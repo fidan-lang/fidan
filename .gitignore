@@ -1,0 +1,6 @@
+# VSCODE related files
+.vscode/
+
+# CMake build directory
+build/
+bin/

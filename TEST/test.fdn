@@ -1,0 +1,77 @@
+## TEST PROGRAM ##
+
+object Creature {
+    var species oftype string = "Unknown"
+
+    action init with (species oftype string default "Unknown") {
+        this.species = species
+    }
+
+    action speak returns string {
+        return "Hello, I am a {this.species}!"
+    }
+}
+
+object Person extends Creature {
+    @declareonly
+    var name oftype string
+    @declareonly
+    var age oftype integer
+
+    action init with (name oftype string) also optional age oftype integer = 18 returns null {
+        this.name = name
+        this.age = age
+
+        parent.init(species is "Human")
+    }
+
+    action introduce returns null {
+        print("My name is {this.name} and I am {this.age} years old!")
+    }
+}
+
+action greet extends Person with (optional person oftype Person) { ## No default value means it defaults to null
+    ## Can be used like this:
+    ## 1. var john = Person("John" also 20)
+    ##    john.greet()
+    ## 2. greet(Person("John" also 20))
+
+    ## Check if the person param is passed, else use the extended object
+    var personToGreet = person nonnull this ## Or: var personToGreet = person if (person != null) else this
+
+    print("Hello, {personToGreet.name}!")
+}
+
+action main {
+    var john is Person("John" also 20) ## Optionally: var person = Person.init("John" also 20)
+    var jennifer is Person(name is "Jennifer", age is 18) ## Optionally: var person = Person.init(name is "Jennifer" also age is 18)
+    john.introduce()
+    greet(jennifer)
+
+    ## Some calculations
+    var x is 10 ## Type is inferred automatically
+    var y is 20
+    var z is (x + y) / 2
+    print(z)
+
+    if john.age greaterthan jennifer.age {
+        print("John is older than Jennifer!")
+    } otherwise when john.age equals jennifer.age {
+        print("John and Jennifer are the same age!")
+    } else {
+        print("Jennifer is older than John!")
+    }
+
+    attempt { ## Can also be used with 'try' instead of 'attempt'
+        throw("An error occurred!") ## Throw an error
+    } catch error {
+        print(error)
+    } finally {
+        print("This is the end of the script!")
+    } otherwise {
+        print("Only executed if no error is thrown!")
+    }
+}
+
+print("Hello, world!") ## Print a message
+main() ## Call the main action
