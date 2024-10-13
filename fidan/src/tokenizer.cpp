@@ -10,7 +10,7 @@ Tokenizer::Tokenizer(const std::string &source, const std::string &filename)
 std::vector<Token> Tokenizer::tokenize()
 {
     std::vector<Token> tokens;
-    const size_t estimatedTokenCount = source.size() / 5; // Assuming average token length is 5
+    const size_t estimatedTokenCount = source.size() / 7; // Assuming average token length is 7 characters
     tokens.reserve(estimatedTokenCount);
     while (true)
     {
