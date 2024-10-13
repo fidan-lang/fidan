@@ -43,7 +43,7 @@ class ASTNode
 public:
     virtual ~ASTNode() = default;
     virtual std::string toString() const = 0;
-    virtual NodeType getType() const = 0;
+    inline virtual NodeType getType() const = 0;
 };
 
 struct Parameter
@@ -81,13 +81,13 @@ private:
     std::vector<std::shared_ptr<Scope>> scopes;
 
 public:
-    void enterScope(std::string_view name, ScopeType type)
+    inline void enterScope(std::string_view name, ScopeType type)
     {
         std::shared_ptr<Scope> parent = scopes.empty() ? nullptr : scopes.back();
         scopes.push_back(std::make_shared<Scope>(name, type, parent));
     }
 
-    void exitScope()
+    inline void exitScope()
     {
         if (!scopes.empty())
         {
@@ -95,7 +95,7 @@ public:
         }
     }
 
-    std::shared_ptr<Scope> currentScope()
+    inline std::shared_ptr<Scope> currentScope()
     {
         return scopes.empty() ? nullptr : scopes.back();
     }
@@ -124,7 +124,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::VariableDeclaration;
     }
@@ -151,7 +151,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::VariableAssignment;
     }
@@ -172,7 +172,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::Block;
     }
@@ -224,7 +224,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::ActionDeclaration;
     }
@@ -255,7 +255,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::ObjectDeclaration;
     }
@@ -276,7 +276,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::Literal;
     }
@@ -298,7 +298,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::ListLiteral;
     }
@@ -318,7 +318,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::DynamicLiteral;
     }
@@ -343,7 +343,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::BinaryExpression;
     }
@@ -367,7 +367,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::UnaryExpression;
     }
@@ -391,7 +391,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::VariableReference;
     }
@@ -441,7 +441,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::FunctionCall;
     }
@@ -464,7 +464,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::ReturnStatement;
     }
@@ -488,7 +488,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::Decorator;
     }
@@ -512,7 +512,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::NonNullExpression;
     }
@@ -546,7 +546,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::WhenStatement;
     }
@@ -595,7 +595,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::TryCatchStatement;
     }
@@ -618,7 +618,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::ThrowStatement;
     }
@@ -666,7 +666,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::ForLoop;
     }
@@ -695,7 +695,7 @@ public:
         return oss.str();
     }
 
-    NodeType getType() const override
+    inline NodeType getType() const override
     {
         return NodeType::WhileLoop;
     }

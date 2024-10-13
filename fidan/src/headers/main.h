@@ -31,6 +31,12 @@ const std::unordered_map<std::string, void (*)()> commands = {
     {"credits", []()
      { print(credits); }},
     {"clear", []()
-     { system("clear"); }}}; // clearScreen
+     {
+         int result = system("clear");
+         if (result != 0)
+         {
+             std::cerr << "Failed to clear the screen" << std::endl;
+         }
+     }}}; // clearScreen
 
 #endif // FIDAN_MAIN_H

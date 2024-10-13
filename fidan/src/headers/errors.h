@@ -12,7 +12,18 @@
 
 // Preprocess the source code into a map for O(1) line retrieval
 std::unordered_map<int, std::string> preprocessSource(const std::string_view source) noexcept;
+
+// This function retrieves the source line from the preprocessed map
 std::string getSourceLine(int lineNumber, const std::unordered_map<int, std::string> &sourceMap) noexcept;
+
+enum class FidanErrorType
+{
+    SyntaxError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    DeclarationError
+};
 
 // Base class for exceptions in Fidan language
 class FidanException : public std::exception
@@ -33,8 +44,10 @@ public:
 
     int getLine() const { return line; }
     int getColumn() const { return column; }
+    // Method to get type of the exception
+    inline virtual FidanErrorType getType() const = 0;
 
-    void addTrace(const std::string &file, const std::string &function, int line)
+    inline void addTrace(const std::string &file, const std::string &function, int line)
     {
         std::stringstream trace;
         trace << "  --> File \"" << file << "\", line " << line << ", in " << function;
@@ -81,6 +94,48 @@ class SyntaxError : public FidanException
 public:
     SyntaxError(const std::string &msg, int line = -1, int column = -1)
         : FidanException("SyntaxError: " + msg, line, column) {}
+
+    inline FidanErrorType getType() const override
+    {
+        return FidanErrorType::SyntaxError;
+    }
+};
+
+class ValueError : public FidanException
+{
+public:
+    ValueError(const std::string &msg, int line = -1, int column = -1)
+        : FidanException("ValueError: " + msg, line, column) {}
+
+    inline FidanErrorType getType() const override
+    {
+        return FidanErrorType::RuntimeError;
+    }
+};
+
+class TypeError : public FidanException
+{
+public:
+    TypeError(const std::string &msg, int line = -1, int column = -1)
+        : FidanException("TypeError: " + msg, line, column) {}
+
+    inline FidanErrorType getType() const override
+    {
+        return FidanErrorType::TypeError;
+    }
+};
+
+// DeclarationError class
+class DeclarationError : public FidanException
+{
+public:
+    DeclarationError(const std::string &msg, int line = -1, int column = -1)
+        : FidanException("DeclarationError: " + msg, line, column) {}
+
+    inline FidanErrorType getType() const override
+    {
+        return FidanErrorType::DeclarationError;
+    }
 };
 
 // RuntimeError class
@@ -89,6 +144,11 @@ class RuntimeError : public FidanException
 public:
     RuntimeError(const std::string &msg, int line = -1, int column = -1)
         : FidanException("RuntimeError: " + msg, line, column) {}
+
+    inline FidanErrorType getType() const override
+    {
+        return FidanErrorType::RuntimeError;
+    }
 };
 
 #endif // FIDAN_ERRORS_H
