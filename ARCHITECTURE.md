@@ -21,7 +21,7 @@
 11. [Stage 8 – Diagnostic System](#11-stage-8--diagnostic-system-fidan-diagnostics)
 12. [Stage 9 – Runtime & Value Model](#12-stage-9--runtime--value-model-fidan-runtime)
 13. [Stage 10 – Interpreter Backend](#13-stage-10--interpreter-backend-fidan-interp)
-14. [Stage 11 – Codegen Backend (Cranelift)](#14-stage-11--codegen-backend-fidan-codegen-cranelift)
+14. [Stage 11 – Codegen Backends (Cranelift JIT + LLVM AOT)](#14-stage-11--codegen-backends)
 15. [Stage 12 – Standard Library](#15-stage-12--standard-library-fidan-stdlib)
 16. [Stage 13 – Driver & Compilation Pipeline](#16-stage-13--driver--compilation-pipeline-fidan-driver)
 17. [Stage 14 – CLI](#17-stage-14--cli-fidan-cli)
@@ -60,7 +60,7 @@ Source Text
             Interpreter   │     Precompile JIT   │     Full AOT
                           │                      │
               ┌───────────┴──┐  ┌────────────────┴──┐  ┌─────────────────────┐
-              │  fidan-interp│  │cranelift (JIT ABI)│  │cranelift / LLVM     │
+              │  fidan-interp│  │cranelift (JIT ABI)│  │LLVM -O3 / LTO / PGO │
               │  MIR walker  │  │hot functions only │  │full native binary   │
               └──────────────┘  └───────────────────┘  └─────────────────────┘
                           │                      │                 │
@@ -96,7 +96,8 @@ fidan/
     ├── fidan-diagnostics/       ← Diagnostic types, rendering, fix engine
     ├── fidan-runtime/           ← Value types, GC, object model, task scheduler
     ├── fidan-interp/            ← MIR interpreter
-    ├── fidan-codegen-cranelift/ ← Cranelift backend (Precompile JIT + AOT)
+    ├── fidan-codegen-cranelift/ ← Cranelift backend — JIT only (`@precompile`, interpreter hot paths)
+    ├── fidan-codegen-llvm/      ← LLVM backend — AOT only (`fidan build`, release binaries)
     ├── fidan-stdlib/            ← Standard library (Rust implementations)
     ├── fidan-driver/            ← Pipeline orchestration, Session, CompileOptions
     ├── fidan-lsp/               ← Language Server Protocol server
@@ -117,7 +118,8 @@ fidan-mir           → fidan-hir
 fidan-passes        → fidan-mir
 fidan-runtime       → fidan-source (for string interning)
 fidan-interp        → fidan-mir, fidan-runtime, fidan-stdlib
-fidan-codegen-cranelift → fidan-mir, fidan-runtime
+fidan-codegen-cranelift → fidan-mir, fidan-runtime          ← JIT only
+fidan-codegen-llvm      → fidan-mir, fidan-runtime          ← AOT only; optional feature flag, requires LLVM
 fidan-stdlib        → fidan-runtime
 fidan-driver        → all of the above, fidan-diagnostics
 fidan-lsp           → fidan-driver
@@ -195,6 +197,16 @@ pub enum TokenKind {
     Attempt, Try, Catch, Finally,
     Return, Panic, Throw,
 
+    // ── Concurrency & Parallelism ─────────────────────────────
+    Concurrent,       // `concurrent` block — cooperative I/O-bound tasks
+    Parallel,         // `parallel` block OR `parallel action` modifier OR `parallel for`
+    Task,             // named task inside a concurrent/parallel block
+    Spawn,            // `spawn expr` — explicit non-blocking parallel call → Pending oftype T
+    Await,            // `await expr` — wait for a `Pending oftype T` to resolve
+    Shared,           // `Shared oftype T` — built-in synchronized wrapper type
+    For,              // `for item in collection` (also used by `parallel for`)
+    In,               // `in` keyword for for-loops and parallel for
+
     // ── Canonical Operators (Post-synonym normalization) ──────
     Assign,           // `set` | `=`
     Eq,               // `==` | `is` | `equals`
@@ -212,7 +224,9 @@ pub enum TokenKind {
     // ── Delimiters ────────────────────────────────────────────
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
     Comma,            // `,` | `also` (both normalized to Comma in parameter lists)
-    Dot, Colon, DoubleColon, Arrow, FatArrow, Semicolon,
+    Dot, Colon, DoubleColon, Arrow, FatArrow,
+    Semicolon,        // `;` | `stop` | `separate` — inline statement separator
+    Newline,          // primary statement terminator (emitted by lexer after a logical line)
     Hash,             // start of single-line comment (consumed, not emitted)
     At,               // decorator prefix
 
@@ -248,6 +262,9 @@ A `SynonymMap` is a static compile-time table (using `phf` crate for perfect has
 | `try` | `Attempt` |
 | `throw` | `Panic` |
 | `else if` | `Otherwise` `When` (two tokens, parser handles) |
+| `spawn` (at call site) | `Spawn` |
+| `await` | `Await` |
+| `stop`, `separate`, `;` | `Semicolon` (inline statement separator) |
 
 **Important:** Synonyms are resolved at lex time so the parser only ever sees canonical tokens.
 The original source span is preserved so error messages reference the exact written form.
@@ -274,6 +291,45 @@ String interpolation `"Hello {name}, you are {age} years old"` is handled in a t
 
 This keeps the lexer simple and places interpolation parsing where it belongs: in the parser,
 which already knows about expressions.
+
+### Statement Termination
+
+Fidan uses **newlines as the primary statement terminator**. There are no mandatory semicolons.
+The lexer implements the same rule as Go and Swift:
+
+**A `Newline` token is emitted as a statement terminator when the last non-whitespace
+token on the line is any of:**
+- A literal (`integer`, `float`, `string`, `boolean`, `nothing`)
+- An identifier or `Ident`
+- A closing delimiter: `)`, `}`, `]`
+- A postfix keyword: `return`, `break`, `continue`
+
+**A newline is NOT emitted (logical line continues) when the last token is:**
+- A binary operator (`+`, `-`, `*`, `/`, `and`, `or`, `greaterthan`, etc.)
+- A comma `,` or `also`
+- An opening delimiter: `(`, `{`, `[`
+- The `then` or `with` keyword
+
+This means multi-line expressions work naturally:
+```fidan
+var result set someFunction(
+    arg1,
+    arg2
+)
+
+var sum set 1 +
+    2 +
+    3
+```
+
+**Inline statement separation** (rare): use `;`, `stop`, or `separate` to put multiple
+statements on one line. All three emit the same `Semicolon` token.
+```fidan
+var x set 1 stop var y set 2 stop print(x + y)
+var x set 1; var y set 2; print(x + y)   # identical
+```
+
+The parser treats `Newline` and `Semicolon` identically as statement separators.
 
 ### Comment Handling
 
@@ -360,6 +416,7 @@ pub struct ActionDecl<'ast> {
     pub return_ty:   Option<TypeRef<'ast>>,     // `returns T`
     pub body:        Block<'ast>,
     pub decorators:  Vec<Decorator>,
+    pub is_parallel: bool,                      // `parallel action foo(...)` modifier
     pub span:        Span,
 }
 
@@ -386,13 +443,62 @@ pub struct ObjectDecl<'ast> {
 
 pub enum Stmt<'ast> {
     VarDecl(VarDecl<'ast>),
-    Assign   { target: ExprRef<'ast>, value: ExprRef<'ast>, span: Span },
+    Assign      { target: ExprRef<'ast>, value: ExprRef<'ast>, span: Span },
     If(IfStmt<'ast>),
     Attempt(AttemptStmt<'ast>),
-    Return   { value: Option<ExprRef<'ast>>, span: Span },
-    Panic    { value: ExprRef<'ast>, span: Span },       // `panic` / `throw`
+    Concurrent(ConcurrentBlock<'ast>),          // `concurrent { task A {...} task B {...} }`
+    Parallel(ParallelBlock<'ast>),              // `parallel { task A {...} task B {...} }`
+    ParallelFor(ParallelForStmt<'ast>),         // `parallel for item in collection { ... }`
+    For(ForStmt<'ast>),                         // `for item in collection { ... }`
+    Return      { value: Option<ExprRef<'ast>>, span: Span },
+    Panic       { value: ExprRef<'ast>, span: Span },   // `panic` / `throw`
     ExprStmt(ExprRef<'ast>),
     Block(Block<'ast>),
+}
+
+// ── Concurrency / Parallelism nodes ───────────────────────────────────────────
+
+/// A named or anonymous task inside a `concurrent` or `parallel` block.
+pub struct Task<'ast> {
+    pub name:  Option<Symbol>,    // `task loadData { ... }` — name is optional
+    pub body:  Block<'ast>,
+    pub span:  Span,
+}
+
+/// `concurrent { task A {...} task B {...} }`
+/// Tasks run cooperatively (may share one thread). Good for I/O-bound work.
+/// All tasks must complete (or one fail) before the block exits.
+pub struct ConcurrentBlock<'ast> {
+    pub tasks: Vec<Task<'ast>>,
+    pub span:  Span,
+}
+
+/// `parallel { task A {...} task B {...} }`
+/// Tasks run on separate OS threads / thread pool workers simultaneously.
+/// Good for CPU-bound work. All tasks join before the block exits.
+pub struct ParallelBlock<'ast> {
+    pub tasks: Vec<Task<'ast>>,
+    pub span:  Span,
+}
+
+/// `parallel for item in collection { body }`
+/// Runs each iteration simultaneously across the thread pool.
+/// The loop body must satisfy the parallel capture safety rules.
+pub struct ParallelForStmt<'ast> {
+    pub binding:    Symbol,
+    pub ty:         Option<TypeRef<'ast>>,
+    pub iterable:   ExprRef<'ast>,
+    pub body:       Block<'ast>,
+    pub span:       Span,
+}
+
+/// `for item in collection { body }` (sequential)
+pub struct ForStmt<'ast> {
+    pub binding:    Symbol,
+    pub ty:         Option<TypeRef<'ast>>,
+    pub iterable:   ExprRef<'ast>,
+    pub body:       Block<'ast>,
+    pub span:       Span,
 }
 
 pub struct IfStmt<'ast> {
@@ -440,6 +546,10 @@ pub enum Expr<'ast> {
     StringInterp { parts: Vec<StringPart<'ast>>, span: Span },
     List     { elements: Vec<ExprRef<'ast>>, span: Span },
     Dict     { entries: Vec<(ExprRef<'ast>, ExprRef<'ast>)>, span: Span },
+    /// `spawn crunch(data)` — non-blocking parallel call, evaluates to `Pending oftype T`
+    Spawn    { call: ExprRef<'ast>, span: Span },
+    /// `await pendingValue` — block until `Pending oftype T` resolves, yields T
+    Await    { value: ExprRef<'ast>, span: Span },
 }
 
 pub struct CallExpr<'ast> {
@@ -456,9 +566,32 @@ pub enum StringPart<'ast> {
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
+// GENERIC TYPE SYNTAX IN FIDAN:
+//
+// Fidan does NOT use angle brackets `<>` for generic type parameters.
+// The `oftype` keyword is used consistently for all type annotation contexts:
+//
+//   Single param:  `list oftype integer`
+//                  `Shared oftype integer`
+//                  `Pending oftype string`
+//
+//   Multi-param:   `dictionary oftype (string, integer)`
+//                  (parentheses disambiguate from comma-separated parameters)
+//
+// In a variable declaration this produces a readable "double oftype":
+//   `var items oftype list oftype integer`
+// This reads naturally as "items of type list of type integer".
+//
+// `<>` syntax appears ONLY in Rust implementation code inside this document,
+// never in Fidan source syntax.
+
 pub enum Type<'ast> {
-    Named    (Symbol, Span),           // `integer`, `string`, `Person`, ...
-    Generic  (Symbol, Vec<TypeRef<'ast>>, Span),   // future: `list oftype integer`
+    Named    (Symbol, Span),
+    // `list oftype integer`  →  Generic("list", [Named("integer")])
+    // `dictionary oftype (string, integer)`  →  Generic("dictionary", [Named("string"), Named("integer")])
+    // `Shared oftype integer`  →  Generic("Shared", [Named("integer")])
+    // `Pending oftype string`  →  Generic("Pending", [Named("string")])
+    Generic  (Symbol, Vec<TypeRef<'ast>>, Span),
     Nothing  (Span),
     Dynamic  (Span),
 }
@@ -573,6 +706,7 @@ fidan-typeck
 ├── type_engine.rs      ← Type inference (constraint-based, bidirectional)
 ├── type_checker.rs     ← Type compatibility, coercions, error generation
 ├── null_safety.rs      ← Flow-sensitive nothing-analysis
+├── parallel_check.rs   ← Capture safety analysis for parallel blocks and actions
 ├── extension_action.rs ← Extension action resolution
 ├── argument_check.rs   ← Positional-before-named, required params
 ├── decorator_check.rs  ← Validate and record decorators
@@ -656,6 +790,56 @@ When a value of type T is accessed (field, method, operator), the type checker p
 - This is tracked in `null_safety.rs` using a `NullState` map per basic block.
 
 The analysis produces **warnings**, not errors, by default (configurable via CLI flags).
+
+### Parallel Capture Safety (`parallel_check.rs`)
+
+This is the **most critical safety rule in Fidan's concurrency model**. When the type checker
+enters a `parallel` block, a `parallel action` body, or a `parallel for` body, it activates a
+`ParallelContext`. The rules enforced inside a `ParallelContext`:
+
+| Captured variable | Usage in parallel context | Verdict |
+|---|---|---|
+| Immutable (`var x set 10`, never reassigned) | Read-only | ✅ Allowed |
+| Mutable, captured by **one** task, not read by others | Read + write | ✅ Allowed (no sharing) |
+| Mutable, captured by **multiple** tasks | Any mutation | ❌ Error E4xx |
+| `Shared oftype T` | Read + write via `.get()` / `.update()` | ✅ Allowed |
+| `Shared oftype T` | Direct field access bypassing API | ❌ Error |
+| Object passed by value | Implicitly cloned | ✅ Allowed |
+| Object passed with `move` keyword on task | Ownership transfer, not accessible in parent | ✅ Allowed |
+
+The analysis in `parallel_check.rs`:
+1. Builds a **capture set** for each task: the set of variables from enclosing scopes referenced.
+2. Finds the **mutation set** for each task: variables that are assigned inside the task.
+3. Checks for **intersection**: if variable `x` is in the mutation set of task A AND the
+   capture set of task B (or vice versa), that is a data race → `E401: data race on variable 'x'`.
+4. Suggests wrapping in `Shared oftype T` as the fix.
+
+```
+# Compile-time error example:
+var counter = 0
+parallel {
+    task A { counter = counter + 1 }   # mutation
+    task B { counter = counter + 1 }   # mutation of same var
+}
+# E401: data race: `counter` is mutated by both task A and task B
+# help: wrap in `Shared`: var counter oftype Shared oftype integer = Shared(0)
+#       (or let type be inferred): var counter = Shared(0)
+#       then use:                  counter.update(x => x + 1)
+```
+
+```
+# OK example:
+var counter = Shared(0)
+parallel {
+    task A { counter.update(x => x + 1) }
+    task B { counter.update(x => x + 1) }
+}
+print(counter.get())   # 2
+```
+
+**For `parallel for`** loops: the body is a single task logically. The only safety check is
+that each iteration does not mutate a variable shared with other iterations (i.e., no
+loop-carried dependency on mutable state). Mutations local to the iteration body are always safe.
 
 ### Extension Action Resolution
 
@@ -756,12 +940,26 @@ pub struct PhiNode {
 }
 
 pub enum Instr {
-    Assign      { dest: LocalId, ty: MirTy, rhs: Rvalue },
-    Call        { dest: Option<LocalId>, callee: Callee, args: Vec<Operand>, span: Span },
-    NullCheck   { scrutinee: Operand, span: Span },  // inserted by null-safety pass
-    SetField    { object: Operand, field: Symbol, value: Operand },
-    GetField    { dest: LocalId, object: Operand, field: Symbol },
-    Drop        { local: LocalId },           // explicit lifetime end for GC
+    Assign          { dest: LocalId, ty: MirTy, rhs: Rvalue },
+    Call            { dest: Option<LocalId>, callee: Callee, args: Vec<Operand>, span: Span },
+    NullCheck       { scrutinee: Operand, span: Span },  // inserted by null-safety pass
+    SetField        { object: Operand, field: Symbol, value: Operand },
+    GetField        { dest: LocalId, object: Operand, field: Symbol },
+    Drop            { local: LocalId },           // explicit lifetime end for GC
+
+    // ── Concurrency ────────────────────────────────────────────────────
+    /// Spawn a function as a cooperative green-thread task (for `concurrent` blocks)
+    SpawnConcurrent { handle: LocalId, task_fn: FunctionId, args: Vec<Operand> },
+    /// Spawn a function onto the OS thread pool (for `parallel` blocks and `parallel action`)
+    SpawnParallel   { handle: LocalId, task_fn: FunctionId, args: Vec<Operand> },
+    /// Wait for ALL given join handles before proceeding (end of a concurrent/parallel block)
+    JoinAll         { handles: Vec<LocalId> },
+    SpawnExpr       { dest: LocalId, task_fn: FunctionId, args: Vec<Operand> },  // `spawn expr` → `Pending oftype T` handle
+    /// `await pending` → blocks current task until the `Pending oftype T` resolves, stores result
+    AwaitPending    { dest: LocalId, handle: Operand },
+    /// `parallel for` — distributes iterations over the thread pool via Rayon
+    /// `body_fn` receives a single element and returns nothing; captures are passed as `closure_args`
+    ParallelIter    { collection: Operand, body_fn: FunctionId, closure_args: Vec<Operand> },
 }
 
 pub enum Terminator {
@@ -811,9 +1009,20 @@ This is the most algorithmically complex lowering step. It implements:
    - A "landing pad" basic block that receives the thrown value.
    - The `throw` instruction unwinds to the nearest landing pad.
    - `finally` blocks are duplicated on all exit paths (or implemented via cleanup blocks).
-4. **`this` binding**: In extension actions, `this` is given its own `LocalId` and wired
+4. **Concurrency lowering**:
+   - `concurrent { task A {...} task B {...} }` → each task body is lifted to its own
+     synthetic `MirFunction`. Then: `SpawnConcurrent` for each, `JoinAll` at block end.
+   - `parallel { task A {...} task B {...} }` → same structure but uses `SpawnParallel`.
+   - `parallel for item in collection { body }` → body lifted to a synthetic `MirFunction`
+     receiving `item` as its first parameter; lowered to `ParallelIter`.
+   - `spawn expr` → `SpawnExpr`, result is `Pending oftype T`.
+   - `await pending` → `AwaitPending`.
+   - Captured immutable variables are passed as `closure_args`. `Shared oftype T` values
+     are passed as `Arc<Mutex<FidanValue>>` pointers (Rust). This is enforced by `parallel_check.rs` before
+     lowering, so no unsafe sharing reaches the MIR level.
+5. **`this` binding**: In extension actions, `this` is given its own `LocalId` and wired
    appropriately by the call-site lowering.
-5. **`parent.method()` calls**: Lowered to `Callee::Fn(resolved_parent_method_id)` with
+6. **`parent.method()` calls**: Lowered to `Callee::Fn(resolved_parent_method_id)` with
    the receiver passed explicitly.
 
 ---
@@ -962,19 +1171,27 @@ Edit distance: use `strsim` crate (Jaro-Winkler or Levenshtein).
 
 ```rust
 // The universal Fidan value type in interpreted / mixed mode.
-// In AOT mode, this is replaced by typed native values, but the GC still
-// tracks heap objects via a uniform header.
+// In AOT mode, this is replaced by typed native LLVM values.
+//
+// OwnedRef<T>  — interpreter-internal Rc<RefCell<T>>. The Fidan type checker
+//               guarantees only ONE Fidan-level owner exists; the Rc is an
+//               implementation convenience (the interpreter's own data structures
+//               may hold temporary Rust references during a single evaluation step).
+//               Never exposed to user code. In AOT, lowered to Box<T> or alloca.
+//
+// SharedRef<T> — Arc<Mutex<T>>. Used ONLY for `Shared oftype T` values.
 
 pub enum FidanValue {
     Integer  (i64),
     Float    (f64),
     Boolean  (bool),
     Nothing,
-    String   (GcRef<FidanString>),
-    List     (GcRef<FidanList>),
-    Dict     (GcRef<FidanDict>),
-    Object   (GcRef<FidanObject>),
-    Function (FunctionId),            // first-class function reference
+    String   (OwnedRef<FidanString>),
+    List     (OwnedRef<FidanList>),
+    Dict     (OwnedRef<FidanDict>),
+    Object   (OwnedRef<FidanObject>),
+    Shared   (SharedRef<FidanValue>),    // `Shared oftype T` — explicit ARC
+    Function (FunctionId),               // first-class function reference
 }
 
 impl FidanValue {
@@ -985,37 +1202,91 @@ impl FidanValue {
 ```
 
 For **NaN-boxing** (a future optimization): pack the entire `FidanValue` into 8 bytes using
-IEEE 754 NaN payloads. Deferred to post-MVP (complicates GC interaction).
+IEEE 754 NaN payloads. Deferred to post-MVP.
 
-### Heap & GC
+### Memory Model
 
-**Phase 1 (MVP): Reference Counting with Cycle Collection**
+Fidan uses **move-by-default ownership** with Copy-on-Write collections and selective ARC.
+There is no garbage collector. Memory is freed **deterministically at scope exit**.
+The user never calls `free()` or thinks about lifetimes — the compiler handles everything.
 
-```rust
-pub struct GcRef<T>(Rc<GcCell<T>>);   // single-threaded interpreter
-// or
-pub struct GcRef<T>(Arc<Mutex<T>>);   // for concurrent execution
+#### Three-tier model
+
+| Tier | Types | Mechanism | Cost |
+|---|---|---|---|
+| **1. Primitives** | `integer`, `float`, `boolean`, `nothing` | Always copied (stack) | Zero |
+| **2. Owned values** | `string`, `list`, `dict`, user `object` types | Move semantics + COW | Zero in common path |
+| **3. Explicit shared** | `Shared oftype T` | ARC (`Arc<Mutex<T>>`) | Only where user opts in |
+
+#### Tier 2 — Move semantics in detail
+
+Every heap value has **exactly one owner** at every point in the program.
+
+```fidan
+var a set Person(name: "Alice")   # a owns the Person
+var b set a                        # ownership MOVES to b; a is now invalid
+print(b.name)                      # fine
+print(a.name)                      # compile error: a was moved
 ```
 
-- All heap objects (`FidanString`, `FidanList`, `FidanDict`, `FidanObject`) are reference-counted.
-- A periodic `CycleCollector` (Bacon-Rajan algorithm) handles reference cycles (common in
-  object graphs).
-- The `Drop` impl on `GcRef` decrements the reference count; when it hits zero, the object is
-  freed; if it's a tracked cycle candidate, it's added to the cycle collector's trial buffer.
+When a function call moves the value and the caller also uses it after — the compiler
+automatically inserts a **clone** (explicit clone never required by the user):
 
-**Phase 2 (Post-MVP): Generational GC or Incremental Mark-Sweep**
+```fidan
+var a set Person(name: "Alice")
+someFunction(a)    # compiler sees a is used below → inserts clone automatically
+print(a.name)      # still valid; a was cloned into someFunction, original kept here
+```
 
-A proper tracing GC would give better tail latency for long-running programs. Design the GC
-interface behind a trait so it can be swapped:
+The compiler emits a **hint** (not an error) when it inserts an implicit clone of a
+large object (list, dict, deep object graph), so the user can optimize if they care.
+
+#### Copy-on-Write for collections
+
+`list`, `dict`, and `string` use COW internally:
+- Passing a collection to a function is a **cheap pointer copy** regardless of size.
+- The **physical data is only duplicated at the moment of first mutation** inside the callee.
+- Read-only operations (iteration, length, get) never trigger a copy.
+- This means passing a 10-million-element list to a read-only function costs effectively zero.
+
+```fidan
+var data set list(1, 2, 3, 4, 5)   # one allocation
+var count set data.length           # no copy; COW read — free
+data.append(6)                      # mutates; COW copy happens here only
+```
+
+#### Deterministic drop
+
+When an owned value's scope ends, its memory is freed immediately — no pause, no background
+collector, no reference counter decrement chain.
 
 ```rust
-pub trait GcBackend {
-    fn alloc<T: GcTraceable>(&self, val: T) -> GcRef<T>;
-    fn collect(&self);
-    fn add_root(&self, ptr: GcRootPtr);
-    fn remove_root(&self, ptr: GcRootPtr);
+// Runtime representation of owned heap objects
+pub struct OwnedBox<T> {
+    data: *mut T,     // raw heap pointer; freed in Drop
+}
+impl<T> Drop for OwnedBox<T> {
+    fn drop(&mut self) { unsafe { dealloc(self.data) } }
 }
 ```
+
+#### Tier 3 — `Shared oftype T` (explicit ARC)
+
+When the programmer explicitly writes `Shared oftype T`, they are opting into multiple
+ownership — typically because the value crosses thread boundaries in a `parallel` block.
+
+```rust
+// Runtime representation of Shared
+pub struct Shared<T>(Arc<Mutex<T>>);
+```
+
+- ARC overhead (atomic increment/decrement) exists **only** for `Shared` values.
+- For data that is intentionally shared across threads, the synchronization cost already
+  dominates — ARC overhead is negligible in that context.
+- **Cycle prevention:** `Shared` values that need back-references use `WeakShared oftype T`
+  (a non-owning reference, implemented as `Weak<Mutex<T>>`). The compiler warns when a
+  `Shared` graph contains a statically-detectable ownership cycle.
+- There is **no cycle collector** anywhere in the runtime.
 
 ### Object Model
 
@@ -1046,31 +1317,196 @@ impl FidanObject {
 }
 ```
 
-### Concurrency Model
+### Concurrency & Parallelism Model
 
-**Structured Concurrency** means every task has a parent scope. Tasks cannot escape their
-enclosing block (no fire-and-forget).
+Fidan makes a **hard, explicit distinction** between two concepts that most languages conflate:
+
+| | `concurrent` | `parallel` |
+|---|---|---|
+| **What it means** | Multiple tasks making progress | Multiple tasks executing simultaneously |
+| **CPU usage** | Possibly one core (cooperative) | Multiple cores (true multi-threading) |
+| **Best for** | I/O-bound work (network, file, UI) | CPU-bound work (computation, data processing) |
+| **Data safety** | Relaxed (one thread at a time) | Strict (compile-time race checking) |
+| **Runtime mechanism** | Green threads (cooperative yield) | OS threads via Rayon thread pool |
+| **Keyword** | `concurrent` | `parallel` |
+
+Both forms are **structured**: every task has a parent scope. Tasks cannot escape their
+enclosing block. The block exits only after all tasks complete (or one fails).
+
+---
+
+#### Form 1: `concurrent` block (I/O-bound structured concurrency)
 
 ```fidan
 concurrent {
-    task A { ... }
-    task B { ... }
+    task fetchUserData  { var data = std.net.get("https://api.example.com/user") }
+    task fetchConfig    { var cfg  = std.io.readFile("config.json") }
 }
-# execution continues here only after both A and B complete (or one fails)
+# resumes here only after both tasks complete (or one fails)
 ```
 
-**Implementation (Phase 1):** Cooperative task scheduler using green threads.
+**Runtime:** Cooperative green-thread scheduler. Yield points occur at I/O boundaries.
+All concurrent tasks may run on a single OS thread. No data-race checking needed because
+tasks cannot execute simultaneously.
 
-Rust crate: [`corosensei`](https://crates.io/crates/corosensei) (safe, stackful coroutines) OR
-a simple single-threaded event loop with yield points.
+---
 
-**Implementation (Phase 2):** Multi-threaded work-stealing scheduler (similar to Tokio's
-runtime but without async/await syntax surfacing to the user). Fidan's concurrency primitives
-map to a runtime-managed task graph.
+#### Form 2: `parallel` block (CPU-bound structured parallelism)
 
-**Data safety:** Objects passed between tasks are cloned (value semantics) or wrapped in an
-explicit `Shared<T>` type (like Rust's `Arc<Mutex<T>>`). Direct shared mutable access without
-`Shared` is a compile-time error.
+```fidan
+parallel {
+    task processChunk1 { var r1 = crunch(data[0..500]) }
+    task processChunk2 { var r2 = crunch(data[500..1000]) }
+}
+```
+
+Each task runs on a **separate OS thread** from Rayon's global thread pool. Tasks truly
+execute simultaneously. **Compile-time capture safety** (enforced by `parallel_check.rs`)
+guarantees no data races.
+
+---
+
+#### Form 3: `parallel action` modifier (thread-pool dispatch)
+
+Marks an action as intended for parallel execution. When **called normally**, it blocks the
+calling thread until the result is ready (transparent to the caller). When called via `spawn`,
+it returns immediately with a `Pending oftype T`.
+
+```fidan
+parallel action crunch(data oftype list) returns list {
+    return data.map(x => x * x)
+}
+
+# Blocking call (runs on thread pool, caller waits):
+var result = crunch(myData)
+
+# Non-blocking spawn (runs on thread pool, caller continues immediately):
+var pending = spawn crunch(myData)
+# ... do other work ...
+var result = await pending
+```
+
+**Important:** `parallel action` is not just a decorator — it is a modifier that changes the
+action's type. The return type of a `parallel action foo() returns T` is `T` (when called
+blocking) or `Pending oftype T` (when called via `spawn`). The type checker knows this distinction.
+
+---
+
+#### Form 4: `parallel for` (data parallelism)
+
+```fidan
+var results = list()
+parallel for item in largeCollection {
+    var processed = expensiveTransform(item)
+    results.append(processed)    # ERROR: E401 — `results` mutated from parallel context
+}
+
+# Correct pattern: use parallelMap from stdlib instead
+var results = largeCollection.parallelMap(item => expensiveTransform(item))
+```
+
+`parallel for` with a mutable shared accumulator is a classic data race. `parallelMap`
+from `std.collections` is the idiomatic solution — it returns a new list with transformed
+elements, with no shared mutable state.
+
+For side-effect-only parallel iteration (e.g., writing to independent files):
+
+```fidan
+parallel for item in files {
+    std.io.writeFile(item.path, item.content)   # no shared state, safe
+}
+```
+
+---
+
+#### `Shared oftype T` — explicit synchronized state
+
+The only way to safely **share mutable state** across parallel tasks.
+
+**Fidan syntax:**
+```fidan
+# Type is inferred from the initial value (preferred style):
+var counter = Shared(0)
+var results = Shared(list())
+
+# Explicit type annotation (both oftype keywords are deliberate and readable):
+var counter oftype Shared oftype integer = Shared(0)
+var results oftype Shared oftype list = Shared(list())
+
+parallel {
+    task A {
+        counter.update(x => x + 1)
+        results.update(r => r.append("A done"))
+    }
+    task B {
+        counter.update(x => x + 1)
+        results.update(r => r.append("B done"))
+    }
+}
+
+print(counter.get())    # 2
+print(results.get())    # ["A done", "B done"] (order may vary)
+```
+
+`Shared oftype T` API (surface-level Fidan):
+- `Shared(initialValue)` — create; type parameter inferred
+- `.get() returns T` — read (acquires lock, copies value, releases)
+- `.update(transform oftype action(T) returns T)` — atomic read-modify-write
+- `.withLock(action(T) returns nothing)` — hold lock for entire block (for complex mutations)
+
+**Rust implementation:** `Arc<Mutex<FidanValue>>` (the `<>` here is Rust, not Fidan syntax).
+
+---
+
+#### `Pending oftype T` — non-blocking parallel handle
+
+**Fidan syntax:**
+```fidan
+# Type inferred from the return type of the spawned action:
+var p1 = spawn crunch(data1)   # p1 has type: Pending oftype list
+var p2 = spawn crunch(data2)
+
+# Explicit annotation (both oftype keywords deliberate):
+var p1 oftype Pending oftype list = spawn crunch(data1)
+
+# ... do other sequential work while tasks run ...
+
+var r1 = await p1    # blocks until p1 resolves, result has type: list
+var r2 = await p2
+```
+
+If a `spawn`ed task throws an error and nobody `await`s it, the runtime issues a **warning**
+at the point where the `Pending oftype T` is dropped without being awaited (similar to Rust's
+`#[must_use]` for `Result`). Fidan enforces this with a W3xx warning class.
+
+---
+
+#### Implementation Plan
+
+**Phase 1 — `concurrent` only (single-threaded cooperative):**
+- Rust crate: [`corosensei`](https://crates.io/crates/corosensei) (safe, stackful coroutines)
+- All concurrent tasks run on a single OS thread, scheduled cooperatively
+- Yield at I/O boundaries automatically (the runtime inserts yield points at stdlib I/O calls)
+- No `parallel` keyword support yet — produces a clear error: "parallel is not yet supported"
+- No data-race checking needed in this phase (everything is sequential under the hood)
+
+**Phase 2 — `parallel` blocks, `parallel action`, `parallel for`:**
+- Rust crate: [`rayon`](https://crates.io/crates/rayon) for the thread pool
+- `SpawnParallel` / `JoinAll` MIR instructions map to `rayon::spawn` + `rayon::join`
+- `ParallelIter` maps to `rayon::iter::ParallelIterator` (`.par_iter()` under the hood)
+- `Shared oftype T` implemented as `Arc<Mutex<FidanValue>>`
+- `WeakShared oftype T` implemented as `Weak<Mutex<FidanValue>>` for back-references
+- `Pending oftype T` implemented as a wrapper around `std::thread::JoinHandle<FidanValue>`
+  or a Rayon future
+- Owned values that do NOT cross thread boundaries remain `OwnedBox<T>` — no ARC cost
+- Values that DO cross boundaries must be typed `Shared` at the call site — the type
+  checker enforces this; passing a non-Shared owned value into a `parallel` block
+  **moves** it into the block (one owner, the task)
+
+---
+
+**No GIL. No undefined behavior. No need for the user to understand async/await internals.**
+The user writes `concurrent` or `parallel` and gets the right behavior.
 
 ---
 
@@ -1143,46 +1579,60 @@ This is the **Interpreter + Precompile** mode described in the spec.
 
 ---
 
-## 14. Stage 11 – Codegen Backend (`fidan-codegen-cranelift`)
+## 14. Stage 11 – Codegen Backends
 
-> Purpose: Compile MIR to native machine code via Cranelift.
+> Two separate crates. Same MIR input. Different performance/latency trade-offs.
 
-### Why Cranelift?
+```
+                   MIR (optimized)
+                       │
+          ┌──────────────┴────────────────┐
+          │                               │
+  fidan-codegen-cranelift         fidan-codegen-llvm
+  JIT mode only                   AOT mode only
+  Purpose: low latency             Purpose: maximum performance
+  Used by: `fidan run`             Used by: `fidan build`
+           `@precompile`                    release binaries
+           auto hot-path JIT               any `--release` flag
+  Compilation speed: ~ms           Optimization quality: -O3
+  Code quality: ~85% of LLVM       + vectorization (SIMD)
+                                   + LTO (whole-program analysis)
+                                   + PGO (profile-guided)
+                                   + monomorphization
+```
 
-- Pure Rust (no LLVM dependency overhead, no C++ ABI)
-- Fast compilation (suitable for both JIT and AOT)
-- Actively maintained (used in Wasmtime, Rust's `cg_clif` backend)
-- Good enough optimization for Fidan's needs at launch
+### 14a. `fidan-codegen-cranelift` — JIT Only
 
-LLVM can be added as an optional secondary backend later for maximum optimization on release
-builds, but is NOT required for MVP.
+**Why Cranelift for JIT:**
+- Compilation latency is measured in **milliseconds** — acceptable at runtime
+- Pure Rust, no C++ toolchain dependency
+- Actively maintained (Wasmtime, `cg_clif`)
+- Code quality is good, not optimal — perfectly acceptable for `@precompile` 
+  hot paths that just need to beat the MIR interpreter
 
-### MIR → Cranelift IR Mapping
+**What it is NOT:** Cranelift is never used to produce release binaries in the final architecture.
+During Phase 8 of development it temporarily also handles AOT as a stepping stone (for
+correctness validation before the LLVM backend is ready), but that is a transitional state.
+
+#### MIR → Cranelift IR Mapping
 
 ```
 MirFunction           → cranelift::ir::Function
 BasicBlock            → cranelift::ir::Block
 LocalId (SSA value)   → cranelift::ir::Value
-FidanValue (in interp)→ typed Cranelift values (i64, f64, pointer, etc.)
 ```
 
-When compiling in **AOT mode**, types are known at compile time (from typeck), so all
-`FidanValue` enums are replaced with their native Cranelift types:
+Types passed between the MIR interpreter and JIT-compiled functions use the **Fidan JIT ABI**:
 
-| `FidanValue` | Cranelift type |
+| `FidanValue` variant | JIT ABI type |
 |---|---|
 | `Integer(i64)` | `I64` |
 | `Float(f64)` | `F64` |
 | `Boolean(bool)` | `I8` |
-| `String(GcRef<_>)` | `I64` (pointer) |
-| `List(GcRef<_>)` | `I64` (pointer) |
-| `Object(GcRef<_>)` | `I64` (pointer) |
-| `Nothing` | `I64` (0 = null pointer, special-cased) |
+| Heap types (String, List, Object) | `I64` (pointer into GC heap) |
+| `Nothing` | `I64` value `0` |
 
-**Dynamic dispatch** (for `dynamic` typed variables): use a tagged union struct in memory
-(two `I64` words: tag + payload). Generated helper functions in the runtime handle dispatch.
-
-### JIT Mode (Precompile)
+#### JIT Compilation Path
 
 ```rust
 use cranelift_jit::{JITBuilder, JITModule};
@@ -1192,42 +1642,184 @@ pub struct JitCompiler {
 }
 
 impl JitCompiler {
+    /// Called when a @precompile function is first invoked, or when the
+    /// call-count threshold is crossed for automatic hot-path detection.
     pub fn compile_function(&mut self, mir_fn: &MirFunction) -> *const u8 { ... }
 }
 ```
 
-The compiled function pointer is stored in the interpreter's function table and called via
-a safe trampoline that handles the ABI boundary between the interpreter's `FidanValue`
-stack and the compiled function's native calling convention.
+The compiled function pointer replaces the interpreter's dispatch entry for that `FunctionId`.
+Subsequent calls use the native code directly. A safe trampoline handles the ABI boundary
+between the interpreter's `Vec<FidanValue>` argument list and the native calling convention.
 
-### AOT Mode
+---
+
+### 14b. `fidan-codegen-llvm` — AOT Only
+
+**Why LLVM for AOT:**
+- `fidan build` compiles **once**, runs **forever** — latency doesn't matter, quality does
+- LLVM -O3 is the industry standard for production native code quality
+- Auto-vectorization (SIMD for free on eligible loops)
+- Link-Time Optimization (LTO): whole-program analysis across all functions
+- Profile-Guided Optimization (PGO): instrument → profile → recompile with real data
+- Monomorphization eliminates all boxing for generic types (see below)
+- Same backend used by Rust, Swift, Clang — proven, stable, battle-tested
+
+**Rust crate:** [`inkwell`](https://crates.io/crates/inkwell) — safe Rust bindings for LLVM.
+
+#### MIR → LLVM IR Mapping
+
+```
+MirFunction           → llvm::Function
+BasicBlock            → llvm::BasicBlock
+LocalId (SSA value)   → llvm::Value*  (LLVM is also in SSA form — direct 1:1 match)
+PhiNode               → llvm::PHINode*
+```
+
+In AOT mode with full type information, all values are **unboxed to native LLVM types**:
+
+| `FidanValue` | Unboxed LLVM type |
+|---|---|
+| `Integer(i64)` | `i64` |
+| `Float(f64)` | `double` |
+| `Boolean(bool)` | `i1` |
+| `String` | `%FidanStr*` (pointer to struct in GC heap) |
+| `List oftype integer` | `%FidanList_i64*` (monomorphized — stores raw `i64[]`) |
+| `List oftype T` (generic) | `%FidanList*` (boxed, only if T unknown at compile time) |
+| `Nothing` | `i64` value `0` |
+| `dynamic` | `%FidanTaggedUnion` (2× `i64`: tag + payload) |
+
+#### Monomorphization
+
+This is the single most impactful feature for C++-competitive performance.
+
+When the type checker knows the concrete type parameter at a call site:
+```fidan
+var ints oftype list oftype integer = list()
+ints.append(1)      # T is statically `integer` here
+```
+
+The codegen generates a **specialized** LLVM function `list_append_integer` that operates
+directly on `i64[]` — no boxing, no `FidanValue` enum, no heap allocation for the element.
+
+Process:
+1. During MIR→LLVM lowering, collect all **concrete instantiations** of generic functions
+   (tracked by `fidan-typeck`'s monomorphization collector).
+2. For each unique concrete instantiation, emit a separate specialized LLVM function.
+3. Call sites use the specialized function directly.
+4. The generic (boxed) version is emitted only if `dynamic` types require it.
+
+This is exactly how C++ templates work, and how Rust generics work. It eliminates the
+primary boxing overhead for all generic stdlib types.
+
+#### LLVM Optimization Pipeline
 
 ```rust
-use cranelift_object::{ObjectBuilder, ObjectModule};
+// Applied in order for `fidan build --release`:
+pass_manager.add_inline_pass();                  // inline small functions
+pass_manager.add_promote_memory_to_register();   // mem2reg (uses LLVM's own SSA)
+pass_manager.add_gvn_pass();                     // global value numbering
+pass_manager.add_loop_vectorize_pass();          // auto SIMD
+pass_manager.add_slp_vectorize_pass();           // superword-level parallelism
+pass_manager.add_dead_store_elimination_pass();
+pass_manager.add_aggressive_dead_code_elimination_pass();
+pass_manager.run_on_module(&module);
+// Then: LTO via llvm-lto or linker plugin
+```
 
+#### Escape Analysis (stack allocation)
+
+Before LLVM codegen, a MIR pass (`EscapeAnalysis`) checks each object allocation:
+- If an owned value never escapes its creating function (never stored in a field, never
+  returned, never passed to a function that stores it) → it is **stack-allocated**.
+- Stack allocation = no heap allocator call, no `OwnedBox` overhead, no drop bookkeeping.
+- For small, short-lived objects (the vast majority) this is a massive win.
+
+Implemented in `fidan-passes` as a pre-LLVM MIR pass. Produces an `Allocation` annotation:
+```rust
+pub enum AllocationKind { Stack, HeapOwned, HeapShared }
+```
+The LLVM codegen respects this: stack-allocated objects use `alloca`, heap-owned use
+`OwnedBox<T>`, heap-shared use `Arc<Mutex<T>>`.
+
+#### PGO (Profile-Guided Optimization)
+
+```
+fidan build --instrument program.fdn -o program_instrumented
+./program_instrumented < real_workload.txt
+fidan build --use-profile program.fdn -o program_optimized
+```
+
+LLVM's PGO instruments branch frequencies and function call counts, then uses the real-world
+profile to:
+- Reorder basic blocks for better branch prediction
+- Inline hot call sites more aggressively
+- Prioritize vectorization of hot loops
+
+#### LTO (Link-Time Optimization)
+
+Enabled with `fidan build --lto`. Passes LLVM bitcode to the linker stage. This allows:
+- Inlining across module boundaries (e.g., inlining stdlib functions into user code)
+- Whole-program dead code elimination
+- Cross-module constant propagation
+
+#### AOT Object File and Linking
+
+```rust
 pub struct AotCompiler {
-    module: ObjectModule,
+    context:  inkwell::context::Context,
+    module:   inkwell::module::Module<'ctx>,
 }
 
 impl AotCompiler {
-    pub fn compile_program(&mut self, program: &MirProgram) -> Vec<u8> { /* ELF/PE/Mach-O */ }
+    pub fn compile_program(&mut self, program: &MirProgram) -> Vec<u8> {
+        // ... emit LLVM IR, run pass manager, emit object file bytes
+    }
 }
 ```
 
-The output object file is linked with:
-- `fidan-runtime` (compiled as a static `.a` library)
-- `fidan-stdlib` (compiled as a static `.a` library)
-- System libraries (libc, pthreads)
+Output is linked with:
+- `fidan-runtime` (precompiled static `.a`)
+- `fidan-stdlib` (precompiled static `.a`)
+- System libraries
 
-Using the system linker (`cc -o output main.o libfidan_runtime.a`) invoked via `std::process::Command`.
+Linker invocation: `cc -o output main.o libfidan_runtime.a libfidan_stdlib.a`
+On Windows: `link.exe` or `lld` is used instead.
 
-### Platform ABI
+#### Platform ABI
 
-For the AOT calling convention, define a **Fidan ABI** that is consistent across platforms:
-- First argument: always the return slot (pointer to FidanValue) if the return type is > 8 bytes
 - `this` is always the first parameter for methods
-- Primitives are passed in registers; heap types are passed as pointers
-- Tail call optimization: supported for direct recursive calls (mark with `@tailcall` decorator, or automatic detection)
+- Primitives passed in registers; heap objects as pointers
+- Tail call optimization: automatic for direct self-recursion; `@tailcall` for explicit opt-in
+- Return values > 8 bytes: sret (pointer to caller-allocated return slot)
+- Exception unwind: DWARF on Linux/macOS, SEH on Windows (LLVM handles this natively)
+
+---
+
+### Performance Roadmap
+
+**Honest assessment of where Fidan lands vs C++ at each phase:**
+
+| Phase | Mode | vs. C++ single-thread | vs. C++ parallel |
+|---|---|---|---|
+| MVP (interpreter) | `fidan run` | ~2–10% | ~20–50% (GIL-free) |
+| Phase 9 (Cranelift JIT) | `@precompile` hot paths | ~50–70% | ~80–100% |
+| Phase 8 (Cranelift AOT) | `fidan build` | ~75–85% | 100–120% |
+| Phase 11 (LLVM AOT, no mono) | `fidan build --release` | ~85–95% | 110–130% |
+| Phase 11+ (LLVM + monomorphization + escape analysis) | `fidan build --release` | **95–110%** | **120–150%** |
+| Phase 11+ (+ PGO + LTO) | `fidan build --release --pgo` | **100–120%** | **130–200%** |
+
+**Notes on beating C++:**
+- Single-threaded compute: competitive but not reliably faster. C++ has decades of LLVM/GCC
+  hand-tuning. Fidan can match it with LLVM -O3 + monomorphization + escape analysis.
+- Parallel workloads: Fidan can **genuinely exceed** C++ because parallelism is first-class
+  syntax — users actually use it. C++ requires TBB/OpenMP which almost nobody writes in
+  practice. `parallelMap` on a 16-core machine beats hand-written C++ that is still sequential
+  because the developer didn't bother with TBB.
+- Bootstrapping the compiler to Fidan does **not** affect user program performance — the
+  runtime stays in Rust regardless of whether the compiler itself is written in Fidan.
+- The `dynamic` type permanently opts out of monomorphization and some AOT optimizations.
+  Users who want peak performance should use typed variables.
 
 ---
 
@@ -1246,10 +1838,11 @@ The stdlib is organized into a `std` namespace:
 |---|---|---|
 | `std.io` | File, stdin/stdout/stderr, Path, Directory | `std::fs`, `std::io` |
 | `std.net` | TcpSocket, HttpClient, HttpServer | `tokio` / `hyper` |
-| `std.collections` | Set, Queue, Deque, BTreeMap | `std::collections` |
+| `std.collections` | Set, Queue, Deque, BTreeMap, `.parallelMap()`, `.parallelFilter()` | `std::collections` + `rayon` |
 | `std.math` | sin, cos, sqrt, floor, ceil, abs, min, max, random | `std::f64` |
 | `std.string` | split, join, trim, replace, contains, startsWith, endsWith, toUpper, toLower | Rust String methods |
-| `std.concurrent` | Task, Channel, Mutex, Barrier | custom runtime |
+| `std.concurrent` | Task, Channel (async/IO-bound), cooperative scheduler helpers | `corosensei` |
+| `std.parallel` | `Shared oftype T`, `Pending oftype T`, `parallelMap`, `parallelFilter`, `parallelFor` | `rayon` |
 | `std.debug` | assert, assertEq, inspect, profile | custom |
 | `std.test` | describe/it test blocks, expect(...).to... matchers | custom |
 | `std.cli` | Argument parsing, colored output, progress bars | `clap`, `indicatif` |
@@ -1396,12 +1989,21 @@ compilation.
 
 ## 19. Key Technical Decisions & Rationale
 
-### 1. Cranelift over LLVM (initial)
+### 1. Cranelift for JIT, LLVM for AOT
 
-**Decision:** Use Cranelift for both JIT and AOT in MVP.  
-**Rationale:** Cranelift is pure Rust, compiles significantly faster than LLVM, has a cleaner
-API, and produces sufficiently optimized code for most use cases. LLVM can be added as an
-opt-in backend for release builds later.
+**Decision:** Cranelift is the **JIT-only** backend (`@precompile`, interpreter hot paths).
+LLVM is the **AOT-only** backend (`fidan build`, release binaries). These are not alternatives
+or fallbacks — they are complementary tools with distinct roles.
+
+**Rationale:**  
+Cranelift's strength is **compilation speed** — it can JIT-compile a function in milliseconds,
+which is the only metric that matters at runtime. Its code quality (~85% of LLVM -O3) is more
+than sufficient for hot paths that just need to beat the MIR interpreter.  
+LLVM's strength is **code quality** — -O3, auto-vectorization, LTO, PGO, and the resulting
+binary runs forever without recompilation. Latency is acceptable because AOT compilation
+happens once.  
+This split is the same model used by: Firefox (Baseline JIT → IonMonkey/LLVM), Java HotSpot
+(profiling tier → C2), Julia (all LLVM but same reasoning applies). It is proven.
 
 ### 2. Arena Allocation for AST
 
@@ -1409,11 +2011,22 @@ opt-in backend for release builds later.
 **Rationale:** Avoids complex lifetime management, gives `O(1)` allocation, trivial deallocation,
 and allows `Copy` node references throughout the codebase.
 
-### 3. Reference Counting with Cycle Collection (not Tracing GC)
+### 3. Move-by-Default Ownership with COW and Selective ARC (no GC)
 
-**Decision:** Start with Rust `Rc`/`Arc` plus periodic cycle collection.  
-**Rationale:** Simpler to implement, predictable performance, no stop-the-world pauses.
-Tracing GC can be introduced later behind the `GcBackend` trait.
+**Decision:** No garbage collector of any kind. Memory is managed via move semantics,
+Copy-on-Write for collections, and explicit `Shared oftype T` (ARC) only where the user
+opts into shared ownership.  
+**Rationale:** A GC — even a well-tuned one — cannot reach C++-level single-threaded
+performance because it introduces allocation overhead, heap fragmentation, and unpredictable
+collection pauses. Move semantics with COW gives deterministic, zero-overhead memory
+management that the user never has to think about. ARC cost is pay-as-you-go: you pay it
+exactly and only where you wrote `Shared`. Cycles (the traditional ARC failure case) are
+handled by `WeakShared` back-references — no cycle collector needed.  
+**Trade-off acknowledged:** The compiler must perform ownership inference and insert implicit
+clones. This is non-trivial to implement correctly. A clone-too-eagerly compiler is correct
+but slow; a clone-too-rarely compiler is wrong. The test suite must have extensive tests
+for clone elision. The compiler should also emit hints when large implicit clones are inserted
+so the user can understand the performance model.
 
 ### 4. Bidirectional Type Inference (not Full HM)
 
@@ -1435,12 +2048,19 @@ wrapper in the type system.
 safety analysis provides safety without forcing the user to unwrap values. This is closer to
 Kotlin's approach than Rust's.
 
-### 7. Green Threads for Concurrency (Phase 1)
+### 7. Two-tier Concurrency Model (`concurrent` vs `parallel`)
 
-**Decision:** Use stackful green threads for the concurrency runtime initially.  
-**Rationale:** They are transparent to the user (no `async/await` keyword leakage), work
-naturally with existing code, and map cleanly to Fidan's structured concurrency model.
-Async futures can be added as a lower-level optimization later.
+**Decision:** Use `concurrent` for cooperative I/O-bound tasks (green threads, possibly
+single-threaded) and `parallel` for true multi-core CPU-bound work (Rayon thread pool).
+These are two distinct keywords with distinct semantics, not aliases.
+
+**Rationale:** Conflating concurrency and parallelism is the single biggest source of
+confusion in languages like Python (the GIL vs asyncio vs threads mess). Fidan makes the
+distinction explicit in the syntax. A user who writes `concurrent` gets cooperative scheduling
+and does not need to think about data races. A user who writes `parallel` opts into
+full multi-core execution and the compiler enforces data safety via `parallel_check.rs`.
+Green threads (`corosensei`) handle the cooperative case without surfacing async/await.
+Rayon handles the parallel case without requiring users to manage thread lifetimes.
 
 ### 8. String Interpolation as Parser Concern, not Lexer
 
@@ -1481,6 +2101,12 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 - [ ] Ternary and null-coalesce parsing
 - [ ] Named argument call parsing
 - [ ] Extension action declaration parsing
+- [ ] `parallel action` modifier parsing
+- [ ] `concurrent { task ... }` block parsing
+- [ ] `parallel { task ... }` block parsing
+- [ ] `parallel for item in collection { ... }` parsing
+- [ ] `for item in collection { ... }` (sequential) parsing
+- [ ] `spawn expr` and `await expr` parsing
 - [ ] `otherwise when` / `else if` parsing
 - [ ] `attempt/catch/otherwise/finally` parsing
 - [ ] String interpolation parsing
@@ -1503,6 +2129,11 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 - [ ] `required` / `optional` parameter checking
 - [ ] Null safety analysis (flow-sensitive, as warnings)
 - [ ] Decorator validation (`@precompile`, etc.)
+- [ ] `parallel action` type registration (`T` vs `Pending oftype T` depending on call form)
+- [ ] `parallel_check.rs`: capture set + mutation set intersection analysis (data race detection)
+- [ ] `Shared oftype T` type: recognized as safe in parallel contexts
+- [ ] `Pending oftype T` type: inferred from `spawn expr`; `await pending` unboxes to `T`
+- [ ] W3xx warnings: unawaited `Pending oftype T` dropped without `.wait()` or `await`
 
 ### Phase 4 – Diagnostics (1–2 weeks)
 **Goal:** Error messages that make users say "wow".
@@ -1513,19 +2144,33 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 - [ ] Edit-distance suggestions for undefined names
 - [ ] Test every error code produces a beautiful message
 
-### Phase 5 – HIR + MIR + Tree-walking Interpreter (3–4 weeks)
-**Goal:** `fidan run TEST/test.fdn` works end-to-end.
+### Phase 5 – HIR + MIR + Interpreter + `concurrent` (3–4 weeks)
+**Goal:** `fidan run TEST/test.fdn` works end-to-end. `concurrent` blocks work cooperatively.
 
 - [ ] HIR types and AST→HIR lowering
-- [ ] MIR types (BasicBlock, Phi, SSA locals)  
+- [ ] MIR types (BasicBlock, Phi, SSA locals)
 - [ ] HIR→MIR lowering with Braun SSA construction
 - [ ] Exception handling lowering (landing pads)
+- [ ] `concurrent` block lowering → `SpawnConcurrent` + `JoinAll` MIR instructions
 - [ ] MIR text dump (`--emit mir`)
 - [ ] MIR interpreter with call stack, frame locals, GC
-- [ ] `fidan-runtime`: `FidanValue`, `FidanObject`, `FidanClass`, ref-counted GC
+- [ ] `fidan-runtime`: `FidanValue`, `FidanObject`, `FidanClass`, `Rc`-based ref-counted GC
+- [ ] Green-thread scheduler (`corosensei`) for `concurrent` tasks
 - [ ] Builtin functions: `print`, `input`, `len`, `toString`, etc.
-- [ ] Structured concurrency (single-threaded task scheduler first)
 - [ ] Run `TEST/test.fdn` fully and verify output
+
+### Phase 5.5 – `parallel` Execution + Rayon (2–3 weeks)
+**Goal:** `parallel` blocks, `parallel action`, `parallel for`, `Shared oftype T`, `spawn`/`await` work.
+
+- [ ] Upgrade GC from `Rc` to `Arc` (all heap objects must be `Send`)
+- [ ] Rayon thread pool integration in `fidan-runtime`
+- [ ] `SpawnParallel` + `JoinAll` MIR instructions → Rayon `join` / `spawn`
+- [ ] `ParallelIter` MIR instruction → Rayon `par_iter`
+- [ ] `SpawnExpr` + `AwaitPending` → `Pending oftype T` type backed by `JoinHandle<FidanValue>` (Rust)
+- [ ] `Shared oftype T` runtime type (backed by `Arc<Mutex<FidanValue>>` in Rust)
+- [ ] `std.parallel` module: `parallelMap`, `parallelFor`, `Shared`, `Pending`
+- [ ] Parallel capture safety (`parallel_check.rs`) producing E4xx errors
+- [ ] Benchmark: `parallel for` vs sequential `for` on a compute-heavy workload
 
 ### Phase 6 – Optimization Passes (1 week)
 **Goal:** MIR is faster after passes.
@@ -1540,18 +2185,23 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 - [ ] All listed stdlib modules (Rust implementation, Fidan-callable via FFI)
 - [ ] `fidan test` command works, runs test blocks
 
-### Phase 8 – AOT Backend (3–4 weeks)
-**Goal:** `fidan build test.fdn -o test` produces a working binary.
+### Phase 8 – Cranelift AOT (correctness baseline) (2–3 weeks)
+**Goal:** `fidan build test.fdn -o test` produces a correct working binary using Cranelift.
+This is a **transitional phase** — it validates the full AOT pipeline (compilation, linking,
+GC roots, unwind) before LLVM is introduced. Cranelift AOT is NOT the final release backend.
 
 - [ ] Cranelift `ObjectModule` setup
 - [ ] MIR → Cranelift IR translation for all instruction types
 - [ ] Runtime library (`fidan-runtime`) compiled as static library
-- [ ] System linker invocation
+- [ ] System linker invocation (`cc` on Unix, `link.exe`/`lld` on Windows)
 - [ ] GC roots in compiled code (stack maps OR conservative scanning)
-- [ ] Test: compiled binary matches interpreter output
+- [ ] DWARF unwind info for exception handling (Linux/macOS), SEH (Windows)
+- [ ] **Test: compiled binary output must exactly match interpreter output** (this is the
+  correctness contract that the LLVM backend must also satisfy in Phase 11)
 
-### Phase 9 – Precompile JIT (2 weeks)
-**Goal:** `@precompile` decorator accelerates functions in interpreter mode.
+### Phase 9 – Cranelift JIT / `@precompile` (2 weeks)
+**Goal:** `@precompile` decorator accelerates functions in interpreter mode. This is
+Cranelift's **permanent, final role** in the architecture — it will never be replaced here.
 
 - [ ] Cranelift `JITModule` setup
 - [ ] JIT compilation on first call to `@precompile` function
@@ -1568,6 +2218,23 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 - [ ] VS Code extension skeleton (JSON grammar + LSP client)
 - [ ] Formatter (`fidan fmt`)
 
+### Phase 11 – LLVM AOT Backend + Performance (4–6 weeks)
+**Goal:** `fidan build --release` produces C++-competitive native binaries.
+This phase replaces Cranelift as the AOT backend with LLVM and adds all performance features.
+
+- [ ] Add `fidan-codegen-llvm` crate with `inkwell` dependency
+- [ ] MIR → LLVM IR translation for all instruction types
+- [ ] LLVM optimization pass pipeline (`-O2` then `-O3`)
+- [ ] Auto-vectorization enabled (`-loop-vectorize`, `-slp-vectorize`)
+- [ ] LTO support (`fidan build --release --lto`)
+- [ ] Monomorphization collector in `fidan-typeck`: track all concrete generic instantiations
+- [ ] Specialized LLVM function emission per concrete instantiation
+- [ ] Escape analysis MIR pass: stack-allocate non-escaping objects
+- [ ] `fidan build --release` links against LLVM AOT object; `fidan run` still uses Cranelift JIT
+- [ ] Benchmark suite: compare Cranelift AOT vs LLVM AOT vs equivalent C++ on compute benchmarks
+- [ ] PGO instrumentation mode: `fidan build --instrument` → `fidan build --use-profile`
+- [ ] All correctness tests from Phase 8 pass with the LLVM backend
+
 ---
 
 ## 21. Pitfalls & Pre-planned Mitigations
@@ -1577,11 +2244,17 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 | **Arena lifetime hell in Rust** | Use index-based references (`ExprId(u32)`) instead of raw `&'ast` references if lifetime inference becomes too complex. The arena is still used for storage; lookups go through an index. |
 | **`is not` expression parsing** | Token-pair normalization in the parser (documented above). Test exhaustively: `a is not b`, `a is not nothing`, `not a is b`. |
 | **Default param evaluation (Python trap)** | Default values are stored as `Expr` in the AST and re-evaluated at each call site during interpretation. Never evaluated once at definition time. |
-| **Recursive object references causing ref-count cycles** | Bacon-Rajan cycle collector runs periodically. Objects with no external references but internal cycles are collected. |
+| **Recursive object references (ownership cycles)** | Use `WeakShared oftype T` for back-references in object graphs that contain `Shared` values. Compiler emits a warning when a statically-detectable ownership cycle is found in `Shared` types. Owned (non-Shared) values structurally cannot form cycles because single ownership forms a DAG by definition. |
 | **JIT ABI mismatch between interpreter values and compiled code** | Define a clear `FidanABI` spec. All JIT functions receive and return tagged `FidanValue` structs. Trampolines handle boxing/unboxing. Tests verify ABI correctness for every type. |
 | **`this` in free-function call of extension actions** | Clearly specified: `this === person` (the extension parameter) in free-function context. Implemented as a single consistent rule in MIR lowering. |
 | **Exception unwind crossing compiled frames** | In AOT mode, use Dwarf unwinding (like Rust's panics). In interpreter mode, use an explicit unwind loop. In mixed mode (interpreter calling compiled), the ABI trampoline must also be a landing pad candidate. This is complex; handle it in Phase 9, not Phase 5. |
-| **Concurrency + GC interaction** | In Phase 1, all concurrency is cooperative single-threaded (no real parallelism). The GC never runs concurrently with mutators in this phase. Multi-threaded GC is a Phase 2+ concern. |
+| **`parallel` + `OwnedRef`: `Rc` is not `Send`** | Interpreter-internal `OwnedRef<T>` uses `Rc<RefCell<T>>` (single-threaded). Values that cross into a `parallel` block must be `Shared oftype T` (`Arc<Mutex<T>>`). The type checker enforces this: passing an owned value into a `parallel` block is a **move** (one owner, the task); passing a `Shared` value is an ARC clone. Phase 5 implements the type check; Phase 5.5 adds the `Rc`→`Arc` upgrade path for values that become `Shared` mid-program. |
+| **Rayon threadpool panic propagation** | If a parallel task panics, Rayon propagates the panic to the joining thread. MIR lowering ensures that `JoinAll` maps to Rayon's `join` result check. A panic in a parallel task is caught at the `JoinAll` boundary and re-raised as a Fidan `throw` in the calling scope. |
+| **`parallel for` with mutable accumulator (classic race)** | `parallel_check.rs` catches this at compile time (E401). The idiomatic fix (`parallelMap`, `parallelFilter`) is always suggested. Document this prominently in the language guide. |
+| **`spawn` without `await` (dropped `Pending oftype T`)** | `Pending oftype T` is marked `#[must_use]` in Rust. Dropping without `await` or `.wait()` produces a W301 warning. The runtime does NOT silently discard the result; it joins the thread on drop (blocking), with a warning. |
+| **`Shared oftype T` deadlock** | `Shared oftype T` uses a non-recursive `Mutex` (Rust). Calling `.withLock()` inside another `.withLock()` on the same value from the same thread is a runtime panic with a clear message: "deadlock: attempted re-entrant lock on Shared". Detected via `try_lock` + thread ID check. |
+| **`concurrent` + GC interaction** | In Phase 1, all concurrency is cooperative single-threaded. The GC never runs concurrently with mutators in this phase. |
+| **`parallel` task capturing a mutable variable from enclosing scope** | Caught at compile-time by `parallel_check.rs` (E401). Immutable captures are passed by clone. `Shared oftype T` is the only pathway for shared mutation. |
 | **String interpolation with complex nested expressions** | Recursively call the full expression parser. Limit nesting depth (`MAX_INTERP_DEPTH = 16`) to prevent pathological cases. Report a clean error if exceeded. |
 | **`dynamic` type in AOT mode** | All `dynamic`-typed values are lowered to a 2-word tagged union in memory. Dispatch is handled by a runtime helper. This works but is slower; warn users that `dynamic` opts out of AOT type optimizations. |
 | **Bootstrapping: stdlib written in Fidan calling Fidan** | Keep the stdlib in Rust until the compiler is self-hosting. Define a clear FFI surface (`@extern(rust)` decorator) that Fidan code can call into Rust. Bootstrap incrementally. |
