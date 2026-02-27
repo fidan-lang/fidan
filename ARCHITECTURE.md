@@ -67,7 +67,7 @@ Source Text
                           └──────────────────────┴─────────────────┘
                                                  │
                                         fidan-runtime (always present)
-                                 GC │ Object model │ Stdlib │ Concurrency
+                                 Memory │ Object model │ Stdlib │ Concurrency
 ```
 
 The **same MIR** feeds all three backends. No code duplication in the compiler, and no
@@ -94,7 +94,7 @@ fidan/
     ├── fidan-mir/               ← MIR types (SSA/CFG) + HIR→MIR lowering
     ├── fidan-passes/            ← Optimization passes operating on MIR
     ├── fidan-diagnostics/       ← Diagnostic types, rendering, fix engine
-    ├── fidan-runtime/           ← Value types, GC, object model, task scheduler
+    ├── fidan-runtime/           ← Value types, memory model (owned/COW/ARC), object model, task scheduler
     ├── fidan-interp/            ← MIR interpreter
     ├── fidan-codegen-cranelift/ ← Cranelift backend — JIT only (`@precompile`, interpreter hot paths)
     ├── fidan-codegen-llvm/      ← LLVM backend — AOT only (`fidan build`, release binaries)
@@ -945,7 +945,7 @@ pub enum Instr {
     NullCheck       { scrutinee: Operand, span: Span },  // inserted by null-safety pass
     SetField        { object: Operand, field: Symbol, value: Operand },
     GetField        { dest: LocalId, object: Operand, field: Symbol },
-    Drop            { local: LocalId },           // explicit lifetime end for GC
+    Drop            { local: LocalId },           // explicit scope-end: owned value is destroyed here
 
     // ── Concurrency ────────────────────────────────────────────────────
     /// Spawn a function as a cooperative green-thread task (for `concurrent` blocks)
@@ -1519,7 +1519,7 @@ The user writes `concurrent` or `parallel` and gets the right behavior.
 ```rust
 pub struct Interpreter {
     pub session:  Arc<Session>,
-    pub runtime:  Arc<Runtime>,       // GC, stdlib, task scheduler
+    pub runtime:  Arc<Runtime>,       // memory model (owned/ARC ops), stdlib, task scheduler
     call_stack:   Vec<CallFrame>,
 }
 
@@ -1629,7 +1629,7 @@ Types passed between the MIR interpreter and JIT-compiled functions use the **Fi
 | `Integer(i64)` | `I64` |
 | `Float(f64)` | `F64` |
 | `Boolean(bool)` | `I8` |
-| Heap types (String, List, Object) | `I64` (pointer into GC heap) |
+| Heap types (String, List, Object) | `I64` (pointer into Fidan heap — owned or `Shared`) |
 | `Nothing` | `I64` value `0` |
 
 #### JIT Compilation Path
@@ -1683,7 +1683,7 @@ In AOT mode with full type information, all values are **unboxed to native LLVM 
 | `Integer(i64)` | `i64` |
 | `Float(f64)` | `double` |
 | `Boolean(bool)` | `i1` |
-| `String` | `%FidanStr*` (pointer to struct in GC heap) |
+| `String` | `%FidanStr*` (pointer to owned heap struct) |
 | `List oftype integer` | `%FidanList_i64*` (monomorphized — stores raw `i64[]`) |
 | `List oftype T` (generic) | `%FidanList*` (boxed, only if T unknown at compile time) |
 | `Nothing` | `i64` value `0` |
@@ -2153,8 +2153,8 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 - [ ] Exception handling lowering (landing pads)
 - [ ] `concurrent` block lowering → `SpawnConcurrent` + `JoinAll` MIR instructions
 - [ ] MIR text dump (`--emit mir`)
-- [ ] MIR interpreter with call stack, frame locals, GC
-- [ ] `fidan-runtime`: `FidanValue`, `FidanObject`, `FidanClass`, `Rc`-based ref-counted GC
+- [ ] MIR interpreter with call stack, frame locals, and owned-value drop tracking
+- [ ] `fidan-runtime`: `FidanValue`, `FidanObject`, `FidanClass`; owned values via `OwnedRef<T>` (`Rc<RefCell<T>>` interpreter-internally, single-threaded only)
 - [ ] Green-thread scheduler (`corosensei`) for `concurrent` tasks
 - [ ] Builtin functions: `print`, `input`, `len`, `toString`, etc.
 - [ ] Run `TEST/test.fdn` fully and verify output
@@ -2162,8 +2162,8 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 ### Phase 5.5 – `parallel` Execution + Rayon (2–3 weeks)
 **Goal:** `parallel` blocks, `parallel action`, `parallel for`, `Shared oftype T`, `spawn`/`await` work.
 
-- [ ] Upgrade GC from `Rc` to `Arc` (all heap objects must be `Send`)
 - [ ] Rayon thread pool integration in `fidan-runtime`
+- [ ] Type checker enforces thread-crossing rule: owned values may only **move** into a `parallel` block (transferred, not shared); values to be shared across tasks MUST be declared `Shared oftype T` at the call site — no implicit promotion to `Arc`
 - [ ] `SpawnParallel` + `JoinAll` MIR instructions → Rayon `join` / `spawn`
 - [ ] `ParallelIter` MIR instruction → Rayon `par_iter`
 - [ ] `SpawnExpr` + `AwaitPending` → `Pending oftype T` type backed by `JoinHandle<FidanValue>` (Rust)
@@ -2188,13 +2188,13 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 ### Phase 8 – Cranelift AOT (correctness baseline) (2–3 weeks)
 **Goal:** `fidan build test.fdn -o test` produces a correct working binary using Cranelift.
 This is a **transitional phase** — it validates the full AOT pipeline (compilation, linking,
-GC roots, unwind) before LLVM is introduced. Cranelift AOT is NOT the final release backend.
+stack root tracking, unwind) before LLVM is introduced. Cranelift AOT is NOT the final release backend.
 
 - [ ] Cranelift `ObjectModule` setup
 - [ ] MIR → Cranelift IR translation for all instruction types
 - [ ] Runtime library (`fidan-runtime`) compiled as static library
 - [ ] System linker invocation (`cc` on Unix, `link.exe`/`lld` on Windows)
-- [ ] GC roots in compiled code (stack maps OR conservative scanning)
+- [ ] Stack root tracking in compiled code (for AOT exception unwind maps and sanitizers — NOT for a tracing collector; Fidan has no tracing collector)
 - [ ] DWARF unwind info for exception handling (Linux/macOS), SEH (Windows)
 - [ ] **Test: compiled binary output must exactly match interpreter output** (this is the
   correctness contract that the LLVM backend must also satisfy in Phase 11)
@@ -2248,12 +2248,12 @@ This phase replaces Cranelift as the AOT backend with LLVM and adds all performa
 | **JIT ABI mismatch between interpreter values and compiled code** | Define a clear `FidanABI` spec. All JIT functions receive and return tagged `FidanValue` structs. Trampolines handle boxing/unboxing. Tests verify ABI correctness for every type. |
 | **`this` in free-function call of extension actions** | Clearly specified: `this === person` (the extension parameter) in free-function context. Implemented as a single consistent rule in MIR lowering. |
 | **Exception unwind crossing compiled frames** | In AOT mode, use Dwarf unwinding (like Rust's panics). In interpreter mode, use an explicit unwind loop. In mixed mode (interpreter calling compiled), the ABI trampoline must also be a landing pad candidate. This is complex; handle it in Phase 9, not Phase 5. |
-| **`parallel` + `OwnedRef`: `Rc` is not `Send`** | Interpreter-internal `OwnedRef<T>` uses `Rc<RefCell<T>>` (single-threaded). Values that cross into a `parallel` block must be `Shared oftype T` (`Arc<Mutex<T>>`). The type checker enforces this: passing an owned value into a `parallel` block is a **move** (one owner, the task); passing a `Shared` value is an ARC clone. Phase 5 implements the type check; Phase 5.5 adds the `Rc`→`Arc` upgrade path for values that become `Shared` mid-program. |
+| **`parallel` + `OwnedRef`: `Rc` is not `Send`** | `OwnedRef<T>` (interpreter-internal `Rc<RefCell<T>>`) is single-threaded by design and stays that way — it is NEVER upgraded to `Arc`. The type checker prevents owned values from crossing thread boundaries: passing an owned value into a `parallel` block is a **move** (compiler enforces one owner, the task — `Rc` is valid because only one thread touches it). Shared mutation across threads requires `Shared oftype T` which is always `Arc<Mutex<T>>`. There is no whole-runtime `Rc`→`Arc` upgrade. |
 | **Rayon threadpool panic propagation** | If a parallel task panics, Rayon propagates the panic to the joining thread. MIR lowering ensures that `JoinAll` maps to Rayon's `join` result check. A panic in a parallel task is caught at the `JoinAll` boundary and re-raised as a Fidan `throw` in the calling scope. |
 | **`parallel for` with mutable accumulator (classic race)** | `parallel_check.rs` catches this at compile time (E401). The idiomatic fix (`parallelMap`, `parallelFilter`) is always suggested. Document this prominently in the language guide. |
 | **`spawn` without `await` (dropped `Pending oftype T`)** | `Pending oftype T` is marked `#[must_use]` in Rust. Dropping without `await` or `.wait()` produces a W301 warning. The runtime does NOT silently discard the result; it joins the thread on drop (blocking), with a warning. |
 | **`Shared oftype T` deadlock** | `Shared oftype T` uses a non-recursive `Mutex` (Rust). Calling `.withLock()` inside another `.withLock()` on the same value from the same thread is a runtime panic with a clear message: "deadlock: attempted re-entrant lock on Shared". Detected via `try_lock` + thread ID check. |
-| **`concurrent` + GC interaction** | In Phase 1, all concurrency is cooperative single-threaded. The GC never runs concurrently with mutators in this phase. |
+| **`concurrent` tasks and owned values** | All `concurrent` tasks run cooperatively on a single OS thread. Owned values can be freely passed between coroutines because there is no true parallelism — only one coroutine runs at a time. No `Arc`, no mutex needed for `concurrent`-only code. `parallel` is the only form that requires `Shared oftype T` for shared state. |
 | **`parallel` task capturing a mutable variable from enclosing scope** | Caught at compile-time by `parallel_check.rs` (E401). Immutable captures are passed by clone. `Shared oftype T` is the only pathway for shared mutation. |
 | **String interpolation with complex nested expressions** | Recursively call the full expression parser. Limit nesting depth (`MAX_INTERP_DEPTH = 16`) to prevent pathological cases. Report a clean error if exceeded. |
 | **`dynamic` type in AOT mode** | All `dynamic`-typed values are lowered to a 2-word tagged union in memory. Dispatch is handled by a runtime helper. This works but is slower; warn users that `dynamic` opts out of AOT type optimizations. |
