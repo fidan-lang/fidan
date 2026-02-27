@@ -277,7 +277,7 @@ context. This keeps the lexer context-free.
 
 Similarly `is` in `person is not nothing` tokenizes `is` → `Eq`, then `not` → `Not`.
 The expression `a is not b` thus tokenizes to `a Eq Not b` and the parser rewrites this
-compound to `a NotEq b` during a normalization pass (see Parser section).
+compound to `a NotEq b` (`is not` in this context is the same as `isnot`) during a normalization pass (see Parser section).
 
 ### String Interpolation
 
