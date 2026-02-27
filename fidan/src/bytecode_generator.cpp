@@ -1,8 +1,10 @@
-// Copyright (c) AppSolves (Kaan Gönüldinc). All rights reserved.
+// Copyright (c) Kaan Gönüldinc (AppSolves). All rights reserved.
 // See LICENSE file in the project root for full license information.
 
+// Include necessary headers
 #include "headers/bytecode_generator.h"
 
+// Function to initialize the chunk
 void initChunk(Chunk *chunk)
 {
     chunk->count = 0;
@@ -10,6 +12,7 @@ void initChunk(Chunk *chunk)
     chunk->code = NULL;
 }
 
+// Function to write a byte to the chunk
 void writeChunk(Chunk *chunk, uint8_t byte)
 {
     if (chunk->capacity < chunk->count + 1)
@@ -24,6 +27,7 @@ void writeChunk(Chunk *chunk, uint8_t byte)
     chunk->count++;
 }
 
+// Function to manage the memory
 void *reallocate(void *pointer, size_t oldSize, size_t newSize)
 {
     if (newSize == 0)
@@ -38,6 +42,7 @@ void *reallocate(void *pointer, size_t oldSize, size_t newSize)
     return result;
 }
 
+// Function to free the chunk
 void freeChunk(Chunk *chunk)
 {
     FREE_ARRAY(uint8_t, chunk->code, chunk->capacity);

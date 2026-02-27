@@ -1,5 +1,9 @@
 ## TEST PROGRAM ##
 
+var x is 10
+var x
+
+#/
 object Creature {
     var species oftype string = "Unknown"
 
@@ -13,9 +17,7 @@ object Creature {
 }
 
 object Person extends Creature {
-    @declareonly
     var name oftype string
-    @declareonly
     var age oftype integer
 
     action init with (name oftype string) also optional age oftype integer = 18 returns null {
@@ -75,3 +77,5 @@ action main {
 
 print("Hello, world!") ## Print a message
 main() ## Call the main action
+
+/#

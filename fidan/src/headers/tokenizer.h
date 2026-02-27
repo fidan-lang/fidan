@@ -1,4 +1,4 @@
-// Copyright (c) AppSolves (Kaan Gönüldinc). All rights reserved.
+// Copyright (c) Kaan Gönüldinc (AppSolves). All rights reserved.
 // See LICENSE file in the project root for full license information.
 
 #ifndef FIDAN_TOKENIZER_H
@@ -20,7 +20,6 @@ enum class TokenType
     BOOLEAN,
     LIST,
     DICTIONARY,
-    DYNAMIC,
     NULL_,
     IDENTIFIER,
     KEYWORD,
@@ -70,11 +69,11 @@ public:
     std::vector<Token> tokenize();
 
 private:
-    std::string_view source; // Source code to tokenize
-    std::string filename;    // Filename of the source code
-    size_t position;         // Current position in the source code
-    int line;                // Current line number
-    int column;              // Current column number
+    const std::string &source;   // Source code to tokenize
+    const std::string &filename; // Filename of the source code
+    size_t position;             // Current position in the source code
+    int line;                    // Current line number
+    int column;                  // Current column number
 
     // Function to get the current character in the source code
     inline char currentChar() const;

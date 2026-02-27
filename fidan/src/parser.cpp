@@ -1,17 +1,22 @@
-// Copyright (c) AppSolves (Kaan Gönüldinc). All rights reserved.
+// Copyright (c) Kaan Gönüldinc (AppSolves). All rights reserved.
 // See LICENSE file in the project root for full license information.
 
+// Include necessary headers
+#include "headers/parser.h"
 #include "headers/errors.h"
 #include "headers/helpers.h"
 #include <unordered_set>
 
+// Constructor
 Parser::Parser(const std::vector<Token> &tokens, const std::string &filename) : tokens(tokens), filename(filename), currentTokenIndex(0), scopeManager() {}
 
+// Method to move to the next token
 inline Token Parser::advance()
 {
     return currentTokenIndex < tokens.size() ? tokens[currentTokenIndex++] : Token{TokenType::EOF_, "", -1, -1};
 }
 
+// Method to check if the current token matches the given type and value
 inline bool Parser::match(TokenType type, const std::string &value, bool advanceIfMatch)
 {
     if (currentTokenIndex < tokens.size() && tokens[currentTokenIndex].type == type &&
@@ -24,12 +29,14 @@ inline bool Parser::match(TokenType type, const std::string &value, bool advance
     return false;
 }
 
+// Method to check if the token at the given index matches the given type and value
 inline bool Parser::peekMatch(TokenType type, int steps, const std::string &value)
 {
     return currentTokenIndex + steps < tokens.size() && tokens[currentTokenIndex + steps].type == type &&
            (value.empty() || upper(tokens[currentTokenIndex + steps].value) == upper(value));
 }
 
+// Method to consume the current token if it matches the given type and value
 inline void Parser::consume(TokenType type, const std::string &value, const std::string &errorMessage)
 {
     if (!match(type, value))
@@ -38,6 +45,7 @@ inline void Parser::consume(TokenType type, const std::string &value, const std:
     }
 }
 
+// Method to parse the tokens and return the AST
 std::vector<std::unique_ptr<ASTNode>> Parser::parse()
 {
     std::optional<BracketError> bracketError = checkBalancedBrackets(tokens); // Check for unbalanced brackets
@@ -52,6 +60,8 @@ std::vector<std::unique_ptr<ASTNode>> Parser::parse()
     }
     scopeManager.enterScope("global", ScopeType::Global); // Enter the global scope
     std::vector<std::unique_ptr<ASTNode>> statements;
+    const size_t estimatedStatementCount = tokens.size() / 5; // Assuming average statement length is 5 tokens
+    statements.reserve(estimatedStatementCount);
 
     while (currentTokenIndex < tokens.size() && tokens[currentTokenIndex].type != TokenType::EOF_)
     {
@@ -62,11 +72,13 @@ std::vector<std::unique_ptr<ASTNode>> Parser::parse()
     return statements;        // Return the list of statements
 }
 
+// Method to parse a block of statements
 std::unique_ptr<ASTNode> Parser::parseStatement()
 {
     SyntaxError unexpectedTokenError("Unexpected token '" + lower(tokens[currentTokenIndex].value) + "'", tokens[currentTokenIndex].line, tokens[currentTokenIndex].column);
     TraceGuard guard(unexpectedTokenError, filename, "Parser::parseStatement", tokens[currentTokenIndex].line);
 
+    statementFirstTokenIndex = currentTokenIndex;
     if (match(TokenType::DECORATOR))
     {
         return parseDecorator();
@@ -134,9 +146,10 @@ std::unique_ptr<ASTNode> Parser::parseDecorator()
     scopeManager.enterScope(name, ScopeType::DecoratorPaired); // Enter a new scope for the decorator
     std::unique_ptr<ASTNode> statement = parseStatement();
     scopeManager.exitScope(); // Exit the decorator scope
-    return std::make_unique<Decorator>(name, std::move(statement), scopeManager.currentScope());
+    return std::make_unique<Decorator>(statementFirstTokenIndex, name, std::move(statement), scopeManager.currentScope());
 }
 
+// Function to parse an if statement
 std::unique_ptr<ASTNode> Parser::parseIfStatement()
 {
     std::vector<std::pair<std::unique_ptr<ASTNode>, std::unique_ptr<ASTNode>>> conditionsAndBlocks;
@@ -170,9 +183,10 @@ std::unique_ptr<ASTNode> Parser::parseIfStatement()
         }
     }
 
-    return std::make_unique<WhenStatement>(std::move(conditionsAndBlocks), scopeManager.currentScope());
+    return std::make_unique<WhenStatement>(statementFirstTokenIndex, std::move(conditionsAndBlocks), scopeManager.currentScope());
 }
 
+// Function to parse a try-catch statement
 std::unique_ptr<ASTNode> Parser::parseTryCatchStatement()
 {
     SyntaxError multipleElseError("Multiple 'else/otherwise' blocks are not allowed", tokens[currentTokenIndex].line, tokens[currentTokenIndex].column);
@@ -217,24 +231,27 @@ std::unique_ptr<ASTNode> Parser::parseTryCatchStatement()
         }
     }
 
-    return std::make_unique<TryCatchStatement>(std::move(body), catchIdentifier, std::move(catchBody), std::move(finallyBlock), std::move(elseBlock), scopeManager.currentScope());
+    return std::make_unique<TryCatchStatement>(statementFirstTokenIndex, std::move(body), catchIdentifier, std::move(catchBody), std::move(finallyBlock), std::move(elseBlock), scopeManager.currentScope());
 }
 
+// Function to parse a throw statement
 std::unique_ptr<ASTNode> Parser::parseThrowStatement()
 {
     bool openParen = match(TokenType::OPEN_PAREN);
     std::unique_ptr<ASTNode> value = parseExpression();
     if (openParen)
         consume(TokenType::CLOSE_PAREN, "", "Expected ')' after 'throw' value");
-    return std::make_unique<ThrowStatement>(std::move(value), scopeManager.currentScope());
+    return std::make_unique<ThrowStatement>(statementFirstTokenIndex, std::move(value), scopeManager.currentScope());
 }
 
+// Function to parse a return statement
 std::unique_ptr<ASTNode> Parser::parseReturnStatement()
 {
     std::unique_ptr<ASTNode> value = parseExpression();
-    return std::make_unique<ReturnStatement>(std::move(value), scopeManager.currentScope());
+    return std::make_unique<ReturnStatement>(statementFirstTokenIndex, std::move(value), scopeManager.currentScope());
 }
 
+// Function to parse a block of statements
 std::unique_ptr<ASTNode> Parser::parseForLoop()
 {
     std::vector<Parameter> parameters;  // Vector to store the parameters
@@ -243,9 +260,10 @@ std::unique_ptr<ASTNode> Parser::parseForLoop()
     std::unique_ptr<ASTNode> iterable = parseExpression(); // Parse the iterable
     consume(TokenType::OPEN_BRACE, "", "Expected '{' after 'for/foreach' iterable");
     std::unique_ptr<ASTNode> body = parseBlock(); // Parse the body
-    return std::make_unique<ForLoop>(std::move(parameters), std::move(iterable), std::move(body));
+    return std::make_unique<ForLoop>(statementFirstTokenIndex, std::move(parameters), std::move(iterable), std::move(body));
 }
 
+// Function to parse a block of statements
 std::unique_ptr<ASTNode> Parser::parseWhileLoop()
 {
     bool openParen = match(TokenType::OPEN_PAREN);
@@ -254,9 +272,10 @@ std::unique_ptr<ASTNode> Parser::parseWhileLoop()
         consume(TokenType::CLOSE_PAREN, "", "Expected ')' after 'while/aslongas' condition");
     consume(TokenType::OPEN_BRACE, "", "Expected '{' after 'while/aslongas' condition");
     std::unique_ptr<ASTNode> body = parseBlock(); // Parse the body
-    return std::make_unique<WhileLoop>(std::move(condition), std::move(body));
+    return std::make_unique<WhileLoop>(statementFirstTokenIndex, std::move(condition), std::move(body));
 }
 
+// Function to parse a block of statements
 std::unique_ptr<ASTNode> Parser::parseAssignmentOrCall()
 {
     SyntaxError unexpectedTokenError("Unexpected token '" + lower(tokens[currentTokenIndex].value) + "'", tokens[currentTokenIndex].line, tokens[currentTokenIndex].column);
@@ -267,7 +286,7 @@ std::unique_ptr<ASTNode> Parser::parseAssignmentOrCall()
     if (match(TokenType::KEYWORD, "is"))
     {
         std::unique_ptr<ASTNode> value = parseExpression();
-        return std::make_unique<VariableAssignment>(identifierParts, std::move(value), scopeManager.currentScope());
+        return std::make_unique<VariableAssignment>(statementFirstTokenIndex, std::move(identifierParts), std::move(value), scopeManager.currentScope());
     }
     else if (match(TokenType::OPEN_PAREN))
     {
@@ -279,6 +298,7 @@ std::unique_ptr<ASTNode> Parser::parseAssignmentOrCall()
     }
 }
 
+// Function to parse a variable declaration
 std::unique_ptr<ASTNode> Parser::parseFunctionCall(const std::vector<std::string_view> &identifierParts)
 {
     std::vector<std::unique_ptr<ASTNode>> args;
@@ -316,9 +336,10 @@ std::unique_ptr<ASTNode> Parser::parseFunctionCall(const std::vector<std::string
     }
 
     // Return the FunctionCall node, combining positional and keyword arguments
-    return std::make_unique<FunctionCall>(identifierParts, std::move(args), std::move(kwargs), scopeManager.currentScope());
+    return std::make_unique<FunctionCall>(statementFirstTokenIndex, std::move(identifierParts), std::move(args), std::move(kwargs), scopeManager.currentScope());
 }
 
+// Function to parse a block of statements
 std::vector<std::string_view> Parser::parseFullIdentifier()
 {
     SyntaxError missingIdentifierError("Expected identifier after '.'", tokens[currentTokenIndex].line, tokens[currentTokenIndex].column);
@@ -353,6 +374,7 @@ std::vector<std::string_view> Parser::parseFullIdentifier()
     return parts;
 }
 
+// Function to parse a block of statements
 std::unique_ptr<ASTNode> Parser::parseVariableDeclaration()
 {
     SyntaxError missingVariableNameError("Expected variable name", tokens[currentTokenIndex].line, tokens[currentTokenIndex].column);
@@ -368,7 +390,7 @@ std::unique_ptr<ASTNode> Parser::parseVariableDeclaration()
         throw missingVariableNameError;
     }
 
-    std::string_view type = "any"; // Default type is 'any'
+    std::string_view type = "dynamic"; // Default type is 'dynamic'
     if (match(TokenType::KEYWORD, "oftype"))
     {
         if (match(TokenType::TYPE, "") || match(TokenType::IDENTIFIER, ""))
@@ -384,17 +406,16 @@ std::unique_ptr<ASTNode> Parser::parseVariableDeclaration()
 
     std::shared_ptr<Scope> scope = scopeManager.currentScope();
 
-    if (scope->type == ScopeType::DecoratorPaired && scope->name == "declareonly")
+    std::unique_ptr<ASTNode> initializer = nullptr;
+    if (match(TokenType::KEYWORD, "IS"))
     {
-        return std::make_unique<VariableDeclaration>(identifierParts, type, nullptr, scope);
+        initializer = parseExpression();
     }
 
-    consume(TokenType::KEYWORD, "IS", "Expected '=', 'is' or 'set' after variable declaration");
-    std::unique_ptr<ASTNode> initializer = parseExpression(); // Parse the initializer expression
-
-    return std::make_unique<VariableDeclaration>(identifierParts, type, std::move(initializer), scope);
+    return std::make_unique<VariableDeclaration>(statementFirstTokenIndex, std::move(identifierParts), type, std::move(initializer), scope);
 }
 
+// Function to parse a block of statements
 void Parser::parseParameters(std::vector<Parameter> &parameters, bool canBeOptional)
 {
     SyntaxError expectedTypeError("Expected type after 'oftype'", tokens[currentTokenIndex].line, tokens[currentTokenIndex].column);
@@ -409,7 +430,7 @@ void Parser::parseParameters(std::vector<Parameter> &parameters, bool canBeOptio
     consume(TokenType::IDENTIFIER, "", "Expected parameter name");
     std::string_view paramName = tokens[currentTokenIndex - 1].value;
 
-    std::string_view paramType = "any"; // Default type is 'any'
+    std::string_view paramType = "dynamic"; // Default type is 'dynamic'
     if (match(TokenType::KEYWORD, "oftype"))
     {
         if (match(TokenType::TYPE, "") || match(TokenType::IDENTIFIER, ""))
@@ -447,6 +468,7 @@ void Parser::parseParameters(std::vector<Parameter> &parameters, bool canBeOptio
     }
 }
 
+// Function to parse a block of statements
 std::unique_ptr<ASTNode> Parser::parseActionDeclaration()
 {
     SyntaxError expectedTypeError("Expected return type after 'returns'", tokens[currentTokenIndex].line, tokens[currentTokenIndex].column);
@@ -469,7 +491,7 @@ std::unique_ptr<ASTNode> Parser::parseActionDeclaration()
         parseParameters(parameters); // Parse the parameters
     }
 
-    std::string_view returnType = "any"; // Default return type is 'any'
+    std::string_view returnType = "dynamic"; // Default return type is 'dynamic'
     if (match(TokenType::KEYWORD, "returns"))
     {
         if (match(TokenType::TYPE, "") || match(TokenType::IDENTIFIER, ""))
@@ -488,20 +510,12 @@ std::unique_ptr<ASTNode> Parser::parseActionDeclaration()
     std::unique_ptr<ASTNode> body = parseBlock();    // Parse the action body
     scopeManager.exitScope();                        // Exit the action scope
 
-    return std::make_unique<ActionDeclaration>(name, parentName, std::move(parameters), returnType, std::move(body), scopeManager.currentScope());
+    return std::make_unique<ActionDeclaration>(statementFirstTokenIndex, name, parentName, std::move(parameters), returnType, std::move(body), scopeManager.currentScope());
 }
 
+// Function to parse an object declaration
 std::unique_ptr<ASTNode> Parser::parseObjectDeclaration()
 {
-    SyntaxError nestedObjectsError("Object declarations are not allowed inside other objects", tokens[currentTokenIndex].line, tokens[currentTokenIndex].column);
-    TraceGuard guard(nestedObjectsError, filename, "Parser::parseObjectDeclaration", tokens[currentTokenIndex].line);
-
-    if (scopeManager.currentScope() && scopeManager.currentScope()->type != ScopeType::Global)
-    {
-        TraceGuard guard(nestedObjectsError, filename, "Parser::parseStatement", tokens[currentTokenIndex].line);
-        throw nestedObjectsError;
-    }
-
     consume(TokenType::IDENTIFIER, "", "Expected object name");
     std::string_view name = tokens[currentTokenIndex - 1].value;
 
@@ -512,7 +526,7 @@ std::unique_ptr<ASTNode> Parser::parseObjectDeclaration()
         parentName = tokens[currentTokenIndex - 1].value;
     }
 
-    auto object = std::make_unique<ObjectDeclaration>(name, parentName, scopeManager.currentScope());
+    auto object = std::make_unique<ObjectDeclaration>(statementFirstTokenIndex, name, parentName, scopeManager.currentScope());
 
     scopeManager.enterScope(name, ScopeType::ObjectPaired); // Enter a new scope for the object
     consume(TokenType::OPEN_BRACE, "", "Expected '{' to start object body");
@@ -525,9 +539,10 @@ std::unique_ptr<ASTNode> Parser::parseObjectDeclaration()
     return object;
 }
 
+// Function to parse a block of statements
 std::unique_ptr<ASTNode> Parser::parseBlock()
 {
-    auto block = std::make_unique<Block>(scopeManager.currentScope());
+    auto block = std::make_unique<Block>(statementFirstTokenIndex, scopeManager.currentScope());
     while (!match(TokenType::CLOSE_BRACE))
     {
         block->statements.push_back(parseStatement());
@@ -536,6 +551,7 @@ std::unique_ptr<ASTNode> Parser::parseBlock()
     return block;
 }
 
+// Function to parse an expression
 std::unique_ptr<ASTNode> Parser::parseExpression(int precedence)
 {
     // Start by parsing the primary expression (literals, variables, parenthesized expressions, etc.)
@@ -579,7 +595,7 @@ std::unique_ptr<ASTNode> Parser::parseExpression(int precedence)
             std::unique_ptr<ASTNode> right = parseExpression(tokenPrecedence + 1);
 
             // Combine the left and right into a `NonNullExpression`
-            left = std::make_unique<NonNullExpression>(std::move(left), std::move(right), scopeManager.currentScope());
+            left = std::make_unique<NonNullExpression>(statementFirstTokenIndex, std::move(left), std::move(right), scopeManager.currentScope());
 
             // Continue parsing the rest of the expression
             continue;
@@ -590,12 +606,13 @@ std::unique_ptr<ASTNode> Parser::parseExpression(int precedence)
         std::unique_ptr<ASTNode> right = parseExpression(tokenPrecedence + 1);
 
         // Combine the left and right into a binary expression node
-        left = std::make_unique<BinaryExpression>(std::move(left), current, std::move(right), scopeManager.currentScope());
+        left = std::make_unique<BinaryExpression>(statementFirstTokenIndex, std::move(left), current, std::move(right), scopeManager.currentScope());
     }
 
     return left; // Return the resulting expression
 }
 
+// Function to parse a primary expression
 std::unique_ptr<ASTNode> Parser::parsePrimary()
 {
     Token current = tokens[currentTokenIndex];
@@ -605,7 +622,11 @@ std::unique_ptr<ASTNode> Parser::parsePrimary()
     // Check if it's a literal (e.g., numbers, strings, booleans)
     if (match(TokenType::INTEGER) || match(TokenType::FLOAT) || match(TokenType::STRING) || match(TokenType::BOOLEAN) || match(TokenType::NULL_))
     {
-        return std::make_unique<Literal>(current, scopeManager.currentScope());
+        std::string_view type = current.type == TokenType::INTEGER ? "int" : current.type == TokenType::FLOAT ? "float"
+                                                                         : current.type == TokenType::STRING  ? "string"
+                                                                         : current.type == TokenType::BOOLEAN ? "bool"
+                                                                                                              : "null";
+        return std::make_unique<Literal>(statementFirstTokenIndex, current, type, scopeManager.currentScope());
     }
     else if (match(TokenType::OPEN_PAREN))
     {
@@ -631,7 +652,7 @@ std::unique_ptr<ASTNode> Parser::parsePrimary()
             } while (match(TokenType::COMMA));
             consume(TokenType::CLOSE_BRACKET, "", "Expected ']' after list elements");
         }
-        return std::make_unique<ListLiteral>(std::move(elements), scopeManager.currentScope());
+        return std::make_unique<ListLiteral>(statementFirstTokenIndex, std::move(elements), scopeManager.currentScope());
     }
 
     // Otherwise, handle identifiers (variables or function calls)
@@ -652,13 +673,14 @@ std::unique_ptr<ASTNode> Parser::parsePrimary()
         else
         {
             // Variable reference
-            return std::make_unique<VariableReference>(identifierParts, scopeManager.currentScope());
+            return std::make_unique<VariableReference>(statementFirstTokenIndex, std::move(identifierParts), scopeManager.currentScope());
         }
     }
 
     throw unexpectedTokenError;
 }
 
+// Function to get the precedence of an operator
 int Parser::getPrecedence(const Token &token)
 {
     if (token.type == TokenType::OPERATOR)

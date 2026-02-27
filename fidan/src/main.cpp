@@ -1,8 +1,10 @@
-// Copyright (c) AppSolves (Kaan Gönüldinc). All rights reserved.
+// Copyright (c) Kaan Gönüldinc (AppSolves). All rights reserved.
 // See LICENSE file in the project root for full license information.
 
+// Include necessary headers
 #include "headers/tokenizer.h"
 #include "headers/parser.h"
+#include "headers/semantic_analyzer.h"
 #include "headers/interpreter.h"
 #include "headers/errors.h"
 #include "headers/ast.h"
@@ -16,20 +18,24 @@
 // https://github.com/p-ranav/argparse
 #include <argparse/argparse.hpp>
 
+// Function to run the REPL
 int runREPL()
 {
-    std::cout << "Fidan " << version << " REPL" << std::endl;
-    std::cout << "COMMANDS:" << std::endl;
-    std::cout << "--> Type 'help', 'license', or 'credits' for more information" << std::endl;
-    std::cout << "--> Type 'exit' to exit or 'clear' to clear the screen" << std::endl;
+    // Print the welcome message
+    print("Fidan v" + version + " REPL");
+    print("COMMANDS:");
+    print("--> Type 'help', 'license', or 'credits' for more information");
+    print("--> Type 'exit' to exit or 'clear' to clear the screen", 2);
 
     std::string line;
 
     while (true)
     {
-        std::cout << ">>> ";
+        // Get the input from the user
+        print(">>> ", 0);
         std::getline(std::cin, line);
 
+        // Check if the line is a command
         if (line == "exit")
         {
             break;
@@ -51,13 +57,16 @@ int runREPL()
     return 0;
 }
 
+// Main function
 int main(int argc, char *argv[])
 {
-#ifdef DEBUG_MODE
-    std::cout << ">>>DEBUG MODE IS ACTIVE<<<" << std::endl
-              << std::endl;
-#endif
+    // Check if the debug mode is active
+    if (isDebugMode)
+    {
+        print(">>>DEBUG MODE IS ACTIVE<<<", 2);
+    }
 
+    // Create the argument parser
     argparse::ArgumentParser program("fidan", version);
 
     program.add_argument("source_file")
@@ -77,12 +86,14 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    // Check if the source file is not provided or is REPL
     if (program.is_used("source_file") == false || upper(program.get<std::string>("source_file")) == "REPL")
     {
         return runREPL();
     }
 
-    std::string filename = program.get<std::string>("source_file");
+    // Get the source file from the arguments and check if it exists/is valid
+    const std::string filename = program.get<std::string>("source_file");
     if ((filename.rfind(".fdn") != filename.size() - 4) && (filename.rfind(".fidan") != filename.size() - 6))
     {
         std::cerr << "FidanFileError: File must have '.fdn' or '.fidan' extension" << std::endl;
@@ -100,32 +111,45 @@ int main(int argc, char *argv[])
         std::cerr << "FidanFileError: Failed to open file '" << filename << "'" << std::endl;
         return 1;
     }
-    // Read the file contents into a string
-    std::string source((std::istreambuf_iterator<char>(file)),
-                       std::istreambuf_iterator<char>());
 
+    // Read the file contents into a string
+    const std::string source((std::istreambuf_iterator<char>(file)),
+                             std::istreambuf_iterator<char>());
+
+    // Read, tokenize, parse, analyze and interpret the source code
     try
     {
-        std::string full_file_path = std::filesystem::absolute(filename).string();
+        const std::string full_file_path = std::filesystem::absolute(filename).string();
         Tokenizer tokenizer(source, full_file_path);
-        std::vector<Token> tokens = tokenizer.tokenize();
+        const std::vector<Token> tokens = tokenizer.tokenize();
 
         Parser parser(tokens, full_file_path);
-        std::vector<std::unique_ptr<ASTNode>> ast = parser.parse();
+        const std::vector<std::unique_ptr<ASTNode>> ast = parser.parse();
 
-        for (const auto &node : ast)
+        // Check if the debug mode is active
+        if (isDebugMode)
         {
-            std::cout << node->toString() << std::endl;
+            print("ABSTRACT SYNTAX TREE: ", 2);
+            // Print the AST
+            for (const auto &statement : ast)
+            {
+                print(statement->toString());
+            }
+            print("");
         }
 
-        InterpreterVM interpreter(ast);
-        interpreter.interpret();
+        SemanticAnalyzer analyzer(tokens, ast, full_file_path);
+        analyzer.analyze();
+
+        // InterpreterVM interpreter(ast);
+        // interpreter.interpret();
 
         return 0;
     }
+    // Catch and handle exceptions
     catch (const FidanException &e)
     {
-        std::unordered_map<int, std::string> sourceMap = preprocessSource(source);
+        const std::unordered_map<int, std::string> sourceMap = preprocessSource(source);
         std::cerr << e.getTraceback() << std::endl;
         std::cerr << "  " << getSourceLine(e.getLine(), sourceMap) << std::endl;
         std::cerr << "  " << std::string(e.getColumn() - 2, ' ') << "^" << std::endl;

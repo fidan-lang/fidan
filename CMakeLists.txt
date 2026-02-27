@@ -66,8 +66,13 @@ install(TARGETS fidan
     RUNTIME DESTINATION bin
 )
 
-# Install the headers
+# Install the builtins
 install(DIRECTORY fidan/builtins/
     DESTINATION include/builtins
-    FILES_MATCHING PATTERN "*.h"
+    FILES_MATCHING PATTERN "*.h" PATTERN "*.fdn"
+)
+
+# Install other files (e.g. README.md, LICENSE.md)
+install(FILES README.md LICENSE.md
+    DESTINATION .
 )

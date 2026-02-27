@@ -1,26 +1,37 @@
-// Copyright (c) AppSolves (Kaan Gönüldinc). All rights reserved.
+// Copyright (c) Kaan Gönüldinc (AppSolves). All rights reserved.
 // See LICENSE file in the project root for full license information.
 
 #ifndef FIDAN_PARSER_H
 #define FIDAN_PARSER_H
 
+// Include necessary headers
 #include <vector>
 #include "tokenizer.h"
 #include "ast.h"
 #include <string>
 
+// Class for the parser
 class Parser
 {
 public:
+    // Constructor
     explicit Parser(const std::vector<Token> &tokens, const std::string &filename);
+    // Method to parse the tokens and return the AST
     std::vector<std::unique_ptr<ASTNode>> parse(); // Parse the tokens and return the AST
 
 private:
-    std::vector<Token> tokens;
-    std::string filename;
+    // The tokens of the program
+    const std::vector<Token> &tokens;
+    // The name of the file being parsed
+    const std::string &filename;
+    // The current token index
     size_t currentTokenIndex;
+    // The index of the first token of the current statement
+    size_t statementFirstTokenIndex = 0;
+    // The `ScopeManager` object
     ScopeManager scopeManager;
 
+    // Methods for parsing the tokens
     Token advance();
     bool match(TokenType type, const std::string &value = "", bool advanceIfMatch = true);
     bool peekMatch(TokenType type, int steps = 0, const std::string &value = "");

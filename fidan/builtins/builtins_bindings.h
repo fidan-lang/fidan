@@ -1,9 +1,10 @@
-// Copyright (c) AppSolves (Kaan Gönüldinc). All rights reserved.
+// Copyright (c) Kaan Gönüldinc (AppSolves). All rights reserved.
 // See LICENSE file in the project root for full license information.
 
-#ifndef FIDAN_BUILTINS_PRINT_H
-#define FIDAN_BUILTINS_PRINT_H
+#ifndef FIDAN_BUILTINS_H
+#define FIDAN_BUILTINS_H
 
+// Include necessary headers
 #include <string>
 #include <iostream>
 

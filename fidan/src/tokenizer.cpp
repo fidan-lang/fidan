@@ -1,12 +1,15 @@
-// Copyright (c) AppSolves (Kaan Gönüldinc). All rights reserved.
+// Copyright (c) Kaan Gönüldinc (AppSolves). All rights reserved.
 // See LICENSE file in the project root for full license information.
 
+// Include necessary headers
 #include "headers/tokenizer.h"
 #include "headers/errors.h"
 
+// Constructor implementation
 Tokenizer::Tokenizer(const std::string &source, const std::string &filename)
     : source(source), filename(filename), position(0), line(1), column(1) {}
 
+// Method to tokenize the source code
 std::vector<Token> Tokenizer::tokenize()
 {
     std::vector<Token> tokens;
@@ -24,16 +27,19 @@ std::vector<Token> Tokenizer::tokenize()
     return tokens;
 }
 
+// Method to get the current character
 inline char Tokenizer::currentChar() const
 {
     return (position >= source.size()) ? '\0' : source[position];
 }
 
+// Method to get the next character
 inline char Tokenizer::peekChar() const
 {
     return (position + 1 >= source.size()) ? '\0' : source[position + 1];
 }
 
+// Method to advance the position
 inline void Tokenizer::advance()
 {
     if (position >= source.size())
@@ -54,6 +60,7 @@ inline void Tokenizer::advance()
     position++;
 }
 
+// Method to skip whitespace characters
 inline void Tokenizer::skipWhitespace()
 {
     while (std::isspace(static_cast<unsigned char>(currentChar())))
@@ -62,6 +69,7 @@ inline void Tokenizer::skipWhitespace()
     }
 }
 
+// Method to process identifiers
 Token Tokenizer::processComment()
 {
     SyntaxError unterminatedBlockComment("Unterminated block comment", line, column);
@@ -104,6 +112,7 @@ Token Tokenizer::processComment()
     }
 }
 
+// Method to process identifiers
 Token Tokenizer::nextToken()
 {
     SyntaxError unexpectedCharacter("Unexpected character", line, column);
@@ -263,6 +272,7 @@ Token Tokenizer::nextToken()
     }
 }
 
+// Method to process identifiers
 Token Tokenizer::identifier()
 {
     size_t start = position;
@@ -309,6 +319,7 @@ Token Tokenizer::identifier()
     return {TokenType::IDENTIFIER, value, line, column};
 }
 
+// Method to process numbers
 Token Tokenizer::number()
 {
     SyntaxError invalidNumberFormat("Invalid number format: multiple decimal points", line, column);
@@ -350,6 +361,7 @@ Token Tokenizer::number()
     return {TokenType::INTEGER, value, line, column};
 }
 
+// Method to process strings
 Token Tokenizer::string()
 {
     SyntaxError unterminatedString("Unterminated string literal", line, column);

@@ -1,10 +1,10 @@
-// Copyright (c) AppSolves (Kaan Gönüldinc). All rights reserved.
+// Copyright (c) Kaan Gönüldinc (AppSolves). All rights reserved.
 // See LICENSE file in the project root for full license information.
 
 #include "headers/errors.h"
 
 // Preprocess the source code into a map for O(1) line retrieval
-std::unordered_map<int, std::string> preprocessSource(const std::string_view source) noexcept
+std::unordered_map<int, std::string> preprocessSource(const std::string_view &source) noexcept
 {
     std::unordered_map<int, std::string> sourceMap;
     int currentLine = 1;

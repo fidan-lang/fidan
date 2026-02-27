@@ -1,7 +1,8 @@
-// Copyright (c) AppSolves (Kaan Gönüldinc). All rights reserved.
+// Copyright (c) Kaan Gönüldinc (AppSolves). All rights reserved.
 // See LICENSE file in the project root for full license information.
 
 #include "headers/helpers.h"
+#include <iostream>
 
 // Convert string to uppercase
 std::string upper(std::string_view input)
@@ -19,6 +20,31 @@ std::string lower(std::string_view input)
     std::for_each(lowerStr.begin(), lowerStr.end(), [](char &c)
                   { c = std::tolower(c); });
     return lowerStr;
+}
+
+// Join a vector of strings with a delimiter
+std::string join(const std::vector<std::string_view> &parts, const std::string_view delimiter)
+{
+    std::string result;
+    for (size_t i = 0; i < parts.size(); i++)
+    {
+        result += parts[i];
+        if (i < parts.size() - 1)
+        {
+            result += delimiter;
+        }
+    }
+    return result;
+}
+
+// Print a string
+const void print(const std::string &text, int numNewLines)
+{
+    std::cout << text;
+    for (int i = 0; i < numNewLines; i++)
+    {
+        std::cout << std::endl;
+    }
 }
 
 // Check if brackets are balanced
