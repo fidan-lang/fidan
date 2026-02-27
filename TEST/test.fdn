@@ -65,7 +65,7 @@ action main {
     }
 
     attempt { ## Can also be used with 'try' instead of 'attempt'
-        throw("An error occurred!") ## Throw an error
+        panic("An error occurred!") ## Throw an error, can also use `throw` instead of `panic`
     } catch error {
         print(error)
     } finally {
