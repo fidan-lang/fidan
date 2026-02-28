@@ -55,6 +55,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "undefined name",
         category: "names",
     },
+    DiagnosticCode {
+        code: "E0102",
+        title: "variable already declared in this scope",
+        category: "names",
+    },
     // ── Type system ───────────────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0201",

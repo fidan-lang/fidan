@@ -367,6 +367,7 @@ fn run_repl() -> Result<()> {
     // accumulate across lines, so `greeting` defined on line 1 is visible on
     // line 2 — exactly how a real REPL should behave.  :reset replaces it.
     let mut tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
+    tc.set_repl(true);
 
     // ONE persistent interpreter state, same rationale: variables and actions
     // defined on earlier lines must be visible on later lines.
@@ -410,6 +411,7 @@ fn run_repl() -> Result<()> {
 
                 "reset" => {
                     tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
+                    tc.set_repl(true);
                     repl_state = fidan_interp::new_repl_state(Arc::clone(&interner));
                     println!("  (session state cleared)");
                     continue;

@@ -1,8 +1,8 @@
 #![allow(dead_code)]
-use rustc_hash::FxHashMap;
+use crate::types::FidanType;
 use fidan_lexer::Symbol;
 use fidan_source::Span;
-use crate::types::FidanType;
+use rustc_hash::FxHashMap;
 
 /// The kind of scope currently active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,10 +38,10 @@ pub enum SymbolKind {
 /// Everything the type checker knows about a single named symbol.
 #[derive(Debug, Clone)]
 pub struct SymbolInfo {
-    pub kind:        SymbolKind,
-    pub ty:          FidanType,
-    pub span:        Span,
-    pub is_mutable:  bool,
+    pub kind: SymbolKind,
+    pub ty: FidanType,
+    pub span: Span,
+    pub is_mutable: bool,
     pub initialized: Initialized,
 }
 
@@ -49,12 +49,15 @@ pub struct SymbolInfo {
 #[derive(Debug)]
 pub struct Scope {
     pub symbols: FxHashMap<Symbol, SymbolInfo>,
-    pub kind:    ScopeKind,
+    pub kind: ScopeKind,
 }
 
 impl Scope {
     pub fn new(kind: ScopeKind) -> Self {
-        Self { symbols: FxHashMap::default(), kind }
+        Self {
+            symbols: FxHashMap::default(),
+            kind,
+        }
     }
 }
 
@@ -66,7 +69,9 @@ pub struct SymbolTable {
 
 impl SymbolTable {
     pub fn new() -> Self {
-        Self { scopes: vec![Scope::new(ScopeKind::Module)] }
+        Self {
+            scopes: vec![Scope::new(ScopeKind::Module)],
+        }
     }
 
     pub fn push_scope(&mut self, kind: ScopeKind) {
@@ -77,6 +82,11 @@ impl SymbolTable {
         if self.scopes.len() > 1 {
             self.scopes.pop();
         }
+    }
+
+    /// Check if `name` is already declared in the current (innermost) scope only.
+    pub fn lookup_current_scope(&self, name: Symbol) -> Option<&SymbolInfo> {
+        self.scopes.last().and_then(|s| s.symbols.get(&name))
     }
 
     /// Define a symbol in the current (innermost) scope.
@@ -107,7 +117,10 @@ impl SymbolTable {
     }
 
     pub fn current_kind(&self) -> ScopeKind {
-        self.scopes.last().map(|s| s.kind).unwrap_or(ScopeKind::Module)
+        self.scopes
+            .last()
+            .map(|s| s.kind)
+            .unwrap_or(ScopeKind::Module)
     }
 
     /// Iterate over every `Symbol` key defined in any scope level.

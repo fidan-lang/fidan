@@ -46,6 +46,10 @@ pub struct TypeChecker {
     this_ty: Option<FidanType>,
     /// `FileId` used to synthesise dummy spans for injected symbols.
     file_id: FileId,
+    /// When `true` the checker is running inside a REPL session.
+    /// Re-declarations (`var x` when `x` already exists) are silently allowed
+    /// in the REPL so the user can freely change a binding's type.
+    is_repl: bool,
 }
 
 impl TypeChecker {
@@ -58,9 +62,16 @@ impl TypeChecker {
             current_return_ty: None,
             this_ty: None,
             file_id,
+            is_repl: false,
         };
         tc.register_builtins();
         tc
+    }
+
+    /// Mark this checker as operating in REPL mode.
+    /// Re-declarations of existing variables are silently allowed in the REPL.
+    pub fn set_repl(&mut self, repl: bool) {
+        self.is_repl = repl;
     }
 
     // ── Built-in registration ─────────────────────────────────────────────
@@ -249,6 +260,21 @@ impl TypeChecker {
                 init: _,
                 span,
             } => {
+                // Redeclaration check at pass 1 — fires exactly once on the
+                // duplicate `var`, before pass 2 ever runs `check_var_decl`.
+                if !self.is_repl {
+                    if let Some(prev) = self.table.lookup_current_scope(*name) {
+                        if prev.kind != SymbolKind::BuiltinAction {
+                            let n = self.interner.resolve(*name).to_string();
+                            self.emit_error(
+                                fidan_diagnostics::diag_code!("E0102"),
+                                format!("`{n}` is already declared in this scope — use `{n} = value` to reassign"),
+                                *span,
+                            );
+                            return; // do not redefine; leave old binding intact
+                        }
+                    }
+                }
                 let var_ty = ty
                     .as_ref()
                     .map(|t| self.resolve_type_expr(t))
@@ -442,6 +468,20 @@ impl TypeChecker {
                 init,
                 span,
             } => {
+                // Local redeclaration check (action bodies have no pass 1).
+                if !self.is_repl {
+                    if let Some(prev) = self.table.lookup_current_scope(name) {
+                        if prev.kind != SymbolKind::BuiltinAction {
+                            let n = self.interner.resolve(name).to_string();
+                            self.emit_error(
+                                fidan_diagnostics::diag_code!("E0102"),
+                                format!("`{n}` is already declared in this scope — use `{n} = value` to reassign"),
+                                span,
+                            );
+                            return;
+                        }
+                    }
+                }
                 self.check_var_decl(name, &ty, init, span, module);
             }
 
