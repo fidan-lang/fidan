@@ -716,7 +716,9 @@ impl TypeChecker {
         // arm's result value, not a discarded statement.
         let final_stmt = module.arena.get_stmt(*last).clone();
         match final_stmt {
-            Stmt::Expr { expr, .. } => { self.infer_expr(expr, module); }
+            Stmt::Expr { expr, .. } => {
+                self.infer_expr(expr, module);
+            }
             _ => self.check_stmt(*last, module),
         }
         self.table.pop_scope();
