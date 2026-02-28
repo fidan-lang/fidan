@@ -1,0 +1,13 @@
+action inner with (required msg -> string) {
+    panic("something went wrong: {msg}")
+}
+
+action middle with (required count -> integer) {
+    inner("iteration {count}")
+}
+
+action outer {
+    middle(42)
+}
+
+outer()
