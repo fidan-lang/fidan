@@ -342,6 +342,7 @@ impl TypeChecker {
 
             // ── module-level expression ──────────────────────────────────
             Item::ExprStmt(expr_id) => {
+                self.warn_bare_literal(*expr_id, module);
                 self.infer_expr(*expr_id, module);
             }
 
@@ -444,6 +445,7 @@ impl TypeChecker {
             }
 
             Stmt::Expr { expr, .. } => {
+                self.warn_bare_literal(expr, module);
                 self.infer_expr(expr, module);
             }
 
@@ -1163,6 +1165,38 @@ impl TypeChecker {
         span: Span,
     ) {
         self.diags.push(Diagnostic::error(code, message, span));
+    }
+
+    fn emit_warning(
+        &mut self,
+        code: fidan_diagnostics::DiagCode,
+        message: impl Into<String>,
+        span: Span,
+    ) {
+        self.diags.push(Diagnostic::warning(code, message, span));
+    }
+
+    /// Emit W2002 if `expr_id` is a bare literal with no side effects.
+    ///
+    /// Bare literals (`42`, `"hello"`, `true`, `nothing`) as standalone
+    /// statements are almost always a mistake — either a typo or leftover
+    /// debug code.  Identifiers and calls are intentional and not warned.
+    fn warn_bare_literal(&mut self, expr_id: ExprId, module: &Module) {
+        let (is_literal, span) = match module.arena.get_expr(expr_id) {
+            Expr::IntLit { span, .. } => (true, *span),
+            Expr::FloatLit { span, .. } => (true, *span),
+            Expr::BoolLit { span, .. } => (true, *span),
+            Expr::StrLit { span, .. } => (true, *span),
+            Expr::Nothing { span } => (true, *span),
+            _ => (false, Span::new(self.file_id, 0, 0)),
+        };
+        if is_literal {
+            self.emit_warning(
+                fidan_diagnostics::diag_code!("W2002"),
+                "bare literal statement has no effect — did you mean to assign or print it?",
+                span,
+            );
+        }
     }
 
     fn ty_name(&self, ty: &FidanType) -> String {

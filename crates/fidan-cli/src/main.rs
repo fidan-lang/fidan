@@ -368,6 +368,10 @@ fn run_repl() -> Result<()> {
     // line 2 — exactly how a real REPL should behave.  :reset replaces it.
     let mut tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
 
+    // ONE persistent interpreter state, same rationale: variables and actions
+    // defined on earlier lines must be visible on later lines.
+    let mut repl_state = fidan_interp::new_repl_state(Arc::clone(&interner));
+
     let mut line_no: u32 = 0;
 
     loop {
@@ -406,6 +410,7 @@ fn run_repl() -> Result<()> {
 
                 "reset" => {
                     tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
+                    repl_state = fidan_interp::new_repl_state(Arc::clone(&interner));
                     println!("  (session state cleared)");
                     continue;
                 }
@@ -516,7 +521,7 @@ fn run_repl() -> Result<()> {
             tc.check_module(&module);
             let type_diags = tc.drain_diags();
             if type_diags.is_empty() {
-                if let Err(msg) = fidan_interp::run(&module, Arc::clone(&interner)) {
+                if let Err(msg) = fidan_interp::run_repl_line(&mut repl_state, &module) {
                     render_message_to_stderr(
                         Severity::Error,
                         fidan_diagnostics::diag_code!("R0001"),

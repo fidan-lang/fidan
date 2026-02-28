@@ -9,4 +9,4 @@ mod env;
 mod frame;
 mod interp;
 
-pub use interp::run;
+pub use interp::{ReplState, new_repl_state, run, run_repl_line};

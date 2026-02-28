@@ -86,7 +86,7 @@ impl<'m> Interpreter<'m> {
 
     // ── Registration pass ─────────────────────────────────────────────────────
 
-    fn register_module(&mut self, module: &'m Module) {
+    fn register_module(&mut self, module: &Module) {
         for &iid in &module.items {
             match self.arena.get_item(iid) {
                 Item::ObjectDecl { name, parent, fields, methods, .. } => {
@@ -139,7 +139,7 @@ impl<'m> Interpreter<'m> {
 
     // ── Module entry point ───────────────────────────────────────────────────
 
-    fn run_module(&mut self, module: &'m Module) -> InterpResult<()> {
+    fn run_module(&mut self, module: &Module) -> InterpResult<()> {
         // Execute module-level var-decls and expr-statements in order.
         // The entry point is whatever the module-level code calls — most Fidan
         // programs end with a top-level `main()` call or direct expressions.
@@ -1227,6 +1227,66 @@ impl<'m> Interpreter<'m> {
 pub fn run(module: &Module, interner: Arc<SymbolInterner>) -> Result<(), String> {
     let mut interp = Interpreter::new(module, interner);
     match interp.run_module(module) {
+        Ok(()) => Ok(()),
+        Err(Signal::Return(_)) => Ok(()),
+        Err(Signal::Panic(v)) => Err(format!("runtime panic: {}", builtins::display(&v))),
+        Err(Signal::Break) => Err("unexpected `break` outside a loop".to_string()),
+        Err(Signal::Continue) => Err("unexpected `continue` outside a loop".to_string()),
+    }
+}
+
+// ── Persistent REPL state ─────────────────────────────────────────────────────
+
+/// Interpreter state that persists across REPL lines.
+///
+/// Variable bindings, action definitions, and object declarations accumulate
+/// here so that `var x = 1` on line 1 is still visible on line 2.
+pub struct ReplState {
+    interner: Arc<SymbolInterner>,
+    env: Env,
+    functions: HashMap<Symbol, FuncDef>,
+    ext_actions: HashMap<Symbol, HashMap<Symbol, FuncDef>>,
+    classes: HashMap<Symbol, ClassDef>,
+    sym_initialize: Symbol,
+}
+
+/// Create a fresh [`ReplState`] for a new REPL session.
+pub fn new_repl_state(interner: Arc<SymbolInterner>) -> ReplState {
+    let sym_initialize = interner.intern("initialize");
+    ReplState {
+        interner,
+        env: Env::new(),
+        functions: HashMap::new(),
+        ext_actions: HashMap::new(),
+        classes: HashMap::new(),
+        sym_initialize,
+    }
+}
+
+/// Execute one REPL line against the persistent [`ReplState`].
+///
+/// Declarations and variable bindings from previous calls remain visible.
+/// State is written back even if the line produces a runtime error.
+pub fn run_repl_line(state: &mut ReplState, module: &Module) -> Result<(), String> {
+    // Swap persistent state into a temporary interpreter bound to this module.
+    let mut interp = Interpreter {
+        arena: &module.arena,
+        interner: Arc::clone(&state.interner),
+        functions: std::mem::take(&mut state.functions),
+        ext_actions: std::mem::take(&mut state.ext_actions),
+        classes: std::mem::take(&mut state.classes),
+        env: std::mem::take(&mut state.env),
+        sym_initialize: state.sym_initialize,
+    };
+    // Register new top-level declarations from this line.
+    interp.register_module(module);
+    let result = interp.run_module(module);
+    // Write back persistent state regardless of success/failure.
+    state.functions = interp.functions;
+    state.ext_actions = interp.ext_actions;
+    state.classes = interp.classes;
+    state.env = interp.env;
+    match result {
         Ok(()) => Ok(()),
         Err(Signal::Return(_)) => Ok(()),
         Err(Signal::Panic(v)) => Err(format!("runtime panic: {}", builtins::display(&v))),

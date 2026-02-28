@@ -105,6 +105,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "file does not have the `.fdn` extension",
         category: "style",
     },
+    DiagnosticCode {
+        code: "W2002",
+        title: "bare literal has no effect",
+        category: "lint",
+    },
     // ── Runtime: control flow ─────────────────────────────────────────────────
     DiagnosticCode {
         code: "R0001",
