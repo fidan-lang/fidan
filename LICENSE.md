@@ -1,4 +1,4 @@
-<h1 style="margin-bottom: 0px; text-align: center;">Fidan Programming Language License (FPL)</h1>
+<h1 style="margin-bottom: 0px; text-align: center;">Fidan Programming Language License (FPLL)</h1>
 <h2 style="margin-top: 0px; text-align: center;">Version 1.0.0</h2>
 
 <h4 style="text-align: center;">Copyright &copy; 2024 Kaan Gönüldinc. All rights reserved.</h4>

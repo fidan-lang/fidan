@@ -24,7 +24,7 @@ members = [
 version = "1.0.0"
 edition = "2024"
 authors = ["Fidan Contributors"]
-license = "Fidan Programming Language License (FPL) 1.0.0"
+license = "Fidan Programming Language License (FPLL) 1.0.0"
 repository = "https://github.com/AppSolves/Fidan"
 
 # ── Shared dependency versions ────────────────────────────────────────────────
