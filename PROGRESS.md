@@ -148,8 +148,13 @@
 | `Diagnostic` / `Label` / `Suggestion` types | ✅ | `Severity`, `Diagnostic`, `Label` in separate modules |
 | `ariadne` rendering integration | ✅ | `render_to_stderr()` with ariadne 0.6 `(Id, Range)` span API |
 | `FixEngine` with E1xx, E2xx, E3xx rules | ⬜ | Skeleton only — Phase 4 proper |
-| Edit-distance suggestions for undefined names | ⬜ | |
+| Edit-distance suggestions for undefined names | ⬜ | `strsim` (Jaro-Winkler / Levenshtein) |
 | All error codes produce rendered output | ⬜ | |
+| `Suggestion` type with `SourceEdit` + `Confidence` | ⬜ | |
+| `cause_chain: Vec<Box<Diagnostic>>` rendering | ⬜ | Causality tracing: show upstream trigger chain |
+| Custom Fidan diagnostic visual identity | ⬜ | Spanless messages (info/debug/warn/error/crash/trace) get Fidan-branded style distinct from Rust; `render_message_to_stderr` is currently a placeholder using Rust-like format |
+| `stdout` vs `stderr` separation | ⬜ | Program output → stdout; all diagnostics/messages → stderr |
+| Lightweight NLP model for error explanations | ⬜ | Generates human-readable "why did this happen" text from the cause chain |
 
 ---
 
