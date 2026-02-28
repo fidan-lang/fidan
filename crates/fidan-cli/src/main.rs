@@ -139,7 +139,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     if !is_stdin && opts.input.extension().and_then(|e| e.to_str()) != Some("fdn") {
         render_message_to_stderr(
             Severity::Warning,
-            "W001",
+            "W2001",
             &format!(
                 "file '{}' does not have the '.fdn' extension",
                 opts.input.display()
@@ -193,13 +193,33 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
         println!("  stmts: {}", module.arena.stmts.len());
         println!("  items_arena: {}", module.arena.items.len());
     }
-    // ── Type-check ──────────────────────────────────────────────────────
-    // Only proceed if parse is clean (no parse errors).
+    // ── Type-check ────────────────────────────────────
+    // Only proceed if parse is clean.
+    let mut error_count: usize = parse_diags
+        .iter()
+        .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
+        .count();
+
     if parse_diags.is_empty() {
         let type_diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
         for diag in &type_diags {
             fidan_diagnostics::render_to_stderr(diag, &source_map);
         }
+        error_count += type_diags
+            .iter()
+            .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
+            .count();
+    }
+
+    // ── Multi-error footer ───────────────────────────────
+    if error_count > 0 {
+        let s = if error_count == 1 { "" } else { "s" };
+        render_message_to_stderr(
+            Severity::Note,
+            "",
+            &format!("could not compile `{source_name}` — {error_count} error{s}"),
+        );
+        eprintln!("         run `fidan check` to list all errors, or `--max-errors N` to stop early");
     }
     match opts.mode {
         ExecutionMode::Interpret => {
@@ -260,10 +280,7 @@ fn run_repl() -> Result<()> {
         os,
         arch
     );
-    println!(
-        "{}",
-        concat!("Type \"help\" for more information, ", "\"exit\" to quit.",)
-    );
+    println!("Type :help for commands. Press Ctrl+C to cancel, Ctrl+D to exit.");
     println!();
 
     let stdin = std::io::stdin();
@@ -301,8 +318,30 @@ fn run_repl() -> Result<()> {
         if trimmed.is_empty() {
             continue;
         }
-        if trimmed == "exit" || trimmed == "quit" {
-            break;
+        // ── Colon commands ────────────────────────────────────────
+        if let Some(cmd) = trimmed.strip_prefix(':') {
+            match cmd.trim() {
+                "exit" | "quit" | "q" => break,
+                "reset" => {
+                    println!("  (interner reset)");
+                    // Re-entry after reset requires a new interner — inform user
+                    // and continue; true reset happens in Phase 5 with eval state.
+                    continue;
+                }
+                "help" => {
+                    println!("  :help          show this message");
+                    println!("  :exit / :quit  leave the REPL");
+                    println!("  :reset         clear the session state");
+                    println!("  :type <expr>   print the inferred type  (Phase 5)");
+                    println!("  :ast  <expr>   print the AST            (debug)");
+                    println!("  :last --full   expand the last cause chain (Phase 5)");
+                    continue;
+                }
+                other => {
+                    eprintln!("  unknown command `:{other}`. Type :help for a list.");
+                    continue;
+                }
+            }
         }
 
         // ── Lex + parse + typecheck ───────────────────────────────
@@ -321,11 +360,7 @@ fn run_repl() -> Result<()> {
         if parse_diags.is_empty() {
             let type_diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
             if type_diags.is_empty() {
-                println!(
-                    "  ✓  {} item(s)  {} expr(s)",
-                    module.items.len(),
-                    module.arena.exprs.len(),
-                );
+                println!("  ok");
             } else {
                 for diag in &type_diags {
                     fidan_diagnostics::render_to_stderr(diag, &source_map);

@@ -2,7 +2,7 @@
 use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use fidan_ast::{AstArena, BinOp, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp};
-use fidan_diagnostics::{Diagnostic, FixEngine};
+use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::{FileId, Span};
 use crate::scope::{Initialized, ScopeKind, SymbolInfo, SymbolKind, SymbolTable};
@@ -188,8 +188,8 @@ impl TypeChecker {
                 if let Some(p) = parent {
                     if !self.objects.contains_key(p) {
                         let pname = self.interner.resolve(*p).to_string();
-                        self.emit_error("E100",
-                            format!("undefined object '{pname}' in 'extends' clause"),
+                        self.emit_error("E0100",
+                            format!("undefined object `{pname}` in `extends` clause"),
                             *span);
                     }
                 }
@@ -306,8 +306,8 @@ impl TypeChecker {
                 let lhs = self.infer_expr(target, module);
                 if !lhs.is_assignable_from(&rhs) {
                     let (l, r) = (self.ty_name(&lhs), self.ty_name(&rhs));
-                    self.emit_error("E201",
-                        format!("type mismatch: cannot assign '{r}' to '{l}'"), span);
+                    self.emit_error("E0201",
+                        format!("type mismatch: cannot assign `{r}` to `{l}`"), span);
                 }
             }
 
@@ -319,8 +319,8 @@ impl TypeChecker {
                 if let Some(expected) = self.current_return_ty.clone() {
                     if !expected.is_assignable_from(&ret) {
                         let (e, a) = (self.ty_name(&expected), self.ty_name(&ret));
-                        self.emit_error("E202",
-                            format!("return type mismatch: expected '{e}', found '{a}'"), span);
+                        self.emit_error("E0202",
+                            format!("return type mismatch: expected `{e}`, found `{a}`"), span);
                     }
                 }
             }
@@ -432,8 +432,8 @@ impl TypeChecker {
             if let Some(ref dt) = declared {
                 if !dt.is_assignable_from(&actual) {
                     let (d, a) = (self.ty_name(dt), self.ty_name(&actual));
-                    self.emit_error("E201",
-                        format!("type mismatch: expected '{d}', found '{a}'"), span);
+                    self.emit_error("E0201",
+                        format!("type mismatch: expected `{d}`, found `{a}`"), span);
                 }
             }
             actual
@@ -481,15 +481,21 @@ impl TypeChecker {
                             .collect();
                         let candidate_refs: Vec<&str> =
                             candidates.iter().map(String::as_str).collect();
-                        let mut diag = Diagnostic::error(
-                            "E101",
-                            format!("undefined name '{s}'"),
+                    let mut diag = Diagnostic::error(
+                            "E0101",
+                            format!("undefined name `{s}`"),
                             span,
-                        );
-                        if let Some(hint) =
+                        )
+                        .with_label(Label::primary(span, "unknown name"));
+                        if let Some(best) =
                             FixEngine::suggest_name(&s, candidate_refs.into_iter())
                         {
-                            diag = diag.with_note(hint);
+                            diag = diag.with_suggestion(Suggestion::fix(
+                                format!("did you mean `{best}`?"),
+                                span,
+                                best,
+                                Confidence::High,
+                            ));
                         }
                         self.diags.push(diag);
                         FidanType::Error
@@ -564,8 +570,8 @@ impl TypeChecker {
                 let lhs = self.infer_expr(target, module);
                 if !lhs.is_assignable_from(&rhs) && !lhs.is_error() {
                     let (l, r) = (self.ty_name(&lhs), self.ty_name(&rhs));
-                    self.emit_error("E201",
-                        format!("type mismatch: cannot assign '{r}' to '{l}'"), span);
+                    self.emit_error("E0201",
+                        format!("type mismatch: cannot assign `{r}` to `{l}`"), span);
                 }
                 rhs
             }
@@ -740,8 +746,8 @@ impl TypeChecker {
                     let named_ok = args.iter().any(|(n, _)| *n == Some(p.name));
                     if !named_ok && !has_positional {
                         let pname = self.interner.resolve(p.name).to_string();
-                        self.emit_error("E301",
-                            format!("required parameter '{pname}' not provided"), span);
+                        self.emit_error("E0301",
+                            format!("required parameter `{pname}` not provided"), span);
                     }
                 }
             }

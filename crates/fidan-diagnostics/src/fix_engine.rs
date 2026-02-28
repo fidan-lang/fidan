@@ -16,15 +16,17 @@ impl FixEngine {
 
     /// Find the most similar name in `candidates` to `name`.
     ///
-    /// Returns a human-readable hint string like `"did you mean 'foo'?"` when a
-    /// candidate exceeds `SIMILARITY_THRESHOLD` (Jaro-Winkler distance).  Returns
-    /// `None` when no candidate is close enough to be useful.
+    /// Returns the **candidate name** (not a formatted string) when a match
+    /// exceeds `SIMILARITY_THRESHOLD` (Jaro-Winkler).  The caller owns the
+    /// message and can build a `Suggestion::fix(...)` with a `SourceEdit`.
+    ///
+    /// Returns `None` when no candidate is close enough to be useful.
     ///
     /// # Example
     /// ```
     /// use fidan_diagnostics::FixEngine;
-    /// let hint = FixEngine::suggest_name("pritn", ["print", "println"].into_iter());
-    /// assert_eq!(hint, Some("did you mean 'print'?".to_string()));
+    /// let best = FixEngine::suggest_name("pritn", ["print", "println"].into_iter());
+    /// assert_eq!(best, Some("print".to_string()));
     /// ```
     pub fn suggest_name<'a>(
         name: &str,
@@ -46,7 +48,7 @@ impl FixEngine {
         }
 
         if best_score >= SIMILARITY_THRESHOLD {
-            Some(format!("did you mean '{best_name}'?"))
+            Some(best_name.to_string())
         } else {
             None
         }

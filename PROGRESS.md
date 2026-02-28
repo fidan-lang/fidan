@@ -226,11 +226,14 @@
 | `Suggestion` type with `SourceEdit` + `Confidence` | ✅ | `suggestion.rs` — `High/Medium/Low`, `SourceEdit`, `Suggestion::hint/fix` |
 | `Diagnostic` notes + suggestions fields | ✅ | `with_note()`, `with_suggestion()`, `add_note()`, `add_suggestion()` |
 | `cause_chain: Vec<Diagnostic>` rendering | ✅ | Causality chain rendered as indented sub-blocks via ariadne |
-| Custom Fidan diagnostic visual identity | ✅ | Spanless messages use `✗ / ▲ / ◆` badge style; distinct from Rust format |
-| `stdout` vs `stderr` separation | ✅ | `print()` → stdout (Phase 5 interpreter); diagnostics already → stderr |
-| stdin support (`fidan run -`) | ✅ | `-` path reads from `stdin`; skips `.fdn` extension warning |
-| REPL (`fidan repl`) | ✅ | Lex + parse + typecheck loop with `»` prompt; pretty-prints diagnostics |
-| Lightweight NLP model for error explanations | ⬜ | Generates human-readable "why did this happen" text from the cause chain |
+| Custom Fidan diagnostic visual identity | ✅ | `error[E0xxx]:` headers; spanless `✗/▲/◆` badges; distinct from Rust format |
+| Error code registry (`codes.rs`) | ✅ | `E0xxx`/`W1xxx`/`W2xxx`/`R2xxx`/`R3xxx` codes with category + title; `lookup()` / `title()` API |
+| Context window in diagnostics | ✅ | 1 line before + error line + 1 line after; gutter with aligned line numbers |
+| Inline underline label (`^^^^^^^ unknown name`) | ✅ | `Label::primary(span, message)` shown after carets on primary span |
+| Fix-it patch block | ✅ | `Suggestion::fix(msg, span, replacement)` renders patched line + `++++` in green |
+| Backtick identifiers in messages | ✅ | All error messages use backtick-quoted names (e.g. `\`greting\``) |
+| `cause_chain: Vec<Diagnostic>` rendering | ✅ | Causes labelled `caused by (1/2):` and rendered indented one level deeper |
+| Panic is not a separate code prefix | ✅ | `panic(expr)` is a runtime error like any other — rendered as `error[R####]`, no `P####` prefix |
 
 ---
 
@@ -276,6 +279,12 @@
 | Green-thread scheduler (`corosensei`) | ⬜ | |
 | Exception unwind loop | ⬜ | |
 | `test/examples/test.fdn` runs, output verified | ⬜ | |
+| Stack traces in diagnostics (runtime error + call stack) | ⬜ | `stack trace (most recent call first): --> file:line in action \'name\'` format |
+| Evidence / context blocks in diagnostics | ⬜ | `context: y: integer = 0` typed key–value facts attached to runtime errors |
+| `--trace short` / `--trace full` / `--trace compact` output levels | ⬜ | Short = default; full = all cause-chain evidence; compact = CI-friendly single line |
+| `:type expr` in REPL | ⬜ | Evaluate an expression and print its inferred type |
+| `:last --full` in REPL | ⬜ | Expand full cause chain for the last diagnostic |
+| Error history buffer in REPL | ⬜ | Keep last N diagnostics for `:last` / `:last --full` |
 
 ---
 
@@ -290,7 +299,8 @@
 | `SpawnExpr` + `AwaitPending` | ⬜ | |
 | `Shared oftype T` runtime type | ⬜ | |
 | `std.parallel` module | ⬜ | |
-| `parallel_check.rs` E4xx errors | ⬜ | |
+| `parallel_check.rs` E4xx errors | ⬜ | Phase 5.5 — needs MIR |
+| Parallel task failure display | ⬜ | `runtime error[R9001]: N tasks failed in 'parallel' block` + per-task failure list |
 | Parallel benchmark | ⬜ | |
 
 ---
@@ -344,6 +354,7 @@
 | ABI trampoline | ⬜ | |
 | Hot-path auto-detection (call counter) | ⬜ | |
 | Benchmark JIT vs. interpreter | ⬜ | |
+| Precompiled frame debug map (MIR → source span) | ⬜ | Preserves source spans for `@precompile` frames in stack traces; shown as `[precompiled]` |
 
 ---
 
@@ -355,8 +366,11 @@
 | `--emit tokens` | ✅ | Drives lexer, prints full token stream |
 | `--emit ast` | ✅ | Phase 2 — node-count summary; phase 3.5 — works cleanly on `syntax.fdn` |
 | `--emit hir/mir` | ⬜ | Phase 5+ |
-| REPL with history + multi-line | 🔨 | Basic parse/typecheck REPL in Phase 4; full eval needs Phase 5 |
+| REPL with history + multi-line | 🔨 | Colon commands in Phase 4; full eval needs Phase 5; multi-line block input needs Phase 5 |
 | stdin support (`fidan run -`) | ✅ | Reads from stdin when file is `-` |
+| `fidan check` | ⬜ | Parse + type-check a file/project without running it; exits non-zero on any error; honours `--max-errors N` |
+| `fidan fix` | ⬜ | Auto-apply all `Confidence::High` fix-it suggestions from `fidan check`; `--dry-run` prints a unified diff without writing files |
+| `fidan explain <code>` | ⬜ | Print full explanation for any `E####`/`W####`/`R####` code; uses `codes.rs` registry |
 | LSP server | ⬜ | |
 | VS Code extension skeleton | ⬜ | |
 | `fidan fmt` formatter | ⬜ | |
@@ -401,4 +415,4 @@ _None._
 
 ---
 
-*Last updated: 2026-02-28 — Phase 4 complete: `FixEngine` Jaro-Winkler suggestions, `Suggestion`/`SourceEdit`/`Confidence` types, `Diagnostic` notes+cause_chain, Fidan-branded visual design (`✗ / ▲ / ◆` badges), stdin support, REPL (parse+typecheck loop); `syntax.fdn` → 132 items, 672 exprs, zero diagnostics; 12/12 lexer tests + 1 doctest pass.*
+*Last updated: 2026-02-28 — Phase 4 complete: error code registry (`codes.rs`, E0xxx/W1xxx/W2xxx/R2xxx/R3xxx); `error[E0101]:` headers; context window (1 line before+after); inline underline labels; fix-it patch blocks with `++++`; backtick identifiers; multi-error footer; colon-command REPL with Python-style banner; `syntax.fdn` → 132 items, 672 exprs, zero diagnostics; 12/12 lexer tests + 1 doctest pass.*
