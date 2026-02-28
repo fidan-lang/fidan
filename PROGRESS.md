@@ -74,40 +74,58 @@
 |---|---|---|
 | Arena allocator (`typed_arena`) | ✅ | Vec-backed pools: ExprId/StmtId/ItemId |
 | `ExprId`, `StmtId`, `ItemId` index types | ✅ | |
-| All expression AST nodes | ✅ | Full `Expr` enum in `expr.rs` |
-| All statement AST nodes | ✅ | Full `Stmt` enum + `TypeExpr` in `stmt.rs` |
-| All item AST nodes (`object`, `action`, etc.) | ✅ | `Item` enum in `item.rs` |
+| All expression AST nodes | ✅ | Full `Expr` enum + `Ternary`, `List`, `Dict`, `Error` variants added in Phase 2 |
+| All statement AST nodes | ✅ | Full `Stmt` enum + `Panic`, `Error` variants added in Phase 2 |
+| All item AST nodes (`object`, `action`, etc.) | ✅ | `Item` enum + `VarDecl`, `ExprStmt` added in Phase 2 |
 | `Module` root node | ✅ | |
 | AST visitor trait | ✅ | Default no-op `AstVisitor` |
-| AST pretty-printer | ⬜ | Phase 2 |
+| `Expr::span()` helper | ✅ | Returns span for any expression variant |
+| `TypeExpr::span()` / `span_end()` helpers | ✅ | |
+| AST pretty-printer | ⬜ | Phase 2 stretch goal |
 
 ### `fidan-parser`
 | Item | Status | Notes |
 |---|---|---|
-| Recursive-descent top-level parser | ⬜ | |
-| `object` declaration parsing | ⬜ | |
-| `action` declaration parsing | ⬜ | |
-| `var` / `set` statement parsing | ⬜ | |
-| `if` / `otherwise when` / `otherwise` parsing | ⬜ | |
-| `when` (match/switch) parsing | ⬜ | |
-| `for item in collection` parsing | ⬜ | |
-| `attempt / catch / otherwise / finally` parsing | ⬜ | |
-| `return` / `break` / `continue` parsing | ⬜ | |
-| `print` and builtin call parsing | ⬜ | |
-| Pratt expression parser (full precedence table) | ⬜ | |
-| `??` (null-coalesce) operator | ⬜ | |
-| Named argument call parsing | ⬜ | |
-| Extension action declaration | ⬜ | |
-| `parallel action` modifier | ⬜ | |
-| `concurrent { task ... }` block | ⬜ | |
-| `parallel { task ... }` block | ⬜ | |
-| `parallel for` parsing | ⬜ | |
-| `spawn` / `await` expressions | ⬜ | |
-| String interpolation AST node | ⬜ | |
-| `is not` token-pair → `NotEq` normalisation | ⬜ | |
-| Error recovery (synchronisation set) | ⬜ | |
-| Parse `test/examples/test.fdn` without errors | ⬜ | |
-| Round-trip test (parse → print → parse → compare) | ⬜ | |
+| Recursive-descent top-level parser | ✅ | `parse_module()` + `parse_top_level()` |
+| `object` declaration parsing | ✅ | With `extends`, fields, nested methods |
+| `action` declaration parsing | ✅ | With `with (params)`, `returns type`, body |
+| Extension action (`action X extends Y`) | ✅ | |
+| `parallel action` modifier | ✅ | |
+| `var` / `set` statement parsing | ✅ | With optional `oftype` and default value |
+| `if` / `otherwise when` / `otherwise` / `else` parsing | ✅ | Full else-if chain |
+| `for item in collection` parsing | ✅ | |
+| `while` parsing | ✅ | |
+| `attempt / catch / otherwise / finally` parsing | ✅ | |
+| `return` / `break` / `continue` parsing | ✅ | |
+| `panic(expr)` statement | ✅ | |
+| Assignment statement (`lhs = rhs` / `lhs set rhs`) | ✅ | |
+| Expression statement | ✅ | |
+| Pratt expression parser (full precedence table) | ✅ | All 10 precedence levels |
+| `??` (null-coalesce) operator | ✅ | |
+| Ternary `value if condition else fallback` | ✅ | |
+| Implicit-subject ternary `x if is not nothing else y` | ✅ | Fidan-specific shorthand |
+| `is not` → `NotEq` normalization | ✅ | Two-token lookahead in Pratt loop |
+| Named argument call parsing | ✅ | `name set value` and `name = value` |
+| `required` / `optional` parameter modifiers | ✅ | |
+| Mixed grouped/ungrouped param lists | ✅ | `(p1) also p2` style |
+| `default` / `=` param defaults | ✅ | Contextual keyword |
+| `with` param keyword | ✅ | Contextual keyword (interned at parse-init) |
+| `returns` return-type keyword | ✅ | Contextual keyword |
+| `else` keyword in ternary | ✅ | Contextual keyword |
+| String interpolation AST node | ✅ | `{expr}` split into `InterpPart` fragments |
+| List literal `[...]` | ✅ | |
+| `spawn` / `await` expressions | ✅ | |
+| `concurrent { task ... }` / `parallel { task ... }` blocks | ✅ | |
+| `parallel for` parsing | ✅ | |
+| `decorator` (`@name`) parsing | ✅ | |
+| `use` import parsing | ✅ | |
+| Error recovery (synchronisation set) | ✅ | `synchronize()` in recovery.rs |
+| `Expr::Error` / `Stmt::Error` placeholder nodes | ✅ | |
+| Parse errors rendered via ariadne | ✅ | `render_to_stderr` called in CLI |
+| Parse `test/examples/test.fdn` without errors | ✅ | 6 items, 94 exprs, 25 stmts — zero diagnostics |
+| `--emit ast` node-count summary | ✅ | |
+| Round-trip test (parse → print → parse → compare) | ⬜ | Needs pretty-printer (Phase 2 stretch) |
+| Parser unit tests | ⬜ | Phase 2 stretch |
 
 ---
 
@@ -118,23 +136,24 @@
 ### `fidan-typeck`
 | Item | Status | Notes |
 |---|---|---|
-| Symbol table with scope stack | ⬜ | |
-| `object` registration + field/method resolution | ⬜ | |
-| Inheritance chain (`extends`) resolution | ⬜ | |
-| `var` type inference | ⬜ | |
-| Expression type inference | ⬜ | |
-| Type checking (assignments, returns, args) | ⬜ | |
-| `this` and `parent` binding | ⬜ | |
-| Extension action dual-registration | ⬜ | |
-| Named / positional argument checking | ⬜ | |
-| `required` / `optional` parameter checking | ⬜ | |
-| Null safety flow analysis (warnings) | ⬜ | |
-| Decorator validation (`@precompile`, etc.) | ⬜ | |
-| `parallel action` → `Pending oftype T` inference | ⬜ | |
-| `parallel_check.rs` data race detection (E4xx) | ⬜ | |
-| `Shared oftype T` recognised as thread-safe | ⬜ | |
-| `Pending oftype T` from `spawn expr` | ⬜ | |
-| W3xx: unawaited `Pending` dropped | ⬜ | |
+| Symbol table with scope stack | ✅ | `SymbolTable` + `Scope` stack in `scope.rs` |
+| `object` registration + field/method resolution | ✅ | Two-pass: register then check; field + inheritance lookup |
+| Inheritance chain (`extends`) resolution | ✅ | `resolve_field` + `method_return` walk parent chain |
+| `var` type inference | ✅ | Inferred from init expr; `oftype` annotation respected |
+| Expression type inference | ✅ | `infer_expr` covers all `Expr` variants |
+| Type checking (assignments, returns, args) | ✅ | E201 assignment mismatch, E202 return mismatch |
+| `this` and `parent` binding | ✅ | Injected into object + extension-action scopes |
+| Extension action dual-registration | ✅ | Free function + method on target object |
+| Named / positional argument checking | ✅ | E301 missing required param (constructor calls) |
+| `required` / `optional` parameter checking | ✅ | Required params checked at call sites |
+| Null safety flow analysis (warnings) | ⬜ | Deferred — needs control-flow graph (Phase 5) |
+| Decorator validation (`@precompile`, etc.) | ⬜ | Deferred to Phase 4 |
+| `parallel action` → `Pending oftype T` inference | ✅ | `Spawn` expr infers `Pending<T>`; `Await` unwraps it |
+| `parallel_check.rs` data race detection (E4xx) | ⬜ | Phase 5.5 — needs MIR |
+| `Shared oftype T` recognised as thread-safe | ✅ | `FidanType::Shared` variant recognised in `resolve_type_expr` |
+| `Pending oftype T` from `spawn expr` | ✅ | `FidanType::Pending` inferred from `Expr::Spawn` |
+| W3xx: unawaited `Pending` dropped | ⬜ | Phase 5.5 |
+| `test.fdn` typechecks with zero diagnostics | ✅ | `fidan run test.fdn` → zero type errors |
 
 ---
 
@@ -323,4 +342,4 @@ _None yet — implementation not started._
 
 ---
 
-*Last updated: 2026-02-28 — Phase 1 complete; diagnostics renderer + runtime value model + CLI `--emit tokens` done.*
+*Last updated: 2026-02-28 — Phase 3 complete; full type checker (`fidan-typeck`); `test.fdn` typechecks with zero diagnostics; `fidan run test.fdn` produces zero parse + type errors.*

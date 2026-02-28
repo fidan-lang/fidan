@@ -12,5 +12,8 @@ fidan-driver = { workspace = true }
 fidan-diagnostics = { workspace = true }
 fidan-source = { workspace = true }
 fidan-lexer = { workspace = true }
+fidan-ast = { workspace = true }
+fidan-parser = { workspace = true }
+fidan-typeck = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

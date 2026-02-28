@@ -41,6 +41,47 @@ pub enum Expr {
     // Spawn / await
     Spawn { expr: ExprId, span: Span },
     Await { expr: ExprId, span: Span },
+
+    // Ternary: `then_val if condition else else_val`
+    Ternary { condition: ExprId, then_val: ExprId, else_val: ExprId, span: Span },
+
+    // Collection literals
+    List { elements: Vec<ExprId>, span: Span },
+    Dict { entries: Vec<(ExprId, ExprId)>, span: Span },
+
+    // Error recovery placeholder
+    Error { span: Span },
+}
+
+impl Expr {
+    /// Return the source span of this expression.
+    pub fn span(&self) -> Span {
+        match self {
+            Expr::IntLit        { span, .. } => *span,
+            Expr::FloatLit      { span, .. } => *span,
+            Expr::StrLit        { span, .. } => *span,
+            Expr::BoolLit       { span, .. } => *span,
+            Expr::Nothing       { span }     => *span,
+            Expr::Ident         { span, .. } => *span,
+            Expr::This          { span }     => *span,
+            Expr::Parent        { span }     => *span,
+            Expr::Binary        { span, .. } => *span,
+            Expr::Unary         { span, .. } => *span,
+            Expr::NullCoalesce  { span, .. } => *span,
+            Expr::Call          { span, .. } => *span,
+            Expr::Field         { span, .. } => *span,
+            Expr::Index         { span, .. } => *span,
+            Expr::Assign        { span, .. } => *span,
+            Expr::CompoundAssign{ span, .. } => *span,
+            Expr::StringInterp  { span, .. } => *span,
+            Expr::Spawn         { span, .. } => *span,
+            Expr::Await         { span, .. } => *span,
+            Expr::Ternary       { span, .. } => *span,
+            Expr::List          { span, .. } => *span,
+            Expr::Dict          { span, .. } => *span,
+            Expr::Error         { span }     => *span,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

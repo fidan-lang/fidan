@@ -65,6 +65,10 @@ pub enum Stmt {
         tasks:       Vec<Task>,
         span:        Span,
     },
+    /// `panic expr` / `throw expr`
+    Panic { value: ExprId, span: Span },
+    /// Error recovery placeholder inserted when the parser cannot produce a valid statement.
+    Error { span: Span },
 }
 
 #[derive(Debug, Clone)]
@@ -99,8 +103,29 @@ pub struct Task {
 /// A syntactic type expression (unresolved).
 #[derive(Debug, Clone)]
 pub enum TypeExpr {
-    Named  { name: Symbol, span: Span },
-    Oftype { base: Box<TypeExpr>, param: Box<TypeExpr>, span: Span },
+    Named   { name: Symbol, span: Span },
+    Oftype  { base: Box<TypeExpr>, param: Box<TypeExpr>, span: Span },
     Dynamic { span: Span },
     Nothing { span: Span },
+}
+
+impl TypeExpr {
+    /// Byte offset of the last character of this type expression.
+    pub fn span_end(&self) -> u32 {
+        match self {
+            TypeExpr::Named   { span, .. } => span.end,
+            TypeExpr::Oftype  { span, .. } => span.end,
+            TypeExpr::Dynamic { span }     => span.end,
+            TypeExpr::Nothing { span }     => span.end,
+        }
+    }
+
+    pub fn span(&self) -> Span {
+        match self {
+            TypeExpr::Named   { span, .. } => *span,
+            TypeExpr::Oftype  { span, .. } => *span,
+            TypeExpr::Dynamic { span }     => *span,
+            TypeExpr::Nothing { span }     => *span,
+        }
+    }
 }

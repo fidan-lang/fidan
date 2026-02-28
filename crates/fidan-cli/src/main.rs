@@ -144,18 +144,30 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
         }
     }
 
-    // ── Remaining stages (not yet implemented) ─────────────────────────────────
-    if opts.emit.contains(&EmitKind::Ast)
-        || opts.emit.contains(&EmitKind::Hir)
-        || opts.emit.contains(&EmitKind::Mir)
-    {
-        render_message_to_stderr(
-            Severity::Note,
-            "unimplemented",
-            "--emit ast/hir/mir not yet implemented (Phase 2+)",
-        );
+    // ── Parse ──────────────────────────────────────────────────────────────────
+    let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+
+    // Surface parse diagnostics via the diagnostics renderer
+    for diag in &parse_diags {
+        fidan_diagnostics::render_to_stderr(diag, &source_map);
     }
 
+    // ── --emit ast ─────────────────────────────────────────────────────────────
+    if opts.emit.contains(&EmitKind::Ast) {
+        println!("=== ast: {} ===", opts.input.display());
+        println!("  items: {}", module.items.len());
+        println!("  exprs: {}", module.arena.exprs.len());
+        println!("  stmts: {}", module.arena.stmts.len());
+        println!("  items_arena: {}", module.arena.items.len());
+    }
+    // ── Type-check ──────────────────────────────────────────────────────
+    // Only proceed if parse is clean (no parse errors).
+    if parse_diags.is_empty() {
+        let type_diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
+        for diag in &type_diags {
+            fidan_diagnostics::render_to_stderr(diag, &source_map);
+        }
+    }
     match opts.mode {
         ExecutionMode::Interpret => {
             if !opts.emit.contains(&EmitKind::Tokens) {

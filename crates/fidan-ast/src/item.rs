@@ -6,6 +6,15 @@ use fidan_lexer::Symbol;
 /// Top-level items (declarations).
 #[derive(Debug, Clone)]
 pub enum Item {
+    /// `var name oftype T = expr` at module scope
+    VarDecl {
+        name: fidan_lexer::Symbol,
+        ty:   Option<crate::stmt::TypeExpr>,
+        init: Option<crate::ExprId>,
+        span: fidan_source::Span,
+    },
+    /// A top-level expression statement, e.g. `print("Hello")` or `main()`
+    ExprStmt(crate::ExprId),
     /// `object Name extends Parent { fields... methods... }`
     ObjectDecl {
         name:    Symbol,
