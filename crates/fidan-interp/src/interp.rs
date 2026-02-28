@@ -591,7 +591,27 @@ impl<'m> Interpreter<'m> {
                 }
             }
         }
-        self.env.push_frame(Some(name.to_string()), this);
+        // Build human-readable label: `name(param = value, ...)` for the trace.
+        let frame_label = {
+            let args_display: Vec<String> = locals
+                .iter()
+                .map(|(sym, val)| {
+                    let pname = self.interner.resolve(*sym).to_string();
+                    // Quote strings; print other values as-is.
+                    let vdisplay = match val {
+                        FidanValue::String(_) => format!("\"{}\"", builtins::display(val)),
+                        _ => builtins::display(val),
+                    };
+                    format!("{pname} = {vdisplay}")
+                })
+                .collect();
+            if args_display.is_empty() {
+                format!("{name}()")
+            } else {
+                format!("{name}({})", args_display.join(", "))
+            }
+        };
+        self.env.push_frame(Some(frame_label), this);
         for (sym, val) in locals {
             self.env.define(sym, val);
         }
@@ -803,7 +823,10 @@ impl<'m> Interpreter<'m> {
                 // Determine the outcome of body + catch handling.
                 let post_catch = match body_result {
                     Ok(_) => Ok(true), // success — run `otherwise` before `finally`
-                    Err(Signal::Panic { value: err_val, trace: orig_trace }) => {
+                    Err(Signal::Panic {
+                        value: err_val,
+                        trace: orig_trace,
+                    }) => {
                         let mut caught = false;
                         let mut catch_outcome = Ok(false);
                         for catch in &catches {
@@ -825,7 +848,10 @@ impl<'m> Interpreter<'m> {
                         if caught {
                             catch_outcome
                         } else {
-                            Err(Signal::Panic { value: err_val, trace: orig_trace }) // uncaught
+                            Err(Signal::Panic {
+                                value: err_val,
+                                trace: orig_trace,
+                            }) // uncaught
                         }
                     }
                     Err(e) => Err(e),
@@ -1443,7 +1469,9 @@ pub fn run_repl_line(state: &mut ReplState, module: &Module) -> Result<Option<St
             Ok(echo)
         }
         Err(Signal::Return(_)) => Ok(None),
-        Err(Signal::Panic { value, .. }) => Err(format!("runtime panic: {}", builtins::display(&value))),
+        Err(Signal::Panic { value, .. }) => {
+            Err(format!("runtime panic: {}", builtins::display(&value)))
+        }
         Err(Signal::Break) => Err("unexpected `break` outside a loop".to_string()),
         Err(Signal::Continue) => Err("unexpected `continue` outside a loop".to_string()),
     }

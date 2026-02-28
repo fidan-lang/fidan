@@ -439,11 +439,17 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                             _ => &err.trace,
                         };
                         if opts.trace == TraceMode::Compact {
-                            eprintln!("  stack: {}", frames.join(" -> "));
+                            eprintln!("  stack: {}", frames.join(" ← "));
                         } else {
                             eprintln!("  stack trace (innermost first):");
-                            for (i, name) in frames.iter().enumerate() {
-                                eprintln!("    #{i}  {name}");
+                            for (i, frame) in frames.iter().enumerate() {
+                                if i == 0 {
+                                    eprintln!("    #{i}  {frame}  ← panicked here");
+                                } else if let Some(outer) = frames.get(i + 1) {
+                                    eprintln!("    #{i}  {frame}  ← called by {outer}");
+                                } else {
+                                    eprintln!("    #{i}  {frame}");
+                                }
                             }
                         }
                     }
