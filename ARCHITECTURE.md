@@ -382,6 +382,30 @@ pub type ExprRef<'ast> = &'ast Expr<'ast>;
 
 ### Core Node Types
 
+### Execution Model (decided 2026-02-28)
+
+Fidan uses **top-to-bottom, declaration-hoisted execution** — like a JavaScript module, not
+like a language that requires a mandatory `main` entry point.
+
+**Rules:**
+1. **Pass 1 – Hoist declarations:** All `object` and `action` definitions in the module are
+   registered first, regardless of their textual position. This means forward references
+   between actions are always valid.
+2. **Pass 2 – Execute statements:** Top-level `var` declarations and bare expression
+   statements (`print(...)`, `main()`, etc.) are executed in source order.
+
+There is **no required `main` action**. If a programmer wants a clean entry point, the
+convention is to define `action main { ... }` and call `main()` as the last line of the file.
+This is a convention enforced by style, not by the compiler.
+
+**AOT (`fidan build`):** The driver synthesizes a Rust `fn main()` (in the generated
+binary's runtime stub) that runs the module's Pass 2 statement list in order. The user
+never writes or sees this entry point — it is purely a linker-level detail.
+
+**Interpreter / JIT:** Mirrors the same two-pass structure. The type checker already
+implements this (register-in-pass-1, check-in-pass-2), so the interpreter follows the
+same pattern naturally.
+
 ```rust
 // ── Top-level items ────────────────────────────────────────────────────────────
 
@@ -2134,6 +2158,25 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 - [ ] `Shared oftype T` type: recognized as safe in parallel contexts
 - [ ] `Pending oftype T` type: inferred from `spawn expr`; `await pending` unboxes to `T`
 - [ ] W3xx warnings: unawaited `Pending oftype T` dropped without `.wait()` or `await`
+
+### Phase 3.5 – Syntax Completion (before any HIR/MIR work) ⚠️ MANDATORY
+**Goal:** Every surface-language construct is defined, parsed, and type-checked *before*
+HIR lowering begins. Adding syntax after HIR exists means patching the lowering retroactively.
+
+**Constructs that MUST be decided and implemented here:**
+
+- [ ] **Dict literal syntax** — `{k: v}` is ambiguous with blocks; a deliberate syntax
+      must be chosen (e.g. `dict { k: v }`, `#{ k: v }`, `{ k => v }`, etc.) and implemented
+      end-to-end (lexer → parser → AST → type checker).
+- [ ] **`match` / pattern statement** — decide the keyword alias (e.g. `match`, `check`,
+      `when`), decide the arm syntax, implement fully. The `Stmt::When` AST node and
+      `When` token already exist; only the parser dispatch is missing.
+- [ ] **Constructor syntax** — `new TypeName(args)` vs `initialize` convention vs another
+      form. Must be decided, implementing `new` keyword fully in parser + typeck.
+- [ ] **Any other v1 surface syntax** agreed upon before this phase closes.
+
+> **Rule:** No PR that touches `fidan-hir`, `fidan-mir`, or any codegen crate is merged
+> until this phase is marked complete in PROGRESS.md.
 
 ### Phase 4 – Diagnostics (1–2 weeks)
 **Goal:** Error messages that make users say "wow".
