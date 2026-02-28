@@ -188,6 +188,8 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     // ── --emit ast ─────────────────────────────────────────────────────────────
     if opts.emit.contains(&EmitKind::Ast) {
         println!("=== ast: {source_name} ===");
+        fidan_ast::print_module(&module, &interner);
+        println!("\n=== ast counts: {source_name} ===");
         println!("  items: {}", module.items.len());
         println!("  exprs: {}", module.arena.exprs.len());
         println!("  stmts: {}", module.arena.stmts.len());
