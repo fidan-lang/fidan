@@ -155,6 +155,57 @@ pub static CODES: &[DiagnosticCode] = &[
     },
 ];
 
+/// A validated diagnostic code.
+///
+/// Can only be constructed via [`DiagCode::new`], which is `const` and panics
+/// at **compile time** (when called from a `const` context) if the code is not
+/// present in [`CODES`].  Use the [`diag_code!`] macro to get this guarantee
+/// automatically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DiagCode(pub &'static str);
+
+impl DiagCode {
+    /// Validate `code` against [`CODES`] and return a [`DiagCode`].
+    ///
+    /// Calling this in a `const` context (e.g. via `diag_code!`) causes a
+    /// **compile-time error** for unknown codes.
+    pub const fn new(code: &'static str) -> Self {
+        DiagCode(assert_code(code))
+    }
+}
+
+impl std::fmt::Display for DiagCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+/// Assert that `code` is a registered diagnostic code, returning it unchanged.
+/// Panics at compile time when evaluated in a `const` context.
+pub const fn assert_code(code: &'static str) -> &'static str {
+    let code_bytes = code.as_bytes();
+    let mut i = 0;
+    while i < CODES.len() {
+        let candidate = CODES[i].code.as_bytes();
+        if candidate.len() == code_bytes.len() {
+            let mut j = 0;
+            let mut matched = true;
+            while j < candidate.len() {
+                if candidate[j] != code_bytes[j] {
+                    matched = false;
+                    break;
+                }
+                j += 1;
+            }
+            if matched {
+                return code;
+            }
+        }
+        i += 1;
+    }
+    panic!("unknown diagnostic code — add it to `CODES` in fidan-diagnostics/src/codes.rs first")
+}
+
 /// Look up a code's metadata.  Returns `None` for unknown codes.
 pub fn lookup(code: &str) -> Option<&'static DiagnosticCode> {
     CODES.iter().find(|c| c.code == code)

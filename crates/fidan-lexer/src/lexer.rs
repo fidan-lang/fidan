@@ -3,7 +3,7 @@ use crate::{
     synonyms::lookup_keyword,
     token::{Token, TokenKind},
 };
-use fidan_diagnostics::{Diagnostic, Label};
+use fidan_diagnostics::{Diagnostic, Label, diag_code};
 use fidan_source::{FileId, SourceFile, Span};
 use std::sync::Arc;
 
@@ -199,7 +199,7 @@ impl<'src> Lexer<'src> {
                     // EOF before closing quote — emit a diagnostic.
                     let span = self.span_from(start);
                     self.diags.push(
-                        Diagnostic::error("E0001", "unterminated string literal", span).with_label(
+                        Diagnostic::error(diag_code!("E0001"), "unterminated string literal", span).with_label(
                             Label::primary(span, "string opened here, but never closed with `\"`"),
                         ),
                     );

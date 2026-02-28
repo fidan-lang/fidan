@@ -1,4 +1,4 @@
-use crate::suggestion::Suggestion;
+use crate::{codes::DiagCode, suggestion::Suggestion};
 use fidan_source::Span;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,10 +37,10 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    pub fn error(code: impl Into<String>, message: impl Into<String>, span: Span) -> Self {
+    pub fn error(code: DiagCode, message: impl Into<String>, span: Span) -> Self {
         Self {
             severity: Severity::Error,
-            code: code.into(),
+            code: code.0.to_owned(),
             message: message.into(),
             span,
             labels: vec![],
@@ -50,10 +50,10 @@ impl Diagnostic {
         }
     }
 
-    pub fn warning(code: impl Into<String>, message: impl Into<String>, span: Span) -> Self {
+    pub fn warning(code: DiagCode, message: impl Into<String>, span: Span) -> Self {
         Self {
             severity: Severity::Warning,
-            code: code.into(),
+            code: code.0.to_owned(),
             message: message.into(),
             span,
             labels: vec![],

@@ -254,7 +254,7 @@ impl TypeChecker {
                     if !self.objects.contains_key(p) {
                         let pname = self.interner.resolve(*p).to_string();
                         self.emit_error(
-                            "E0100",
+                            fidan_diagnostics::diag_code!("E0100"),
                             format!("undefined object `{pname}` in `extends` clause"),
                             *span,
                         );
@@ -406,7 +406,7 @@ impl TypeChecker {
                 if !lhs.is_assignable_from(&rhs) {
                     let (l, r) = (self.ty_name(&lhs), self.ty_name(&rhs));
                     self.emit_error(
-                        "E0201",
+                        fidan_diagnostics::diag_code!("E0201"),
                         format!("type mismatch: cannot assign `{r}` to `{l}`"),
                         span,
                     );
@@ -425,7 +425,7 @@ impl TypeChecker {
                     if !expected.is_assignable_from(&ret) {
                         let (e, a) = (self.ty_name(&expected), self.ty_name(&ret));
                         self.emit_error(
-                            "E0202",
+                            fidan_diagnostics::diag_code!("E0202"),
                             format!("return type mismatch: expected `{e}`, found `{a}`"),
                             span,
                         );
@@ -598,7 +598,7 @@ impl TypeChecker {
                 if !dt.is_assignable_from(&actual) {
                     let (d, a) = (self.ty_name(dt), self.ty_name(&actual));
                     self.emit_error(
-                        "E0201",
+                        fidan_diagnostics::diag_code!("E0201"),
                         format!("type mismatch: expected `{d}`, found `{a}`"),
                         span,
                     );
@@ -656,9 +656,12 @@ impl TypeChecker {
                             .collect();
                         let candidate_refs: Vec<&str> =
                             candidates.iter().map(String::as_str).collect();
-                        let mut diag =
-                            Diagnostic::error("E0101", format!("undefined name `{s}`"), span)
-                                .with_label(Label::primary(span, "unknown name"));
+                        let mut diag = Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0101"),
+                            format!("undefined name `{s}`"),
+                            span,
+                        )
+                        .with_label(Label::primary(span, "unknown name"));
                         if let Some(best) = FixEngine::suggest_name(&s, candidate_refs.into_iter())
                         {
                             diag = diag.with_suggestion(Suggestion::fix(
@@ -761,7 +764,7 @@ impl TypeChecker {
                 if !lhs.is_assignable_from(&rhs) && !lhs.is_error() {
                     let (l, r) = (self.ty_name(&lhs), self.ty_name(&rhs));
                     self.emit_error(
-                        "E0201",
+                        fidan_diagnostics::diag_code!("E0201"),
                         format!("type mismatch: cannot assign `{r}` to `{l}`"),
                         span,
                     );
@@ -962,7 +965,7 @@ impl TypeChecker {
                     if !named_ok && !has_positional {
                         let pname = self.interner.resolve(p.name).to_string();
                         self.emit_error(
-                            "E0301",
+                            fidan_diagnostics::diag_code!("E0301"),
                             format!("required parameter `{pname}` not provided"),
                             span,
                         );
@@ -1123,7 +1126,12 @@ impl TypeChecker {
         Span::new(self.file_id, 0, 0)
     }
 
-    fn emit_error(&mut self, code: &str, message: impl Into<String>, span: Span) {
+    fn emit_error(
+        &mut self,
+        code: fidan_diagnostics::DiagCode,
+        message: impl Into<String>,
+        span: Span,
+    ) {
         self.diags.push(Diagnostic::error(code, message, span));
     }
 

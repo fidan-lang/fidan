@@ -17,7 +17,7 @@ impl<'t> Parser<'t> {
             return;
         }
         self.recovering = true;
-        self.diags.push(Diagnostic::error("E0000", message, span));
+        self.diags.push(Diagnostic::error(fidan_diagnostics::diag_code!("E0000"), message, span));
     }
 
     /// Allocate an `Expr::Error` placeholder.
