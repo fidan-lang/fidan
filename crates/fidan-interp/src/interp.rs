@@ -155,6 +155,10 @@ impl<'m> Interpreter<'m> {
                 Item::ExprStmt(eid) => {
                     self.eval_expr(*eid)?;
                 }
+                Item::Assign { target, value, .. } => {
+                    let val = self.eval_expr(*value)?;
+                    self.eval_assign(*target, val)?;
+                }
                 _ => {} // declarations already registered
             }
         }

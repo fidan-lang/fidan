@@ -237,8 +237,21 @@ impl<'t> Parser<'t> {
                 }))
             }
             _ => {
-                // Top-level expression statement (e.g. `print("Hello")`, `main()`)
-                let expr = self.parse_expr();
+                // Top-level expression statement or assignment
+                let start = self.current_span().start;
+                let expr  = self.parse_expr();
+                // `x = rhs` or `x set rhs` at module / REPL scope
+                if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
+                    self.advance(); // eat `=` / `set`
+                    let value = self.parse_expr();
+                    let end   = self.current_span().end;
+                    self.skip_one_terminator();
+                    return Some(self.module.arena.alloc_item(Item::Assign {
+                        target: expr,
+                        value,
+                        span: Span::new(self.module.file, start, end),
+                    }));
+                }
                 let _span = self.module.arena.get_expr(expr).span();
                 self.skip_one_terminator();
                 Some(self.module.arena.alloc_item(Item::ExprStmt(expr)))

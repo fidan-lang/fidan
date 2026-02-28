@@ -100,6 +100,10 @@ impl<'a> Printer<'a> {
                 println!("{p}ExprStmt  {}", self.expr_hint(*id));
             }
 
+            Item::Assign { target, value, .. } => {
+                println!("{p}Assign  {} = {}", self.expr_hint(*target), self.expr_hint(*value));
+            }
+
             Item::Use {
                 path,
                 alias,

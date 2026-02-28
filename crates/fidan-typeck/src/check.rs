@@ -264,7 +264,7 @@ impl TypeChecker {
                     },
                 );
             }
-            Item::ExprStmt(_) | Item::Use { .. } => {}
+            Item::ExprStmt(_) | Item::Assign { .. } | Item::Use { .. } => {}
         }
     }
 
@@ -344,6 +344,24 @@ impl TypeChecker {
             Item::ExprStmt(expr_id) => {
                 self.warn_bare_literal(*expr_id, module);
                 self.infer_expr(*expr_id, module);
+            }
+
+            // ── module-level assignment ──────────────────────────────────
+            Item::Assign {
+                target,
+                value,
+                span,
+            } => {
+                let rhs = self.infer_expr(*value, module);
+                let lhs = self.infer_expr(*target, module);
+                if !lhs.is_assignable_from(&rhs) {
+                    let (l, r) = (self.ty_name(&lhs), self.ty_name(&rhs));
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0201"),
+                        format!("type mismatch: cannot assign `{r}` to `{l}`"),
+                        *span,
+                    );
+                }
             }
 
             Item::Use { .. } => {}

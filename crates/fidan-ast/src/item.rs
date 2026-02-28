@@ -15,6 +15,12 @@ pub enum Item {
     },
     /// A top-level expression statement, e.g. `print("Hello")` or `main()`
     ExprStmt(crate::ExprId),
+    /// A top-level assignment, e.g. `x = 1` or `obj.field = val`
+    Assign {
+        target: crate::ExprId,
+        value: crate::ExprId,
+        span: fidan_source::Span,
+    },
     /// `object Name extends Parent { fields... methods... }`
     ObjectDecl {
         name: Symbol,
