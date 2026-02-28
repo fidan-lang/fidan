@@ -399,7 +399,7 @@ impl TypeChecker {
                 }
             }
 
-            Stmt::When { scrutinee, arms, .. } => {
+            Stmt::Check { scrutinee, arms, .. } => {
                 self.infer_expr(scrutinee, module);
                 for arm in &arms {
                     self.infer_expr(arm.pattern, module);
@@ -463,10 +463,16 @@ impl TypeChecker {
             Expr::StrLit    { .. } | Expr::StringInterp { .. } => FidanType::String,
 
             Expr::Ident { name, span } => {
+                // `_` is the universal wildcard — it matches any type and is never
+                // declared as a variable (used in check-arm patterns).
+                let resolved = self.interner.resolve(name);
+                if resolved.as_ref() == "_" {
+                    return FidanType::Dynamic;
+                }
                 match self.table.lookup(name) {
                     Some(info) => info.ty.clone(),
                     None => {
-                        let s = self.interner.resolve(name).to_string();
+                        let s = resolved.to_string();
                         self.emit_error("E101", format!("undefined name '{s}'"), span);
                         FidanType::Error
                     }
@@ -582,6 +588,17 @@ impl TypeChecker {
                     Box::new(FidanType::String),
                     Box::new(FidanType::Dynamic),
                 )
+            }
+
+            Expr::Check { scrutinee, arms, .. } => {
+                self.infer_expr(scrutinee, module);
+                for arm in arms {
+                    self.infer_expr(arm.pattern, module);
+                    for &sid in &arm.body {
+                        self.check_stmt(sid, module);
+                    }
+                }
+                FidanType::Dynamic
             }
 
             Expr::Error { .. } => FidanType::Error,
@@ -723,7 +740,8 @@ impl TypeChecker {
                 (FidanType::Integer, FidanType::Integer)        => FidanType::Integer,
                 _                                               => FidanType::Dynamic,
             },
-            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow => match (lhs, rhs) {
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow
+            | BinOp::BitXor | BinOp::BitAnd | BinOp::BitOr | BinOp::Shl | BinOp::Shr => match (lhs, rhs) {
                 (FidanType::Float, _) | (_, FidanType::Float) => FidanType::Float,
                 (FidanType::Integer, FidanType::Integer)      => FidanType::Integer,
                 _                                             => FidanType::Dynamic,

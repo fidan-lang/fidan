@@ -81,6 +81,10 @@ pub enum TokenKind {
     Percent,      // `%`
     PercentEq,    // `%=`
     Caret,        // `^` (bitwise XOR)
+    Ampersand,    // `&`  (bitwise AND)
+    Pipe,         // `|`  (bitwise OR)
+    LtLt,         // `<<` (shift left)
+    GtGt,         // `>>` (shift right)
     StarStar,     // `**` | `pow` (exponentiation)
     NullCoalesce, // `??`
 
@@ -137,6 +141,58 @@ impl TokenKind {
                 | TokenKind::True
                 | TokenKind::False
         )
+    }
+
+    /// Returns the canonical keyword string for this token, if it is a keyword.
+    /// Used to allow keywords as field / method names after `.` (e.g. `obj.set()`).
+    pub fn as_keyword_str(&self) -> Option<&'static str> {
+        Some(match self {
+            TokenKind::Var => "var",
+            TokenKind::Set => "set",
+            TokenKind::Action => "action",
+            TokenKind::Object => "object",
+            TokenKind::Extends => "extends",
+            TokenKind::Return => "return",
+            TokenKind::If => "if",
+            TokenKind::Otherwise => "otherwise",
+            TokenKind::When => "when",
+            TokenKind::For => "for",
+            TokenKind::In => "in",
+            TokenKind::While => "while",
+            TokenKind::Break => "break",
+            TokenKind::Continue => "continue",
+            TokenKind::Attempt => "attempt",
+            TokenKind::Catch => "catch",
+            TokenKind::Finally => "finally",
+            TokenKind::Panic => "panic",
+            TokenKind::Check => "check",
+            TokenKind::Use => "use",
+            TokenKind::Export => "export",
+            TokenKind::As => "as",
+            TokenKind::Oftype => "oftype",
+            TokenKind::Required => "required",
+            TokenKind::Optional => "optional",
+            TokenKind::Dynamic => "dynamic",
+            TokenKind::Parallel => "parallel",
+            TokenKind::Concurrent => "concurrent",
+            TokenKind::Task => "task",
+            TokenKind::Spawn => "spawn",
+            TokenKind::Await => "await",
+            TokenKind::Shared => "shared",
+            TokenKind::Pending => "pending",
+            TokenKind::Weak => "weak",
+            TokenKind::And => "and",
+            TokenKind::Or => "or",
+            TokenKind::Not => "not",
+            TokenKind::Is => "is",
+            TokenKind::This => "this",
+            TokenKind::Parent => "parent",
+            TokenKind::New => "new",
+            TokenKind::True => "true",
+            TokenKind::False => "false",
+            TokenKind::Nothing => "nothing",
+            _ => return None,
+        })
     }
 }
 

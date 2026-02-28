@@ -215,6 +215,34 @@ impl<'src> Lexer<'src> {
     }
 
     fn lex_number(&mut self, start: u32) -> Token {
+        // `self.pos` is still at the first character (not yet consumed).
+        // Detect hex `0x…` and binary `0b…` prefixes.
+        if self.peek() == Some('0') {
+            match self.peek2() {
+                Some('x') | Some('X') => {
+                    self.advance(); // eat `0`
+                    self.advance(); // eat `x`/`X`
+                    while self.peek().map_or(false, |c| c.is_ascii_hexdigit() || c == '_') {
+                        self.advance();
+                    }
+                    let raw = &self.src[start as usize + 2..self.pos as usize];
+                    let val = i64::from_str_radix(&raw.replace('_', ""), 16).unwrap_or(0);
+                    return self.emit(TokenKind::LitInteger(val), start);
+                }
+                Some('b') | Some('B') => {
+                    self.advance(); // eat `0`
+                    self.advance(); // eat `b`/`B`
+                    while self.peek().map_or(false, |c| c == '0' || c == '1' || c == '_') {
+                        self.advance();
+                    }
+                    let raw = &self.src[start as usize + 2..self.pos as usize];
+                    let val = i64::from_str_radix(&raw.replace('_', ""), 2).unwrap_or(0);
+                    return self.emit(TokenKind::LitInteger(val), start);
+                }
+                _ => {}
+            }
+        }
+
         while self
             .peek()
             .map_or(false, |c| c.is_ascii_digit() || c == '_')
@@ -280,6 +308,7 @@ impl<'src> Lexer<'src> {
             ',' => TokenKind::Comma,
             '.' => {
                 if self.eat_if('.') {
+                    self.eat_if('.'); // `...` inclusive range — treated as `..` for now
                     TokenKind::DotDot
                 } else {
                     TokenKind::Dot
@@ -341,6 +370,20 @@ impl<'src> Lexer<'src> {
                 }
             }
             '^' => TokenKind::Caret,
+            '&' => {
+                if self.eat_if('&') {
+                    TokenKind::And       // `&&` = logical and alias
+                } else {
+                    TokenKind::Ampersand // `&`  = bitwise AND
+                }
+            }
+            '|' => {
+                if self.eat_if('|') {
+                    TokenKind::Or   // `||` = logical or alias
+                } else {
+                    TokenKind::Pipe // `|`  = bitwise OR
+                }
+            }
             '=' => {
                 if self.eat_if('>') {
                     TokenKind::FatArrow
@@ -358,14 +401,18 @@ impl<'src> Lexer<'src> {
                 }
             }
             '<' => {
-                if self.eat_if('=') {
+                if self.eat_if('<') {
+                    TokenKind::LtLt  // `<<` shift left
+                } else if self.eat_if('=') {
                     TokenKind::LtEq
                 } else {
                     TokenKind::Lt
                 }
             }
             '>' => {
-                if self.eat_if('=') {
+                if self.eat_if('>') {
+                    TokenKind::GtGt  // `>>` shift right
+                } else if self.eat_if('=') {
                     TokenKind::GtEq
                 } else {
                     TokenKind::Gt
@@ -483,6 +530,22 @@ mod tests {
     fn test_null_coalesce() {
         let tokens = lex("x ?? y");
         assert_eq!(tokens[1], TokenKind::NullCoalesce);
+    }
+
+    #[test]
+    fn test_logical_punct_operators() {
+        // `&&` and `||` are punct-level aliases for `and` / `or`
+        let tokens = lex("a && b || c");
+        assert_eq!(tokens[1], TokenKind::And);
+        assert_eq!(tokens[3], TokenKind::Or);
+    }
+
+    #[test]
+    fn test_number_prefixes() {
+        let tokens = lex("0x1F 0b1010 0xFF");
+        assert_eq!(tokens[0], TokenKind::LitInteger(31));
+        assert_eq!(tokens[1], TokenKind::LitInteger(10));
+        assert_eq!(tokens[2], TokenKind::LitInteger(255));
     }
 
     #[test]

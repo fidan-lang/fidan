@@ -62,10 +62,22 @@ impl FidanType {
             return true; // suppress cascading errors
         }
         // Numeric coercions
-        matches!(
+        if matches!(
             (self, other),
             (FidanType::Float, FidanType::Integer) | (FidanType::Integer, FidanType::Float)
-        )
+        ) {
+            return true;
+        }
+        // Parameterized types — covariant (List<Dynamic> accepts List<T>, etc.)
+        match (self, other) {
+            (FidanType::List(s), FidanType::List(o)) => s.is_assignable_from(o),
+            (FidanType::Dict(sk, sv), FidanType::Dict(ok, ov)) => {
+                sk.is_assignable_from(ok) && sv.is_assignable_from(ov)
+            }
+            (FidanType::Shared(s), FidanType::Shared(o)) => s.is_assignable_from(o),
+            (FidanType::Pending(s), FidanType::Pending(o)) => s.is_assignable_from(o),
+            _ => false,
+        }
     }
 
     /// Human-readable name for use in diagnostic messages.

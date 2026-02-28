@@ -1,5 +1,5 @@
 // fidan-parser — Pratt (top-down operator precedence) expression parser
-use fidan_ast::{Arg, BinOp, Expr, ExprId, InterpPart, UnOp};
+use fidan_ast::{Arg, BinOp, CheckArm, Expr, ExprId, InterpPart, Stmt, UnOp};
 use fidan_lexer::TokenKind;
 use fidan_source::Span;
 use crate::parser::Parser;
@@ -13,7 +13,7 @@ use crate::parser::Parser;
 //  7  comparison  `== != < > <= >= is`
 //  9  additive    `+ -`
 // 11  multiplicative `* / %`
-// 13  power `^`  (right-associative)
+// 13  power/xor `**` right-assoc; `^` bitwise-xor (same precedence slot)
 // 15  unary prefix  `- not spawn await`
 // 17  postfix   `.`  `()`  `[]`
 
@@ -80,7 +80,8 @@ impl<'t> Parser<'t> {
             _ => self.parse_expr_bp(0),
         };
 
-        if !self.eat_ident(self.sym_else) {
+        // `else` and `otherwise` both lex to `TokenKind::Otherwise`
+        if !self.eat_ident(self.sym_else) && !self.eat(&TokenKind::Otherwise) {
             let sp = self.current_span();
             self.error("expected `else` in ternary expression", sp);
         }
@@ -130,7 +131,7 @@ impl<'t> Parser<'t> {
                 }
                 // ── Postfix: member access ────────────────────────────────────
                 TokenKind::Dot => {
-                    let field = self.expect_ident_sym("expected field name after `.`");
+                    let field = self.expect_field_name();
                     let end   = self.current_span().end;
                     lhs = self.module.arena.alloc_expr(Expr::Field {
                         object: lhs, field,
@@ -189,6 +190,11 @@ impl<'t> Parser<'t> {
                     op: UnOp::Neg, operand,
                     span: Span::new(self.module.file, span.start, end),
                 })
+            }
+            // Unary plus — no semantic effect, just parse the operand
+            TokenKind::Plus => {
+                self.advance();
+                self.parse_expr_bp(15)
             }
             TokenKind::Not => {
                 self.advance();
@@ -255,8 +261,79 @@ impl<'t> Parser<'t> {
                     span: Span::new(self.module.file, span.start, end),
                 })
             }
+            TokenKind::LBrace => {
+                // Dict literal: `{ key: value, key: value }`
+                // Blocks are never primary expressions in Fidan, so `{` here is always a dict.
+                self.advance(); // eat `{`
+                let mut entries = vec![];
+                loop {
+                    self.skip_terminators();
+                    if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) { break; }
+                    let key   = self.parse_expr();
+                    self.expect_tok(&TokenKind::Colon);
+                    let value = self.parse_expr();
+                    entries.push((key, value));
+                    // Allow comma or newline between entries; trailing comma/newline is fine
+                    if !self.eat(&TokenKind::Comma) {
+                        self.skip_terminators();
+                    }
+                }
+                let end = self.current_span().end;
+                self.expect_tok(&TokenKind::RBrace);
+                self.module.arena.alloc_expr(Expr::Dict {
+                    entries,
+                    span: Span::new(self.module.file, span.start, end),
+                })
+            }
+            TokenKind::Check => {
+                // `check <expr> { pattern => body, ... }` used as an expression-value
+                self.advance(); // eat `check`
+                let scrutinee = self.parse_expr_bp(0);
+                self.skip_terminators();
+                self.expect_tok(&TokenKind::LBrace);
+                let mut arms = vec![];
+                loop {
+                    self.skip_terminators();
+                    if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) { break; }
+                    let arm_start = self.current_span().start;
+                    let pattern = if matches!(self.peek(), TokenKind::Otherwise) {
+                        let sp = self.current_span();
+                        self.advance();
+                        let wild = self.interner.intern("_");
+                        self.module.arena.alloc_expr(Expr::Ident { name: wild, span: sp })
+                    } else {
+                        self.parse_expr_bp(0)
+                    };
+                    self.expect_tok(&TokenKind::FatArrow);
+                    let body = if matches!(self.peek(), TokenKind::LBrace) {
+                        self.parse_block()
+                    } else {
+                        let e = self.parse_expr_bp(0);
+                        let es = self.module.arena.get_expr(e).span();
+                        self.skip_one_terminator();
+                        vec![self.module.arena.alloc_stmt(Stmt::Expr { expr: e, span: es })]
+                    };
+                    let arm_end = self.current_span().end;
+                    arms.push(CheckArm { pattern, body, span: Span::new(self.module.file, arm_start, arm_end) });
+                }
+                let end = self.current_span().end;
+                self.expect_tok(&TokenKind::RBrace);
+                self.module.arena.alloc_expr(Expr::Check {
+                    scrutinee, arms,
+                    span: Span::new(self.module.file, span.start, end),
+                })
+            }
+            // `Shared(value)` / `Pending(value)` — wrap keyword as Ident so infix `(` handles the call
+            TokenKind::Shared | TokenKind::Pending => {
+                let name_str = if matches!(self.peek(), TokenKind::Shared) { "Shared" } else { "Pending" };
+                self.advance();
+                let name = self.interner.intern(name_str);
+                self.module.arena.alloc_expr(Expr::Ident { name, span })
+            }
             _ => {
+                // Always advance so callers never loop on an unrecognised token.
                 self.error(&format!("unexpected token in expression: {:?}", self.peek()), span);
+                self.advance();
                 self.error_expr(span)
             }
         }
@@ -366,6 +443,7 @@ impl<'t> Parser<'t> {
     fn infix_bp(&self, kind: &TokenKind) -> Option<(u8, u8)> {
         Some(match kind {
             TokenKind::NullCoalesce                              => (1,  2),
+            TokenKind::DotDot                                    => (2,  3),  // range, lower than add
             TokenKind::Or                                        => (3,  4),
             TokenKind::And                                       => (5,  6),
             TokenKind::Is | TokenKind::Eq    | TokenKind::NotEq
@@ -373,7 +451,11 @@ impl<'t> Parser<'t> {
             | TokenKind::Gt  | TokenKind::GtEq                  => (7,  8),
             TokenKind::Plus  | TokenKind::Minus                  => (9,  10),
             TokenKind::Star  | TokenKind::Slash | TokenKind::Percent => (11, 12),
-            TokenKind::Caret                                     => (13, 12), // right-assoc
+            TokenKind::StarStar                                       => (13, 14), // right-assoc
+            TokenKind::Caret                                          => (13, 13), // bitwise XOR
+            TokenKind::Ampersand                                      => (11, 12), // bitwise AND (same tier as mul)
+            TokenKind::Pipe                                           => ( 9, 10), // bitwise OR  (same tier as add)
+            TokenKind::LtLt | TokenKind::GtGt                        => (11, 12), // shift
             // Postfix (call / member / index)
             TokenKind::LParen | TokenKind::Dot | TokenKind::LBracket => (17, 18),
             _ => return None,
@@ -387,8 +469,13 @@ impl<'t> Parser<'t> {
             TokenKind::Star    => BinOp::Mul,
             TokenKind::Slash   => BinOp::Div,
             TokenKind::Percent => BinOp::Rem,
-            TokenKind::Caret   => BinOp::Pow,
-            TokenKind::Eq      => BinOp::Eq,
+            TokenKind::StarStar => BinOp::Pow,
+            TokenKind::Caret     => BinOp::BitXor,
+            TokenKind::Ampersand => BinOp::BitAnd,
+            TokenKind::Pipe      => BinOp::BitOr,
+            TokenKind::LtLt      => BinOp::Shl,
+            TokenKind::GtGt      => BinOp::Shr,
+            TokenKind::Eq        => BinOp::Eq,
             TokenKind::Is      => BinOp::Eq,
             TokenKind::NotEq   => BinOp::NotEq,
             TokenKind::Lt      => BinOp::Lt,

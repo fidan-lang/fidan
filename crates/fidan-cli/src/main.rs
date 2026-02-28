@@ -4,6 +4,23 @@ use fidan_diagnostics::{Severity, render_message_to_stderr};
 use fidan_driver::{CompileOptions, EmitKind, ExecutionMode};
 use std::path::PathBuf;
 
+// On Windows, PowerShell's default code page is CP1252 which corrupts the UTF-8
+// box-drawing characters emitted by ariadne.  Switch both the input and output
+// console code pages to UTF-8 (65001) as early as possible.
+#[cfg(target_os = "windows")]
+fn ensure_utf8_console() {
+    unsafe extern "system" {
+        fn SetConsoleOutputCP(wCodePageID: u32) -> i32;
+        fn SetConsoleCP(wCodePageID: u32) -> i32;
+    }
+    unsafe {
+        SetConsoleOutputCP(65001);
+        SetConsoleCP(65001);
+    }
+}
+#[cfg(not(target_os = "windows"))]
+fn ensure_utf8_console() {}
+
 #[derive(Parser)]
 #[command(
     name    = "fidan",
@@ -62,6 +79,7 @@ fn parse_emit(raw: &[String]) -> Result<Vec<EmitKind>> {
 }
 
 fn main() -> Result<()> {
+    ensure_utf8_console();
     let cli = Cli::parse();
 
     match cli.command {

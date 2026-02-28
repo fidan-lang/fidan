@@ -1,13 +1,22 @@
 // fidan-parser — error recovery helpers
+use crate::parser::Parser;
 use fidan_ast::{Expr, ExprId, Stmt, StmtId};
 use fidan_diagnostics::Diagnostic;
 use fidan_lexer::TokenKind;
 use fidan_source::Span;
-use crate::parser::Parser;
 
 impl<'t> Parser<'t> {
     /// Emit a parse error diagnostic.
+    ///
+    /// If the parser is already in recovery mode (a previous error was just
+    /// emitted and `synchronize()` has not yet fired), the error is silently
+    /// suppressed to prevent cascade diagnostics.  `synchronize()` clears the
+    /// flag so the next genuine error is always reported.
     pub(crate) fn error(&mut self, message: &str, span: Span) {
+        if self.recovering {
+            return;
+        }
+        self.recovering = true;
         self.diags.push(Diagnostic::error("P000", message, span));
     }
 
@@ -25,7 +34,8 @@ impl<'t> Parser<'t> {
     ///
     /// Synchronisation points: `}`, statement-starting keywords, `Eof`.
     /// Allows parsing to continue after an error and collect more diagnostics
-    /// in a single pass.
+    /// in a single pass.  Always resets the `recovering` flag so subsequent
+    /// genuine errors are reported cleanly.
     pub(crate) fn synchronize(&mut self) {
         loop {
             match self.peek() {
@@ -51,5 +61,6 @@ impl<'t> Parser<'t> {
                 }
             }
         }
+        self.recovering = false; // re-open error reporting after each sync
     }
 }

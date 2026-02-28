@@ -2,8 +2,8 @@
 use std::sync::Arc;
 
 use fidan_ast::{
-    Item, ItemId, Module, Stmt, StmtId,
-    CatchClause, Decorator, ElseIf, FieldDecl, Param, Task, TypeExpr,
+    Expr, Item, ItemId, Module, Stmt, StmtId,
+    CatchClause, CheckArm, Decorator, ElseIf, FieldDecl, Param, Task, TypeExpr,
 };
 use fidan_diagnostics::Diagnostic;
 use fidan_lexer::{Symbol, SymbolInterner, Token, TokenKind};
@@ -17,6 +17,10 @@ pub struct Parser<'t> {
     pub(crate) module:       Module,
     pub(crate) diags:        Vec<Diagnostic>,
     pub(crate) interner:     Arc<SymbolInterner>,
+    /// When `true`, the parser is in post-error recovery mode.
+    /// Further errors are suppressed until `synchronize()` resets this flag,
+    /// preventing one bad token from producing hundreds of cascade diagnostics.
+    pub(crate) recovering:   bool,
     // Contextual keyword symbols (interned once at construction)
     pub(crate) sym_with:     Symbol,
     pub(crate) sym_returns:  Symbol,
@@ -36,6 +40,7 @@ impl<'t> Parser<'t> {
             module: Module::new(file_id),
             diags: Vec::new(),
             interner,
+            recovering: false,
             sym_with,
             sym_returns,
             sym_default,
@@ -127,6 +132,18 @@ impl<'t> Parser<'t> {
         }
     }
 
+    /// Consume a type annotation introducer: `oftype` or `->` (Arrow).
+    /// Returns `true` if a token was consumed.
+    #[inline]
+    pub(crate) fn eat_type_ann(&mut self) -> bool {
+        if matches!(self.peek(), TokenKind::Oftype | TokenKind::Arrow) {
+            self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Consume an identifier and return its symbol, or emit an error.
     pub(crate) fn expect_ident_sym(&mut self, msg: &str) -> Symbol {
         let span = self.current_span();
@@ -137,6 +154,24 @@ impl<'t> Parser<'t> {
             self.error(msg, span);
             self.interner.intern("<error>")
         }
+    }
+
+    /// Like `expect_ident_sym` but also accepts keyword tokens as field names.
+    /// Keywords are legal identifiers after `.` in Fidan (e.g. `obj.set()`,
+    /// `obj.new`) — same rule as Python, Swift, Kotlin, etc.
+    pub(crate) fn expect_field_name(&mut self) -> Symbol {
+        let span = self.current_span();
+        let tok  = self.peek().clone();
+        if let TokenKind::Ident(sym) = tok {
+            self.advance();
+            return sym;
+        }
+        if let Some(kw) = tok.as_keyword_str() {
+            self.advance();
+            return self.interner.intern(kw);
+        }
+        self.error("expected field name after `.`", span);
+        self.interner.intern("<error>")
     }
 
     // ── Module parsing ────────────────────────────────────────────────────────
@@ -157,6 +192,7 @@ impl<'t> Parser<'t> {
 
     fn parse_top_level(&mut self) -> Option<ItemId> {
         let _decs = self.parse_decorators();
+        self.skip_terminators(); // skip any newlines between decorator and declaration
         match self.peek().clone() {
             TokenKind::Object   => Some(self.parse_object_decl()),
             TokenKind::Action   => Some(self.parse_action_decl(false)),
@@ -170,13 +206,23 @@ impl<'t> Parser<'t> {
                     None
                 }
             }
-            TokenKind::Use => Some(self.parse_use_decl()),
+            TokenKind::Use    => Some(self.parse_use_decl(false)),
+            TokenKind::Export => {
+                self.advance(); // eat `export`
+                if matches!(self.peek(), TokenKind::Use) {
+                    Some(self.parse_use_decl(true))
+                } else {
+                    let span = self.current_span();
+                    self.error("expected `use` after `export`", span);
+                    None
+                }
+            }
             TokenKind::Var => {
                 // Top-level variable declaration
                 let start = self.current_span().start;
                 self.advance(); // eat `var`
                 let name = self.expect_ident_sym("expected variable name");
-                let ty   = if self.eat(&TokenKind::Oftype) { Some(self.parse_type_expr()) } else { None };
+                let ty   = if self.eat_type_ann() { Some(self.parse_type_expr()) } else { None };
                 let init = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
                     self.advance();
                     Some(self.parse_expr())
@@ -259,6 +305,27 @@ impl<'t> Parser<'t> {
                     };
                     methods.push(self.parse_action_decl(is_par));
                 }
+                TokenKind::New => {
+                    // Constructor block: `new with (params) { body }`
+                    let item_start = self.current_span().start;
+                    self.advance(); // eat `new`
+                    let params = if self.at_ident(self.sym_with) {
+                        self.advance();
+                        self.parse_params()
+                    } else {
+                        vec![]
+                    };
+                    self.skip_terminators();
+                    let body = self.parse_block();
+                    let end  = self.current_span().end;
+                    let ctor_name = self.interner.intern("new");
+                    let ctor_id = self.module.arena.alloc_item(Item::ActionDecl {
+                        name: ctor_name, params, return_ty: None, body,
+                        decorators: vec![], is_parallel: false,
+                        span: Span::new(self.module.file, item_start, end),
+                    });
+                    methods.push(ctor_id);
+                }
                 _ => {
                     let span = self.current_span();
                     self.error("expected field (`var`) or method (`action`) in object body", span);
@@ -281,7 +348,7 @@ impl<'t> Parser<'t> {
         let start = self.current_span().start;
         self.advance(); // eat `var`
         let name = self.expect_ident_sym("expected field name");
-        let ty   = if self.eat(&TokenKind::Oftype) {
+        let ty   = if self.eat_type_ann() {
             self.parse_type_expr()
         } else {
             TypeExpr::Dynamic { span: self.current_span() }
@@ -388,7 +455,7 @@ impl<'t> Parser<'t> {
         let required = self.eat(&TokenKind::Required);
         let _optional = !required && self.eat(&TokenKind::Optional);
         let name = self.expect_ident_sym("expected parameter name");
-        let ty   = if self.eat(&TokenKind::Oftype) {
+        let ty   = if self.eat_type_ann() {
             self.parse_type_expr()
         } else {
             TypeExpr::Dynamic { span: self.current_span() }
@@ -416,8 +483,8 @@ impl<'t> Parser<'t> {
             TokenKind::Ident(name) => {
                 self.advance();
                 let base = TypeExpr::Named { name, span };
-                // `list oftype T`, `Shared oftype T`, etc.
-                if self.eat(&TokenKind::Oftype) {
+                // `list oftype T`, `list -> T`, `Shared oftype T`, etc.
+                if self.eat_type_ann() {
                     let param = self.parse_type_expr();
                     let end   = param.span_end();
                     TypeExpr::Oftype {
@@ -431,7 +498,7 @@ impl<'t> Parser<'t> {
             }
             TokenKind::Shared => {
                 self.advance();
-                let param = if self.eat(&TokenKind::Oftype) {
+                let param = if self.eat_type_ann() {
                     self.parse_type_expr()
                 } else {
                     TypeExpr::Dynamic { span: self.current_span() }
@@ -444,6 +511,41 @@ impl<'t> Parser<'t> {
                     span:  Span::new(self.module.file, span.start, end),
                 }
             }
+            TokenKind::Pending => {
+                self.advance();
+                let param = if self.eat_type_ann() {
+                    self.parse_type_expr()
+                } else {
+                    TypeExpr::Dynamic { span: self.current_span() }
+                };
+                let end  = param.span_end();
+                let name = self.interner.intern("Pending");
+                TypeExpr::Oftype {
+                    base:  Box::new(TypeExpr::Named { name, span }),
+                    param: Box::new(param),
+                    span:  Span::new(self.module.file, span.start, end),
+                }
+            }
+            TokenKind::LParen => {
+                // Tuple / pair type: `(K, V)` — e.g. `dict oftype (string, integer)`
+                self.advance(); // eat `(`
+                let mut types = vec![];
+                loop {
+                    self.skip_terminators();
+                    if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) { break; }
+                    types.push(self.parse_type_expr());
+                    if !self.eat(&TokenKind::Comma) { break; }
+                }
+                let end = self.current_span().end;
+                self.eat(&TokenKind::RParen);
+                if types.len() == 1 {
+                    types.remove(0)
+                } else {
+                    // Multi-element tuple: use Named("tuple") as placeholder
+                    let name = self.interner.intern("tuple");
+                    TypeExpr::Named { name, span: Span::new(self.module.file, span.start, end) }
+                }
+            }
             _ => {
                 self.error("expected type expression", span);
                 TypeExpr::Dynamic { span }
@@ -451,26 +553,72 @@ impl<'t> Parser<'t> {
         }
     }
 
-    // ── Use declaration ───────────────────────────────────────────────────────
-
-    fn parse_use_decl(&mut self) -> ItemId {
+    fn parse_use_decl(&mut self, re_export: bool) -> ItemId {
         let start = self.current_span().start;
         self.advance(); // eat `use`
         let mut path = vec![self.expect_ident_sym("expected module name")];
-        while self.eat(&TokenKind::Dot) || self.eat(&TokenKind::DoubleColon) {
+
+        // Grouped import flag: `use std.io.{print, readFile, writeFile}`
+        let mut grouped_names: Option<Vec<Symbol>> = None;
+
+        loop {
+            if !self.eat(&TokenKind::Dot) && !self.eat(&TokenKind::DoubleColon) {
+                break;
+            }
+            // Grouped import: `use std.io.{print, readFile}`
+            if matches!(self.peek(), TokenKind::LBrace) {
+                self.advance(); // eat `{`
+                let mut names = vec![];
+                loop {
+                    self.skip_terminators();
+                    if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) { break; }
+                    names.push(self.expect_ident_sym("expected import name"));
+                    if !self.eat(&TokenKind::Comma) { break; }
+                }
+                self.eat(&TokenKind::RBrace);
+                grouped_names = Some(names);
+                break;
+            }
             path.push(self.expect_ident_sym("expected path segment"));
         }
-        let alias = if self.eat(&TokenKind::As) {
-            Some(self.expect_ident_sym("expected alias"))
-        } else {
-            None
-        };
+
         let end = self.current_span().end;
         self.skip_one_terminator();
-        self.module.arena.alloc_item(Item::Use {
-            path, alias,
-            span: Span::new(self.module.file, start, end),
-        })
+
+        if let Some(names) = grouped_names {
+            // Emit one Use item per grouped name; push extras directly onto the module.
+            let mut first_id: Option<ItemId> = None;
+            for name in names {
+                let mut full_path = path.clone();
+                full_path.push(name);
+                let id = self.module.arena.alloc_item(Item::Use {
+                    path: full_path, alias: None, re_export,
+                    span: Span::new(self.module.file, start, end),
+                });
+                if first_id.is_none() {
+                    first_id = Some(id);
+                } else {
+                    self.module.items.push(id);
+                }
+            }
+            // If the group was empty, emit a single Use with the prefix path.
+            first_id.unwrap_or_else(|| {
+                self.module.arena.alloc_item(Item::Use {
+                    path, alias: None, re_export,
+                    span: Span::new(self.module.file, start, end),
+                })
+            })
+        } else {
+            let alias = if self.eat(&TokenKind::As) {
+                Some(self.expect_ident_sym("expected alias"))
+            } else {
+                None
+            };
+            self.module.arena.alloc_item(Item::Use {
+                path, alias, re_export,
+                span: Span::new(self.module.file, start, end),
+            })
+        }
     }
 
     // ── Block & statement parsing ─────────────────────────────────────────────
@@ -503,6 +651,7 @@ impl<'t> Parser<'t> {
             TokenKind::While    => self.parse_while_stmt(),
             TokenKind::Attempt  => self.parse_attempt_stmt(),
             TokenKind::Panic    => self.parse_panic_stmt(),
+            TokenKind::Check    => self.parse_check_stmt(),
             TokenKind::Parallel => {
                 let span = self.current_span();
                 self.advance();
@@ -529,7 +678,7 @@ impl<'t> Parser<'t> {
         let start = self.current_span().start;
         self.advance(); // eat `var`
         let name = self.expect_ident_sym("expected variable name");
-        let ty   = if self.eat(&TokenKind::Oftype) { Some(self.parse_type_expr()) } else { None };
+        let ty   = if self.eat_type_ann() { Some(self.parse_type_expr()) } else { None };
         let init = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
             self.advance();
             Some(self.parse_expr())
@@ -568,6 +717,61 @@ impl<'t> Parser<'t> {
         self.module.arena.alloc_stmt(Stmt::Panic { value, span: Span::new(self.module.file, start, end) })
     }
 
+    // ── Check / pattern-match statement ──────────────────────────────────────
+    //
+    // Syntax:
+    //   check <expr> {
+    //     <pattern> => { <body> }   -- block arm
+    //     <pattern> => <expr>       -- expression arm
+    //     otherwise => { <body> }   -- wildcard arm
+    //   }
+
+    fn parse_check_stmt(&mut self) -> StmtId {
+        let start = self.current_span().start;
+        self.advance(); // eat `check`
+        let scrutinee = self.parse_expr();
+        self.skip_terminators();
+        self.expect_tok(&TokenKind::LBrace);
+        let mut arms = vec![];
+        loop {
+            self.skip_terminators();
+            if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) { break; }
+            let arm_start = self.current_span().start;
+            // Pattern: `otherwise` becomes wildcard (`_`), else any expression
+            let pattern = if matches!(self.peek(), TokenKind::Otherwise) {
+                let sp = self.current_span();
+                self.advance();
+                let wild = self.interner.intern("_");
+                self.module.arena.alloc_expr(Expr::Ident { name: wild, span: sp })
+            } else {
+                self.parse_expr()
+            };
+            self.expect_tok(&TokenKind::FatArrow); // `=>`
+            // Body: block `{ ... }` or a single expression wrapped as ExprStmt
+            let body = if matches!(self.peek(), TokenKind::LBrace) {
+                self.parse_block()
+            } else {
+                let expr = self.parse_expr();
+                let expr_span = self.module.arena.get_expr(expr).span();
+                self.skip_one_terminator();
+                vec![self.module.arena.alloc_stmt(Stmt::Expr { expr, span: expr_span })]
+            };
+            let arm_end = self.current_span().end;
+            arms.push(CheckArm {
+                pattern,
+                body,
+                span: Span::new(self.module.file, arm_start, arm_end),
+            });
+        }
+        let end = self.current_span().end;
+        self.expect_tok(&TokenKind::RBrace);
+        self.module.arena.alloc_stmt(Stmt::Check {
+            scrutinee, arms,
+            span: Span::new(self.module.file, start, end),
+        })
+    }
+
+
     fn parse_if_stmt(&mut self) -> StmtId {
         let start = self.current_span().start;
         self.advance(); // eat `if`
@@ -581,30 +785,17 @@ impl<'t> Parser<'t> {
         loop {
             self.skip_terminators();
             if matches!(self.peek(), TokenKind::Otherwise) {
-                self.advance(); // eat `otherwise`
-                if matches!(self.peek(), TokenKind::When) {
-                    self.advance(); // eat `when`
+                self.advance(); // eat `otherwise` / `else` (both lex to Otherwise)
+                // `otherwise when` or `else if` (else→Otherwise, then If) = else-if chain
+                if matches!(self.peek(), TokenKind::When | TokenKind::If) {
+                    self.advance(); // eat `when` or `if`
                     let cond  = self.parse_expr();
                     self.skip_terminators();
                     let body  = self.parse_block();
                     let end   = self.current_span().end;
                     else_ifs.push(ElseIf { condition: cond, body, span: Span::new(self.module.file, start, end) });
                 } else {
-                    // `otherwise { ... }` = plain else
-                    self.skip_terminators();
-                    else_body = Some(self.parse_block());
-                    break;
-                }
-            } else if self.at_ident(self.sym_else) {
-                self.advance(); // eat `else`
-                if matches!(self.peek(), TokenKind::If) {
-                    self.advance(); // eat `if`
-                    let cond = self.parse_expr();
-                    self.skip_terminators();
-                    let body = self.parse_block();
-                    let end  = self.current_span().end;
-                    else_ifs.push(ElseIf { condition: cond, body, span: Span::new(self.module.file, start, end) });
-                } else {
+                    // `otherwise { ... }` / `else { ... }` = plain else
                     self.skip_terminators();
                     else_body = Some(self.parse_block());
                     break;
@@ -663,7 +854,7 @@ impl<'t> Parser<'t> {
                     } else {
                         None
                     };
-                    let ty = if self.eat(&TokenKind::Oftype) { Some(self.parse_type_expr()) } else { None };
+                    let ty = if self.eat_type_ann() { Some(self.parse_type_expr()) } else { None };
                     self.skip_terminators();
                     let cbody = self.parse_block();
                     let end   = self.current_span().end;

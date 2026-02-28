@@ -1,5 +1,5 @@
 use crate::{Diagnostic, Severity};
-use ariadne::{Color, Label, Report, ReportKind, sources};
+use ariadne::{CharSet, Color, Config, Label, Report, ReportKind, sources};
 use fidan_source::SourceMap;
 
 // ── Spanless message renderer ─────────────────────────────────────────────────
@@ -59,10 +59,23 @@ pub fn render_to_stderr(diag: &Diagnostic, source_map: &SourceMap) {
         Severity::Note => ReportKind::Advice,
     };
 
+    // Use Unicode box-drawing characters only when writing directly to a TTY
+    // (a real terminal that supports UTF-8).  When stderr is a pipe — e.g. when
+    // the user runs `2>&1` in PowerShell — UTF-8 box chars get garbled by the
+    // shell's code-page.  Falling back to ASCII keeps the output readable.
+    use std::io::IsTerminal;
+    let char_set = if std::io::stderr().is_terminal() {
+        CharSet::Unicode
+    } else {
+        CharSet::Ascii
+    };
+    let cfg = Config::default().with_char_set(char_set);
+
     // In ariadne 0.6 the primary span (file, range) is passed directly to build().
     let primary_range = diag.span.start as usize..diag.span.end as usize;
-    let mut b =
-        Report::build(kind, (name.clone(), primary_range.clone())).with_message(&diag.message);
+    let mut b = Report::build(kind, (name.clone(), primary_range.clone()))
+        .with_config(cfg)
+        .with_message(&diag.message);
 
     if !diag.code.is_empty() {
         b = b.with_code(&diag.code);

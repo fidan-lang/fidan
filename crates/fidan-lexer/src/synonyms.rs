@@ -51,9 +51,9 @@ pub fn lookup_keyword(s: &str) -> Option<TokenKind> {
         "False" => TokenKind::LitBool(false),
 
         // ── Operators / synonyms ──────────────────────────────────────────
-        "and" | "&&" => TokenKind::And,
-        "or" | "||" => TokenKind::Or,
-        "not" | "!" => TokenKind::Not,
+        "and" => TokenKind::And, // `&&` handled at punct level
+        "or" => TokenKind::Or,   // `||` handled at punct level
+        "not" => TokenKind::Not, // `!`  handled at punct level
         "is" | "equals" => TokenKind::Is,
         "notequals" => TokenKind::NotEq,
         "greaterthan" => TokenKind::Gt,

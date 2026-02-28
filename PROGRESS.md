@@ -56,11 +56,13 @@
 | `SynonymMap` (phf perfect hash) | ✅ | `synonyms.rs` |
 | Keyword → canonical `TokenKind` mapping | ✅ | |
 | `stop` / `separate` → `Semicolon` | ✅ | |
+| `&&` / `||` punct-level lexing | ✅ | Phase 3.5 — handled in `lex_punct` before synonyms |
+| Hex (`0x…`) and binary (`0b…`) number literals | ✅ | Phase 3.5 |
 | `SymbolInterner` (DashMap, Symbol = u32) | ✅ | Thread-safe, lock-free fast path |
 | Identifier interning | ✅ | |
 | Error recovery (Unknown token) | ✅ | `TokenKind::Unknown(char)` |
 | Lexer test: tokenise `test/examples/test.fdn` | ⬜ | Phase 2 |
-| Lexer test: round-trip all token types | ✅ | 10 unit tests, all passing |
+| Lexer test: round-trip all token types | ✅ | 12 unit tests, all passing |
 | `--emit tokens` output in CLI | ✅ | `fidan run --emit tokens file.fdn` works |
 
 ---
@@ -74,9 +76,9 @@
 |---|---|---|
 | Arena allocator (`typed_arena`) | ✅ | Vec-backed pools: ExprId/StmtId/ItemId |
 | `ExprId`, `StmtId`, `ItemId` index types | ✅ | |
-| All expression AST nodes | ✅ | Full `Expr` enum + `Ternary`, `List`, `Dict`, `Error` variants added in Phase 2 |
-| All statement AST nodes | ✅ | Full `Stmt` enum + `Panic`, `Error` variants added in Phase 2 |
-| All item AST nodes (`object`, `action`, etc.) | ✅ | `Item` enum + `VarDecl`, `ExprStmt` added in Phase 2 |
+| All expression AST nodes | ✅ | Full `Expr` enum + `Ternary`, `List`, `Dict`, `Error` variants (Phase 2); `Expr::Check` (Phase 3.5) |
+| All statement AST nodes | ✅ | Full `Stmt` enum + `Panic`, `Error` (Phase 2); `Stmt::Check` / `CheckArm` (Phase 3.5) |
+| All item AST nodes (`object`, `action`, etc.) | ✅ | `Item` enum + `VarDecl`, `ExprStmt` (Phase 2); `Item::Use` gains `re_export: bool` (Phase 3.5) |
 | `Module` root node | ✅ | |
 | AST visitor trait | ✅ | Default no-op `AstVisitor` |
 | `Expr::span()` helper | ✅ | Returns span for any expression variant |
@@ -119,10 +121,27 @@
 | `parallel for` parsing | ✅ | |
 | `decorator` (`@name`) parsing | ✅ | |
 | `use` import parsing | ✅ | |
+| Grouped import `use std.io.{print, foo}` | ✅ | Phase 3.5 — emits one `Item::Use` per name |
+| `export use` re-export syntax | ✅ | Phase 3.5 — `Item::Use { re_export: true }` |
+| `->` as type-annotation introducer | ✅ | Phase 3.5 — `eat_type_ann()` accepts `Oftype` or `Arrow` |
+| `Pending` type in `parse_type_expr` | ✅ | Phase 3.5 |
+| Tuple/pair type `(K, V)` in `parse_type_expr` | ✅ | Phase 3.5 — used by `dict oftype (string, integer)` |
+| `..` range operator in Pratt table | ✅ | Phase 3.5 — `DotDot` infix BP; `...` inclusive range normalised to `DotDot` |
+| `**` power operator + `BinOp::Pow` | ✅ | Phase 3.5 — `StarStar` infix BP; `Caret` → `BinOp::BitXor` |
+| Unary `+` (no-op) | ✅ | Phase 3.5 |
+| `Shared` / `Pending` as call-target expressions | ✅ | Phase 3.5 — keywords treated as `Expr::Ident` in `parse_primary` |
+| Dict literal `{ k: v, … }` | ✅ | Phase 3.5 — `LBrace` in expression context |
+| `check` statement | ✅ | Phase 3.5 — `parse_check_stmt()`; arms with `pattern => { body }` or `pattern => expr` |
+| `check` expression (inline) | ✅ | Phase 3.5 — `Expr::Check` in `parse_primary` |
+| `new` constructor block in object body | ✅ | Phase 3.5 — `new with (params) { body }` inside `object` |
+| `catch err -> Type` arrow annotation | ✅ | Phase 3.5 — catch clause uses `eat_type_ann()` |
+| Decorator–declaration newline fix | ✅ | Phase 3.5 — `skip_terminators()` after `parse_decorators()` |
+| `else if` chain (both `else if` and `otherwise when`) | ✅ | Phase 3.5 — `Otherwise + If` handled identically to `Otherwise + When` |
 | Error recovery (synchronisation set) | ✅ | `synchronize()` in recovery.rs |
 | `Expr::Error` / `Stmt::Error` placeholder nodes | ✅ | |
 | Parse errors rendered via ariadne | ✅ | `render_to_stderr` called in CLI |
 | Parse `test/examples/test.fdn` without errors | ✅ | 6 items, 94 exprs, 25 stmts — zero diagnostics |
+| Parse `test/syntax.fdn` without parser errors | ✅ | Phase 3.5+ — 132 items, 672 exprs, 150 stmts; zero `[P000]` and zero `[E1xx]`/`[E2xx]` diagnostics |
 | `--emit ast` node-count summary | ✅ | |
 | Round-trip test (parse → print → parse → compare) | ⬜ | Needs pretty-printer (Phase 2 stretch) |
 | Parser unit tests | ⬜ | Phase 2 stretch |
@@ -157,15 +176,50 @@
 
 ---
 
-## Phase 4 – Diagnostics
+## Phase 3.5 – Parser Completeness Pass
 
-> Goal: Error messages that make users say "wow".
+> Goal: `cargo run -- run test/syntax.fdn --emit ast` produces **zero parse errors** (`[P000]`).  
+> All Fidan surface syntax covered; unimplemented constructs documented with `# [FUTURE]` markers.
 
-### `fidan-diagnostics`
 | Item | Status | Notes |
 |---|---|---|
-| `Diagnostic` / `Label` / `Suggestion` types | ✅ | `Severity`, `Diagnostic`, `Label` in separate modules |
-| `ariadne` rendering integration | ✅ | `render_to_stderr()` with ariadne 0.6 `(Id, Range)` span API |
+| `&&` / `||` punct-level lexing | ✅ | Handled in `lex_punct`; synonyms.rs cleaned |
+| `0x…` / `0b…` number literal prefixes | ✅ | Hex and binary integer literals |
+| `&` bitwise AND lexing (`Ampersand` token) | ✅ | Was `Unknown('&')` |
+| `\|` bitwise OR lexing (`Pipe` token) | ✅ | Was `Unknown('\|')` |
+| `<<` shift-left (`LtLt` token) | ✅ | New two-char token |
+| `>>` shift-right (`GtGt` token) | ✅ | New two-char token |
+| Grouped import `use mod.{a, b, c}` | ✅ | Expands to one `Item::Use` per name |
+| `export use` re-export | ✅ | `Item::Use { re_export: true }` |
+| `->` type-annotation introducer | ✅ | `eat_type_ann()` accepts `Oftype` \| `Arrow` everywhere |
+| `Pending` named type | ✅ | Parsed in `parse_type_expr` |
+| Tuple/pair type `(K, V)` | ✅ | Dict key-value type syntax |
+| `..` / `...` range operators | ✅ | `DotDot` added to Pratt infix table; `...` normalised to `DotDot` |
+| `**` (`StarStar`) → `BinOp::Pow` | ✅ | Precedence 13 right-assoc |
+| `^` (`Caret`) → `BinOp::BitXor` | ✅ | Was incorrectly mapped to `Pow` |
+| `&` (`Ampersand`) → `BinOp::BitAnd` | ✅ | Phase 3.5+ |
+| `\|` (`Pipe`) → `BinOp::BitOr` | ✅ | Phase 3.5+ |
+| `<<` (`LtLt`) → `BinOp::Shl` | ✅ | Phase 3.5+ |
+| `>>` (`GtGt`) → `BinOp::Shr` | ✅ | Phase 3.5+ |
+| `BinOp::BitXor` in typeck | ✅ | Numeric result same as `Sub`/`Mul`/etc. |
+| `BinOp::BitAnd` / `BitOr` / `Shl` / `Shr` in typeck | ✅ | Same numeric arm |
+| `List<T>` / `Dict<K,V>` / `Shared<T>` / `Pending<T>` covariant widening | ✅ | `is_assignable_from` recurses into parameterized types |
+| `_` wildcard in check-arm patterns | ✅ | `infer_expr` returns `Dynamic` for `_` instead of E101 |
+| Keywords as field / method names after `.` | ✅ | `expect_field_name()` accepts any keyword token; `TokenKind::as_keyword_str()` |
+| Unary `+` | ✅ | Parses operand, no semantic effect |
+| `Shared(…)` / `Pending(…)` call expressions | ✅ | Keywords treated as `Expr::Ident` in `parse_primary` |
+| Dict literal `{ k: v, … }` | ✅ | `LBrace` in expression context always a dict |
+| `check` statement + `Stmt::Check` / `CheckArm` | ✅ | Full pattern-matching statement |
+| `check` expression + `Expr::Check` | ✅ | Inline check used as a value |
+| `Expr::Check` in typeck `infer_expr` | ✅ | Walks scrutinee + arms |
+| `new` constructor block in `object` body | ✅ | `new with (…) { … }` sugar |
+| `catch err -> Type` arrow annotation | ✅ | `eat_type_ann()` in `parse_attempt_stmt` |
+| `else if` after `otherwise` block | ✅ | `Otherwise + If` → else-if branch |
+| Decorator newline tolerance | ✅ | `skip_terminators()` after `parse_decorators()` |
+| Error cascade suppression (`recovering` flag) | ✅ | One `[P000]` per desync; `synchronize()` resets the flag |
+| `ariadne` ASCII fallback for non-TTY output | ✅ | `CharSet::Ascii` when stderr is a pipe |
+| Windows UTF-8 console setup | ✅ | `SetConsoleOutputCP(65001)` in CLI `main()` |
+| ASCII charset fallback for non-TTY | ✅ | Phase 3.5 — `CharSet::Ascii` when stderr is a pipe; prevents garbled box chars |
 | `FixEngine` with E1xx, E2xx, E3xx rules | ⬜ | Skeleton only — Phase 4 proper |
 | Edit-distance suggestions for undefined names | ⬜ | `strsim` (Jaro-Winkler / Levenshtein) |
 | All error codes produce rendered output | ⬜ | |
@@ -296,7 +350,8 @@
 |---|---|---|
 | All `fidan` subcommands | 🔨 | `run`, `build`, `test`, `lsp` wired; backends are stubs |
 | `--emit tokens` | ✅ | Drives lexer, prints full token stream |
-| `--emit ast/hir/mir` | ⬜ | Phase 2+ |
+| `--emit ast` | ✅ | Phase 2 — node-count summary; phase 3.5 — works cleanly on `syntax.fdn` |
+| `--emit hir/mir` | ⬜ | Phase 5+ |
 | REPL with history + multi-line | ⬜ | |
 | LSP server | ⬜ | |
 | VS Code extension skeleton | ⬜ | |
@@ -326,7 +381,7 @@
 
 | Suite | Status | Notes |
 |---|---|---|
-| Lexer unit tests | ✅ | 10/10 passing in `fidan-lexer` |
+| Lexer unit tests | ✅ | 12/12 passing in `fidan-lexer` |
 | Parser unit tests | ⬜ | |
 | Typeck unit tests | ⬜ | |
 | Interpreter integration (`test.fdn`) | ⬜ | |
@@ -338,8 +393,8 @@
 
 ## Known Issues / Blockers
 
-_None yet — implementation not started._
+_None._
 
 ---
 
-*Last updated: 2026-02-28 — Phase 3 complete; full type checker (`fidan-typeck`); `test.fdn` typechecks with zero diagnostics; `fidan run test.fdn` produces zero parse + type errors.*
+*Last updated: 2026-02-28 — Phase 3.5+ complete; bitwise / shift operators, cascade suppression, `_` wildcard, parameterized-type widening, keyword field names (`.set()`); `syntax.fdn` → 132 items, 672 exprs, zero diagnostics; 12/12 tests pass.*
