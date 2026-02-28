@@ -1,0 +1,66 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/fidan-source",
+    "crates/fidan-lexer",
+    "crates/fidan-ast",
+    "crates/fidan-parser",
+    "crates/fidan-diagnostics",
+    "crates/fidan-typeck",
+    "crates/fidan-hir",
+    "crates/fidan-mir",
+    "crates/fidan-passes",
+    "crates/fidan-runtime",
+    "crates/fidan-interp",
+    "crates/fidan-codegen-cranelift",
+    "crates/fidan-codegen-llvm",
+    "crates/fidan-stdlib",
+    "crates/fidan-driver",
+    "crates/fidan-lsp",
+    "crates/fidan-cli",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+authors = ["Fidan Contributors"]
+license = "Fidan Programming Language License (FPL) 1.0.0"
+repository = "https://github.com/AppSolves/Fidan"
+
+# ── Shared dependency versions ────────────────────────────────────────────────
+[workspace.dependencies]
+# Internal crates
+fidan-source = { path = "crates/fidan-source" }
+fidan-lexer = { path = "crates/fidan-lexer" }
+fidan-ast = { path = "crates/fidan-ast" }
+fidan-parser = { path = "crates/fidan-parser" }
+fidan-diagnostics = { path = "crates/fidan-diagnostics" }
+fidan-typeck = { path = "crates/fidan-typeck" }
+fidan-hir = { path = "crates/fidan-hir" }
+fidan-mir = { path = "crates/fidan-mir" }
+fidan-passes = { path = "crates/fidan-passes" }
+fidan-runtime = { path = "crates/fidan-runtime" }
+fidan-interp = { path = "crates/fidan-interp" }
+fidan-stdlib = { path = "crates/fidan-stdlib" }
+fidan-driver = { path = "crates/fidan-driver" }
+
+# External
+phf = { version = "0.13.1", features = ["macros"] }
+phf_codegen = "0.13.1"
+dashmap = "6"
+typed-arena = "2"
+ariadne = "0.6.0"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+rustc-hash = "2"
+indexmap = "2"
+smol_str = "0.3"
+
+[profile.dev]
+opt-level = 1 # faster builds in dev without being fully unoptimised
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

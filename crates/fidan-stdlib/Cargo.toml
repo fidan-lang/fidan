@@ -1,0 +1,8 @@
+[package]
+name = "fidan-stdlib"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-source = { workspace = true }
+fidan-runtime = { workspace = true }

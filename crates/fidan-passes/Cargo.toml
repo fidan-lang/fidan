@@ -1,0 +1,8 @@
+[package]
+name = "fidan-passes"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-source = { workspace = true }
+fidan-mir = { workspace = true }

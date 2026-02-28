@@ -1,0 +1,11 @@
+[package]
+name = "fidan-lexer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-source = { workspace = true }
+phf = { workspace = true }
+smol_str = { workspace = true }
+dashmap = { workspace = true }
+rustc-hash = { workspace = true }

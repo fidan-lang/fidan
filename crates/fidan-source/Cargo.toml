@@ -1,0 +1,4 @@
+[package]
+name = "fidan-source"
+version.workspace = true
+edition.workspace = true

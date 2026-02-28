@@ -1,0 +1,11 @@
+[package]
+name = "fidan-mir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-source = { workspace = true }
+fidan-lexer = { workspace = true }
+fidan-hir = { workspace = true }
+rustc-hash = { workspace = true }
+indexmap = { workspace = true }

@@ -1,0 +1,9 @@
+[package]
+name = "fidan-hir"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-source = { workspace = true }
+fidan-ast = { workspace = true }
+fidan-typeck = { workspace = true }

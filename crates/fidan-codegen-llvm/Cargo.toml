@@ -1,0 +1,14 @@
+[package]
+name = "fidan-codegen-llvm"
+version.workspace = true
+edition.workspace = true
+
+# inkwell (safe LLVM bindings) added in Phase 11 only.
+# Gated behind a feature flag so the workspace builds without LLVM installed.
+[features]
+llvm = []
+
+[dependencies]
+fidan-source = { workspace = true }
+fidan-mir = { workspace = true }
+fidan-runtime = { workspace = true }

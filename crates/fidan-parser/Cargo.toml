@@ -1,0 +1,10 @@
+[package]
+name = "fidan-parser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-source = { workspace = true }
+fidan-lexer = { workspace = true }
+fidan-ast = { workspace = true }
+fidan-diagnostics = { workspace = true }

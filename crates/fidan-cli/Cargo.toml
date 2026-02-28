@@ -1,0 +1,13 @@
+[package]
+name = "fidan-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "fidan"
+path = "src/main.rs"
+
+[dependencies]
+fidan-driver = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }

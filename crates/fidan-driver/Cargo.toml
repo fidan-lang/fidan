@@ -1,0 +1,19 @@
+[package]
+name = "fidan-driver"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-source = { workspace = true }
+fidan-lexer = { workspace = true }
+fidan-ast = { workspace = true }
+fidan-parser = { workspace = true }
+fidan-diagnostics = { workspace = true }
+fidan-typeck = { workspace = true }
+fidan-hir = { workspace = true }
+fidan-mir = { workspace = true }
+fidan-passes = { workspace = true }
+fidan-runtime = { workspace = true }
+fidan-interp = { workspace = true }
+fidan-stdlib = { workspace = true }
+anyhow = { workspace = true }

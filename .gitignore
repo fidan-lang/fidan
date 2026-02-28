@@ -1,6 +1,58 @@
-# VSCODE related files
-.vscode/
+# ── Rust / Cargo ──────────────────────────────────────────────────────────────
+/target/
+**/*.rs.bk
+Cargo.lock
 
-# Build directory
-build/
-bin/
+# Incremental compilation artefacts
+/target/debug/incremental/
+/target/release/incremental/
+
+# ── LLVM (optional backend) ───────────────────────────────────────────────────
+*.bc
+*.ll
+*.s
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.lib
+*.pdb
+
+# ── Editor / IDE ──────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.iml
+*.ipr
+*.iws
+.fleet/
+*.sublime-project
+*.sublime-workspace
+
+# ── OS artefacts ─────────────────────────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# ── Test / benchmark output ───────────────────────────────────────────────────
+/test/output/
+*.fdn.out
+criterion/
+perf.data
+perf.data.old
+flamegraph.svg
+/scripts/*.log
+
+# ── Misc ──────────────────────────────────────────────────────────────────────
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+.env
+.env.*

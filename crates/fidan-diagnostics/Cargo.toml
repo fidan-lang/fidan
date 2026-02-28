@@ -1,0 +1,9 @@
+[package]
+name = "fidan-diagnostics"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-source = { workspace = true }
+ariadne = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,10 @@
+[package]
+name = "fidan-interp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-source = { workspace = true }
+fidan-mir = { workspace = true }
+fidan-runtime = { workspace = true }
+fidan-stdlib = { workspace = true }

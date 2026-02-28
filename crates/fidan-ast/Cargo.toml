@@ -1,0 +1,10 @@
+[package]
+name = "fidan-ast"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-source = { workspace = true }
+fidan-lexer = { workspace = true }
+typed-arena = { workspace = true }
+smol_str = { workspace = true }

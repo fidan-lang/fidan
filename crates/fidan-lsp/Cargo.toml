@@ -1,0 +1,8 @@
+[package]
+name = "fidan-lsp"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-driver = { workspace = true }
+anyhow = { workspace = true }

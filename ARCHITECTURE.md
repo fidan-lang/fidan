@@ -83,7 +83,7 @@ fidan/
 ├── ARCHITECTURE.md
 ├── LICENSE.md
 ├── scripts/
-├── TEST/
+├── test/
 └── crates/
     ├── fidan-source/            ← SourceFile, Span, SourceMap, FileId
     ├── fidan-lexer/             ← Tokenizer, Token, SynonymMap
@@ -2078,11 +2078,11 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 
 - [ ] Set up Cargo workspace with all 14 crates (initially empty)
 - [ ] `fidan-source`: `SourceFile`, `Span`, `SourceMap`, `SymbolInterner`
-- [ ] Integration test: load `TEST/test.fdn` and print its contents
+- [ ] Integration test: load `test/examples/test.fdn` and print its contents
 - [ ] CI setup (GitHub Actions: `cargo test`, `cargo clippy`, `cargo fmt --check`)
 
 ### Phase 1 – Lexer (1–2 weeks)
-**Goal:** Tokenize `TEST/test.fdn` correctly.
+**Goal:** Tokenize `test/examples/test.fdn` correctly.
 
 - [ ] Implement all `TokenKind` variants
 - [ ] Synonym normalization table (`phf` map)
@@ -2093,7 +2093,7 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 - [ ] Unit tests: every token type, all synonyms, nested comments, string with interpolation
 
 ### Phase 2 – AST + Parser (2–3 weeks)
-**Goal:** Parse `TEST/test.fdn` to AST and pretty-print it back.
+**Goal:** Parse `test/examples/test.fdn` to AST and pretty-print it back.
 
 - [ ] All AST node types with arena allocation
 - [ ] Recursive descent parser: items, statements
@@ -2145,7 +2145,7 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 - [ ] Test every error code produces a beautiful message
 
 ### Phase 5 – HIR + MIR + Interpreter + `concurrent` (3–4 weeks)
-**Goal:** `fidan run TEST/test.fdn` works end-to-end. `concurrent` blocks work cooperatively.
+**Goal:** `fidan run test/examples/test.fdn` works end-to-end. `concurrent` blocks work cooperatively.
 
 - [ ] HIR types and AST→HIR lowering
 - [ ] MIR types (BasicBlock, Phi, SSA locals)
@@ -2157,7 +2157,7 @@ would require the lexer to embed a mini-parser, which is messy and error-prone.
 - [ ] `fidan-runtime`: `FidanValue`, `FidanObject`, `FidanClass`; owned values via `OwnedRef<T>` (`Rc<RefCell<T>>` interpreter-internally, single-threaded only)
 - [ ] Green-thread scheduler (`corosensei`) for `concurrent` tasks
 - [ ] Builtin functions: `print`, `input`, `len`, `toString`, etc.
-- [ ] Run `TEST/test.fdn` fully and verify output
+- [ ] Run `test/examples/test.fdn` fully and verify output
 
 ### Phase 5.5 – `parallel` Execution + Rayon (2–3 weeks)
 **Goal:** `parallel` blocks, `parallel action`, `parallel for`, `Shared oftype T`, `spawn`/`await` work.

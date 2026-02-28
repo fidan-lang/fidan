@@ -1,0 +1,9 @@
+[package]
+name = "fidan-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-source = { workspace = true }
+fidan-lexer = { workspace = true }
+rustc-hash = { workspace = true }
