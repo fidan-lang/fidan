@@ -3,6 +3,7 @@ use crate::{
     synonyms::lookup_keyword,
     token::{Token, TokenKind},
 };
+use fidan_diagnostics::{Diagnostic, Label};
 use fidan_source::{FileId, SourceFile, Span};
 use std::sync::Arc;
 
@@ -17,6 +18,8 @@ pub struct Lexer<'src> {
     interner: Arc<SymbolInterner>,
     /// The last non-whitespace token kind emitted (needed for auto-newline insertion).
     last_kind: Option<TokenKind>,
+    /// Lexer-level diagnostics (e.g. unterminated string literals).
+    diags: Vec<Diagnostic>,
 }
 
 impl<'src> Lexer<'src> {
@@ -27,12 +30,13 @@ impl<'src> Lexer<'src> {
             pos: 0,
             interner,
             last_kind: None,
+            diags: Vec::new(),
         }
     }
 
-    /// Tokenise the entire source and return a `Vec<Token>`.
+    /// Tokenise the entire source and return a `(Vec<Token>, Vec<Diagnostic>)` pair.
     /// The last token is always `Eof`.
-    pub fn tokenise(mut self) -> Vec<Token> {
+    pub fn tokenise(mut self) -> (Vec<Token>, Vec<Diagnostic>) {
         let mut tokens = Vec::new();
         loop {
             let tok = self.next_token();
@@ -42,7 +46,7 @@ impl<'src> Lexer<'src> {
                 break;
             }
         }
-        tokens
+        (tokens, self.diags)
     }
 
     // ── Core advancement ─────────────────────────────────────────────────────
@@ -188,9 +192,23 @@ impl<'src> Lexer<'src> {
     fn lex_string(&mut self, start: u32) -> Token {
         self.advance(); // opening `"`
         let mut s = String::new();
+        let mut terminated = false;
         loop {
             match self.advance() {
-                None | Some('"') => break,
+                None => {
+                    // EOF before closing quote — emit a diagnostic.
+                    let span = self.span_from(start);
+                    self.diags.push(
+                        Diagnostic::error("E0001", "unterminated string literal", span).with_label(
+                            Label::primary(span, "string opened here, but never closed with `\"`"),
+                        ),
+                    );
+                    break;
+                }
+                Some('"') => {
+                    terminated = true;
+                    break;
+                }
                 Some('\\') => {
                     // Basic escape sequences
                     match self.advance() {
@@ -210,7 +228,12 @@ impl<'src> Lexer<'src> {
                 Some(c) => s.push(c),
             }
         }
-        let kind = TokenKind::LitString(s);
+        let kind = if terminated {
+            TokenKind::LitString(s)
+        } else {
+            // Represent the bad token so the parser can skip it cleanly.
+            TokenKind::LitString(s)
+        };
         self.emit(kind, start)
     }
 
@@ -222,7 +245,10 @@ impl<'src> Lexer<'src> {
                 Some('x') | Some('X') => {
                     self.advance(); // eat `0`
                     self.advance(); // eat `x`/`X`
-                    while self.peek().map_or(false, |c| c.is_ascii_hexdigit() || c == '_') {
+                    while self
+                        .peek()
+                        .map_or(false, |c| c.is_ascii_hexdigit() || c == '_')
+                    {
                         self.advance();
                     }
                     let raw = &self.src[start as usize + 2..self.pos as usize];
@@ -232,7 +258,10 @@ impl<'src> Lexer<'src> {
                 Some('b') | Some('B') => {
                     self.advance(); // eat `0`
                     self.advance(); // eat `b`/`B`
-                    while self.peek().map_or(false, |c| c == '0' || c == '1' || c == '_') {
+                    while self
+                        .peek()
+                        .map_or(false, |c| c == '0' || c == '1' || c == '_')
+                    {
                         self.advance();
                     }
                     let raw = &self.src[start as usize + 2..self.pos as usize];
@@ -372,14 +401,14 @@ impl<'src> Lexer<'src> {
             '^' => TokenKind::Caret,
             '&' => {
                 if self.eat_if('&') {
-                    TokenKind::And       // `&&` = logical and alias
+                    TokenKind::And // `&&` = logical and alias
                 } else {
                     TokenKind::Ampersand // `&`  = bitwise AND
                 }
             }
             '|' => {
                 if self.eat_if('|') {
-                    TokenKind::Or   // `||` = logical or alias
+                    TokenKind::Or // `||` = logical or alias
                 } else {
                     TokenKind::Pipe // `|`  = bitwise OR
                 }
@@ -402,7 +431,7 @@ impl<'src> Lexer<'src> {
             }
             '<' => {
                 if self.eat_if('<') {
-                    TokenKind::LtLt  // `<<` shift left
+                    TokenKind::LtLt // `<<` shift left
                 } else if self.eat_if('=') {
                     TokenKind::LtEq
                 } else {
@@ -411,7 +440,7 @@ impl<'src> Lexer<'src> {
             }
             '>' => {
                 if self.eat_if('>') {
-                    TokenKind::GtGt  // `>>` shift right
+                    TokenKind::GtGt // `>>` shift right
                 } else if self.eat_if('=') {
                     TokenKind::GtEq
                 } else {
@@ -445,11 +474,8 @@ mod tests {
     fn lex(src: &str) -> Vec<TokenKind> {
         let file = SourceFile::new(FileId(0), "<test>", src);
         let interner = Arc::new(SymbolInterner::new());
-        Lexer::new(&file, interner)
-            .tokenise()
-            .into_iter()
-            .map(|t| t.kind)
-            .collect()
+        let (tokens, _diags) = Lexer::new(&file, interner).tokenise();
+        tokens.into_iter().map(|t| t.kind).collect()
     }
 
     #[test]

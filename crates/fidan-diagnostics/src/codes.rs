@@ -34,45 +34,125 @@ pub struct DiagnosticCode {
 /// All known Fidan diagnostic codes.
 pub static CODES: &[DiagnosticCode] = &[
     // ── Syntax / parse ────────────────────────────────────────────────────────
-    DiagnosticCode { code: "E0000", title: "unexpected token or syntax error",             category: "syntax"       },
-
+    DiagnosticCode {
+        code: "E0000",
+        title: "unexpected token or syntax error",
+        category: "syntax",
+    },
+    DiagnosticCode {
+        code: "E0001",
+        title: "unterminated string literal",
+        category: "syntax",
+    },
     // ── Name resolution ───────────────────────────────────────────────────────
-    DiagnosticCode { code: "E0100", title: "undefined object in `extends` clause",         category: "names"        },
-    DiagnosticCode { code: "E0101", title: "undefined name",                               category: "names"        },
-
+    DiagnosticCode {
+        code: "E0100",
+        title: "undefined object in `extends` clause",
+        category: "names",
+    },
+    DiagnosticCode {
+        code: "E0101",
+        title: "undefined name",
+        category: "names",
+    },
     // ── Type system ───────────────────────────────────────────────────────────
-    DiagnosticCode { code: "E0201", title: "type mismatch in assignment or initialiser",   category: "types"        },
-    DiagnosticCode { code: "E0202", title: "return type mismatch",                         category: "types"        },
-
+    DiagnosticCode {
+        code: "E0201",
+        title: "type mismatch in assignment or initialiser",
+        category: "types",
+    },
+    DiagnosticCode {
+        code: "E0202",
+        title: "return type mismatch",
+        category: "types",
+    },
     // ── Argument / call ───────────────────────────────────────────────────────
-    DiagnosticCode { code: "E0301", title: "missing required argument",                    category: "args"         },
-
+    DiagnosticCode {
+        code: "E0301",
+        title: "missing required argument",
+        category: "args",
+    },
     // ── Concurrency / safety ──────────────────────────────────────────────────
-    DiagnosticCode { code: "E0401", title: "non-`Shared` value crossed a thread boundary", category: "concurrency"  },
-    DiagnosticCode { code: "E0402", title: "unawaited `Pending` value dropped",            category: "concurrency"  },
-
+    DiagnosticCode {
+        code: "E0401",
+        title: "non-`Shared` value crossed a thread boundary",
+        category: "concurrency",
+    },
+    DiagnosticCode {
+        code: "E0402",
+        title: "unawaited `Pending` value dropped",
+        category: "concurrency",
+    },
     // ── Warnings: lifecycle ───────────────────────────────────────────────────
-    DiagnosticCode { code: "W1001", title: "variable declared without a value",            category: "init"         },
-    DiagnosticCode { code: "W1002", title: "variable declared but never used",             category: "unused"       },
-    DiagnosticCode { code: "W1003", title: "action parameter never used",                  category: "unused"       },
-
+    DiagnosticCode {
+        code: "W1001",
+        title: "variable declared without a value",
+        category: "init",
+    },
+    DiagnosticCode {
+        code: "W1002",
+        title: "variable declared but never used",
+        category: "unused",
+    },
+    DiagnosticCode {
+        code: "W1003",
+        title: "action parameter never used",
+        category: "unused",
+    },
     // ── Warnings: style ───────────────────────────────────────────────────────
-    DiagnosticCode { code: "W2001", title: "file does not have the `.fdn` extension",      category: "style"        },
-
+    DiagnosticCode {
+        code: "W2001",
+        title: "file does not have the `.fdn` extension",
+        category: "style",
+    },
     // ── Runtime: control flow ─────────────────────────────────────────────────
-    DiagnosticCode { code: "R1001", title: "stack overflow",                               category: "runtime"      },
-    DiagnosticCode { code: "R1002", title: "user-thrown panic",                            category: "runtime"      },
-
+    DiagnosticCode {
+        code: "R1001",
+        title: "stack overflow",
+        category: "runtime",
+    },
+    DiagnosticCode {
+        code: "R1002",
+        title: "user-thrown panic",
+        category: "runtime",
+    },
     // ── Runtime: arithmetic / bounds ──────────────────────────────────────────
-    DiagnosticCode { code: "R2001", title: "division by zero",                             category: "arithmetic"   },
-    DiagnosticCode { code: "R2002", title: "index out of bounds",                          category: "bounds"       },
-    DiagnosticCode { code: "R2003", title: "arithmetic overflow",                          category: "arithmetic"   },
-
+    DiagnosticCode {
+        code: "R2001",
+        title: "division by zero",
+        category: "arithmetic",
+    },
+    DiagnosticCode {
+        code: "R2002",
+        title: "index out of bounds",
+        category: "bounds",
+    },
+    DiagnosticCode {
+        code: "R2003",
+        title: "arithmetic overflow",
+        category: "arithmetic",
+    },
     // ── Runtime: I/O ──────────────────────────────────────────────────────────
-    DiagnosticCode { code: "R3001", title: "failed to open file",                          category: "io"           },
-    DiagnosticCode { code: "R3002", title: "failed to read file",                          category: "io"           },
-    DiagnosticCode { code: "R3003", title: "failed to write file",                         category: "io"           },
-    DiagnosticCode { code: "R3004", title: "permission denied",                            category: "io"           },
+    DiagnosticCode {
+        code: "R3001",
+        title: "failed to open file",
+        category: "io",
+    },
+    DiagnosticCode {
+        code: "R3002",
+        title: "failed to read file",
+        category: "io",
+    },
+    DiagnosticCode {
+        code: "R3003",
+        title: "failed to write file",
+        category: "io",
+    },
+    DiagnosticCode {
+        code: "R3004",
+        title: "permission denied",
+        category: "io",
+    },
 ];
 
 /// Look up a code's metadata.  Returns `None` for unknown codes.

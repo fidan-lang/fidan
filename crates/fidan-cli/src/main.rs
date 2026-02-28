@@ -167,7 +167,10 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     let interner = Arc::new(SymbolInterner::new());
 
     // ── Lex ────────────────────────────────────────────────────────────────────
-    let tokens = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+    let (tokens, lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+    for diag in &lex_diags {
+        fidan_diagnostics::render_to_stderr(diag, &source_map);
+    }
 
     // ── --emit tokens ──────────────────────────────────────────────────────────
     if opts.emit.contains(&EmitKind::Tokens) {
@@ -197,12 +200,16 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     }
     // ── Type-check ────────────────────────────────────
     // Only proceed if parse is clean.
-    let mut error_count: usize = parse_diags
+    let mut error_count: usize = lex_diags
+        .iter()
+        .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
+        .count()
+        + parse_diags
         .iter()
         .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
         .count();
 
-    if parse_diags.is_empty() {
+    if lex_diags.is_empty() && parse_diags.is_empty() {
         let type_diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
         for diag in &type_diags {
             fidan_diagnostics::render_to_stderr(diag, &source_map);
@@ -428,7 +435,10 @@ fn run_repl() -> Result<()> {
                     let sname = format!("<repl:{line_no}>");
                     let smap = Arc::new(SourceMap::new());
                     let f = smap.add_file(sname.as_str(), cmd_arg);
-                    let toks = Lexer::new(&f, Arc::clone(&interner)).tokenise();
+                    let (toks, lex_diags) = Lexer::new(&f, Arc::clone(&interner)).tokenise();
+                    for d in &lex_diags {
+                        fidan_diagnostics::render_to_stderr(d, &smap);
+                    }
                     let (m, ast_diags) = fidan_parser::parse(&toks, f.id, Arc::clone(&interner));
                     for d in &ast_diags {
                         fidan_diagnostics::render_to_stderr(d, &smap);
@@ -467,7 +477,10 @@ fn run_repl() -> Result<()> {
         let source_name = format!("<repl:{line_no}>");
         let source_map = Arc::new(SourceMap::new());
         let file = source_map.add_file(source_name.as_str(), trimmed);
-        let tokens = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        let (tokens, lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        for diag in &lex_diags {
+            fidan_diagnostics::render_to_stderr(diag, &source_map);
+        }
 
         let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
 
@@ -475,7 +488,7 @@ fn run_repl() -> Result<()> {
             fidan_diagnostics::render_to_stderr(diag, &source_map);
         }
 
-        if parse_diags.is_empty() {
+        if lex_diags.is_empty() && parse_diags.is_empty() {
             tc.check_module(&module);
             let type_diags = tc.drain_diags();
             if type_diags.is_empty() {
