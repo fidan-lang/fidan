@@ -19,29 +19,31 @@ pub enum TokenKind {
 
     // ── Keywords ─────────────────────────────────────────────────────────────
     Var,
-    Set,        // assignment: canonical form of `set`
+    Set, // assignment: canonical form of `set`
     Action,
     Object,
     Extends,
     Return,
     If,
-    Otherwise,
+    Otherwise, // `else`
     When,
     For,
     In,
     While,
-    Break,
+    Break, // `stop`
     Continue,
-    Attempt,    // `try`
+    Attempt, // `try`
     Catch,
     Finally,
-    Panic,      // `throw`
-    Use,        // imports
+    Panic,  // `throw`
+    Check,  // pattern match statement (`check x { ... }`)
+    Use,    // imports
+    Export, // `export use`
     As,
-    Oftype,     // type annotation
+    Oftype, // type annotation (`->` is also accepted in the parser)
     Required,
     Optional,
-    Dynamic,
+    Dynamic, // surface keyword: `flexible` (alias: `dynamic`)
     Parallel,
     Concurrent,
     Task,
@@ -49,11 +51,11 @@ pub enum TokenKind {
     Await,
     Shared,
     Pending,
-    Weak,       // WeakShared
+    Weak, // WeakShared
     And,
     Or,
     Not,
-    Is,         // `is` — part of `is not` (normalised to NotEq in parser)
+    Is, // `is` — part of `is not` (normalised to NotEq in parser)
     This,
     Parent,
     New,
@@ -61,25 +63,26 @@ pub enum TokenKind {
     False,
 
     // ── Operators ────────────────────────────────────────────────────────────
-    Assign,         // `=` | `set` (in assignment position)
-    Eq,             // `==` | `is` | `equals`
-    NotEq,          // `!=` | `notequals`
-    Lt,             // `<`  | `lessthan`
-    LtEq,           // `<=` | `lessthanorequals`
-    Gt,             // `>`  | `greaterthan`
-    GtEq,           // `>=` | `greaterthanorequals`
-    Plus,           // `+`
-    PlusEq,         // `+=`
-    Minus,          // `-`
-    MinusEq,        // `-=`
-    Star,           // `*`
-    StarEq,         // `*=`
-    Slash,          // `/`
-    SlashEq,        // `/=`
-    Percent,        // `%`
-    PercentEq,      // `%=`
-    Caret,          // `^`
-    NullCoalesce,   // `??`
+    Assign,       // `=` | `set` (in assignment position)
+    Eq,           // `==` | `is` | `equals`
+    NotEq,        // `!=` | `notequals` | `is not` (two-token, folded in parser)
+    Lt,           // `<`  | `lessthan`
+    LtEq,         // `<=` | `lessthanorequals`
+    Gt,           // `>`  | `greaterthan`
+    GtEq,         // `>=` | `greaterthanorequals`
+    Plus,         // `+`
+    PlusEq,       // `+=`
+    Minus,        // `-`
+    MinusEq,      // `-=`
+    Star,         // `*`
+    StarEq,       // `*=`
+    Slash,        // `/`
+    SlashEq,      // `/=`
+    Percent,      // `%`
+    PercentEq,    // `%=`
+    Caret,        // `^` (bitwise XOR)
+    StarStar,     // `**` | `pow` (exponentiation)
+    NullCoalesce, // `??`
 
     // ── Delimiters ───────────────────────────────────────────────────────────
     LParen,
@@ -88,19 +91,19 @@ pub enum TokenKind {
     RBrace,
     LBracket,
     RBracket,
-    Comma,          // `,` | `also`
+    Comma, // `,` | `also`
     Dot,
-    DotDot,         // `..`  range
+    DotDot, // `..`  range
     Colon,
-    DoubleColon,    // `::`
-    Arrow,          // `->`
-    FatArrow,       // `=>`
-    /// `;` | `stop` | `separate` — inline statement separator.
+    DoubleColon, // `::`
+    Arrow,       // `->`
+    FatArrow,    // `=>`
+    /// `;` | `separate` — inline statement separator.
     Semicolon,
     /// Emitted at the end of a logical line (Go-style automatic insertion).
     Newline,
-    Hash,           // `#` decorator prefix (the `@` is decorator, `#` is comment start — already consumed)
-    At,             // `@` decorator prefix
+    Hash, // `#` decorator prefix (the `@` is decorator, `#` is comment start — already consumed)
+    At,   // `@` decorator prefix
 
     // ── Identifiers ──────────────────────────────────────────────────────────
     Ident(Symbol),

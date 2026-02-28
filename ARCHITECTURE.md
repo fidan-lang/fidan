@@ -331,6 +331,24 @@ var x set 1; var y set 2; print(x + y)   # identical
 
 The parser treats `Newline` and `Semicolon` identically as statement separators.
 
+### Parentheses Rule
+
+> **Parentheses in Fidan mean exactly one thing: wrapping a list of items or grouping a
+> sub-expression. They are NEVER written around control-flow conditions or `for` bindings.**
+
+| Position | Parens required? | Example |
+|---|---|---|
+| Action parameter list | **Yes** | `action foo with (required x -> integer)` |
+| Lambda parameter list | **Yes** | `(x -> integer) returns integer => x * 2` |
+| Call / constructor argument list | **Yes** | `add(1, 2)`, `Dog("Rex")` |
+| Grouping inside an expression | **Yes** | `(a + b) * c` |
+| `if` condition | **No — forbidden** | `if score > 90 {` ✅  `if (score > 90) {` ❌ |
+| `while` condition | **No — forbidden** | `while count < 5 {` ✅  `while (count < 5) {` ❌ |
+| `for` binding | **No — forbidden** | `for item in list {` ✅  `for (item in list) {` ❌ |
+
+This keeps control-flow readable as plain English prose and gives parentheses a single,
+unambiguous meaning in the grammar.
+
 ### Comment Handling
 
 ```
@@ -2173,6 +2191,15 @@ HIR lowering begins. Adding syntax after HIR exists means patching the lowering 
       `When` token already exist; only the parser dispatch is missing.
 - [ ] **Constructor syntax** — `new TypeName(args)` vs `initialize` convention vs another
       form. Must be decided, implementing `new` keyword fully in parser + typeck.
+- [ ] **`export use` re-exports** — `export use std.io.print` makes an imported name
+      part of the current module's public API. Implement in the module-resolution pass
+      (before HIR); no backend changes required.
+- [ ] **`->` as `oftype` alias** — `Arrow` is already a separate token. In the parser,
+      every position that consumes `Oftype` must also accept `Arrow`. This covers
+      variable declarations (`var x -> integer`), action params (`required n -> integer`),
+      nested composite types (`list -> list -> integer`), and return annotations.
+      Do NOT emit `Oftype` from the lexer for `->` — keep `Arrow` distinct so it can
+      later serve as a closure/lambda arrow (`(x) -> x + 1`) without ambiguity.
 - [ ] **Any other v1 surface syntax** agreed upon before this phase closes.
 
 > **Rule:** No PR that touches `fidan-hir`, `fidan-mir`, or any codegen crate is merged

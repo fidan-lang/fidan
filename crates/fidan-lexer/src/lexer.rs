@@ -1,20 +1,20 @@
-use std::sync::Arc;
-use fidan_source::{FileId, SourceFile, Span};
 use crate::{
-    token::{Token, TokenKind},
-    synonyms::lookup_keyword,
     interner::SymbolInterner,
+    synonyms::lookup_keyword,
+    token::{Token, TokenKind},
 };
+use fidan_source::{FileId, SourceFile, Span};
+use std::sync::Arc;
 
 /// The Fidan lexer.
 ///
 /// Consumes a `SourceFile` and produces a flat `Vec<Token>`.
 /// All synonym resolution happens here; the parser only sees canonical tokens.
 pub struct Lexer<'src> {
-    src:       &'src str,
-    file_id:   FileId,
-    pos:       u32,   // current byte position (always on a char boundary)
-    interner:  Arc<SymbolInterner>,
+    src: &'src str,
+    file_id: FileId,
+    pos: u32, // current byte position (always on a char boundary)
+    interner: Arc<SymbolInterner>,
     /// The last non-whitespace token kind emitted (needed for auto-newline insertion).
     last_kind: Option<TokenKind>,
 }
@@ -22,9 +22,9 @@ pub struct Lexer<'src> {
 impl<'src> Lexer<'src> {
     pub fn new(file: &'src SourceFile, interner: Arc<SymbolInterner>) -> Self {
         Self {
-            src:      &file.src,
-            file_id:  file.id,
-            pos:      0,
+            src: &file.src,
+            file_id: file.id,
+            pos: 0,
             interner,
             last_kind: None,
         }
@@ -38,7 +38,9 @@ impl<'src> Lexer<'src> {
             let tok = self.next_token();
             let is_eof = tok.kind == TokenKind::Eof;
             tokens.push(tok);
-            if is_eof { break; }
+            if is_eof {
+                break;
+            }
         }
         tokens
     }
@@ -80,7 +82,9 @@ impl<'src> Lexer<'src> {
     /// Returns `true` if a newline was encountered while skipping.
     fn skip_non_newline_whitespace(&mut self) {
         while let Some(c) = self.peek() {
-            if c == '\n' || !c.is_whitespace() { break; }
+            if c == '\n' || !c.is_whitespace() {
+                break;
+            }
             self.advance();
         }
     }
@@ -106,7 +110,9 @@ impl<'src> Lexer<'src> {
             } else if c == '/' && self.peek() == Some('#') {
                 self.advance();
                 depth -= 1;
-                if depth == 0 { break; }
+                if depth == 0 {
+                    break;
+                }
             }
         }
     }
@@ -123,7 +129,11 @@ impl<'src> Lexer<'src> {
                 // ── End of file ──────────────────────────────────────────
                 None => {
                     // Auto-insert newline before Eof if needed.
-                    if self.last_kind.as_ref().map_or(false, |k| k.terminates_statement()) {
+                    if self
+                        .last_kind
+                        .as_ref()
+                        .map_or(false, |k| k.terminates_statement())
+                    {
                         let span = self.span_from(start);
                         self.last_kind = Some(TokenKind::Newline);
                         return Token::new(TokenKind::Newline, span);
@@ -136,7 +146,11 @@ impl<'src> Lexer<'src> {
                     self.advance();
                     let span = self.span_from(start);
                     // Emit a `Newline` token only if the last real token warrants it.
-                    if self.last_kind.as_ref().map_or(false, |k| k.terminates_statement()) {
+                    if self
+                        .last_kind
+                        .as_ref()
+                        .map_or(false, |k| k.terminates_statement())
+                    {
                         self.last_kind = Some(TokenKind::Newline);
                         return Token::new(TokenKind::Newline, span);
                     }
@@ -180,14 +194,17 @@ impl<'src> Lexer<'src> {
                 Some('\\') => {
                     // Basic escape sequences
                     match self.advance() {
-                        Some('n')  => s.push('\n'),
-                        Some('t')  => s.push('\t'),
-                        Some('r')  => s.push('\r'),
-                        Some('"')  => s.push('"'),
+                        Some('n') => s.push('\n'),
+                        Some('t') => s.push('\t'),
+                        Some('r') => s.push('\r'),
+                        Some('"') => s.push('"'),
                         Some('\\') => s.push('\\'),
-                        Some('{')  => s.push('{'),
-                        Some(c)    => { s.push('\\'); s.push(c); }
-                        None       => break,
+                        Some('{') => s.push('{'),
+                        Some(c) => {
+                            s.push('\\');
+                            s.push(c);
+                        }
+                        None => break,
                     }
                 }
                 Some(c) => s.push(c),
@@ -198,20 +215,31 @@ impl<'src> Lexer<'src> {
     }
 
     fn lex_number(&mut self, start: u32) -> Token {
-        while self.peek().map_or(false, |c| c.is_ascii_digit() || c == '_') {
+        while self
+            .peek()
+            .map_or(false, |c| c.is_ascii_digit() || c == '_')
+        {
             self.advance();
         }
-        let is_float = self.peek() == Some('.') && self.peek2().map_or(false, |c| c.is_ascii_digit());
+        let is_float =
+            self.peek() == Some('.') && self.peek2().map_or(false, |c| c.is_ascii_digit());
         if is_float {
             self.advance(); // `.`
-            while self.peek().map_or(false, |c| c.is_ascii_digit() || c == '_') {
+            while self
+                .peek()
+                .map_or(false, |c| c.is_ascii_digit() || c == '_')
+            {
                 self.advance();
             }
             // Optional exponent: e/E [+-] digits
             if matches!(self.peek(), Some('e') | Some('E')) {
                 self.advance();
-                if matches!(self.peek(), Some('+') | Some('-')) { self.advance(); }
-                while self.peek().map_or(false, |c| c.is_ascii_digit()) { self.advance(); }
+                if matches!(self.peek(), Some('+') | Some('-')) {
+                    self.advance();
+                }
+                while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                    self.advance();
+                }
             }
             let raw = &self.src[start as usize..self.pos as usize];
             let val: f64 = raw.replace('_', "").parse().unwrap_or(0.0);
@@ -223,7 +251,10 @@ impl<'src> Lexer<'src> {
     }
 
     fn lex_ident(&mut self, start: u32) -> Token {
-        while self.peek().map_or(false, |c| c.is_alphanumeric() || c == '_') {
+        while self
+            .peek()
+            .map_or(false, |c| c.is_alphanumeric() || c == '_')
+        {
             self.advance();
         }
         let word = &self.src[start as usize..self.pos as usize];
@@ -248,57 +279,97 @@ impl<'src> Lexer<'src> {
             ']' => TokenKind::RBracket,
             ',' => TokenKind::Comma,
             '.' => {
-                if self.eat_if('.') { TokenKind::DotDot }
-                else { TokenKind::Dot }
+                if self.eat_if('.') {
+                    TokenKind::DotDot
+                } else {
+                    TokenKind::Dot
+                }
             }
             ':' => {
-                if self.eat_if(':') { TokenKind::DoubleColon }
-                else { TokenKind::Colon }
+                if self.eat_if(':') {
+                    TokenKind::DoubleColon
+                } else {
+                    TokenKind::Colon
+                }
             }
             ';' => TokenKind::Semicolon,
             '@' => TokenKind::At,
             '?' => {
-                if self.eat_if('?') { TokenKind::NullCoalesce }
-                else { TokenKind::Unknown('?') }
+                if self.eat_if('?') {
+                    TokenKind::NullCoalesce
+                } else {
+                    TokenKind::Unknown('?')
+                }
             }
             '+' => {
-                if self.eat_if('=') { TokenKind::PlusEq }
-                else { TokenKind::Plus }
+                if self.eat_if('=') {
+                    TokenKind::PlusEq
+                } else {
+                    TokenKind::Plus
+                }
             }
             '-' => {
-                if self.eat_if('>') { TokenKind::Arrow }
-                else if self.eat_if('=') { TokenKind::MinusEq }
-                else { TokenKind::Minus }
+                if self.eat_if('>') {
+                    TokenKind::Arrow
+                } else if self.eat_if('=') {
+                    TokenKind::MinusEq
+                } else {
+                    TokenKind::Minus
+                }
             }
             '*' => {
-                if self.eat_if('=') { TokenKind::StarEq }
-                else { TokenKind::Star }
+                if self.eat_if('*') {
+                    TokenKind::StarStar
+                } else if self.eat_if('=') {
+                    TokenKind::StarEq
+                } else {
+                    TokenKind::Star
+                }
             }
             '/' => {
-                if self.eat_if('=') { TokenKind::SlashEq }
-                else { TokenKind::Slash }
+                if self.eat_if('=') {
+                    TokenKind::SlashEq
+                } else {
+                    TokenKind::Slash
+                }
             }
             '%' => {
-                if self.eat_if('=') { TokenKind::PercentEq }
-                else { TokenKind::Percent }
+                if self.eat_if('=') {
+                    TokenKind::PercentEq
+                } else {
+                    TokenKind::Percent
+                }
             }
             '^' => TokenKind::Caret,
             '=' => {
-                if self.eat_if('>') { TokenKind::FatArrow }
-                else if self.eat_if('=') { TokenKind::Eq }
-                else { TokenKind::Assign }
+                if self.eat_if('>') {
+                    TokenKind::FatArrow
+                } else if self.eat_if('=') {
+                    TokenKind::Eq
+                } else {
+                    TokenKind::Assign
+                }
             }
             '!' => {
-                if self.eat_if('=') { TokenKind::NotEq }
-                else { TokenKind::Not }
+                if self.eat_if('=') {
+                    TokenKind::NotEq
+                } else {
+                    TokenKind::Not
+                }
             }
             '<' => {
-                if self.eat_if('=') { TokenKind::LtEq }
-                else { TokenKind::Lt }
+                if self.eat_if('=') {
+                    TokenKind::LtEq
+                } else {
+                    TokenKind::Lt
+                }
             }
             '>' => {
-                if self.eat_if('=') { TokenKind::GtEq }
-                else { TokenKind::Gt }
+                if self.eat_if('=') {
+                    TokenKind::GtEq
+                } else {
+                    TokenKind::Gt
+                }
             }
             other => TokenKind::Unknown(other),
         };
@@ -364,12 +435,22 @@ mod tests {
 
     #[test]
     fn test_synonyms() {
-        let tokens = lex("stop separate also try throw");
-        assert_eq!(tokens[0], TokenKind::Semicolon);
-        assert_eq!(tokens[1], TokenKind::Semicolon);
-        assert_eq!(tokens[2], TokenKind::Comma);
-        assert_eq!(tokens[3], TokenKind::Attempt);
-        assert_eq!(tokens[4], TokenKind::Panic);
+        // Control-flow synonyms
+        let tokens = lex("else stop");
+        assert_eq!(tokens[0], TokenKind::Otherwise); // else = otherwise
+        assert_eq!(tokens[1], TokenKind::Break); // stop = break
+
+        // Inline separator synonym
+        let tokens = lex("separate");
+        assert_eq!(tokens[0], TokenKind::Semicolon); // separate = ;
+
+        // Operator / call synonyms
+        let tokens = lex("also try throw mod pow");
+        assert_eq!(tokens[0], TokenKind::Comma); // also = ,
+        assert_eq!(tokens[1], TokenKind::Attempt); // try = attempt
+        assert_eq!(tokens[2], TokenKind::Panic); // throw = panic
+        assert_eq!(tokens[3], TokenKind::Percent); // mod = %
+        assert_eq!(tokens[4], TokenKind::StarStar); // pow = **
     }
 
     #[test]
@@ -384,7 +465,8 @@ mod tests {
         // `+` is a continuation token; a newline after it must NOT terminate the statement.
         // Verify: no [Plus, Newline] pair exists (the Newline before Eof from `y` is fine).
         let tokens = lex("x +\ny");
-        let newline_after_plus = tokens.windows(2)
+        let newline_after_plus = tokens
+            .windows(2)
             .any(|w| w[0] == TokenKind::Plus && w[1] == TokenKind::Newline);
         assert!(!newline_after_plus);
     }

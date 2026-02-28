@@ -1,0 +1,613 @@
+## ============================================================
+## Fidan Language — Complete Syntax Reference
+## Every statement, expression, and construct in one file.
+## Lines marked [PROPOSED] use syntax not yet finalised —
+## tweak to your vision before Phase 3.5 is closed.
+## ============================================================
+
+
+# ── 1. COMMENTS ──────────────────────────────────────────────────────────────
+
+# Single-line comment (#)
+## Also a single-line comment
+
+#/
+  Multi-line comment.
+  #/
+    Nested multi-line comment — arbitrary depth.
+  /#
+  Back in the outer comment.
+/#
+
+
+# ── 2. IMPORTS ───────────────────────────────────────────────────────────────
+
+### Basic usage
+
+use std.io
+use std.math
+
+### Selective imports
+
+use std.io.print
+use std.math.sqrt
+
+### Grouped imports
+
+use std.io.{print, readFile, writeFile}
+
+### Aliasing
+
+use std.collections.list as List
+use std.math as math
+
+### Re-exporting (important for libraries)
+
+use std.io.print
+use std.net.http
+
+export use std.io.print
+export use std.net.http
+
+# ── 3. VARIABLE DECLARATIONS ─────────────────────────────────────────────────
+
+var a = 42                   # inferred: integer
+var b set 3.14                    # inferred: float   (`set` = `=`)
+var c = true                      # inferred: boolean
+var d = "hello"                   # inferred: string
+var e = nothing                   # inferred: nothing (null)
+
+var f oftype integer              # explicit type, no init → value is `nothing`
+var g oftype float = 2.718        # explicit type + init
+var h oftype string = "world"
+var i oftype boolean = false
+
+# All built-in primitive type names
+var t1 oftype integer
+var t2 oftype float
+var t3 oftype boolean
+var t4 oftype string
+var t5 oftype nothing
+var t6 oftype flexible             # accepts any type — like TypeScript `any`
+
+# Composite types
+var nums   oftype list oftype integer
+var lookup oftype map oftype string        # `map` is the keyword for dictionary/hashmap
+var matrix oftype list oftype list oftype integer
+var anothermatrix -> list -> list -> integer   # alternative arrow syntax for nested types
+
+
+# ── 4. LITERALS ──────────────────────────────────────────────────────────────
+
+# Integer
+var int1 = 1_000_000              # underscores allowed for readability
+var int2 = -99
+
+# Float
+var flt1 = 1.5
+var flt2 = -0.001
+
+# Boolean
+var bool1 = true
+var bool2 = false
+var bool3 = True                  # capital alias
+var bool4 = False
+
+# Nothing
+var nul1 = nothing
+
+# String (raw)
+var str1 = "Hello, world!"
+var str2 = "Line one\nLine two\tTabbed"
+
+# String interpolation
+var iname = "Fidan"
+var greeting = "Hello, {iname}!"
+var nested_interp = "Result: {1 + 2 * 3}"    # expression inside {}
+var chained  = "{iname} says: {greeting}"
+
+# List literal
+var primes -> list -> integer  = [2, 3, 5, 7, 11]
+var mixed oftype list oftype flexible  = [1, "two", true, nothing]       # flexible list
+var empty_l = []
+var matrix = [[1, 2], [3, 4], [5, 6]]
+var squares = [x * x for x in primes]    # list comprehension
+
+# Dict (Map) literal
+var person_data = { "name": "Alice", "age": 30 }
+var scores      = { "math": 95, "english": 88 }
+var empty_d     = {}
+
+### Dict comprehension
+var word_lengths = { word: word.length for word in ["apple", "banana", "cherry"] }
+
+
+# ── 5. OPERATORS ─────────────────────────────────────────────────────────────
+
+# Arithmetic
+var op_sum  = 10 + 3
+var op_diff = 10 - 3
+var op_prod = 10 * 3
+var op_quot = 10 / 3
+var op_rem  = 10 % 3
+var op_pow  = 2 ** 10
+var op_neg  = -5
+var op_pos  = +5    # unary plus (no effect, but valid syntax)
+var op_mod  = 10 mod 3   # `mod` alias for `%`
+var op_pow2 = 2 pow 10   # `pow` alias for `**`
+var op_bitand = 0b1101 & 0b1011
+var op_bitor  = 0b1101 | 0b1011
+var op_bitxor = 0b1101 ^ 0b1011
+var op_shl    = 1 << 3
+var op_shr    = 8 >> 2
+
+# Comparison  (all aliases shown)
+var eq1  = 5 == 5
+var eq2  = 5 is 5                 # `is` = `==`
+var eq3  = 5 equals 5             # `equals` = `==`
+var neq1 = 5 != 6
+var neq2 = 5 is not 6             # `is not` (two tokens) = `!=`
+var lt1  = 3 < 5
+var lt2  = 3 lessthan 5
+var gt1  = 5 > 3
+var gt2  = 5 greaterthan 3
+var lte  = 3 <= 3
+var gte  = 5 >= 5
+
+# Logical
+var and1 = true and false
+var and2 = true && false          # `&&` alias
+var or1  = true or false
+var or2  = true || false          # `||` alias
+var not1 = not true
+var not2 = !false                 # `!` alias
+
+# Null-coalescing
+var maybe  = nothing
+var nc_result = maybe ?? "default"   # = "default" when maybe is nothing
+var nc_chain = maybe ?? another ?? "fallback"   # checks each in order, returns first non-nothing
+
+# Ternary:  value if condition else fallback
+var absval = a if a > 0 else -a
+var tlabel = "adult" if a >= 18 else "minor"
+
+# Implicit-subject ternary (Fidan shorthand)
+var safe = maybe if is not nothing else "fallback"
+#          ^^^^^ subject is `maybe` — no need to repeat it in the condition
+
+# Range
+var r1 = 1..10                    # 1 inclusive to 10 exclusive
+var r2 = 1...10                   # 1 to 10 inclusive
+
+# ── 6. TYPE EXPRESSIONS ──────────────────────────────────────────────────────
+
+# Primitive named types — all valid spellings (aliases normalised by lexer)
+var xt1 oftype integer
+var xt2 oftype int                # alias
+var xt3 oftype float
+var xt4 oftype decimal            # alias
+var xt5 oftype boolean
+var xt6 oftype bool               # alias
+var xt7 oftype string
+var xt8 oftype text               # alias
+var xt9 oftype flexible
+var xt10 oftype nothing
+
+# Composite
+var tl1 oftype list oftype string
+var td1 oftype dict oftype (string, integer)
+var ts1 oftype Shared oftype integer        # thread-safe shared value
+var tp1 oftype Pending oftype string        # async result handle
+
+
+# ── 7. OBJECTS ───────────────────────────────────────────────────────────────
+
+object Animal {
+    var species oftype string = "Unknown"
+    var sound   oftype string = "..."
+
+    # Constructor-by-convention: action named `new` (without `action` keyword)
+    new with (optional species oftype string = "Unknown", optional sound oftype string = "...") {
+        this.species = species
+        this.sound   = sound
+    }
+
+    action speak returns string {
+        return "{this.species} says {this.sound}"
+    }
+
+    action describe returns nothing {
+        print("I am a {this.species}")
+    }
+}
+
+# Single inheritance with `extends`
+object Dog extends Animal {
+    var name oftype string
+
+    new with (required name oftype string) {
+        this.name = name
+        parent(species set "Dog", sound set "Woof")
+    }
+
+    action fetch with (required item oftype string) returns string {
+        return "{this.name} fetched the {item}!"
+    }
+}
+
+# Deeper inheritance chain
+object GuideDog extends Dog {
+    var owner oftype string = "Nobody"
+
+    new with (required name oftype string, optional owner oftype string = "Nobody") {
+        parent(name set name)
+        this.owner = owner
+    }
+
+    action guide returns nothing {
+        print("{this.name} is guiding {this.owner}")
+    }
+}
+
+
+# ── 8. ACTIONS (FUNCTIONS) ───────────────────────────────────────────────────
+
+# No params, no return type (implicitly nothing)
+action sayHello {
+    print("Hello!")
+}
+
+# Required param, but can be `nothing` (since all types are nullable by default)
+action greetUser with (username oftype string) {
+    print("Welcome, {username}!")
+}
+
+# Required param (enforces nonnull)
+action greetUser with (required username oftype string) {
+    print("Welcome, {username}!")
+}
+
+# Optional param (defaults to nothing when not supplied)
+action greetOptional with (optional username oftype string) {
+    var display = username ?? "stranger"
+    print("Hello, {display}!")
+}
+
+# Default value  (`=` and `default` are aliases for param defaults, can not be `nothing` because of defaults)
+action greetDefault with (optional username oftype string = "world") {
+    print("Hello, {username}!")
+}
+
+# Return type annotation
+action add with (required x -> integer also required y -> integer) returns integer { # `also` is an alias for `,`
+    return x + y
+}
+
+# Mixed params — required first, then optional; `also` = `,`
+action createUser with (required uname oftype string) also (optional age oftype integer = 0) also (optional email oftype string) returns string {
+    return "User: {uname}, age {age}"
+}
+
+# Parallel action — returns Pending oftype T automatically, runs on thread pool
+parallel action fetchData with (required url oftype string) returns string {
+    # ... I/O work here
+    return "data from {url}"
+}
+
+# Extension action — callable as Dog method OR as free function
+action greet extends Dog with (optional guest oftype Dog) {
+    var target = guest if is not nothing else this
+    print("Woof! Hi {target.name}!")
+}
+
+# Lambda (anonymous) action — can be assigned to variables or passed inline
+var square_fn oftype action = (x oftype integer) returns integer => x ** 2
+
+# ── 9. DECORATORS ────────────────────────────────────────────────────────────
+
+@precompile
+action hotPath with (required n oftype integer) returns integer {
+    var result = 0
+    for i in 1..n {
+        result = result + i
+    }
+    return result
+}
+
+@deprecated
+action oldWay {
+    print("Please use newWay() instead")
+}
+
+
+# ── 10. CONTROL FLOW ─────────────────────────────────────────────────────────
+
+action demonstrateControlFlow {
+
+    # ── if / otherwise when / otherwise ───────────────────────────────────────
+    var score = 75
+
+    if score >= 90 {
+        print("A")
+    } otherwise when score >= 80 {    # `otherwise when` = `else if`
+        print("B")
+    } else if score >= 70 {           # `else if` alias — same thing
+        print("C")
+    } otherwise {                     # `otherwise` = `else`
+        print("F")
+    }
+
+    # Single-branch if (no else required)
+    if score > 50 {
+        print("Passing")
+    }
+
+    # ── for loop ──────────────────────────────────────────────────────────────
+    var total = 0
+    for i in 1..11 {                  # i = 1, 2, ..., 10
+        total = total + i
+    }
+    print("Sum 1..10 = {total}")
+
+    # for over a list
+    var fruits = ["apple", "banana", "cherry"]
+    for fruit in fruits {             # NO parens — parens are forbidden on control-flow
+        print("Fruit: {fruit}")
+    }
+
+    # break and continue
+    for n in 1..20 {
+        if n % 2 equals 0 {
+            continue                  # skip even numbers (`also` = `,` but `continue` has no args)
+        }
+        if n > 9 {
+            break                     # stop after 9 (`break` = `stop`)
+        }
+        print(n)
+    }
+
+    # ── while loop ────────────────────────────────────────────────────────────
+    var count = 0
+    while count < 5 {
+        count = count + 1
+        print("count = {count}")
+    }
+
+    # while with break
+    var wx = 0
+    while true {
+        wx = wx + 1
+        if wx >= 3 { break }
+    }
+
+}
+
+
+# ── 11. ERROR HANDLING ───────────────────────────────────────────────────────
+
+action demonstrateErrors {
+
+    # Basic attempt/catch/otherwise/finally
+    attempt {
+        panic("Something went wrong!")    # `throw` is an alias
+    } catch err {
+        print("Caught: {err}")
+    } otherwise {
+        print("No error — success path only")
+    } finally {
+        print("Always runs, error or not")
+    }
+
+    # Multiple catch clauses with type annotation
+    attempt {
+        panic("typed error")
+    } catch err oftype string {
+        print("String error: {err}")
+    } catch err -> CustomError {
+        print("Any other error: {err}")
+    } catch err {
+        print("Fallback catch: {err}")
+    }
+
+    # Re-panicking inside catch
+    attempt {
+        panic("original")
+    } catch err {
+        print("Logging, then re-throwing")
+        panic(err)
+    } finally {
+        print("Cleanup always runs")
+    }
+
+}
+
+
+# ── 12. MATCH / PATTERN STATEMENT  ────────────
+
+action demonstrateMatch {
+
+    var day = "Monday"
+
+    # check on a value; `=>` introduces the arm body
+    # wildcard arm uses `_` or `default` as the pattern
+    check day {
+        "Monday"   => { print("Start of the week") }
+        "Friday"   => { print("End of the week") }
+        "Saturday" => { print("Weekend!") }
+        "Sunday"   => { print("Weekend!") }
+        _          => { print("Midweek") }
+    }
+
+    # check on integer
+    var code = 404
+    check code {
+        200 => { print("OK") }
+        404 => { print("Not Found") }
+        500 => { print("Server Error") }
+        _   => { print("Unknown: {code}") }
+    }
+
+    # match as expression — arm bodies are single expressions
+    var description = check code {
+        200 => "OK"
+        404 => "Not Found"
+        _   => "Other"
+    }
+
+    print(description)
+
+}
+
+
+# ── 13. CONCURRENCY ──────────────────────────────────────────────────────────
+
+action demonstrateConcurrency {
+
+    # ── concurrent { } — cooperative green threads ────────────────────────────
+    # Tasks interleave co-operatively; control returns after ALL finish
+    concurrent {
+        task fetchUsers {
+            print("Fetching users...")
+        }
+        task fetchProducts {
+            print("Fetching products...")
+        }
+    }
+
+    # ── parallel { } — OS thread pool via Rayon ───────────────────────────────
+    parallel {
+        task computeA {
+            print("Heavy A on thread pool")
+        }
+        task computeB {
+            print("Heavy B on thread pool")
+        }
+    }
+
+    # ── parallel for — distributes iterations over thread pool ────────────────
+    var data = [1, 2, 3, 4, 5, 6, 7, 8]
+    parallel for item in data {
+        print("Processing {item}")
+    }
+
+    # ── spawn / await — explicit async handle (Pending oftype T) ──────────────
+    var handle = spawn fetchData("https://example.com")     # type: Pending oftype string
+    var fetched = await handle                              # unwraps to string
+
+    # Inline spawn + await (shorthand)
+    var direct = await spawn fetchData("https://example.com/2")
+
+    # ── Shared oftype T — thread-safe mutable value (Arc<Mutex>) ─────────────
+    var counter oftype Shared oftype integer = Shared(0)
+    parallel {
+        task inc1 { counter.update(n set n + 1) }
+        task inc2 { counter.update(n set n + 1) }
+    }
+    print("Counter = {counter.get()}")    # 2
+
+    # ── parallel action returns Pending automatically ─────────────────────────
+    var pending = fetchData("https://example.com/3")        # type: Pending oftype string
+    var result  = await pending                             # type: string
+
+}
+
+
+# ── 14. CALLS — ALL FORMS ────────────────────────────────────────────────────
+
+action demonstrateCalls {
+
+    # Positional args
+    var s1 = add(3, 4)
+
+    # Named args  (`set` = `=` for arg passing)
+    var s2 = add(x set 3, y set 4)
+    var s3 = add(x = 3,   y = 4)
+
+    # Mixed — positional first, then named
+    var s4 = createUser("Alice", age = 25, email = "a@b.com")
+
+    # `also` as argument separator (alias for `,`)
+    var s5 = createUser("Bob" also age = 30)
+
+    # Method call
+    var rex = Dog("Rex")
+    rex.describe()
+    rex.fetch("ball")
+
+    # Call result used directly in expression
+    if add(1, 2) equals 3 {
+        print("Math works!")
+    }
+
+    # Chained field + call
+    print(rex.fetch("stick"))
+
+}
+
+
+# ── 15. COMPLEX / NESTED EXPRESSIONS ─────────────────────────────────────────
+
+action demonstrateExpressions {
+
+    # Nested null-coalescing
+    var na = nothing
+    var nb = nothing
+    var nc = "found"
+    var first = na ?? nb ?? nc        # = "found"
+
+    # Nested ternary
+    var xv = 5
+    var nest = "big" if xv > 10 else ("medium" if xv > 3 else "small")
+
+    # Boolean chains
+    var flag = true and (1 < 2) or not false
+
+    # Arithmetic precedence  (2 + 3 * 4**2 = 2 + 48 = 50)
+    var calc = 2 + 3 * 4 ** 2
+
+    # Index access
+    var fruits2 = ["apple", "banana"]
+    var first2  = fruits2[0]
+    var data2   = { "x": 10 }
+    var xval    = data2["x"]
+
+    # String concatenation with +
+    var fullname = "John" + " " + "Doe"
+
+    # Deeply nested string interpolation
+    var depth = "a={a}, sum={add(1,2)}, name={iname}"
+
+}
+
+
+# ── 16. MAIN (convention — not required by the language) ─────────────────────
+
+action main {
+    # Object construction (via initialize convention)
+    var animal = Animal("Cat", "Meow")
+    var rex    = Dog("Rex")
+    var guide  = GuideDog("Buddy", "Alice")
+
+    animal.speak()
+    rex.fetch("bone")
+    guide.guide()
+
+    # Extension action — two equivalent call forms
+    greet(rex)           # free-function: `this` bound to rex (the Dog param)
+    rex.greet()          # method form:   `this` = rex, guest = nothing
+
+    # All sections
+    demonstrateControlFlow()
+    demonstrateErrors()
+    demonstrateMatch()
+    demonstrateConcurrency()
+    demonstrateCalls()
+    demonstrateExpressions()
+
+    print("All done!")
+}
+
+
+# ── Top-level statements — hoisted declarations run first, then these in order
+print("Hello, world!")    # runs after all object/action declarations are registered
+main()                    # call the conventional entry point
