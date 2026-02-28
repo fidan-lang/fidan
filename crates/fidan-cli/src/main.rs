@@ -223,10 +223,14 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     // ── Multi-error footer ───────────────────────────────
     if error_count > 0 {
         let s = if error_count == 1 { "" } else { "s" };
+        let verb = match opts.mode {
+            ExecutionMode::Interpret => "run",
+            _ => "compile",
+        };
         render_message_to_stderr(
             Severity::Note,
             "",
-            &format!("could not compile `{source_name}` — {error_count} error{s}"),
+            &format!("could not {verb} `{source_name}` — {error_count} error{s}"),
         );
         eprintln!(
             "         run `fidan check` to list all errors, or `--max-errors N` to stop early"

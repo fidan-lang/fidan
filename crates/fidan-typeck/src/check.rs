@@ -266,10 +266,14 @@ impl TypeChecker {
                     if let Some(prev) = self.table.lookup_current_scope(*name) {
                         if prev.kind != SymbolKind::BuiltinAction {
                             let n = self.interner.resolve(*name).to_string();
-                            self.emit_error(
-                                fidan_diagnostics::diag_code!("E0102"),
-                                format!("`{n}` is already declared in this scope — use `{n} = value` to reassign"),
-                                *span,
+                            let prev_span = prev.span;
+                            self.diags.push(
+                                Diagnostic::error(
+                                    fidan_diagnostics::diag_code!("E0102"),
+                                    format!("`{n}` is already declared in this scope — use `{n} = value` to reassign"),
+                                    *span,
+                                )
+                                .with_label(Label::secondary(prev_span, "first declared here")),
                             );
                             return; // do not redefine; leave old binding intact
                         }
@@ -473,10 +477,14 @@ impl TypeChecker {
                     if let Some(prev) = self.table.lookup_current_scope(name) {
                         if prev.kind != SymbolKind::BuiltinAction {
                             let n = self.interner.resolve(name).to_string();
-                            self.emit_error(
-                                fidan_diagnostics::diag_code!("E0102"),
-                                format!("`{n}` is already declared in this scope — use `{n} = value` to reassign"),
-                                span,
+                            let prev_span = prev.span;
+                            self.diags.push(
+                                Diagnostic::error(
+                                    fidan_diagnostics::diag_code!("E0102"),
+                                    format!("`{n}` is already declared in this scope — use `{n} = value` to reassign"),
+                                    span,
+                                )
+                                .with_label(Label::secondary(prev_span, "first declared here")),
                             );
                             return;
                         }

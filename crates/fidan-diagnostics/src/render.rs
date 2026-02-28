@@ -138,11 +138,11 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
         let gutter_w = ctx_end.to_string().len();
         let g = " ".repeat(gutter_w); // blank gutter for separator lines
 
-        // Optional inline label after the underline carets.
+        // Optional inline label — only from a *primary* label on this line.
         let label_msg: Option<&str> = diag
             .labels
-            .first()
-            .filter(|l| !l.message.is_empty())
+            .iter()
+            .find(|l| l.primary && !l.message.is_empty())
             .map(|l| l.message.as_str());
 
         eprintln!("{dp}  {g} |");
@@ -180,6 +180,52 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
             }
         }
         eprintln!("{dp}  {g} |");
+    }
+
+    // ── Secondary labels (e.g. "first declared here") ─────────────────────────
+    //
+    // Each secondary label with a distinct span gets its own mini-snippet so
+    // the user can see both locations at a glance.
+    for label in diag.labels.iter().filter(|l| !l.primary && !l.message.is_empty()) {
+        // Resolve the source for this label's file (may differ from primary).
+        let lfile = source_map.get(label.span.file);
+        let lsrc: &str = &lfile.src;
+        let lname: &str = &lfile.name;
+        let (lline, lcol) = byte_to_line_col(lsrc, label.span.start as usize);
+        let lspan_len = (label.span.end as usize)
+            .saturating_sub(label.span.start as usize)
+            .max(1);
+        let llines: Vec<&str> = lsrc.lines().collect();
+        let ltotal = llines.len();
+
+        if lline > 0 && lline <= ltotal {
+            eprintln!("{dp}  {dim}note:{reset} {}", label.message);
+            eprintln!("{dp}  {dim}-->{reset} {lname}:{lline}:{lcol}");
+
+            let lctx_start = if lline > 1 { lline - 1 } else { lline };
+            let lctx_end = (lline + 1).min(ltotal);
+            let lgutter_w = lctx_end.to_string().len();
+            let lg = " ".repeat(lgutter_w);
+
+            eprintln!("{dp}  {lg} |");
+            for ln in lctx_start..=lctx_end {
+                if ln == 0 || ln > ltotal { continue; }
+                let src_line = llines[ln - 1];
+                let ln_s = format!("{:>width$}", ln, width = lgutter_w);
+                if ln == lline {
+                    eprintln!("{dp}  {ln_s} | {src_line}");
+                    let uline = format!(
+                        "{}{}",
+                        " ".repeat(lcol.saturating_sub(1)),
+                        "~".repeat(lspan_len),
+                    );
+                    eprintln!("{dp}  {lg} | {dim}{uline}{reset}");
+                } else {
+                    eprintln!("{dp}  {ctx_c}{ln_s} | {src_line}{reset}");
+                }
+            }
+            eprintln!("{dp}  {lg} |");
+        }
     }
 
     // ── Notes ─────────────────────────────────────────────────────────────────
