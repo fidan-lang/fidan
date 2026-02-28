@@ -97,7 +97,8 @@ pub enum TokenKind {
     RBracket,
     Comma, // `,` | `also`
     Dot,
-    DotDot, // `..`  range
+    DotDot,    // `..`  exclusive range
+    DotDotDot, // `...` inclusive range
     Colon,
     DoubleColon, // `::`
     Arrow,       // `->`

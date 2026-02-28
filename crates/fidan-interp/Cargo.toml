@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 fidan-source = { workspace = true }
+fidan-ast = { workspace = true }
+fidan-lexer = { workspace = true }
 fidan-mir = { workspace = true }
 fidan-runtime = { workspace = true }
 fidan-stdlib = { workspace = true }

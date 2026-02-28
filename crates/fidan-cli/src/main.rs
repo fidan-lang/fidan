@@ -139,7 +139,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     if !is_stdin && opts.input.extension().and_then(|e| e.to_str()) != Some("fdn") {
         render_message_to_stderr(
             Severity::Warning,
-            "W2001",
+            fidan_diagnostics::diag_code!("W2001"),
             &format!(
                 "file '{}' does not have the '.fdn' extension",
                 opts.input.display()
@@ -205,9 +205,9 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
         .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
         .count()
         + parse_diags
-        .iter()
-        .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
-        .count();
+            .iter()
+            .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
+            .count();
 
     if lex_diags.is_empty() && parse_diags.is_empty() {
         let type_diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
@@ -234,12 +234,15 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     }
     match opts.mode {
         ExecutionMode::Interpret => {
-            if !opts.emit.contains(&EmitKind::Tokens) {
-                render_message_to_stderr(
-                    Severity::Note,
-                    "unimplemented",
-                    "interpreter not yet implemented (Phase 5)",
-                );
+            if error_count == 0 {
+                // Run the interpreter.
+                if let Err(msg) = fidan_interp::run(&module, Arc::clone(&interner)) {
+                    render_message_to_stderr(
+                        Severity::Error,
+                        fidan_diagnostics::diag_code!("R0001"),
+                        &msg,
+                    );
+                }
             }
         }
         ExecutionMode::Build => {
@@ -307,11 +310,12 @@ impl rustyline::highlight::Highlighter for ReplHelper {
 
 // ── REPL ─────────────────────────────────────────────────────────────────────────────
 
-/// Interactive lex + parse + typecheck loop.
+/// Interactive lex + parse + typecheck + interpret loop.
 ///
-/// Each line is treated as a self-contained Fidan snippet.  The interpreter
-/// (Phase 5) will be wired here once available — for now this REPL is useful
-/// for exploring the parser and type-checker interactively.
+/// Each line is treated as a self-contained Fidan snippet.  The persistent
+/// [`TypeChecker`] accumulates symbol definitions across lines so names defined
+/// on line N are visible on line N+1.  The interpreter runs after every clean
+/// type-check so side effects (print, etc.) are visible immediately.
 fn run_repl() -> Result<()> {
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
@@ -412,8 +416,8 @@ fn run_repl() -> Result<()> {
                     println!("  :clear / :cls       clear the terminal (also Ctrl+L)");
                     println!("  :reset              clear the session state");
                     println!("  :ast  <snippet>     show the parsed AST node counts (debug)");
-                    println!("  :type <expr>        print the inferred type (Phase 5)");
-                    println!("  :last [--full]      show the last error's cause chain (Phase 5)");
+                    println!("  :type <expr>        print the inferred type of an expression");
+                    println!("  :last [--full]      show the last error's cause chain (Phase 6)");
                     continue;
                 }
 
@@ -451,11 +455,31 @@ fn run_repl() -> Result<()> {
                     continue;
                 }
 
-                // ── :type <expr>  (Phase 5) ───────────────────────────────
+                // ── :type <expr>  ────────────────────────────────────────
                 "type" => {
-                    eprintln!(
-                        "  :type — full type inference in the REPL is not yet implemented (Phase 5)"
-                    );
+                    if cmd_arg.is_empty() {
+                        eprintln!("  usage: :type <expr>");
+                        continue;
+                    }
+                    line_no += 1;
+                    let sname = format!("<repl:{line_no}>");
+                    let smap = Arc::new(SourceMap::new());
+                    let f = smap.add_file(sname.as_str(), cmd_arg);
+                    let (toks, lex_diags) = Lexer::new(&f, Arc::clone(&interner)).tokenise();
+                    for d in &lex_diags {
+                        fidan_diagnostics::render_to_stderr(d, &smap);
+                    }
+                    let (m, parse_diags) = fidan_parser::parse(&toks, f.id, Arc::clone(&interner));
+                    for d in &parse_diags {
+                        fidan_diagnostics::render_to_stderr(d, &smap);
+                    }
+                    if lex_diags.is_empty() && parse_diags.is_empty() {
+                        match tc.infer_snippet_type(&m) {
+                            Some(ty_name) => println!("  : {ty_name}"),
+                            None => eprintln!("  (snippet has no bare expression to infer)"),
+                        }
+                        let _ = tc.drain_diags(); // discard type errors — :type is query-only
+                    }
                     continue;
                 }
 
@@ -492,7 +516,13 @@ fn run_repl() -> Result<()> {
             tc.check_module(&module);
             let type_diags = tc.drain_diags();
             if type_diags.is_empty() {
-                println!("  ok");
+                if let Err(msg) = fidan_interp::run(&module, Arc::clone(&interner)) {
+                    render_message_to_stderr(
+                        Severity::Error,
+                        fidan_diagnostics::diag_code!("R0001"),
+                        &msg,
+                    );
+                }
             } else {
                 for diag in &type_diags {
                     fidan_diagnostics::render_to_stderr(diag, &source_map);

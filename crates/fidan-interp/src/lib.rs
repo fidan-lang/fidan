@@ -1,7 +1,12 @@
-//! `fidan-interp` — MIR tree-walking interpreter.
+//! `fidan-interp` — AST-walking interpreter (Phase 5 bootstrap).
+//!
+//! Evaluates a parsed, type-checked `Module` directly.
+//! When HIR/MIR lowering is complete (Phase 6+), this will be replaced by
+//! a proper SSA/MIR walker.
 
-mod interp;
-mod frame;
 mod builtins;
+mod env;
+mod frame;
+mod interp;
 
-pub use interp::Interpreter;
+pub use interp::run;

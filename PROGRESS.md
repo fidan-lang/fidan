@@ -83,7 +83,7 @@
 | AST visitor trait | ✅ | Default no-op `AstVisitor` |
 | `Expr::span()` helper | ✅ | Returns span for any expression variant |
 | `TypeExpr::span()` / `span_end()` helpers | ✅ | |
-| AST pretty-printer | ⬜ | Phase 2 stretch goal |
+| AST pretty-printer | ✅ | Phase 5 — `print.rs` full tree-walk printer; `--emit ast` shows all nodes |
 
 ### `fidan-parser`
 | Item | Status | Notes |
@@ -265,26 +265,37 @@
 | `OwnedRef<T>` (`Rc<RefCell<T>>`, interpreter-internal) | ✅ | `derive(Debug, Clone)`, COW helpers |
 | `SharedRef<T>` (`Arc<Mutex<T>>`, for `Shared oftype T`) | ✅ | `derive(Debug, Clone)` |
 | `FidanObject`, `FidanClass` | ✅ | Field lookup, inheritance chain via `parent: Option<Arc<FidanClass>>` |
-| `FidanList` (COW) | ✅ | `Arc<Vec<T>>` + `Arc::make_mut` on mutation |
-| `FidanDict` (COW) | ✅ | `Arc<HashMap<K,V>>` + `Arc::make_mut` on mutation |
+| `FidanList` (COW) | ✅ | `Arc<Vec<T>>` + `Arc::make_mut` on mutation; `set_at()` added Phase 5 |
+| `FidanDict` (COW) | ✅ | `Arc<HashMap<K,V>>` + `Arc::make_mut` on mutation; `iter()` added Phase 5 |
 | `FidanString` (COW) | ✅ | `Arc<str>`, `append()` produces new Arc |
 | Drop / owned-value lifetime tracking | ⬜ | Phase 5 — interpreter needed |
 
 ### `fidan-interp`
 | Item | Status | Notes |
 |---|---|---|
-| MIR walker / eval loop | ⬜ | |
-| Call stack + `CallFrame` | ⬜ | |
-| Built-in functions (`print`, `input`, `len`, etc.) | ⬜ | |
+| MIR walker / eval loop | ⬜ | Phase 6 — when HIR/MIR lowering is done |
+| Call stack + `CallFrame` | ✅ | `env.rs` frame stack; `frame.rs` Signal enum |
+| Built-in functions (`print`, `input`, `len`, etc.) | ✅ | `builtins.rs` — print, input, len, string, integer, float, boolean, range, append |
+| AST-walking interpreter (Phase 5 bootstrap) | ✅ | `interp.rs` — full eval_expr / exec_stmt; `fidan run test.fdn` works end-to-end |
+| Object construction + `initialize` dispatch | ✅ | `construct_object` + inherited fields via `make_fidan_class` |
+| Extension actions as methods + free functions | ✅ | `ext_actions: HashMap<class, HashMap<name, FuncDef>>` |
+| `parent.method()` dispatch | ✅ | Dispatches to parent class in class hierarchy |
+| String interpolation | ✅ | `InterpPart::Literal` + `InterpPart::Expr` evaluated inline |
+| `attempt / catch / otherwise / finally` | ✅ | `finally` always runs even on re-panic |
+| `check` statement + `check` expression | ✅ | Wildcard `_` + value matching |
+| Binary / unary operators (all variants) | ✅ | Arithmetic, bitwise, comparison, logical (short-circuit) |
+| `for` / `while` / `parallel for` loops | ✅ | Break / Continue signals propagate correctly |
+| Concurrent block (sequential fallback) | ✅ | Phase 5.5 will add real green threads |
+| `spawn` / `await` (sequential fallback) | ✅ | Evaluated synchronously; async in Phase 5.5 |
 | Green-thread scheduler (`corosensei`) | ⬜ | |
-| Exception unwind loop | ⬜ | |
-| `test/examples/test.fdn` runs, output verified | ⬜ | |
-| Stack traces in diagnostics (runtime error + call stack) | ⬜ | `stack trace (most recent call first): --> file:line in action \'name\'` format |
-| Evidence / context blocks in diagnostics | ⬜ | `context: y: integer = 0` typed key–value facts attached to runtime errors |
-| `--trace short` / `--trace full` / `--trace compact` output levels | ⬜ | Short = default; full = all cause-chain evidence; compact = CI-friendly single line |
-| `:type expr` in REPL | ⬜ | Evaluate an expression and print its inferred type |
-| `:last --full` in REPL | ⬜ | Expand full cause chain for the last diagnostic |
-| Error history buffer in REPL | ⬜ | Keep last N diagnostics for `:last` / `:last --full` |
+| Exception unwind loop | ✅ | Signal::Panic caught by attempt/catch |
+| `test/examples/test.fdn` runs, output verified | ✅ | 7 lines of output, exactly correct |
+| Stack traces in diagnostics (runtime error + call stack) | ⬜ | |
+| Evidence / context blocks in diagnostics | ⬜ | |
+| `--trace short` / `--trace full` / `--trace compact` | ⬜ | |
+| `:type expr` in REPL | ⬜ | Needs interpreter integration in REPL loop |
+| `:last --full` in REPL | ⬜ | |
+| Error history buffer in REPL | ⬜ | |
 
 ---
 
@@ -415,4 +426,4 @@ _None._
 
 ---
 
-*Last updated: 2026-02-28 — Phase 4 complete: error code registry (`codes.rs`, E0xxx/W1xxx/W2xxx/R2xxx/R3xxx); `error[E0101]:` headers; context window (1 line before+after); inline underline labels; fix-it patch blocks with `++++`; backtick identifiers; multi-error footer; colon-command REPL with Python-style banner; `syntax.fdn` → 132 items, 672 exprs, zero diagnostics; 12/12 lexer tests + 1 doctest pass.*
+*Last updated: 2026-02-28 — Phase 5 complete: AST-walking interpreter in `fidan-interp` (`env.rs`, `frame.rs`, `builtins.rs`, `interp.rs`); `fidan run test/examples/test.fdn` produces correct output; object construction + inheritance + extension actions + string interpolation + attempt/catch/finally (always runs) + check/pattern matching + all operators all working; `fidan-runtime` extended with `FidanList::set_at()` + `FidanDict::iter()`; 13 tests pass.*

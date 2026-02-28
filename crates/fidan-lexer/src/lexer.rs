@@ -199,9 +199,11 @@ impl<'src> Lexer<'src> {
                     // EOF before closing quote — emit a diagnostic.
                     let span = self.span_from(start);
                     self.diags.push(
-                        Diagnostic::error(diag_code!("E0001"), "unterminated string literal", span).with_label(
-                            Label::primary(span, "string opened here, but never closed with `\"`"),
-                        ),
+                        Diagnostic::error(diag_code!("E0001"), "unterminated string literal", span)
+                            .with_label(Label::primary(
+                                span,
+                                "string opened here, but never closed with `\"`",
+                            )),
                     );
                     break;
                 }
@@ -337,8 +339,11 @@ impl<'src> Lexer<'src> {
             ',' => TokenKind::Comma,
             '.' => {
                 if self.eat_if('.') {
-                    self.eat_if('.'); // `...` inclusive range — treated as `..` for now
-                    TokenKind::DotDot
+                    if self.eat_if('.') {
+                        TokenKind::DotDotDot // `...` inclusive range
+                    } else {
+                        TokenKind::DotDot // `..`  exclusive range
+                    }
                 } else {
                     TokenKind::Dot
                 }

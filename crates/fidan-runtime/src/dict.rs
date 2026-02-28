@@ -17,6 +17,11 @@ impl FidanDict {
     }
     pub fn len(&self) -> usize { self.inner.len() }
     pub fn is_empty(&self) -> bool { self.inner.is_empty() }
+
+    /// Iterate over key-value pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&FidanString, &FidanValue)> {
+        self.inner.iter()
+    }
 }
 
 impl Default for FidanDict {

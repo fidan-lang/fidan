@@ -19,6 +19,14 @@ impl FidanList {
         Arc::make_mut(&mut self.inner).push(val);
     }
 
+    /// Set value at index. No-op if out of bounds.
+    pub fn set_at(&mut self, idx: usize, val: FidanValue) {
+        let v = Arc::make_mut(&mut self.inner);
+        if idx < v.len() {
+            v[idx] = val;
+        }
+    }
+
     pub fn iter(&self) -> std::slice::Iter<'_, FidanValue> {
         self.inner.iter()
     }

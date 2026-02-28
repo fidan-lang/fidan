@@ -443,7 +443,7 @@ impl<'t> Parser<'t> {
     fn infix_bp(&self, kind: &TokenKind) -> Option<(u8, u8)> {
         Some(match kind {
             TokenKind::NullCoalesce                              => (1,  2),
-            TokenKind::DotDot                                    => (2,  3),  // range, lower than add
+            TokenKind::DotDot | TokenKind::DotDotDot             => (2,  3),  // range, lower than add
             TokenKind::Or                                        => (3,  4),
             TokenKind::And                                       => (5,  6),
             TokenKind::Is | TokenKind::Eq    | TokenKind::NotEq
@@ -484,7 +484,8 @@ impl<'t> Parser<'t> {
             TokenKind::GtEq    => BinOp::GtEq,
             TokenKind::And     => BinOp::And,
             TokenKind::Or      => BinOp::Or,
-            TokenKind::DotDot  => BinOp::Range,
+            TokenKind::DotDot    => BinOp::Range,
+            TokenKind::DotDotDot  => BinOp::RangeInclusive,
             _ => return None,
         })
     }

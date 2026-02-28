@@ -107,6 +107,11 @@ pub static CODES: &[DiagnosticCode] = &[
     },
     // ── Runtime: control flow ─────────────────────────────────────────────────
     DiagnosticCode {
+        code: "R0001",
+        title: "unhandled interpreter error",
+        category: "runtime",
+    },
+    DiagnosticCode {
         code: "R1001",
         title: "stack overflow",
         category: "runtime",

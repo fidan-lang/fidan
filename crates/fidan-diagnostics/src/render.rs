@@ -54,7 +54,8 @@ fn is_color_enabled() -> bool {
 /// Used for phase stubs, extension warnings, LSP stubs, etc. — messages that
 /// have no source location and use the badge layout:
 /// ` ◆  note  code  message`
-pub fn render_message_to_stderr(severity: Severity, code: &str, message: &str) {
+pub fn render_message_to_stderr(severity: Severity, code: impl std::fmt::Display, message: &str) {
+    let code_s = code.to_string();
     if is_color_enabled() {
         let (sym, sev_color) = match severity {
             Severity::Error => ("✖", "\x1b[1;31m"),
@@ -64,17 +65,17 @@ pub fn render_message_to_stderr(severity: Severity, code: &str, message: &str) {
         let sev_str = severity.to_string();
         let reset = "\x1b[0m";
         let dim = "\x1b[2m";
-        if code.is_empty() {
+        if code_s.is_empty() {
             eprintln!(" {sev_color}{sym}  {sev_str}{reset}  {message}");
         } else {
-            eprintln!(" {sev_color}{sym}  {sev_str}{reset}  {dim}{code}{reset}  {message}");
+            eprintln!(" {sev_color}{sym}  {sev_str}{reset}  {dim}{code_s}{reset}  {message}");
         }
     } else {
         let sev_str = severity.to_string();
-        if code.is_empty() {
+        if code_s.is_empty() {
             eprintln!("{sev_str}  {message}");
         } else {
-            eprintln!("{sev_str}  {code}  {message}");
+            eprintln!("{sev_str}  {code_s}  {message}");
         }
     }
 }

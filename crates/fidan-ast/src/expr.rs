@@ -195,12 +195,13 @@ pub enum BinOp {
     GtEq,
     And,
     Or,
-    BitXor, // `^`
-    BitAnd, // `&`
-    BitOr,  // `|`
-    Shl,    // `<<`
-    Shr,    // `>>`
-    Range,  // `..`
+    BitXor,         // `^`
+    BitAnd,         // `&`
+    BitOr,          // `|`
+    Shl,            // `<<`
+    Shr,            // `>>`
+    Range,          // `..`  exclusive (start..end)
+    RangeInclusive, // `...` inclusive (start...end)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

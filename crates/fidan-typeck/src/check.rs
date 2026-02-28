@@ -141,6 +141,36 @@ impl TypeChecker {
         std::mem::take(&mut self.diags)
     }
 
+    /// Infer the type of the last bare expression in `module` and return its
+    /// human-readable name.  Used by the REPL `:type <expr>` command.
+    ///
+    /// Runs the registration pass so forward references work, then infers the
+    /// last `ExprStmt` item.  Diagnostics accumulate in `self.diags`; call
+    /// `drain_diags()` afterwards to suppress or print them.
+    pub fn infer_snippet_type(&mut self, module: &Module) -> Option<String> {
+        // Pass 1: register top-level declarations in case the snippet contains
+        // `object` or `action` items (rare but consistent).
+        for &item_id in &module.items {
+            let item = module.arena.get_item(item_id);
+            self.register_top_level(item, &module.arena);
+        }
+
+        // Find the last top-level ExprStmt — that is the expression the user
+        // wants to know the type of.
+        for &item_id in module.items.iter().rev() {
+            let item = module.arena.get_item(item_id).clone();
+            if let Item::ExprStmt(expr_id) = item {
+                let ty = self.infer_expr(expr_id, module);
+                let interner = Arc::clone(&self.interner);
+                return Some(ty.display_name(&|sym| interner.resolve(sym).to_string()));
+            }
+            // Stop at the first non-ExprStmt from the end so that
+            //   `:type var x = 5` reports nothing rather than panicking.
+            break;
+        }
+        None
+    }
+
     // ── Registration (pass 1) ─────────────────────────────────────────────
 
     fn register_top_level(&mut self, item: &Item, arena: &AstArena) {
@@ -1013,7 +1043,7 @@ impl TypeChecker {
             | BinOp::GtEq
             | BinOp::And
             | BinOp::Or => FidanType::Boolean,
-            BinOp::Range => FidanType::List(Box::new(FidanType::Integer)),
+            BinOp::Range | BinOp::RangeInclusive => FidanType::List(Box::new(FidanType::Integer)),
         }
     }
 
