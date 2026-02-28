@@ -680,7 +680,7 @@ impl TypeChecker {
                 self.infer_expr(scrutinee, module);
                 for arm in &arms {
                     self.infer_expr(arm.pattern, module);
-                    self.check_block(&arm.body, module);
+                    self.check_arm_body(&arm.body, module);
                 }
             }
 
@@ -692,6 +692,32 @@ impl TypeChecker {
         self.table.push_scope(ScopeKind::Block);
         for &s in stmts {
             self.check_stmt(s, module);
+        }
+        self.table.pop_scope();
+    }
+
+    /// Like `check_block`, but suppresses `W2002` on the final statement when
+    /// it is a bare expression — that expression is the *result value* of the
+    /// check arm, not a discarded side-effect.
+    fn check_arm_body(&mut self, stmts: &[StmtId], module: &Module) {
+        self.table.push_scope(ScopeKind::Block);
+        let (last, rest) = match stmts.split_last() {
+            Some(pair) => pair,
+            None => {
+                self.table.pop_scope();
+                return;
+            }
+        };
+        for &s in rest {
+            self.check_stmt(s, module);
+        }
+        // For the final statement: if it's a bare expression, infer its type
+        // directly — skipping the bare-literal warning — because it is the
+        // arm's result value, not a discarded statement.
+        let final_stmt = module.arena.get_stmt(*last).clone();
+        match final_stmt {
+            Stmt::Expr { expr, .. } => { self.infer_expr(expr, module); }
+            _ => self.check_stmt(*last, module),
         }
         self.table.pop_scope();
     }
@@ -935,9 +961,7 @@ impl TypeChecker {
                 self.infer_expr(scrutinee, module);
                 for arm in arms {
                     self.infer_expr(arm.pattern, module);
-                    for &sid in &arm.body {
-                        self.check_stmt(sid, module);
-                    }
+                    self.check_arm_body(&arm.body, module);
                 }
                 FidanType::Dynamic
             }
