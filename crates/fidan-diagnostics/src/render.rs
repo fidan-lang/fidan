@@ -28,7 +28,7 @@ use fidan_source::SourceMap;
 //
 // Spanless pipeline badge:
 //
-//    ⓘ  note  unimplemented  interpreter not yet implemented (Phase 5)
+//    ◆  note  unimplemented  interpreter not yet implemented (Phase 5)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -53,13 +53,13 @@ fn is_color_enabled() -> bool {
 ///
 /// Used for phase stubs, extension warnings, LSP stubs, etc. — messages that
 /// have no source location and use the badge layout:
-/// ` ⓘ  note  code  message`
+/// ` ◆  note  code  message`
 pub fn render_message_to_stderr(severity: Severity, code: &str, message: &str) {
     if is_color_enabled() {
         let (sym, sev_color) = match severity {
             Severity::Error => ("✖", "\x1b[1;31m"),
             Severity::Warning => ("⚠", "\x1b[1;33m"),
-            Severity::Note => ("ⓘ", "\x1b[1;36m"),
+            Severity::Note => ("◆", "\x1b[1;36m"),
         };
         let sev_str = severity.to_string();
         let reset = "\x1b[0m";
