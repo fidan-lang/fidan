@@ -1080,14 +1080,43 @@ impl TypeChecker {
         op: BinOp,
         lhs: &FidanType,
         rhs: &FidanType,
-        _span: Span,
+        span: Span,
     ) -> FidanType {
+        // Return Dynamic for operands that are themselves Dynamic/Unknown
+        // (we can't know the type yet, so don't warn).
+        let either_dynamic = matches!(lhs, FidanType::Dynamic | FidanType::Unknown)
+            || matches!(rhs, FidanType::Dynamic | FidanType::Unknown);
+
+        let op_sym = match op {
+            BinOp::Add => "+",
+            BinOp::Sub => "-",
+            BinOp::Mul => "*",
+            BinOp::Div => "/",
+            BinOp::Rem => "%",
+            BinOp::Pow => "**",
+            BinOp::BitAnd => "&",
+            BinOp::BitOr => "|",
+            BinOp::BitXor => "^",
+            BinOp::Shl => "<<",
+            BinOp::Shr => ">>",
+            _ => "",
+        };
+
         match op {
             BinOp::Add => match (lhs, rhs) {
                 (FidanType::String, _) | (_, FidanType::String) => FidanType::String,
                 (FidanType::Float, _) | (_, FidanType::Float) => FidanType::Float,
                 (FidanType::Integer, FidanType::Integer) => FidanType::Integer,
-                _ => FidanType::Dynamic,
+                _ if either_dynamic => FidanType::Dynamic,
+                _ => {
+                    let (l, r) = (self.ty_name(lhs), self.ty_name(rhs));
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0203"),
+                        format!("operator `{op_sym}` cannot be applied to `{l}` and `{r}`"),
+                        span,
+                    );
+                    FidanType::Dynamic
+                }
             },
             BinOp::Sub
             | BinOp::Mul
@@ -1101,7 +1130,16 @@ impl TypeChecker {
             | BinOp::Shr => match (lhs, rhs) {
                 (FidanType::Float, _) | (_, FidanType::Float) => FidanType::Float,
                 (FidanType::Integer, FidanType::Integer) => FidanType::Integer,
-                _ => FidanType::Dynamic,
+                _ if either_dynamic => FidanType::Dynamic,
+                _ => {
+                    let (l, r) = (self.ty_name(lhs), self.ty_name(rhs));
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0203"),
+                        format!("operator `{op_sym}` cannot be applied to `{l}` and `{r}`"),
+                        span,
+                    );
+                    FidanType::Dynamic
+                }
             },
             BinOp::Eq
             | BinOp::NotEq

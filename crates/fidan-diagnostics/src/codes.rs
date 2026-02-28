@@ -71,6 +71,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "return type mismatch",
         category: "types",
     },
+    DiagnosticCode {
+        code: "E0203",
+        title: "unsupported operand types for operator",
+        category: "types",
+    },
     // ── Argument / call ───────────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0301",

@@ -355,7 +355,7 @@ fn run_repl() -> Result<()> {
 
     // Plain string — no escape codes.  ReplHelper::highlight_prompt wraps it
     // in colour for display; rustyline uses this for all width arithmetic.
-    let prompt = " ƒ>  ";
+    let prompt = "ƒ>  ";
 
     // Persist the interner so symbol IDs are stable across REPL lines.
     let interner = Arc::new(SymbolInterner::new());
@@ -527,12 +527,14 @@ fn run_repl() -> Result<()> {
             tc.check_module(&module);
             let type_diags = tc.drain_diags();
             if type_diags.is_empty() {
-                if let Err(msg) = fidan_interp::run_repl_line(&mut repl_state, &module) {
-                    render_message_to_stderr(
+                match fidan_interp::run_repl_line(&mut repl_state, &module) {
+                    Ok(Some(echo)) => println!("{echo}"),
+                    Ok(None) => {}
+                    Err(msg) => render_message_to_stderr(
                         Severity::Error,
                         fidan_diagnostics::diag_code!("R0001"),
                         &msg,
-                    );
+                    ),
                 }
             } else {
                 for diag in &type_diags {

@@ -10,13 +10,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use fidan_ast::{
-    AstArena, Arg, BinOp, ExprId, InterpPart, Item, Module, Param, StmtId, UnOp,
-    Expr, Stmt,
+    Arg, AstArena, BinOp, Expr, ExprId, InterpPart, Item, Module, Param, Stmt, StmtId, UnOp,
 };
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_runtime::{
-    FidanClass, FidanDict, FidanList, FidanObject, FidanString, FidanValue, FieldDef,
-    OwnedRef,
+    FidanClass, FidanDict, FidanList, FidanObject, FidanString, FidanValue, FieldDef, OwnedRef,
 };
 
 use crate::builtins;
@@ -37,7 +35,7 @@ struct ClassDef {
     /// Symbol name of the parent class (if any).
     parent_name: Option<Symbol>,
     /// Own field declarations (not including inherited).
-    own_fields: Vec<(Symbol, bool)>,  // (name, required)
+    own_fields: Vec<(Symbol, bool)>, // (name, required)
     /// Methods defined inside `object { action ... }`.
     methods: HashMap<Symbol, FuncDef>,
 }
@@ -89,19 +87,31 @@ impl<'m> Interpreter<'m> {
     fn register_module(&mut self, module: &Module) {
         for &iid in &module.items {
             match self.arena.get_item(iid) {
-                Item::ObjectDecl { name, parent, fields, methods, .. } => {
-                    let own_fields: Vec<(Symbol, bool)> = fields
-                        .iter()
-                        .map(|f| (f.name, f.required))
-                        .collect();
+                Item::ObjectDecl {
+                    name,
+                    parent,
+                    fields,
+                    methods,
+                    ..
+                } => {
+                    let own_fields: Vec<(Symbol, bool)> =
+                        fields.iter().map(|f| (f.name, f.required)).collect();
 
                     let mut mmap: HashMap<Symbol, FuncDef> = HashMap::new();
                     for &mid in methods {
                         match self.arena.get_item(mid) {
-                            Item::ActionDecl { name: mname, params, body, .. } => {
+                            Item::ActionDecl {
+                                name: mname,
+                                params,
+                                body,
+                                ..
+                            } => {
                                 mmap.insert(
                                     *mname,
-                                    FuncDef { params: params.clone(), body: body.clone() },
+                                    FuncDef {
+                                        params: params.clone(),
+                                        body: body.clone(),
+                                    },
                                 );
                             }
                             _ => {}
@@ -118,18 +128,32 @@ impl<'m> Interpreter<'m> {
                     );
                 }
 
-                Item::ActionDecl { name, params, body, .. } => {
+                Item::ActionDecl {
+                    name, params, body, ..
+                } => {
                     self.functions.insert(
                         *name,
-                        FuncDef { params: params.clone(), body: body.clone() },
+                        FuncDef {
+                            params: params.clone(),
+                            body: body.clone(),
+                        },
                     );
                 }
 
-                Item::ExtensionAction { name, extends, params, body, .. } => {
-                    self.ext_actions
-                        .entry(*extends)
-                        .or_default()
-                        .insert(*name, FuncDef { params: params.clone(), body: body.clone() });
+                Item::ExtensionAction {
+                    name,
+                    extends,
+                    params,
+                    body,
+                    ..
+                } => {
+                    self.ext_actions.entry(*extends).or_default().insert(
+                        *name,
+                        FuncDef {
+                            params: params.clone(),
+                            body: body.clone(),
+                        },
+                    );
                 }
 
                 _ => {}
@@ -140,9 +164,13 @@ impl<'m> Interpreter<'m> {
     // ── Module entry point ───────────────────────────────────────────────────
 
     fn run_module(&mut self, module: &Module) -> InterpResult<()> {
-        // Execute module-level var-decls and expr-statements in order.
-        // The entry point is whatever the module-level code calls — most Fidan
-        // programs end with a top-level `main()` call or direct expressions.
+        self.run_module_repl(module).map(|_| ())
+    }
+
+    /// Like `run_module` but returns the value of the last `ExprStmt`, if any.
+    /// Used by the REPL to auto-echo bare expression results.
+    fn run_module_repl(&mut self, module: &Module) -> InterpResult<Option<FidanValue>> {
+        let mut last_expr_val: Option<FidanValue> = None;
         for &iid in &module.items {
             match self.arena.get_item(iid) {
                 Item::VarDecl { name, init, .. } => {
@@ -151,18 +179,21 @@ impl<'m> Interpreter<'m> {
                         None => FidanValue::Nothing,
                     };
                     self.env.define(*name, val);
+                    last_expr_val = None; // declaration — suppress echo
                 }
                 Item::ExprStmt(eid) => {
-                    self.eval_expr(*eid)?;
+                    let val = self.eval_expr(*eid)?;
+                    last_expr_val = Some(val);
                 }
                 Item::Assign { target, value, .. } => {
                     let val = self.eval_expr(*value)?;
                     self.eval_assign(*target, val)?;
+                    last_expr_val = None; // assignment — suppress echo
                 }
-                _ => {} // declarations already registered
+                _ => {}
             }
         }
-        Ok(())
+        Ok(last_expr_val)
     }
 
     // ── Expression evaluator ──────────────────────────────────────────────────
@@ -176,18 +207,14 @@ impl<'m> Interpreter<'m> {
             Expr::IntLit { value, .. } => Ok(FidanValue::Integer(value)),
             Expr::FloatLit { value, .. } => Ok(FidanValue::Float(value)),
             Expr::BoolLit { value, .. } => Ok(FidanValue::Boolean(value)),
-            Expr::StrLit { value, .. } => {
-                Ok(FidanValue::String(FidanString::new(&value)))
-            }
+            Expr::StrLit { value, .. } => Ok(FidanValue::String(FidanString::new(&value))),
             Expr::Nothing { .. } => Ok(FidanValue::Nothing),
 
             // Names –––––––––––––––––––––––––––––––––––––––––––––––––––––––
             Expr::Ident { name, .. } => {
                 Ok(self.env.get(name).cloned().unwrap_or(FidanValue::Nothing))
             }
-            Expr::This { .. } => {
-                Ok(self.env.this_val().cloned().unwrap_or(FidanValue::Nothing))
-            }
+            Expr::This { .. } => Ok(self.env.this_val().cloned().unwrap_or(FidanValue::Nothing)),
             Expr::Parent { .. } => {
                 // As a value, `parent` is the same object as `this`.
                 // The distinction only matters for method dispatch (handled in eval_call).
@@ -202,9 +229,18 @@ impl<'m> Interpreter<'m> {
             }
             Expr::NullCoalesce { lhs, rhs, .. } => {
                 let left = self.eval_expr(lhs)?;
-                if left.is_nothing() { self.eval_expr(rhs) } else { Ok(left) }
+                if left.is_nothing() {
+                    self.eval_expr(rhs)
+                } else {
+                    Ok(left)
+                }
             }
-            Expr::Ternary { condition, then_val, else_val, .. } => {
+            Expr::Ternary {
+                condition,
+                then_val,
+                else_val,
+                ..
+            } => {
                 if self.eval_expr(condition)?.truthy() {
                     self.eval_expr(then_val)
                 } else {
@@ -234,7 +270,9 @@ impl<'m> Interpreter<'m> {
                 self.eval_assign(target, val.clone())?;
                 Ok(val)
             }
-            Expr::CompoundAssign { op, target, value, .. } => {
+            Expr::CompoundAssign {
+                op, target, value, ..
+            } => {
                 let rhs = self.eval_expr(value)?;
                 let lhs = self.eval_expr(target)?;
                 let new_val = self.apply_binop(op, lhs, rhs)?;
@@ -281,7 +319,9 @@ impl<'m> Interpreter<'m> {
             }
 
             // Check (inline match expression) ––––––––––––––––––––––––––
-            Expr::Check { scrutinee, arms, .. } => {
+            Expr::Check {
+                scrutinee, arms, ..
+            } => {
                 let val = self.eval_expr(scrutinee)?;
                 for arm in arms {
                     // Wildcard `_` always matches.
@@ -303,9 +343,7 @@ impl<'m> Interpreter<'m> {
             }
 
             // Concurrency (sequential fallback) –––––––––––––––––––––––—
-            Expr::Spawn { expr, .. } | Expr::Await { expr, .. } => {
-                self.eval_expr(expr)
-            }
+            Expr::Spawn { expr, .. } | Expr::Await { expr, .. } => self.eval_expr(expr),
 
             Expr::Error { .. } => Ok(FidanValue::Nothing),
         }
@@ -364,7 +402,11 @@ impl<'m> Interpreter<'m> {
             }
 
             // ── Field call: method dispatch ──────────────────────────────
-            Expr::Field { object: obj_id, field, .. } => {
+            Expr::Field {
+                object: obj_id,
+                field,
+                ..
+            } => {
                 let obj_expr = self.arena.get_expr(obj_id).clone();
                 let is_parent_call = matches!(obj_expr, Expr::Parent { .. });
 
@@ -392,8 +434,7 @@ impl<'m> Interpreter<'m> {
                     }
                     // Built-in methods on collections and strings
                     other => {
-                        let vals: Vec<FidanValue> =
-                            raw_args.into_iter().map(|(_, v)| v).collect();
+                        let vals: Vec<FidanValue> = raw_args.into_iter().map(|(_, v)| v).collect();
                         Ok(self
                             .call_builtin_method(other, field, vals)
                             .unwrap_or(FidanValue::Nothing))
@@ -425,7 +466,8 @@ impl<'m> Interpreter<'m> {
         }
 
         // 2. Defined method in this class?
-        if let Some(fdef) = self.classes
+        if let Some(fdef) = self
+            .classes
             .get(&class_name)
             .and_then(|cd| cd.methods.get(&method_name))
             .cloned()
@@ -434,7 +476,8 @@ impl<'m> Interpreter<'m> {
         }
 
         // 3. Extension action targeting this class?
-        if let Some(fdef) = self.ext_actions
+        if let Some(fdef) = self
+            .ext_actions
             .get(&class_name)
             .and_then(|m| m.get(&method_name))
             .cloned()
@@ -495,13 +538,16 @@ impl<'m> Interpreter<'m> {
         let start = all_fields.len();
         if let Some(cd) = self.classes.get(&class_name) {
             for (i, &(field_sym, _)) in cd.own_fields.iter().enumerate() {
-                all_fields.push(FieldDef { name: field_sym, index: start + i });
+                all_fields.push(FieldDef {
+                    name: field_sym,
+                    index: start + i,
+                });
             }
         }
 
         Arc::new(FidanClass {
             name: class_name,
-            parent: None,            // not used by the AST interpreter
+            parent: None, // not used by the AST interpreter
             fields: all_fields,
             methods: HashMap::new(), // not used by the AST interpreter
         })
@@ -584,10 +630,7 @@ impl<'m> Interpreter<'m> {
 
             // Try positional.
             // Skip over args that were consumed as named.
-            let named_symbols: Vec<Symbol> = args
-                .iter()
-                .filter_map(|(n, _)| *n)
-                .collect();
+            let named_symbols: Vec<Symbol> = args.iter().filter_map(|(n, _)| *n).collect();
 
             // Find the next positional arg (one without a name, in order).
             let positional_args: Vec<&FidanValue> = args
@@ -656,7 +699,13 @@ impl<'m> Interpreter<'m> {
             Stmt::Break { .. } => Err(Signal::Break),
             Stmt::Continue { .. } => Err(Signal::Continue),
 
-            Stmt::If { condition, then_body, else_ifs, else_body, .. } => {
+            Stmt::If {
+                condition,
+                then_body,
+                else_ifs,
+                else_body,
+                ..
+            } => {
                 if self.eval_expr(condition)?.truthy() {
                     return self.exec_body(&then_body);
                 }
@@ -671,7 +720,9 @@ impl<'m> Interpreter<'m> {
                 Ok(FidanValue::Nothing)
             }
 
-            Stmt::While { condition, body, .. } => {
+            Stmt::While {
+                condition, body, ..
+            } => {
                 loop {
                     if !self.eval_expr(condition)?.truthy() {
                         break;
@@ -686,7 +737,12 @@ impl<'m> Interpreter<'m> {
                 Ok(FidanValue::Nothing)
             }
 
-            Stmt::For { binding, iterable, body, .. } => {
+            Stmt::For {
+                binding,
+                iterable,
+                body,
+                ..
+            } => {
                 let iter_val = self.eval_expr(iterable)?;
                 let items = self.collect_iterable(iter_val)?;
                 'for_loop: for item in items {
@@ -701,7 +757,12 @@ impl<'m> Interpreter<'m> {
                 Ok(FidanValue::Nothing)
             }
 
-            Stmt::ParallelFor { binding, iterable, body, .. } => {
+            Stmt::ParallelFor {
+                binding,
+                iterable,
+                body,
+                ..
+            } => {
                 // Sequential fallback — Phase 5.5 adds real parallelism.
                 let iter_val = self.eval_expr(iterable)?;
                 let items = self.collect_iterable(iter_val)?;
@@ -725,7 +786,13 @@ impl<'m> Interpreter<'m> {
                 Ok(FidanValue::Nothing)
             }
 
-            Stmt::Attempt { body, catches, otherwise, finally, .. } => {
+            Stmt::Attempt {
+                body,
+                catches,
+                otherwise,
+                finally,
+                ..
+            } => {
                 let body_result = self.exec_body(&body);
 
                 // Determine the outcome of body + catch handling.
@@ -745,8 +812,8 @@ impl<'m> Interpreter<'m> {
                             let r = self.exec_body(&catch_body);
                             self.env.pop_frame();
                             catch_outcome = match r {
-                                Ok(_) => Ok(false),    // caught and handled
-                                Err(e) => Err(e),      // catch body re-threw
+                                Ok(_) => Ok(false), // caught and handled
+                                Err(e) => Err(e),   // catch body re-threw
                             };
                             break;
                         }
@@ -799,7 +866,9 @@ impl<'m> Interpreter<'m> {
                 Err(Signal::Panic(v))
             }
 
-            Stmt::Check { scrutinee, arms, .. } => {
+            Stmt::Check {
+                scrutinee, arms, ..
+            } => {
                 let val = self.eval_expr(scrutinee)?;
                 for arm in &arms {
                     let is_wildcard = {
@@ -886,18 +955,27 @@ impl<'m> Interpreter<'m> {
 
     // ── Binary operator evaluation ────────────────────────────────────────────
 
-    fn eval_binary(&mut self, op: BinOp, lhs_id: ExprId, rhs_id: ExprId) -> InterpResult<FidanValue> {
+    fn eval_binary(
+        &mut self,
+        op: BinOp,
+        lhs_id: ExprId,
+        rhs_id: ExprId,
+    ) -> InterpResult<FidanValue> {
         // Short-circuit logical operators first.
         match op {
             BinOp::And => {
                 let l = self.eval_expr(lhs_id)?;
-                if !l.truthy() { return Ok(FidanValue::Boolean(false)); }
+                if !l.truthy() {
+                    return Ok(FidanValue::Boolean(false));
+                }
                 let r = self.eval_expr(rhs_id)?;
                 return Ok(FidanValue::Boolean(r.truthy()));
             }
             BinOp::Or => {
                 let l = self.eval_expr(lhs_id)?;
-                if l.truthy() { return Ok(FidanValue::Boolean(true)); }
+                if l.truthy() {
+                    return Ok(FidanValue::Boolean(true));
+                }
                 let r = self.eval_expr(rhs_id)?;
                 return Ok(FidanValue::Boolean(r.truthy()));
             }
@@ -910,8 +988,8 @@ impl<'m> Interpreter<'m> {
     }
 
     fn apply_binop(&self, op: BinOp, lhs: FidanValue, rhs: FidanValue) -> InterpResult<FidanValue> {
-        use FidanValue::*;
         use BinOp::*;
+        use FidanValue::*;
 
         Ok(match (op, lhs, rhs) {
             // ── Arithmetic ───────────────────────────────────────────────
@@ -956,43 +1034,41 @@ impl<'m> Interpreter<'m> {
             }
             (Rem, Float(a), Float(b)) => Float(a % b),
 
-            (Pow, Integer(a), Integer(b)) => {
-                Integer(i64::pow(a, b.max(0) as u32))
-            }
+            (Pow, Integer(a), Integer(b)) => Integer(i64::pow(a, b.max(0) as u32)),
             (Pow, Float(a), Float(b)) => Float(a.powf(b)),
             (Pow, Integer(a), Float(b)) => Float((a as f64).powf(b)),
             (Pow, Float(a), Integer(b)) => Float(a.powf(b as f64)),
 
             // ── Bitwise ──────────────────────────────────────────────────
             (BitAnd, Integer(a), Integer(b)) => Integer(a & b),
-            (BitOr,  Integer(a), Integer(b)) => Integer(a | b),
+            (BitOr, Integer(a), Integer(b)) => Integer(a | b),
             (BitXor, Integer(a), Integer(b)) => Integer(a ^ b),
-            (Shl,    Integer(a), Integer(b)) => Integer(a << (b & 63)),
-            (Shr,    Integer(a), Integer(b)) => Integer(a >> (b & 63)),
+            (Shl, Integer(a), Integer(b)) => Integer(a << (b & 63)),
+            (Shr, Integer(a), Integer(b)) => Integer(a >> (b & 63)),
 
             // ── Comparison ───────────────────────────────────────────────
-            (Eq, a, b)    => Boolean(self.values_equal(&a, &b)),
+            (Eq, a, b) => Boolean(self.values_equal(&a, &b)),
             (NotEq, a, b) => Boolean(!self.values_equal(&a, &b)),
 
-            (Lt,   Integer(a), Integer(b)) => Boolean(a < b),
-            (Lt,   Float(a), Float(b))     => Boolean(a < b),
-            (Lt,   Integer(a), Float(b))   => Boolean((a as f64) < b),
-            (Lt,   Float(a), Integer(b))   => Boolean(a < b as f64),
+            (Lt, Integer(a), Integer(b)) => Boolean(a < b),
+            (Lt, Float(a), Float(b)) => Boolean(a < b),
+            (Lt, Integer(a), Float(b)) => Boolean((a as f64) < b),
+            (Lt, Float(a), Integer(b)) => Boolean(a < b as f64),
 
             (LtEq, Integer(a), Integer(b)) => Boolean(a <= b),
-            (LtEq, Float(a), Float(b))     => Boolean(a <= b),
-            (LtEq, Integer(a), Float(b))   => Boolean((a as f64) <= b),
-            (LtEq, Float(a), Integer(b))   => Boolean(a <= b as f64),
+            (LtEq, Float(a), Float(b)) => Boolean(a <= b),
+            (LtEq, Integer(a), Float(b)) => Boolean((a as f64) <= b),
+            (LtEq, Float(a), Integer(b)) => Boolean(a <= b as f64),
 
-            (Gt,   Integer(a), Integer(b)) => Boolean(a > b),
-            (Gt,   Float(a), Float(b))     => Boolean(a > b),
-            (Gt,   Integer(a), Float(b))   => Boolean((a as f64) > b),
-            (Gt,   Float(a), Integer(b))   => Boolean(a > b as f64),
+            (Gt, Integer(a), Integer(b)) => Boolean(a > b),
+            (Gt, Float(a), Float(b)) => Boolean(a > b),
+            (Gt, Integer(a), Float(b)) => Boolean((a as f64) > b),
+            (Gt, Float(a), Integer(b)) => Boolean(a > b as f64),
 
             (GtEq, Integer(a), Integer(b)) => Boolean(a >= b),
-            (GtEq, Float(a), Float(b))     => Boolean(a >= b),
-            (GtEq, Integer(a), Float(b))   => Boolean((a as f64) >= b),
-            (GtEq, Float(a), Integer(b))   => Boolean(a >= b as f64),
+            (GtEq, Float(a), Float(b)) => Boolean(a >= b),
+            (GtEq, Integer(a), Float(b)) => Boolean((a as f64) >= b),
+            (GtEq, Float(a), Integer(b)) => Boolean(a >= b as f64),
 
             // ── Range ─────────────────────────────────────────────────────
             (Range, Integer(start), Integer(end)) => {
@@ -1010,8 +1086,30 @@ impl<'m> Interpreter<'m> {
                 List(OwnedRef::new(l))
             }
 
-            // Fallback: unknown combination → Nothing
-            _ => Nothing,
+            // Fallback: unsupported operand combination — runtime type error
+            (op, lhs, rhs) => {
+                let op_s = match op {
+                    Add => "+",
+                    Sub => "-",
+                    Mul => "*",
+                    Div => "/",
+                    Rem => "%",
+                    Pow => "**",
+                    BitAnd => "&",
+                    BitOr => "|",
+                    BitXor => "^",
+                    Shl => "<<",
+                    Shr => ">>",
+                    _ => "(op)",
+                };
+                return Err(Signal::Panic(FidanValue::String(FidanString::new(
+                    &format!(
+                        "operator `{op_s}` cannot be applied to `{}` and `{}`",
+                        lhs.type_name(),
+                        rhs.type_name()
+                    ),
+                ))));
+            }
         })
     }
 
@@ -1028,17 +1126,19 @@ impl<'m> Interpreter<'m> {
 
     fn eval_index(&self, obj: FidanValue, idx: FidanValue) -> InterpResult<FidanValue> {
         match (obj, idx) {
-            (FidanValue::List(l), FidanValue::Integer(i)) => {
-                Ok(l.borrow().get(i as usize).cloned().unwrap_or(FidanValue::Nothing))
-            }
+            (FidanValue::List(l), FidanValue::Integer(i)) => Ok(l
+                .borrow()
+                .get(i as usize)
+                .cloned()
+                .unwrap_or(FidanValue::Nothing)),
             (FidanValue::Dict(d), FidanValue::String(k)) => {
                 Ok(d.borrow().get(&k).cloned().unwrap_or(FidanValue::Nothing))
             }
             (FidanValue::String(s), FidanValue::Integer(i)) => {
                 let ch = s.as_str().chars().nth(i as usize);
-                Ok(ch.map(|c| {
-                    FidanValue::String(FidanString::new(&c.to_string()))
-                }).unwrap_or(FidanValue::Nothing))
+                Ok(ch
+                    .map(|c| FidanValue::String(FidanString::new(&c.to_string())))
+                    .unwrap_or(FidanValue::Nothing))
             }
             _ => Ok(FidanValue::Nothing),
         }
@@ -1048,9 +1148,11 @@ impl<'m> Interpreter<'m> {
 
     fn read_field(&self, val: &FidanValue, field: Symbol) -> InterpResult<FidanValue> {
         match val {
-            FidanValue::Object(obj_ref) => {
-                Ok(obj_ref.borrow().get_field(field).cloned().unwrap_or(FidanValue::Nothing))
-            }
+            FidanValue::Object(obj_ref) => Ok(obj_ref
+                .borrow()
+                .get_field(field)
+                .cloned()
+                .unwrap_or(FidanValue::Nothing)),
             FidanValue::List(l) => {
                 // `.len` as a property
                 let field_str = self.interner.resolve(field);
@@ -1104,7 +1206,12 @@ impl<'m> Interpreter<'m> {
                 "len" | "length" => Some(FidanValue::Integer(l.borrow().len() as i64)),
                 "get" => {
                     if let Some(FidanValue::Integer(i)) = args.first() {
-                        Some(l.borrow().get(*i as usize).cloned().unwrap_or(FidanValue::Nothing))
+                        Some(
+                            l.borrow()
+                                .get(*i as usize)
+                                .cloned()
+                                .unwrap_or(FidanValue::Nothing),
+                        )
                     } else {
                         Some(FidanValue::Nothing)
                     }
@@ -1120,9 +1227,7 @@ impl<'m> Interpreter<'m> {
                     }
                 }
                 "set" | "insert" => {
-                    if let (Some(FidanValue::String(k)), Some(v)) =
-                        (args.first(), args.get(1))
-                    {
+                    if let (Some(FidanValue::String(k)), Some(v)) = (args.first(), args.get(1)) {
                         d.borrow_mut().insert(k.clone(), v.clone());
                         Some(FidanValue::Nothing)
                     } else {
@@ -1212,7 +1317,12 @@ impl<'m> Interpreter<'m> {
         if cd.methods.contains_key(&method_name) {
             return Some(());
         }
-        if self.ext_actions.get(&class_name).map(|m| m.contains_key(&method_name)).unwrap_or(false) {
+        if self
+            .ext_actions
+            .get(&class_name)
+            .map(|m| m.contains_key(&method_name))
+            .unwrap_or(false)
+        {
             return Some(());
         }
         if let Some(parent) = cd.parent_name {
@@ -1271,7 +1381,11 @@ pub fn new_repl_state(interner: Arc<SymbolInterner>) -> ReplState {
 ///
 /// Declarations and variable bindings from previous calls remain visible.
 /// State is written back even if the line produces a runtime error.
-pub fn run_repl_line(state: &mut ReplState, module: &Module) -> Result<(), String> {
+///
+/// Returns `Ok(Some(display_string))` when the last item was a bare expression
+/// with a non-`Nothing` result — the caller should print that string.
+/// Returns `Ok(None)` for declarations, assignments, or `Nothing` results.
+pub fn run_repl_line(state: &mut ReplState, module: &Module) -> Result<Option<String>, String> {
     // Swap persistent state into a temporary interpreter bound to this module.
     let mut interp = Interpreter {
         arena: &module.arena,
@@ -1284,15 +1398,21 @@ pub fn run_repl_line(state: &mut ReplState, module: &Module) -> Result<(), Strin
     };
     // Register new top-level declarations from this line.
     interp.register_module(module);
-    let result = interp.run_module(module);
+    let result = interp.run_module_repl(module);
     // Write back persistent state regardless of success/failure.
     state.functions = interp.functions;
     state.ext_actions = interp.ext_actions;
     state.classes = interp.classes;
     state.env = interp.env;
     match result {
-        Ok(()) => Ok(()),
-        Err(Signal::Return(_)) => Ok(()),
+        Ok(maybe_val) => {
+            let echo = match maybe_val {
+                Some(FidanValue::Nothing) | None => None,
+                Some(v) => Some(builtins::display(&v)),
+            };
+            Ok(echo)
+        }
+        Err(Signal::Return(_)) => Ok(None),
         Err(Signal::Panic(v)) => Err(format!("runtime panic: {}", builtins::display(&v))),
         Err(Signal::Break) => Err("unexpected `break` outside a loop".to_string()),
         Err(Signal::Continue) => Err("unexpected `continue` outside a loop".to_string()),
