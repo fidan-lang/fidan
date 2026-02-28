@@ -55,7 +55,7 @@
 | All operators and delimiters | ✅ | |
 | `SynonymMap` (phf perfect hash) | ✅ | `synonyms.rs` |
 | Keyword → canonical `TokenKind` mapping | ✅ | |
-| `stop` / `separate` → `Semicolon` | ✅ | |
+| `;` / `sep` → `Semicolon` | ✅ | |
 | `&&` / `||` punct-level lexing | ✅ | Phase 3.5 — handled in `lex_punct` before synonyms |
 | Hex (`0x…`) and binary (`0b…`) number literals | ✅ | Phase 3.5 |
 | `SymbolInterner` (DashMap, Symbol = u32) | ✅ | Thread-safe, lock-free fast path |

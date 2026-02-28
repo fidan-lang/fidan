@@ -103,7 +103,7 @@ pub enum TokenKind {
     DoubleColon, // `::`
     Arrow,       // `->`
     FatArrow,    // `=>`
-    /// `;` | `separate` — inline statement separator.
+    /// `;` | `sep` — inline statement separator.
     Semicolon,
     /// Emitted at the end of a logical line (Go-style automatic insertion).
     Newline,

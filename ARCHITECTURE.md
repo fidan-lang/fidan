@@ -225,7 +225,7 @@ pub enum TokenKind {
     LParen, RParen, LBrace, RBrace, LBracket, RBracket,
     Comma,            // `,` | `also` (both normalized to Comma in parameter lists)
     Dot, Colon, DoubleColon, Arrow, FatArrow,
-    Semicolon,        // `;` | `stop` | `separate` — inline statement separator
+    Semicolon,        // `;` | `sep` — inline statement separator
     Newline,          // primary statement terminator (emitted by lexer after a logical line)
     Hash,             // start of single-line comment (consumed, not emitted)
     At,               // decorator prefix
@@ -264,7 +264,8 @@ A `SynonymMap` is a static compile-time table (using `phf` crate for perfect has
 | `else if` | `Otherwise` `When` (two tokens, parser handles) |
 | `spawn` (at call site) | `Spawn` |
 | `await` | `Await` |
-| `stop`, `separate`, `;` | `Semicolon` (inline statement separator) |
+| `stop`, `break` | `Break` |
+| `sep`, `;` | `Semicolon` (inline statement separator) |
 
 **Important:** Synonyms are resolved at lex time so the parser only ever sees canonical tokens.
 The original source span is preserved so error messages reference the exact written form.
@@ -322,7 +323,7 @@ var sum set 1 +
     3
 ```
 
-**Inline statement separation** (rare): use `;`, `stop`, or `separate` to put multiple
+**Inline statement separation** (rare): use `;` or `sep` to put multiple
 statements on one line. All three emit the same `Semicolon` token.
 ```fidan
 var x set 1 stop var y set 2 stop print(x + y)

@@ -66,7 +66,7 @@ pub fn lookup_keyword(s: &str) -> Option<TokenKind> {
         "pow" => TokenKind::StarStar,
 
         // ── Statement separator synonyms ─────────────────────────────────
-        "separate" => TokenKind::Semicolon,
+        "sep" => TokenKind::Semicolon,
 
         // ── Object / method keywords ──────────────────────────────────────
         "this" => TokenKind::This,

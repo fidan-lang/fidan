@@ -519,8 +519,8 @@ mod tests {
         assert_eq!(tokens[1], TokenKind::Break); // stop = break
 
         // Inline separator synonym
-        let tokens = lex("separate");
-        assert_eq!(tokens[0], TokenKind::Semicolon); // separate = ;
+        let tokens = lex("sep");
+        assert_eq!(tokens[0], TokenKind::Semicolon); // sep = ;
 
         // Operator / call synonyms
         let tokens = lex("also try throw mod pow");
