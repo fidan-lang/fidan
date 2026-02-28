@@ -1,51 +1,51 @@
 #![allow(dead_code)]
-use std::sync::Arc;
-use rustc_hash::FxHashMap;
+use crate::scope::{Initialized, ScopeKind, SymbolInfo, SymbolKind, SymbolTable};
+use crate::types::FidanType;
 use fidan_ast::{AstArena, BinOp, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp};
 use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::{FileId, Span};
-use crate::scope::{Initialized, ScopeKind, SymbolInfo, SymbolKind, SymbolTable};
-use crate::types::FidanType;
+use rustc_hash::FxHashMap;
+use std::sync::Arc;
 
 // ── Data structures ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct ParamInfo {
-    pub name:        Symbol,
-    pub ty:          FidanType,
-    pub required:    bool,
+    pub name: Symbol,
+    pub ty: FidanType,
+    pub required: bool,
     pub has_default: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct ActionInfo {
-    pub params:    Vec<ParamInfo>,
+    pub params: Vec<ParamInfo>,
     pub return_ty: FidanType,
-    pub span:      Span,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct ObjectInfo {
-    pub fields:  FxHashMap<Symbol, FidanType>,
+    pub fields: FxHashMap<Symbol, FidanType>,
     pub methods: FxHashMap<Symbol, ActionInfo>,
-    pub parent:  Option<Symbol>,
-    pub span:    Span,
+    pub parent: Option<Symbol>,
+    pub span: Span,
 }
 
 // ── TypeChecker ───────────────────────────────────────────────────────────────
 
 pub struct TypeChecker {
     pub(crate) interner: Arc<SymbolInterner>,
-    table:               SymbolTable,
-    objects:             FxHashMap<Symbol, ObjectInfo>,
-    diags:               Vec<Diagnostic>,
+    table: SymbolTable,
+    objects: FxHashMap<Symbol, ObjectInfo>,
+    diags: Vec<Diagnostic>,
     /// Expected return type of the action currently being checked.
-    current_return_ty:   Option<FidanType>,
+    current_return_ty: Option<FidanType>,
     /// Type of `this` in the current object / extension-action scope.
-    this_ty:             Option<FidanType>,
+    this_ty: Option<FidanType>,
     /// `FileId` used to synthesise dummy spans for injected symbols.
-    file_id:             FileId,
+    file_id: FileId,
 }
 
 impl TypeChecker {
@@ -68,24 +68,27 @@ impl TypeChecker {
     fn register_builtins(&mut self) {
         let dummy = self.dummy_span();
         let builtins: &[(&str, SymbolKind)] = &[
-            ("print",   SymbolKind::BuiltinAction),
+            ("print", SymbolKind::BuiltinAction),
             ("println", SymbolKind::BuiltinAction),
-            ("input",   SymbolKind::BuiltinAction),
-            ("len",     SymbolKind::BuiltinAction),
-            ("string",  SymbolKind::BuiltinAction),
+            ("input", SymbolKind::BuiltinAction),
+            ("len", SymbolKind::BuiltinAction),
+            ("string", SymbolKind::BuiltinAction),
             ("integer", SymbolKind::BuiltinAction),
-            ("float",   SymbolKind::BuiltinAction),
+            ("float", SymbolKind::BuiltinAction),
             ("boolean", SymbolKind::BuiltinAction),
         ];
         for &(name, kind) in builtins {
             let sym = self.interner.intern(name);
-            self.table.define(sym, SymbolInfo {
-                kind,
-                ty: FidanType::Function,
-                span: dummy,
-                is_mutable: false,
-                initialized: Initialized::Yes,
-            });
+            self.table.define(
+                sym,
+                SymbolInfo {
+                    kind,
+                    ty: FidanType::Function,
+                    span: dummy,
+                    is_mutable: false,
+                    initialized: Initialized::Yes,
+                },
+            );
         }
     }
 
@@ -102,7 +105,15 @@ impl TypeChecker {
         // Pass 1b: register extension actions as methods on their target objects.
         for &item_id in &module.items {
             let item = module.arena.get_item(item_id).clone();
-            if let Item::ExtensionAction { name, extends, ref params, ref return_ty, span, .. } = item {
+            if let Item::ExtensionAction {
+                name,
+                extends,
+                ref params,
+                ref return_ty,
+                span,
+                ..
+            } = item
+            {
                 let info = self.build_action_info(params, return_ty, span);
                 if let Some(obj) = self.objects.get_mut(&extends) {
                     obj.methods.insert(name, info);
@@ -121,12 +132,27 @@ impl TypeChecker {
         self.diags
     }
 
+    /// Drain accumulated diagnostics without consuming the checker.
+    ///
+    /// Used by the REPL after each line so the symbol-table state (defined
+    /// names, object registry) survives into the next line while diagnostic
+    /// history is cleared for fresh reporting.
+    pub fn drain_diags(&mut self) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.diags)
+    }
+
     // ── Registration (pass 1) ─────────────────────────────────────────────
 
     fn register_top_level(&mut self, item: &Item, arena: &AstArena) {
         let _dummy = self.dummy_span();
         match item {
-            Item::ObjectDecl { name, parent, fields, methods, span } => {
+            Item::ObjectDecl {
+                name,
+                parent,
+                fields,
+                methods,
+                span,
+            } => {
                 let mut obj = ObjectInfo {
                     fields: FxHashMap::default(),
                     methods: FxHashMap::default(),
@@ -134,46 +160,79 @@ impl TypeChecker {
                     span: *span,
                 };
                 for field in fields {
-                    obj.fields.insert(field.name, self.resolve_type_expr(&field.ty));
+                    obj.fields
+                        .insert(field.name, self.resolve_type_expr(&field.ty));
                 }
                 for &mid in methods {
-                    if let Item::ActionDecl { name: mname, params, return_ty, span: mspan, .. } =
-                        arena.get_item(mid)
+                    if let Item::ActionDecl {
+                        name: mname,
+                        params,
+                        return_ty,
+                        span: mspan,
+                        ..
+                    } = arena.get_item(mid)
                     {
                         let info = self.build_action_info(params, return_ty, *mspan);
                         obj.methods.insert(*mname, info);
                     }
                 }
                 self.objects.insert(*name, obj);
-                self.table.define(*name, SymbolInfo {
-                    kind: SymbolKind::Object,
-                    ty: FidanType::Object(*name),
-                    span: *span,
-                    is_mutable: false,
-                    initialized: Initialized::Yes,
-                });
+                self.table.define(
+                    *name,
+                    SymbolInfo {
+                        kind: SymbolKind::Object,
+                        ty: FidanType::Object(*name),
+                        span: *span,
+                        is_mutable: false,
+                        initialized: Initialized::Yes,
+                    },
+                );
             }
-            Item::ActionDecl { name, params: _, return_ty: _, span, .. } |
-            Item::ExtensionAction { name, params: _, return_ty: _, span, .. } => {
-                self.table.define(*name, SymbolInfo {
-                    kind: SymbolKind::Action,
-                    ty: FidanType::Function,
-                    span: *span,
-                    is_mutable: false,
-                    initialized: Initialized::Yes,
-                });
+            Item::ActionDecl {
+                name,
+                params: _,
+                return_ty: _,
+                span,
+                ..
             }
-            Item::VarDecl { name, ty, init: _, span } => {
-                let var_ty = ty.as_ref()
+            | Item::ExtensionAction {
+                name,
+                params: _,
+                return_ty: _,
+                span,
+                ..
+            } => {
+                self.table.define(
+                    *name,
+                    SymbolInfo {
+                        kind: SymbolKind::Action,
+                        ty: FidanType::Function,
+                        span: *span,
+                        is_mutable: false,
+                        initialized: Initialized::Yes,
+                    },
+                );
+            }
+            Item::VarDecl {
+                name,
+                ty,
+                init: _,
+                span,
+            } => {
+                let var_ty = ty
+                    .as_ref()
                     .map(|t| self.resolve_type_expr(t))
                     .unwrap_or(FidanType::Unknown);
-                self.table.define(*name, SymbolInfo {
-                    kind: SymbolKind::Var,
-                    ty: var_ty,
-                    span: *span,
-                    is_mutable: true,
-                    initialized: Initialized::No,
-                });
+                self.table.define(
+                    *name,
+                    SymbolInfo {
+                        kind: SymbolKind::Var,
+                        ty: var_ty,
+                        span: *span,
+                        is_mutable: true,
+                        initialized: Initialized::No,
+                    },
+                );
             }
             Item::ExprStmt(_) | Item::Use { .. } => {}
         }
@@ -184,13 +243,21 @@ impl TypeChecker {
     fn check_item(&mut self, item: &Item, module: &Module) {
         match item {
             // ── object ──────────────────────────────────────────────────
-            Item::ObjectDecl { name, parent, methods, span, .. } => {
+            Item::ObjectDecl {
+                name,
+                parent,
+                methods,
+                span,
+                ..
+            } => {
                 if let Some(p) = parent {
                     if !self.objects.contains_key(p) {
                         let pname = self.interner.resolve(*p).to_string();
-                        self.emit_error("E0100",
+                        self.emit_error(
+                            "E0100",
                             format!("undefined object `{pname}` in `extends` clause"),
-                            *span);
+                            *span,
+                        );
                     }
                 }
 
@@ -210,12 +277,23 @@ impl TypeChecker {
             }
 
             // ── action / extension action ────────────────────────────────
-            Item::ActionDecl { params, return_ty, body, .. } => {
+            Item::ActionDecl {
+                params,
+                return_ty,
+                body,
+                ..
+            } => {
                 // `this_ty` is already set if we're inside an ObjectDecl scope.
                 self.check_action_body(params, return_ty, body, None, module);
             }
 
-            Item::ExtensionAction { extends, params, return_ty, body, .. } => {
+            Item::ExtensionAction {
+                extends,
+                params,
+                return_ty,
+                body,
+                ..
+            } => {
                 let ext_ty = FidanType::Object(*extends);
                 let prev_this = self.this_ty.replace(ext_ty.clone());
                 self.check_action_body(params, return_ty, body, Some(ext_ty), module);
@@ -223,7 +301,12 @@ impl TypeChecker {
             }
 
             // ── module-level var ─────────────────────────────────────────
-            Item::VarDecl { name, ty, init, span } => {
+            Item::VarDecl {
+                name,
+                ty,
+                init,
+                span,
+            } => {
                 self.check_var_decl(*name, ty, *init, *span, module);
             }
 
@@ -238,15 +321,16 @@ impl TypeChecker {
 
     fn check_action_body(
         &mut self,
-        params:    &[fidan_ast::Param],
+        params: &[fidan_ast::Param],
         return_ty: &Option<TypeExpr>,
-        body:      &[StmtId],
+        body: &[StmtId],
         // If Some, inject a `this` binding for extension actions (object scope already
         // provides `this` for regular methods).
         inject_this: Option<FidanType>,
         module: &Module,
     ) {
-        let ret = return_ty.as_ref()
+        let ret = return_ty
+            .as_ref()
             .map(|t| self.resolve_type_expr(t))
             .unwrap_or(FidanType::Nothing);
         let prev_ret = self.current_return_ty.replace(ret);
@@ -260,28 +344,34 @@ impl TypeChecker {
             // Inside an object scope — propagate existing this into the action scope.
             let this_sym = self.interner.intern("this");
             let dummy = self.dummy_span();
-            self.table.define(this_sym, SymbolInfo {
-                kind: SymbolKind::Var,
-                ty: t.clone(),
-                span: dummy,
-                is_mutable: false,
-                initialized: Initialized::Yes,
-            });
+            self.table.define(
+                this_sym,
+                SymbolInfo {
+                    kind: SymbolKind::Var,
+                    ty: t.clone(),
+                    span: dummy,
+                    is_mutable: false,
+                    initialized: Initialized::Yes,
+                },
+            );
         }
 
         for param in params {
             let param_ty = self.resolve_type_expr(&param.ty);
-            self.table.define(param.name, SymbolInfo {
-                kind: SymbolKind::Param,
-                ty: param_ty,
-                span: param.span,
-                is_mutable: false,
-                initialized: if param.required {
-                    Initialized::Yes
-                } else {
-                    Initialized::Maybe
+            self.table.define(
+                param.name,
+                SymbolInfo {
+                    kind: SymbolKind::Param,
+                    ty: param_ty,
+                    span: param.span,
+                    is_mutable: false,
+                    initialized: if param.required {
+                        Initialized::Yes
+                    } else {
+                        Initialized::Maybe
+                    },
                 },
-            });
+            );
         }
 
         for &sid in body {
@@ -297,99 +387,170 @@ impl TypeChecker {
     fn check_stmt(&mut self, stmt_id: StmtId, module: &Module) {
         let stmt = module.arena.get_stmt(stmt_id).clone();
         match stmt {
-            Stmt::VarDecl { name, ty, init, span } => {
+            Stmt::VarDecl {
+                name,
+                ty,
+                init,
+                span,
+            } => {
                 self.check_var_decl(name, &ty, init, span, module);
             }
 
-            Stmt::Assign { target, value, span } => {
+            Stmt::Assign {
+                target,
+                value,
+                span,
+            } => {
                 let rhs = self.infer_expr(value, module);
                 let lhs = self.infer_expr(target, module);
                 if !lhs.is_assignable_from(&rhs) {
                     let (l, r) = (self.ty_name(&lhs), self.ty_name(&rhs));
-                    self.emit_error("E0201",
-                        format!("type mismatch: cannot assign `{r}` to `{l}`"), span);
+                    self.emit_error(
+                        "E0201",
+                        format!("type mismatch: cannot assign `{r}` to `{l}`"),
+                        span,
+                    );
                 }
             }
 
-            Stmt::Expr { expr, .. } => { self.infer_expr(expr, module); }
+            Stmt::Expr { expr, .. } => {
+                self.infer_expr(expr, module);
+            }
 
             Stmt::Return { value, span } => {
-                let ret = value.map(|id| self.infer_expr(id, module))
+                let ret = value
+                    .map(|id| self.infer_expr(id, module))
                     .unwrap_or(FidanType::Nothing);
                 if let Some(expected) = self.current_return_ty.clone() {
                     if !expected.is_assignable_from(&ret) {
                         let (e, a) = (self.ty_name(&expected), self.ty_name(&ret));
-                        self.emit_error("E0202",
-                            format!("return type mismatch: expected `{e}`, found `{a}`"), span);
+                        self.emit_error(
+                            "E0202",
+                            format!("return type mismatch: expected `{e}`, found `{a}`"),
+                            span,
+                        );
                     }
                 }
             }
 
             Stmt::Break { .. } | Stmt::Continue { .. } => {}
 
-            Stmt::If { condition, then_body, else_ifs, else_body, .. } => {
+            Stmt::If {
+                condition,
+                then_body,
+                else_ifs,
+                else_body,
+                ..
+            } => {
                 self.infer_expr(condition, module);
                 self.check_block(&then_body, module);
                 for ei in &else_ifs {
                     self.infer_expr(ei.condition, module);
                     self.check_block(&ei.body, module);
                 }
-                if let Some(body) = &else_body { self.check_block(body, module); }
+                if let Some(body) = &else_body {
+                    self.check_block(body, module);
+                }
             }
 
-            Stmt::For { binding, iterable, body, span } => {
+            Stmt::For {
+                binding,
+                iterable,
+                body,
+                span,
+            } => {
                 let iter_ty = self.infer_expr(iterable, module);
                 let elem_ty = match iter_ty {
                     FidanType::List(inner) => *inner,
                     FidanType::String | FidanType::Dynamic => FidanType::Dynamic,
-                    FidanType::Unknown | FidanType::Error  => FidanType::Unknown,
+                    FidanType::Unknown | FidanType::Error => FidanType::Unknown,
                     _ => FidanType::Dynamic,
                 };
                 self.table.push_scope(ScopeKind::Block);
-                self.table.define(binding, SymbolInfo {
-                    kind: SymbolKind::Var, ty: elem_ty, span,
-                    is_mutable: false, initialized: Initialized::Yes,
-                });
-                for &s in &body { self.check_stmt(s, module); }
+                self.table.define(
+                    binding,
+                    SymbolInfo {
+                        kind: SymbolKind::Var,
+                        ty: elem_ty,
+                        span,
+                        is_mutable: false,
+                        initialized: Initialized::Yes,
+                    },
+                );
+                for &s in &body {
+                    self.check_stmt(s, module);
+                }
                 self.table.pop_scope();
             }
 
-            Stmt::While { condition, body, .. } => {
+            Stmt::While {
+                condition, body, ..
+            } => {
                 self.infer_expr(condition, module);
                 self.check_block(&body, module);
             }
 
-            Stmt::Attempt { body, catches, otherwise, finally, .. } => {
+            Stmt::Attempt {
+                body,
+                catches,
+                otherwise,
+                finally,
+                ..
+            } => {
                 self.check_block(&body, module);
                 for catch in &catches {
                     self.table.push_scope(ScopeKind::Block);
                     if let Some(binding) = catch.binding {
                         let dummy = self.dummy_span();
-                        self.table.define(binding, SymbolInfo {
-                            kind: SymbolKind::Var,
-                            ty: FidanType::Dynamic, // exceptions are untyped in MVP
-                            span: dummy,
-                            is_mutable: false,
-                            initialized: Initialized::Yes,
-                        });
+                        self.table.define(
+                            binding,
+                            SymbolInfo {
+                                kind: SymbolKind::Var,
+                                ty: FidanType::Dynamic, // exceptions are untyped in MVP
+                                span: dummy,
+                                is_mutable: false,
+                                initialized: Initialized::Yes,
+                            },
+                        );
                     }
-                    for &s in &catch.body { self.check_stmt(s, module); }
+                    for &s in &catch.body {
+                        self.check_stmt(s, module);
+                    }
                     self.table.pop_scope();
                 }
-                if let Some(b) = &otherwise { self.check_block(b, module); }
-                if let Some(b) = &finally   { self.check_block(b, module); }
+                if let Some(b) = &otherwise {
+                    self.check_block(b, module);
+                }
+                if let Some(b) = &finally {
+                    self.check_block(b, module);
+                }
             }
 
-            Stmt::Panic { value, .. } => { self.infer_expr(value, module); }
+            Stmt::Panic { value, .. } => {
+                self.infer_expr(value, module);
+            }
 
-            Stmt::ParallelFor { binding, iterable, body, span } => {
+            Stmt::ParallelFor {
+                binding,
+                iterable,
+                body,
+                span,
+            } => {
                 self.infer_expr(iterable, module);
                 self.table.push_scope(ScopeKind::Block);
-                self.table.define(binding, SymbolInfo {
-                    kind: SymbolKind::Var, ty: FidanType::Dynamic, span,
-                    is_mutable: false, initialized: Initialized::Yes,
-                });
-                for &s in &body { self.check_stmt(s, module); }
+                self.table.define(
+                    binding,
+                    SymbolInfo {
+                        kind: SymbolKind::Var,
+                        ty: FidanType::Dynamic,
+                        span,
+                        is_mutable: false,
+                        initialized: Initialized::Yes,
+                    },
+                );
+                for &s in &body {
+                    self.check_stmt(s, module);
+                }
                 self.table.pop_scope();
             }
 
@@ -399,7 +560,9 @@ impl TypeChecker {
                 }
             }
 
-            Stmt::Check { scrutinee, arms, .. } => {
+            Stmt::Check {
+                scrutinee, arms, ..
+            } => {
                 self.infer_expr(scrutinee, module);
                 for arm in &arms {
                     self.infer_expr(arm.pattern, module);
@@ -413,16 +576,18 @@ impl TypeChecker {
 
     fn check_block(&mut self, stmts: &[StmtId], module: &Module) {
         self.table.push_scope(ScopeKind::Block);
-        for &s in stmts { self.check_stmt(s, module); }
+        for &s in stmts {
+            self.check_stmt(s, module);
+        }
         self.table.pop_scope();
     }
 
     fn check_var_decl(
         &mut self,
-        name:   Symbol,
-        ty:     &Option<TypeExpr>,
-        init:   Option<ExprId>,
-        span:   Span,
+        name: Symbol,
+        ty: &Option<TypeExpr>,
+        init: Option<ExprId>,
+        span: Span,
         module: &Module,
     ) {
         let declared = ty.as_ref().map(|t| self.resolve_type_expr(t));
@@ -432,8 +597,11 @@ impl TypeChecker {
             if let Some(ref dt) = declared {
                 if !dt.is_assignable_from(&actual) {
                     let (d, a) = (self.ty_name(dt), self.ty_name(&actual));
-                    self.emit_error("E0201",
-                        format!("type mismatch: expected `{d}`, found `{a}`"), span);
+                    self.emit_error(
+                        "E0201",
+                        format!("type mismatch: expected `{d}`, found `{a}`"),
+                        span,
+                    );
                 }
             }
             actual
@@ -442,13 +610,20 @@ impl TypeChecker {
         };
 
         let final_ty = declared.unwrap_or(inferred);
-        self.table.define(name, SymbolInfo {
-            kind: SymbolKind::Var,
-            ty: final_ty,
-            span,
-            is_mutable: true,
-            initialized: if init.is_some() { Initialized::Yes } else { Initialized::No },
-        });
+        self.table.define(
+            name,
+            SymbolInfo {
+                kind: SymbolKind::Var,
+                ty: final_ty,
+                span,
+                is_mutable: true,
+                initialized: if init.is_some() {
+                    Initialized::Yes
+                } else {
+                    Initialized::No
+                },
+            },
+        );
     }
 
     // ── Expression inference ──────────────────────────────────────────────
@@ -456,11 +631,11 @@ impl TypeChecker {
     pub(crate) fn infer_expr(&mut self, expr_id: ExprId, module: &Module) -> FidanType {
         let expr = module.arena.get_expr(expr_id).clone();
         match expr {
-            Expr::IntLit    { .. } => FidanType::Integer,
-            Expr::FloatLit  { .. } => FidanType::Float,
-            Expr::BoolLit   { .. } => FidanType::Boolean,
-            Expr::Nothing   { .. } => FidanType::Nothing,
-            Expr::StrLit    { .. } | Expr::StringInterp { .. } => FidanType::String,
+            Expr::IntLit { .. } => FidanType::Integer,
+            Expr::FloatLit { .. } => FidanType::Float,
+            Expr::BoolLit { .. } => FidanType::Boolean,
+            Expr::Nothing { .. } => FidanType::Nothing,
+            Expr::StrLit { .. } | Expr::StringInterp { .. } => FidanType::String,
 
             Expr::Ident { name, span } => {
                 // `_` is the universal wildcard — it matches any type and is never
@@ -481,14 +656,10 @@ impl TypeChecker {
                             .collect();
                         let candidate_refs: Vec<&str> =
                             candidates.iter().map(String::as_str).collect();
-                    let mut diag = Diagnostic::error(
-                            "E0101",
-                            format!("undefined name `{s}`"),
-                            span,
-                        )
-                        .with_label(Label::primary(span, "unknown name"));
-                        if let Some(best) =
-                            FixEngine::suggest_name(&s, candidate_refs.into_iter())
+                        let mut diag =
+                            Diagnostic::error("E0101", format!("undefined name `{s}`"), span)
+                                .with_label(Label::primary(span, "unknown name"));
+                        if let Some(best) = FixEngine::suggest_name(&s, candidate_refs.into_iter())
                         {
                             diag = diag.with_suggestion(Suggestion::fix(
                                 format!("did you mean `{best}`?"),
@@ -514,15 +685,25 @@ impl TypeChecker {
                 FidanType::Dynamic
             }
 
-            Expr::Field { object, field, span } => {
+            Expr::Field {
+                object,
+                field,
+                span,
+            } => {
                 let obj_ty = self.infer_expr(object, module);
                 self.resolve_field(&obj_ty, field, span)
             }
 
-            Expr::Call { callee, ref args, span } => {
+            Expr::Call {
+                callee,
+                ref args,
+                span,
+            } => {
                 // Infer arg types first (for side effects / nested errors)
                 let args_clone: Vec<_> = args.iter().map(|a| (a.name, a.value)).collect();
-                for (_, val) in &args_clone { self.infer_expr(*val, module); }
+                for (_, val) in &args_clone {
+                    self.infer_expr(*val, module);
+                }
                 self.infer_call(callee, &args_clone, span, module)
             }
 
@@ -531,9 +712,9 @@ impl TypeChecker {
                 self.infer_expr(index, module);
                 match obj_ty {
                     FidanType::List(inner) => *inner,
-                    FidanType::Dict(_, v)  => *v,
-                    FidanType::String      => FidanType::String,
-                    _                      => FidanType::Dynamic,
+                    FidanType::Dict(_, v) => *v,
+                    FidanType::String => FidanType::String,
+                    _ => FidanType::Dynamic,
                 }
             }
 
@@ -558,25 +739,42 @@ impl TypeChecker {
                 if l.is_nothing() { r } else { l }
             }
 
-            Expr::Ternary { condition, then_val, else_val, .. } => {
+            Expr::Ternary {
+                condition,
+                then_val,
+                else_val,
+                ..
+            } => {
                 self.infer_expr(condition, module);
                 let then_ty = self.infer_expr(then_val, module);
                 self.infer_expr(else_val, module);
                 then_ty
             }
 
-            Expr::Assign { target, value, span } => {
+            Expr::Assign {
+                target,
+                value,
+                span,
+            } => {
                 let rhs = self.infer_expr(value, module);
                 let lhs = self.infer_expr(target, module);
                 if !lhs.is_assignable_from(&rhs) && !lhs.is_error() {
                     let (l, r) = (self.ty_name(&lhs), self.ty_name(&rhs));
-                    self.emit_error("E0201",
-                        format!("type mismatch: cannot assign `{r}` to `{l}`"), span);
+                    self.emit_error(
+                        "E0201",
+                        format!("type mismatch: cannot assign `{r}` to `{l}`"),
+                        span,
+                    );
                 }
                 rhs
             }
 
-            Expr::CompoundAssign { op, target, value, span } => {
+            Expr::CompoundAssign {
+                op,
+                target,
+                value,
+                span,
+            } => {
                 let rhs = self.infer_expr(value, module);
                 let lhs = self.infer_expr(target, module);
                 self.binary_result(op, &lhs, &rhs, span)
@@ -596,10 +794,13 @@ impl TypeChecker {
             }
 
             Expr::List { elements, .. } => {
-                let elem = elements.first()
+                let elem = elements
+                    .first()
                     .map(|&id| self.infer_expr(id, module))
                     .unwrap_or(FidanType::Dynamic);
-                for &id in elements.iter().skip(1) { self.infer_expr(id, module); }
+                for &id in elements.iter().skip(1) {
+                    self.infer_expr(id, module);
+                }
                 FidanType::List(Box::new(elem))
             }
 
@@ -608,13 +809,12 @@ impl TypeChecker {
                     self.infer_expr(*k, module);
                     self.infer_expr(*v, module);
                 }
-                FidanType::Dict(
-                    Box::new(FidanType::String),
-                    Box::new(FidanType::Dynamic),
-                )
+                FidanType::Dict(Box::new(FidanType::String), Box::new(FidanType::Dynamic))
             }
 
-            Expr::Check { scrutinee, arms, .. } => {
+            Expr::Check {
+                scrutinee, arms, ..
+            } => {
                 self.infer_expr(scrutinee, module);
                 for arm in arms {
                     self.infer_expr(arm.pattern, module);
@@ -636,7 +836,12 @@ impl TypeChecker {
             FidanType::Object(sym) => {
                 let sym = *sym;
                 // Try field, then method, then walk inheritance chain.
-                if let Some(ft) = self.objects.get(&sym).and_then(|o| o.fields.get(&field)).cloned() {
+                if let Some(ft) = self
+                    .objects
+                    .get(&sym)
+                    .and_then(|o| o.fields.get(&field))
+                    .cloned()
+                {
                     return ft;
                 }
                 if let Some(_) = self.objects.get(&sym).and_then(|o| o.methods.get(&field)) {
@@ -650,11 +855,19 @@ impl TypeChecker {
             }
             FidanType::String => {
                 let f = self.interner.resolve(field);
-                if matches!(f.as_ref(), "length" | "len") { FidanType::Integer } else { FidanType::Dynamic }
+                if matches!(f.as_ref(), "length" | "len") {
+                    FidanType::Integer
+                } else {
+                    FidanType::Dynamic
+                }
             }
             FidanType::List(_) => {
                 let f = self.interner.resolve(field);
-                if matches!(f.as_ref(), "length" | "len") { FidanType::Integer } else { FidanType::Dynamic }
+                if matches!(f.as_ref(), "length" | "len") {
+                    FidanType::Integer
+                } else {
+                    FidanType::Dynamic
+                }
             }
             FidanType::Dynamic | FidanType::Unknown | FidanType::Error => FidanType::Dynamic,
             _ => FidanType::Dynamic,
@@ -666,9 +879,9 @@ impl TypeChecker {
     fn infer_call(
         &mut self,
         callee_id: ExprId,
-        args:      &[(Option<Symbol>, ExprId)],
-        span:      Span,
-        module:    &Module,
+        args: &[(Option<Symbol>, ExprId)],
+        span: Span,
+        module: &Module,
     ) -> FidanType {
         let callee = module.arena.get_expr(callee_id).clone();
         match callee {
@@ -676,13 +889,13 @@ impl TypeChecker {
                 let name_str = self.interner.resolve(name).to_string();
                 // Built-in return types
                 match name_str.as_str() {
-                    "print" | "println"    => return FidanType::Nothing,
-                    "input"                => return FidanType::String,
-                    "len"                  => return FidanType::Integer,
-                    "string"               => return FidanType::String,
-                    "integer"              => return FidanType::Integer,
-                    "float"                => return FidanType::Float,
-                    "boolean"              => return FidanType::Boolean,
+                    "print" | "println" => return FidanType::Nothing,
+                    "input" => return FidanType::String,
+                    "len" => return FidanType::Integer,
+                    "string" => return FidanType::String,
+                    "integer" => return FidanType::Integer,
+                    "float" => return FidanType::Float,
+                    "boolean" => return FidanType::Boolean,
                     _ => {}
                 }
                 // Object constructor call
@@ -730,12 +943,14 @@ impl TypeChecker {
     fn check_required_params(
         &mut self,
         obj_sym: Symbol,
-        args:    &[(Option<Symbol>, ExprId)],
-        span:    Span,
+        args: &[(Option<Symbol>, ExprId)],
+        span: Span,
     ) {
         // Intern "initialize" before borrowing self.objects
         let init_sym = self.interner.intern("initialize");
-        let params: Option<Vec<ParamInfo>> = self.objects.get(&obj_sym)
+        let params: Option<Vec<ParamInfo>> = self
+            .objects
+            .get(&obj_sym)
             .and_then(|o| o.methods.get(&init_sym))
             .map(|m| m.params.clone());
 
@@ -746,8 +961,11 @@ impl TypeChecker {
                     let named_ok = args.iter().any(|(n, _)| *n == Some(p.name));
                     if !named_ok && !has_positional {
                         let pname = self.interner.resolve(p.name).to_string();
-                        self.emit_error("E0301",
-                            format!("required parameter `{pname}` not provided"), span);
+                        self.emit_error(
+                            "E0301",
+                            format!("required parameter `{pname}` not provided"),
+                            span,
+                        );
                     }
                 }
             }
@@ -756,23 +974,42 @@ impl TypeChecker {
 
     // ── Binary type rules ─────────────────────────────────────────────────
 
-    fn binary_result(&mut self, op: BinOp, lhs: &FidanType, rhs: &FidanType, _span: Span) -> FidanType {
+    fn binary_result(
+        &mut self,
+        op: BinOp,
+        lhs: &FidanType,
+        rhs: &FidanType,
+        _span: Span,
+    ) -> FidanType {
         match op {
             BinOp::Add => match (lhs, rhs) {
                 (FidanType::String, _) | (_, FidanType::String) => FidanType::String,
-                (FidanType::Float, _)  | (_, FidanType::Float)  => FidanType::Float,
-                (FidanType::Integer, FidanType::Integer)        => FidanType::Integer,
-                _                                               => FidanType::Dynamic,
-            },
-            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow
-            | BinOp::BitXor | BinOp::BitAnd | BinOp::BitOr | BinOp::Shl | BinOp::Shr => match (lhs, rhs) {
                 (FidanType::Float, _) | (_, FidanType::Float) => FidanType::Float,
-                (FidanType::Integer, FidanType::Integer)      => FidanType::Integer,
-                _                                             => FidanType::Dynamic,
+                (FidanType::Integer, FidanType::Integer) => FidanType::Integer,
+                _ => FidanType::Dynamic,
             },
-            BinOp::Eq | BinOp::NotEq
-            | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq
-            | BinOp::And | BinOp::Or => FidanType::Boolean,
+            BinOp::Sub
+            | BinOp::Mul
+            | BinOp::Div
+            | BinOp::Rem
+            | BinOp::Pow
+            | BinOp::BitXor
+            | BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::Shl
+            | BinOp::Shr => match (lhs, rhs) {
+                (FidanType::Float, _) | (_, FidanType::Float) => FidanType::Float,
+                (FidanType::Integer, FidanType::Integer) => FidanType::Integer,
+                _ => FidanType::Dynamic,
+            },
+            BinOp::Eq
+            | BinOp::NotEq
+            | BinOp::Lt
+            | BinOp::LtEq
+            | BinOp::Gt
+            | BinOp::GtEq
+            | BinOp::And
+            | BinOp::Or => FidanType::Boolean,
             BinOp::Range => FidanType::List(Box::new(FidanType::Integer)),
         }
     }
@@ -791,45 +1028,49 @@ impl TypeChecker {
                 };
                 let inner = self.resolve_type_expr(param);
                 match base_str.as_str() {
-                    "list"    => FidanType::List(Box::new(inner)),
-                    "dict"    => FidanType::Dict(Box::new(FidanType::String), Box::new(inner)),
-                    "shared"  => FidanType::Shared(Box::new(inner)),
+                    "list" => FidanType::List(Box::new(inner)),
+                    "dict" => FidanType::Dict(Box::new(FidanType::String), Box::new(inner)),
+                    "shared" => FidanType::Shared(Box::new(inner)),
                     "pending" => FidanType::Pending(Box::new(inner)),
-                    _         => FidanType::Unknown,
+                    _ => FidanType::Unknown,
                 }
             }
             TypeExpr::Dynamic { .. } => FidanType::Dynamic,
-            TypeExpr::Nothing  { .. } => FidanType::Nothing,
+            TypeExpr::Nothing { .. } => FidanType::Nothing,
         }
     }
 
     fn resolve_named_type(&self, sym: Symbol) -> FidanType {
         let s = self.interner.resolve(sym);
         match s.to_lowercase().as_str() {
-            "integer" | "int"     => FidanType::Integer,
-            "float"   | "decimal" => FidanType::Float,
-            "boolean" | "bool"    => FidanType::Boolean,
-            "string"  | "text"    => FidanType::String,
+            "integer" | "int" => FidanType::Integer,
+            "float" | "decimal" => FidanType::Float,
+            "boolean" | "bool" => FidanType::Boolean,
+            "string" | "text" => FidanType::String,
             "nothing" | "null" | "none" => FidanType::Nothing,
-            "dynamic" | "any"     => FidanType::Dynamic,
-            _ => FidanType::Object(sym),  // user-defined type
+            "dynamic" | "any" => FidanType::Dynamic,
+            _ => FidanType::Object(sym), // user-defined type
         }
     }
 
     fn build_action_info(
         &self,
-        params:    &[Param],
+        params: &[Param],
         return_ty: &Option<TypeExpr>,
-        span:      Span,
+        span: Span,
     ) -> ActionInfo {
         ActionInfo {
-            params: params.iter().map(|p| ParamInfo {
-                name:        p.name,
-                ty:          self.resolve_type_expr(&p.ty),
-                required:    p.required,
-                has_default: p.default.is_some(),
-            }).collect(),
-            return_ty: return_ty.as_ref()
+            params: params
+                .iter()
+                .map(|p| ParamInfo {
+                    name: p.name,
+                    ty: self.resolve_type_expr(&p.ty),
+                    required: p.required,
+                    has_default: p.default.is_some(),
+                })
+                .collect(),
+            return_ty: return_ty
+                .as_ref()
                 .map(|t| self.resolve_type_expr(t))
                 .unwrap_or(FidanType::Nothing),
             span,
@@ -840,34 +1081,40 @@ impl TypeChecker {
 
     fn inject_this_and_parent(
         &mut self,
-        this_ty:    FidanType,
+        this_ty: FidanType,
         parent_sym: Option<Symbol>,
-        file:       FileId,
+        file: FileId,
     ) {
         self.inject_this_binding(this_ty, file);
         if let Some(p) = parent_sym {
-            let dummy  = self.dummy_span();
+            let dummy = self.dummy_span();
             let parent = self.interner.intern("parent");
-            self.table.define(parent, SymbolInfo {
-                kind: SymbolKind::Var,
-                ty:   FidanType::Object(p),
-                span: dummy,
-                is_mutable:  false,
-                initialized: Initialized::Yes,
-            });
+            self.table.define(
+                parent,
+                SymbolInfo {
+                    kind: SymbolKind::Var,
+                    ty: FidanType::Object(p),
+                    span: dummy,
+                    is_mutable: false,
+                    initialized: Initialized::Yes,
+                },
+            );
         }
     }
 
     fn inject_this_binding(&mut self, ty: FidanType, _file: FileId) {
-        let dummy  = self.dummy_span();
-        let this   = self.interner.intern("this");
-        self.table.define(this, SymbolInfo {
-            kind: SymbolKind::Var,
-            ty,
-            span: dummy,
-            is_mutable:  false,
-            initialized: Initialized::Yes,
-        });
+        let dummy = self.dummy_span();
+        let this = self.interner.intern("this");
+        self.table.define(
+            this,
+            SymbolInfo {
+                kind: SymbolKind::Var,
+                ty,
+                span: dummy,
+                is_mutable: false,
+                initialized: Initialized::Yes,
+            },
+        );
     }
 
     // ── Utility ───────────────────────────────────────────────────────────

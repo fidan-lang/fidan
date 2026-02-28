@@ -342,6 +342,19 @@ fn run_repl() -> Result<()> {
 
     // Persist the interner so symbol IDs are stable across REPL lines.
     let interner = Arc::new(SymbolInterner::new());
+
+    // A stable boot file gives the TypeChecker a FileId for its internal
+    // dummy spans (built-in registrations).  Because each per-line SourceMap
+    // also starts its counter at 0, all spans always resolve correctly.
+    let boot_map = Arc::new(SourceMap::new());
+    let boot_file = boot_map.add_file("<repl>", "");
+    let boot_fid = boot_file.id;
+
+    // ONE persistent TypeChecker for the whole session.  Symbol definitions
+    // accumulate across lines, so `greeting` defined on line 1 is visible on
+    // line 2 — exactly how a real REPL should behave.  :reset replaces it.
+    let mut tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
+
     let mut line_no: u32 = 0;
 
     loop {
@@ -379,8 +392,8 @@ fn run_repl() -> Result<()> {
                 "exit" | "quit" | "q" => break,
 
                 "reset" => {
+                    tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
                     println!("  (session state cleared)");
-                    // True eval-state reset happens in Phase 5.
                     continue;
                 }
 
@@ -461,7 +474,8 @@ fn run_repl() -> Result<()> {
         }
 
         if parse_diags.is_empty() {
-            let type_diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
+            tc.check_module(&module);
+            let type_diags = tc.drain_diags();
             if type_diags.is_empty() {
                 println!("  ok");
             } else {
