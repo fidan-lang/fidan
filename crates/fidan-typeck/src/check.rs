@@ -267,13 +267,22 @@ impl TypeChecker {
                         if prev.kind != SymbolKind::BuiltinAction {
                             let n = self.interner.resolve(*name).to_string();
                             let prev_span = prev.span;
+                            // High-confidence fix: remove the leading `var ` (4 bytes)
+                            // to turn the redeclaration into a plain assignment.
+                            let var_kw = Span::new(span.file, span.start, span.start + 4);
                             self.diags.push(
                                 Diagnostic::error(
                                     fidan_diagnostics::diag_code!("E0102"),
                                     format!("`{n}` is already declared in this scope — use `{n} = value` to reassign"),
                                     *span,
                                 )
-                                .with_label(Label::secondary(prev_span, "first declared here")),
+                                .with_label(Label::secondary(prev_span, "first declared here"))
+                                .with_suggestion(Suggestion::fix(
+                                    format!("remove `var` to reassign `{n}`"),
+                                    var_kw,
+                                    "",
+                                    Confidence::High,
+                                )),
                             );
                             return; // do not redefine; leave old binding intact
                         }
@@ -478,13 +487,20 @@ impl TypeChecker {
                         if prev.kind != SymbolKind::BuiltinAction {
                             let n = self.interner.resolve(name).to_string();
                             let prev_span = prev.span;
+                            let var_kw = Span::new(span.file, span.start, span.start + 4);
                             self.diags.push(
                                 Diagnostic::error(
                                     fidan_diagnostics::diag_code!("E0102"),
                                     format!("`{n}` is already declared in this scope — use `{n} = value` to reassign"),
                                     span,
                                 )
-                                .with_label(Label::secondary(prev_span, "first declared here")),
+                                .with_label(Label::secondary(prev_span, "first declared here"))
+                                .with_suggestion(Suggestion::fix(
+                                    format!("remove `var` to reassign `{n}`"),
+                                    var_kw,
+                                    "",
+                                    Confidence::High,
+                                )),
                             );
                             return;
                         }

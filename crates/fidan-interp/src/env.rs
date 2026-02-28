@@ -14,6 +14,11 @@ pub struct Env {
 
     /// `this` binding — one slot per call frame.
     this_stack: Vec<Option<FidanValue>>,
+
+    /// Per-frame name for the call stack.
+    /// `None` for anonymous scopes (catch blocks, the global frame, etc.).
+    /// `Some(name)` for named function / method invocations.
+    frame_names: Vec<Option<String>>,
 }
 
 impl Env {
@@ -21,26 +26,41 @@ impl Env {
         Self {
             frames: vec![HashMap::new()],
             this_stack: vec![None],
+            frame_names: vec![None], // global frame is anonymous
         }
     }
 
     // ── Frame management ───────────────────────────────────────────────────────
 
-    /// Push a new call frame (function call).
-    /// `this` is the receiver object, if any.
-    pub fn push_frame(&mut self, this: Option<FidanValue>) {
+    /// Push a new call frame.
+    ///
+    /// * `name`  — the function / method name to appear in the call stack.
+    ///   Pass `None` for anonymous scopes (catch blocks, closures, etc.).
+    /// * `this`  — optional receiver object.
+    pub fn push_frame(&mut self, name: Option<String>, this: Option<FidanValue>) {
         self.frames.push(HashMap::new());
         self.this_stack.push(this);
+        self.frame_names.push(name);
     }
 
     /// Pop the top call frame.
     pub fn pop_frame(&mut self) {
         if self.frames.len() > 1 {
             self.frames.pop();
-        }
-        if self.this_stack.len() > 1 {
             self.this_stack.pop();
+            self.frame_names.pop();
         }
+    }
+
+    /// Return the call stack as a list of named frames, **innermost first**.
+    ///
+    /// Anonymous frames (catch blocks, the global frame) are excluded.
+    pub fn stack_trace(&self) -> Vec<String> {
+        self.frame_names
+            .iter()
+            .rev()
+            .filter_map(|n| n.clone())
+            .collect()
     }
 
     // ── Variable access ────────────────────────────────────────────────────────

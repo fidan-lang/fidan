@@ -2,6 +2,7 @@
 
 mod codes;
 mod diagnostic;
+mod explanations;
 mod fix_engine;
 mod label;
 mod render;
@@ -10,6 +11,7 @@ mod suggestion;
 pub use codes::{
     CODES, DiagCode, DiagnosticCode, assert_code, lookup as lookup_code, title as code_title,
 };
+pub use explanations::explain;
 
 /// Validate a diagnostic code string at **compile time** and return a [`DiagCode`].
 ///

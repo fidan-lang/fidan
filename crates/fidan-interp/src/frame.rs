@@ -18,7 +18,11 @@ pub enum Signal {
 
     /// `panic(expr)` / runtime error — carries the error value to the nearest
     /// `attempt / catch` handler, or terminates the program if uncaught.
-    Panic(FidanValue),
+    ///
+    /// `trace` is the call stack at the moment the panic was raised,
+    /// ordered **innermost frame first**.  Empty when the panic originates
+    /// outside any named function (e.g. top-level code).
+    Panic { value: FidanValue, trace: Vec<String> },
 }
 
 /// Convenience alias: `Ok(value)` for normal execution,

@@ -110,7 +110,7 @@ var chained  = "{iname} says: {greeting}"
 var primes -> list -> integer  = [2, 3, 5, 7, 11]
 var mixed oftype list oftype flexible  = [1, "two", true, nothing]       # flexible list
 var empty_l = []
-var matrix = [[1, 2], [3, 4], [5, 6]]
+matrix = [[1, 2], [3, 4], [5, 6]]
 # var squares = [x * x for x in primes]    # [FUTURE: list comprehension]
 
 # Dict (Map) literal

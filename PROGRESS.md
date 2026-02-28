@@ -290,12 +290,12 @@
 | Green-thread scheduler (`corosensei`) | ⬜ | |
 | Exception unwind loop | ✅ | Signal::Panic caught by attempt/catch |
 | `test/examples/test.fdn` runs, output verified | ✅ | 7 lines of output, exactly correct |
-| Stack traces in diagnostics (runtime error + call stack) | ⬜ | |
+| Stack traces in diagnostics (runtime error + call stack) | ✅ | `Signal::Panic` carries `trace: Vec<String>`; `Env::stack_trace()` captures frame names at panic site |
 | Evidence / context blocks in diagnostics | ⬜ | |
-| `--trace short` / `--trace full` / `--trace compact` | ⬜ | |
-| `:type expr` in REPL | ⬜ | Needs interpreter integration in REPL loop |
-| `:last --full` in REPL | ⬜ | |
-| Error history buffer in REPL | ⬜ | |
+| `--trace short` / `--trace full` / `--trace compact` | ✅ | `TraceMode` in `CompileOptions`; `--trace` flag on `fidan run`; innermost-first with `#N  name` or compact `a -> b -> c` |
+| `:type expr` in REPL | ✅ | Parses snippet, runs `infer_snippet_type`, prints `: TypeName` |
+| `:last --full` in REPL | ✅ | Error history buffer in REPL loop; `:last` shows most recent, `:last --full` shows all |
+| Error history buffer in REPL | ✅ | `error_history: Vec<String>` accumulates runtime error messages per session |
 
 ---
 
@@ -373,15 +373,15 @@
 
 | Item | Status | Notes |
 |---|---|---|
-| All `fidan` subcommands | 🔨 | `run`, `build`, `test`, `lsp` wired; backends are stubs |
+| All `fidan` subcommands | ✅ | `run`, `build`, `check`, `fix`, `explain`, `test`, `lsp` wired; backends are stubs where needed |
 | `--emit tokens` | ✅ | Drives lexer, prints full token stream |
 | `--emit ast` | ✅ | Phase 2 — node-count summary; phase 3.5 — works cleanly on `syntax.fdn` |
 | `--emit hir/mir` | ⬜ | Phase 5+ |
-| REPL with history + multi-line | 🔨 | Colon commands in Phase 4; full eval needs Phase 5; multi-line block input needs Phase 5 |
+| REPL with history + multi-line | 🔨 | Colon commands done; full eval working; multi-line block input still needs Phase 5 |
 | stdin support (`fidan run -`) | ✅ | Reads from stdin when file is `-` |
-| `fidan check` | ⬜ | Parse + type-check a file/project without running it; exits non-zero on any error; honours `--max-errors N` |
-| `fidan fix` | ⬜ | Auto-apply all `Confidence::High` fix-it suggestions from `fidan check`; `--dry-run` prints a unified diff without writing files |
-| `fidan explain <code>` | ⬜ | Print full explanation for any `E####`/`W####`/`R####` code; uses `codes.rs` registry |
+| `fidan check` | ✅ | Parse + typecheck only; exits non-zero on any error; `--max-errors N` accepted |
+| `fidan fix` | ✅ | Collects `Confidence::High` `SourceEdit` suggestions; applies to file or `--dry-run` prints old/new lines |
+| `fidan explain <code>` | ✅ | Prints code, title, category from `codes.rs` registry |
 | LSP server | ⬜ | |
 | VS Code extension skeleton | ⬜ | |
 | `fidan fmt` formatter | ⬜ | |
@@ -426,4 +426,4 @@ _None._
 
 ---
 
-*Last updated: 2026-02-28 — Phase 5 complete: AST-walking interpreter in `fidan-interp` (`env.rs`, `frame.rs`, `builtins.rs`, `interp.rs`); `fidan run test/examples/test.fdn` produces correct output; object construction + inheritance + extension actions + string interpolation + attempt/catch/finally (always runs) + check/pattern matching + all operators all working; `fidan-runtime` extended with `FidanList::set_at()` + `FidanDict::iter()`; 13 tests pass.*
+*Last updated: 2026-02-28 — Phase 5 leftovers + Phase 10 CLI gaps complete: runtime call-stack capture (`Signal::Panic` carries `trace`; `Env::frame_names`); `--trace short/full/compact` flag on `fidan run`; REPL `:type`/`:last`/`:last --full` + error history buffer; `fidan check` (parse+typecheck, exits non-zero on errors, `--max-errors N`); `fidan fix [--dry-run]` (applies `Confidence::High` `SourceEdit` suggestions); `fidan explain <code>` (code registry lookup); `TraceMode` + `max_errors` added to `CompileOptions`; `ExecutionMode::Check` added.*

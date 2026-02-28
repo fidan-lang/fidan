@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use fidan_diagnostics::{Severity, render_message_to_stderr};
-use fidan_driver::{CompileOptions, EmitKind, ExecutionMode};
+use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, TraceMode};
 use std::path::PathBuf;
 
 // On Windows, PowerShell's default code page is CP1252 which corrupts the UTF-8
@@ -42,6 +42,12 @@ enum Command {
         /// Emit intermediate representation: tokens | ast | hir | mir
         #[arg(long, value_delimiter = ',')]
         emit: Vec<String>,
+        /// Print the call stack on uncaught panics: none | short | full | compact
+        #[arg(long, default_value = "none")]
+        trace: String,
+        /// Stop after this many errors (0 = no limit)
+        #[arg(long, default_value = "0")]
+        max_errors: usize,
     },
     /// Compile a Fidan source file to a native binary
     Build {
@@ -63,6 +69,27 @@ enum Command {
     Repl,
     /// Start the language server (LSP)
     Lsp,
+    /// Check a Fidan source file for errors without running it
+    Check {
+        /// Path to the .fdn source file
+        file: PathBuf,
+        /// Stop after this many errors (0 = no limit)
+        #[arg(long, default_value = "0")]
+        max_errors: usize,
+    },
+    /// Apply high-confidence fix suggestions to a Fidan source file
+    Fix {
+        /// Path to the .fdn source file
+        file: PathBuf,
+        /// Print the proposed changes without writing to the file
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Print the description of a diagnostic code (e.g. `E0101`, `W2001`)
+    Explain {
+        /// Diagnostic code
+        code: String,
+    },
 }
 
 fn parse_emit(raw: &[String]) -> Result<Vec<EmitKind>> {
@@ -80,18 +107,160 @@ fn parse_emit(raw: &[String]) -> Result<Vec<EmitKind>> {
         .collect()
 }
 
+fn parse_trace(raw: &str) -> Result<TraceMode> {
+    match raw.trim().to_lowercase().as_str() {
+        "none" | "" => Ok(TraceMode::None),
+        "short" => Ok(TraceMode::Short),
+        "full" => Ok(TraceMode::Full),
+        "compact" => Ok(TraceMode::Compact),
+        other => bail!(
+            "unknown --trace mode {:?}  (valid: none, short, full, compact)",
+            other
+        ),
+    }
+}
+
+fn run_explain(code: &str) {
+    let entry = match fidan_diagnostics::lookup_code(code) {
+        Some(e) => e,
+        None => {
+            eprintln!("  unknown diagnostic code `{code}`");
+            eprintln!("  run `fidan explain` without arguments to list all codes");
+            return;
+        }
+    };
+
+    // Header line – mirrors the style used in error output
+    let prefix = if code.starts_with('W') {
+        "warning"
+    } else if code.starts_with('R') {
+        "runtime"
+    } else {
+        "error"
+    };
+    println!("{prefix}[{code}] — {}", entry.title);
+    println!("category: {}", entry.category);
+    println!();
+
+    match fidan_diagnostics::explain(fidan_diagnostics::DiagCode(entry.code)) {
+        Some(text) => print!("{text}"),
+        None => println!("  (no extended explanation is available for this code yet)"),
+    }
+}
+
+fn run_fix(file: PathBuf, dry_run: bool) -> Result<()> {
+    use fidan_diagnostics::{Confidence, render_to_stderr};
+    use fidan_lexer::{Lexer, SymbolInterner};
+    use fidan_source::SourceMap;
+    use std::sync::Arc;
+
+    let src = std::fs::read_to_string(&file).with_context(|| format!("cannot read {:?}", file))?;
+    let source_name = file.display().to_string();
+    let source_map = Arc::new(SourceMap::new());
+    let interner = Arc::new(SymbolInterner::new());
+    let f = source_map.add_file(source_name.as_str(), src.as_str());
+    let (tokens, lex_diags) = Lexer::new(&f, Arc::clone(&interner)).tokenise();
+    for d in &lex_diags {
+        render_to_stderr(d, &source_map);
+    }
+    let (module, parse_diags) = fidan_parser::parse(&tokens, f.id, Arc::clone(&interner));
+    for d in &parse_diags {
+        render_to_stderr(d, &source_map);
+    }
+    let type_diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
+    for d in &type_diags {
+        render_to_stderr(d, &source_map);
+    }
+
+    // Collect all High-confidence machine-applicable edits.
+    let mut edits: Vec<(u32, u32, String)> = vec![]; // (lo, hi, replacement)
+    for diag in type_diags
+        .iter()
+        .chain(parse_diags.iter())
+        .chain(lex_diags.iter())
+    {
+        for sug in &diag.suggestions {
+            if sug.confidence == Confidence::High {
+                if let Some(edit) = &sug.edit {
+                    edits.push((edit.span.start, edit.span.end, edit.replacement.clone()));
+                }
+            }
+        }
+    }
+
+    if edits.is_empty() {
+        render_message_to_stderr(Severity::Note, "", "no high-confidence fixes available");
+        return Ok(());
+    }
+
+    // Sort descending by byte offset — apply back-to-front to preserve earlier offsets.
+    edits.sort_by(|a, b| b.0.cmp(&a.0));
+    edits.dedup_by_key(|e| e.0);
+
+    let src_bytes = src.as_bytes();
+    let mut patched = src.clone();
+    for (lo, hi, replacement) in &edits {
+        let lo = *lo as usize;
+        let hi = (*hi as usize).min(patched.len());
+        if dry_run {
+            let line_start = src_bytes[..lo]
+                .iter()
+                .rposition(|&b| b == b'\n')
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            let line_end = src_bytes[hi..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|p| hi + p)
+                .unwrap_or(src.len());
+            println!("\x1b[31m- {}\x1b[0m", &src[line_start..line_end]);
+            let new_line = format!(
+                "{}{}{}",
+                &src[line_start..lo],
+                replacement,
+                &src[hi..line_end]
+            );
+            println!("\x1b[32m+ {}\x1b[0m", new_line);
+        } else {
+            patched.replace_range(lo..hi, replacement);
+        }
+    }
+
+    if !dry_run {
+        std::fs::write(&file, &patched).with_context(|| format!("cannot write {:?}", file))?;
+        render_message_to_stderr(
+            Severity::Note,
+            "",
+            &format!("applied {} fix(es) to {source_name}", edits.len()),
+        );
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     ensure_utf8_console();
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run { file, emit } => {
+        Command::Run {
+            file,
+            emit,
+            trace,
+            max_errors,
+        } => {
             let emit_kinds = parse_emit(&emit)?;
+            let trace_mode = parse_trace(&trace)?;
             let opts = CompileOptions {
                 input: file,
                 output: None,
                 mode: ExecutionMode::Interpret,
                 emit: emit_kinds,
+                trace: trace_mode,
+                max_errors: if max_errors == 0 {
+                    None
+                } else {
+                    Some(max_errors)
+                },
             };
             run_pipeline(opts)
         }
@@ -104,17 +273,35 @@ fn main() -> Result<()> {
                 output: Some(output),
                 mode: ExecutionMode::Build,
                 emit: emit_kinds,
+                ..Default::default()
             };
             run_pipeline(opts)
         }
         Command::Test { file } => {
             let opts = CompileOptions {
                 input: file,
-                output: None,
                 mode: ExecutionMode::Test,
-                emit: vec![],
+                ..Default::default()
             };
             run_pipeline(opts)
+        }
+        Command::Check { file, max_errors } => {
+            let opts = CompileOptions {
+                input: file,
+                mode: ExecutionMode::Check,
+                max_errors: if max_errors == 0 {
+                    None
+                } else {
+                    Some(max_errors)
+                },
+                ..Default::default()
+            };
+            run_pipeline(opts)
+        }
+        Command::Fix { file, dry_run } => run_fix(file, dry_run),
+        Command::Explain { code } => {
+            run_explain(&code);
+            Ok(())
         }
         Command::Repl => run_repl(),
         Command::Lsp => {
@@ -223,30 +410,50 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     // ── Multi-error footer ───────────────────────────────
     if error_count > 0 {
         let s = if error_count == 1 { "" } else { "s" };
-        let verb = match opts.mode {
-            ExecutionMode::Interpret => "run",
-            _ => "compile",
+        let footer = match opts.mode {
+            ExecutionMode::Check => format!("found {error_count} error{s} in `{source_name}`"),
+            ExecutionMode::Interpret => {
+                format!("could not run `{source_name}` — {error_count} error{s}")
+            }
+            _ => format!("could not compile `{source_name}` — {error_count} error{s}"),
         };
-        render_message_to_stderr(
-            Severity::Note,
-            "",
-            &format!("could not {verb} `{source_name}` — {error_count} error{s}"),
-        );
-        eprintln!(
-            "         run `fidan check` to list all errors, or `--max-errors N` to stop early"
-        );
+        render_message_to_stderr(Severity::Note, "", &footer);
+        if opts.mode != ExecutionMode::Check {
+            eprintln!(
+                "         run `fidan check` to list all errors, or `--max-errors N` to stop early"
+            );
+        }
     }
     match opts.mode {
         ExecutionMode::Interpret => {
             if error_count == 0 {
-                // Run the interpreter.
-                if let Err(msg) = fidan_interp::run(&module, Arc::clone(&interner)) {
+                if let Err(err) = fidan_interp::run(&module, Arc::clone(&interner)) {
                     render_message_to_stderr(
                         Severity::Error,
                         fidan_diagnostics::diag_code!("R0001"),
-                        &msg,
+                        &err.message,
                     );
+                    if !err.trace.is_empty() && opts.trace != TraceMode::None {
+                        let frames: &[String] = match opts.trace {
+                            TraceMode::Short => &err.trace[..err.trace.len().min(5)],
+                            _ => &err.trace,
+                        };
+                        if opts.trace == TraceMode::Compact {
+                            eprintln!("  stack: {}", frames.join(" -> "));
+                        } else {
+                            eprintln!("  stack trace (innermost first):");
+                            for (i, name) in frames.iter().enumerate() {
+                                eprintln!("    #{i}  {name}");
+                            }
+                        }
+                    }
                 }
+            }
+        }
+        ExecutionMode::Check => {
+            // Parse + typecheck already ran above; non-zero exit if errors found.
+            if error_count > 0 {
+                std::process::exit(1);
             }
         }
         ExecutionMode::Build => {
@@ -378,6 +585,8 @@ fn run_repl() -> Result<()> {
     let mut repl_state = fidan_interp::new_repl_state(Arc::clone(&interner));
 
     let mut line_no: u32 = 0;
+    // Rolling buffer of recent runtime errors for `:last [--full]`.
+    let mut error_history: Vec<String> = Vec::new();
 
     loop {
         let line = match rl.readline(prompt) {
@@ -428,7 +637,9 @@ fn run_repl() -> Result<()> {
                     println!("  :reset              clear the session state");
                     println!("  :ast  <snippet>     show the parsed AST node counts (debug)");
                     println!("  :type <expr>        print the inferred type of an expression");
-                    println!("  :last [--full]      show the last error's cause chain (Phase 6)");
+                    println!(
+                        "  :last [--full]      show last runtime error (--full shows all recent)"
+                    );
                     continue;
                 }
 
@@ -494,9 +705,23 @@ fn run_repl() -> Result<()> {
                     continue;
                 }
 
-                // ── :last [--full]  (Phase 5) ─────────────────────────────
+                // ── :last [--full]  ────────────────────────────────────────
                 "last" => {
-                    eprintln!("  :last — error history is not yet implemented (Phase 5)");
+                    if error_history.is_empty() {
+                        println!("  (no errors recorded this session)");
+                    } else if cmd_arg == "--full" {
+                        for (i, msg) in error_history.iter().enumerate().rev() {
+                            println!("  [{}]  {}", i + 1, msg);
+                        }
+                    } else {
+                        println!("  {}", error_history.last().unwrap());
+                        if error_history.len() > 1 {
+                            println!(
+                                "  ({} total — :last --full to see all)",
+                                error_history.len()
+                            );
+                        }
+                    }
                     continue;
                 }
 
@@ -530,11 +755,14 @@ fn run_repl() -> Result<()> {
                 match fidan_interp::run_repl_line(&mut repl_state, &module) {
                     Ok(Some(echo)) => println!("{echo}"),
                     Ok(None) => {}
-                    Err(msg) => render_message_to_stderr(
-                        Severity::Error,
-                        fidan_diagnostics::diag_code!("R0001"),
-                        &msg,
-                    ),
+                    Err(msg) => {
+                        render_message_to_stderr(
+                            Severity::Error,
+                            fidan_diagnostics::diag_code!("R0001"),
+                            &msg,
+                        );
+                        error_history.push(msg);
+                    }
                 }
             } else {
                 for diag in &type_diags {

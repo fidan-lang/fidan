@@ -383,7 +383,7 @@ impl<'m> Interpreter<'m> {
                         if let Some(fdef) = action_map.get(&name).cloned() {
                             let locals = self.bind_args(&fdef.params.clone(), raw_args)?;
                             let body = fdef.body.clone();
-                            self.env.push_frame(None);
+                            self.env.push_frame(Some(name_str.clone()), None);
                             for (sym, val) in locals {
                                 self.env.define(sym, val);
                             }
@@ -472,7 +472,7 @@ impl<'m> Interpreter<'m> {
             .and_then(|cd| cd.methods.get(&method_name))
             .cloned()
         {
-            return self.exec_callable(fdef, raw_args, Some(obj_val));
+            return self.exec_callable(&method_str, fdef, raw_args, Some(obj_val));
         }
 
         // 3. Extension action targeting this class?
@@ -482,7 +482,7 @@ impl<'m> Interpreter<'m> {
             .and_then(|m| m.get(&method_name))
             .cloned()
         {
-            return self.exec_callable(fdef, raw_args, Some(obj_val));
+            return self.exec_callable(&method_str, fdef, raw_args, Some(obj_val));
         }
 
         // 4. Walk up the hierarchy.
@@ -562,16 +562,21 @@ impl<'m> Interpreter<'m> {
         raw_args: Vec<(Option<Symbol>, FidanValue)>,
         this: Option<FidanValue>,
     ) -> InterpResult<FidanValue> {
+        let name_str = self.interner.resolve(name).to_string();
         let fdef = match self.functions.get(&name).cloned() {
             Some(f) => f,
             None => return Ok(FidanValue::Nothing),
         };
-        self.exec_callable(fdef, raw_args, this)
+        self.exec_callable(&name_str, fdef, raw_args, this)
     }
 
     /// Execute a callable (bind args, push frame, run body, pop frame).
+    ///
+    /// `name` is pushed onto the interpreter call stack and shown in
+    /// stack traces on uncaught panics.
     fn exec_callable(
         &mut self,
+        name: &str,
         fdef: FuncDef,
         raw_args: Vec<(Option<Symbol>, FidanValue)>,
         this: Option<FidanValue>,
@@ -586,7 +591,7 @@ impl<'m> Interpreter<'m> {
                 }
             }
         }
-        self.env.push_frame(this);
+        self.env.push_frame(Some(name.to_string()), this);
         for (sym, val) in locals {
             self.env.define(sym, val);
         }
@@ -798,14 +803,14 @@ impl<'m> Interpreter<'m> {
                 // Determine the outcome of body + catch handling.
                 let post_catch = match body_result {
                     Ok(_) => Ok(true), // success — run `otherwise` before `finally`
-                    Err(Signal::Panic(err_val)) => {
+                    Err(Signal::Panic { value: err_val, trace: orig_trace }) => {
                         let mut caught = false;
                         let mut catch_outcome = Ok(false);
                         for catch in &catches {
                             caught = true;
                             let binding = catch.binding;
                             let catch_body = catch.body.clone();
-                            self.env.push_frame(None);
+                            self.env.push_frame(None, None);
                             if let Some(b) = binding {
                                 self.env.define(b, err_val.clone());
                             }
@@ -820,7 +825,7 @@ impl<'m> Interpreter<'m> {
                         if caught {
                             catch_outcome
                         } else {
-                            Err(Signal::Panic(err_val)) // uncaught
+                            Err(Signal::Panic { value: err_val, trace: orig_trace }) // uncaught
                         }
                     }
                     Err(e) => Err(e),
@@ -863,7 +868,8 @@ impl<'m> Interpreter<'m> {
 
             Stmt::Panic { value, .. } => {
                 let v = self.eval_expr(value)?;
-                Err(Signal::Panic(v))
+                let trace = self.env.stack_trace();
+                Err(Signal::Panic { value: v, trace })
             }
 
             Stmt::Check {
@@ -1014,9 +1020,11 @@ impl<'m> Interpreter<'m> {
 
             (Div, Integer(a), Integer(b)) => {
                 if b == 0 {
-                    return Err(Signal::Panic(FidanValue::String(FidanString::new(
-                        "division by zero",
-                    ))));
+                    let trace = self.env.stack_trace();
+                    return Err(Signal::Panic {
+                        value: FidanValue::String(FidanString::new("division by zero")),
+                        trace,
+                    });
                 }
                 Integer(a / b)
             }
@@ -1026,9 +1034,11 @@ impl<'m> Interpreter<'m> {
 
             (Rem, Integer(a), Integer(b)) => {
                 if b == 0 {
-                    return Err(Signal::Panic(FidanValue::String(FidanString::new(
-                        "division by zero (remainder)",
-                    ))));
+                    let trace = self.env.stack_trace();
+                    return Err(Signal::Panic {
+                        value: FidanValue::String(FidanString::new("division by zero (remainder)")),
+                        trace,
+                    });
                 }
                 Integer(a % b)
             }
@@ -1102,13 +1112,16 @@ impl<'m> Interpreter<'m> {
                     Shr => ">>",
                     _ => "(op)",
                 };
-                return Err(Signal::Panic(FidanValue::String(FidanString::new(
-                    &format!(
-                        "operator `{op_s}` cannot be applied to `{}` and `{}`",
-                        lhs.type_name(),
-                        rhs.type_name()
-                    ),
-                ))));
+                let msg = format!(
+                    "operator `{op_s}` cannot be applied to `{}` and `{}`",
+                    lhs.type_name(),
+                    rhs.type_name()
+                );
+                let trace = self.env.stack_trace();
+                return Err(Signal::Panic {
+                    value: FidanValue::String(FidanString::new(&msg)),
+                    trace,
+                });
             }
         })
     }
@@ -1338,14 +1351,31 @@ impl<'m> Interpreter<'m> {
 ///
 /// Prints to stdout via built-in `print`, returns `Ok(())` on success, or
 /// `Err(message)` if an uncaught `panic` terminates execution.
-pub fn run(module: &Module, interner: Arc<SymbolInterner>) -> Result<(), String> {
+/// Error returned from [`run`] when an uncaught panic propagates to the top level.
+pub struct RunError {
+    /// Short description of the panic value shown in the error message.
+    pub message: String,
+    /// Call stack at the moment of the panic, **innermost frame first**.
+    /// Empty when the panic originated outside any named function.
+    pub trace: Vec<String>,
+}
+
+pub fn run(module: &Module, interner: Arc<SymbolInterner>) -> Result<(), RunError> {
     let mut interp = Interpreter::new(module, interner);
     match interp.run_module(module) {
-        Ok(()) => Ok(()),
-        Err(Signal::Return(_)) => Ok(()),
-        Err(Signal::Panic(v)) => Err(format!("runtime panic: {}", builtins::display(&v))),
-        Err(Signal::Break) => Err("unexpected `break` outside a loop".to_string()),
-        Err(Signal::Continue) => Err("unexpected `continue` outside a loop".to_string()),
+        Ok(()) | Err(Signal::Return(_)) => Ok(()),
+        Err(Signal::Panic { value, trace }) => Err(RunError {
+            message: format!("runtime panic: {}", builtins::display(&value)),
+            trace,
+        }),
+        Err(Signal::Break) => Err(RunError {
+            message: "unexpected `break` outside a loop".to_string(),
+            trace: vec![],
+        }),
+        Err(Signal::Continue) => Err(RunError {
+            message: "unexpected `continue` outside a loop".to_string(),
+            trace: vec![],
+        }),
     }
 }
 
@@ -1413,7 +1443,7 @@ pub fn run_repl_line(state: &mut ReplState, module: &Module) -> Result<Option<St
             Ok(echo)
         }
         Err(Signal::Return(_)) => Ok(None),
-        Err(Signal::Panic(v)) => Err(format!("runtime panic: {}", builtins::display(&v))),
+        Err(Signal::Panic { value, .. }) => Err(format!("runtime panic: {}", builtins::display(&value))),
         Err(Signal::Break) => Err("unexpected `break` outside a loop".to_string()),
         Err(Signal::Continue) => Err("unexpected `continue` outside a loop".to_string()),
     }

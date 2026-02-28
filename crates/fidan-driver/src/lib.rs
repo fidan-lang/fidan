@@ -1,9 +1,9 @@
 //! `fidan-driver` — Compilation pipeline orchestration.
 
-mod session;
-mod pipeline;
 mod options;
+mod pipeline;
+mod session;
 
-pub use session::Session;
+pub use options::{CompileOptions, EmitKind, ExecutionMode, TraceMode};
 pub use pipeline::compile;
-pub use options::{CompileOptions, EmitKind, ExecutionMode};
+pub use session::Session;
