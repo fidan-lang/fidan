@@ -28,7 +28,7 @@ use fidan_source::SourceMap;
 //
 // Spanless pipeline badge:
 //
-//    ◆  note  unimplemented  interpreter not yet implemented (Phase 5)
+//    ⓘ  note  unimplemented  interpreter not yet implemented (Phase 5)
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -36,9 +36,9 @@ use fidan_source::SourceMap;
 /// Convert a byte offset into a 1-based `(line, column)` pair.
 fn byte_to_line_col(src: &str, offset: usize) -> (usize, usize) {
     let clamped = offset.min(src.len());
-    let before  = &src[..clamped];
+    let before = &src[..clamped];
     let line = before.chars().filter(|c| *c == '\n').count() + 1;
-    let col  = before.rfind('\n').map_or(clamped, |n| clamped - n - 1) + 1;
+    let col = before.rfind('\n').map_or(clamped, |n| clamped - n - 1) + 1;
     (line, col)
 }
 
@@ -53,17 +53,17 @@ fn is_color_enabled() -> bool {
 ///
 /// Used for phase stubs, extension warnings, LSP stubs, etc. — messages that
 /// have no source location and use the badge layout:
-/// ` ◆  note  code  message`
+/// ` ⓘ  note  code  message`
 pub fn render_message_to_stderr(severity: Severity, code: &str, message: &str) {
     if is_color_enabled() {
         let (sym, sev_color) = match severity {
-            Severity::Error   => ("✗", "\x1b[1;31m"),
-            Severity::Warning => ("▲", "\x1b[1;33m"),
-            Severity::Note    => ("◆", "\x1b[1;36m"),
+            Severity::Error => ("✖", "\x1b[1;31m"),
+            Severity::Warning => ("⚠", "\x1b[1;33m"),
+            Severity::Note => ("ⓘ", "\x1b[1;36m"),
         };
         let sev_str = severity.to_string();
         let reset = "\x1b[0m";
-        let dim   = "\x1b[2m";
+        let dim = "\x1b[2m";
         if code.is_empty() {
             eprintln!(" {sev_color}{sym}  {sev_str}{reset}  {message}");
         } else {
@@ -87,12 +87,12 @@ pub fn render_to_stderr(diag: &Diagnostic, source_map: &SourceMap) {
 }
 
 fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
-    let file     = source_map.get(diag.span.file);
+    let file = source_map.get(diag.span.file);
     let name: &str = &file.name;
-    let src:  &str = &file.src;
+    let src: &str = &file.src;
 
     let (line, col) = byte_to_line_col(src, diag.span.start as usize);
-    let span_len    = (diag.span.end  as usize)
+    let span_len = (diag.span.end as usize)
         .saturating_sub(diag.span.start as usize)
         .max(1);
 
@@ -102,9 +102,9 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
     let color = is_color_enabled();
     let (hdr_c, ctx_c, plus_c, reset, bold, dim) = if color {
         let h = match diag.severity {
-            Severity::Error   => "\x1b[1;31m",   // bold red
-            Severity::Warning => "\x1b[1;33m",   // bold yellow
-            Severity::Note    => "\x1b[1;36m",   // bold cyan
+            Severity::Error => "\x1b[1;31m",   // bold red
+            Severity::Warning => "\x1b[1;33m", // bold yellow
+            Severity::Note => "\x1b[1;36m",    // bold cyan
         };
         (h, "\x1b[2m", "\x1b[1;32m", "\x1b[0m", "\x1b[1m", "\x1b[2m")
     } else {
@@ -113,11 +113,11 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
 
     // ── Header: error[E0101]: message ────────────────────────────────────────
     let kind_label = match diag.severity {
-        Severity::Error   if !diag.code.is_empty() => format!("error[{}]",   diag.code),
+        Severity::Error if !diag.code.is_empty() => format!("error[{}]", diag.code),
         Severity::Warning if !diag.code.is_empty() => format!("warning[{}]", diag.code),
-        Severity::Error   => "error".to_string(),
+        Severity::Error => "error".to_string(),
         Severity::Warning => "warning".to_string(),
-        Severity::Note    => "note".to_string(),
+        Severity::Note => "note".to_string(),
     };
     eprintln!("{dp}{hdr_c}{bold}{kind_label}{reset}: {}", diag.message);
 
@@ -131,11 +131,11 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
     if line > 0 && line <= total {
         // Show 1 line before and 1 line after the error line (if they exist).
         let ctx_start = if line > 1 { line - 1 } else { line };
-        let ctx_end   = (line + 1).min(total);
+        let ctx_end = (line + 1).min(total);
 
         // Gutter width = digits in the largest line number shown.
         let gutter_w = ctx_end.to_string().len();
-        let g        = " ".repeat(gutter_w); // blank gutter for separator lines
+        let g = " ".repeat(gutter_w); // blank gutter for separator lines
 
         // Optional inline label after the underline carets.
         let label_msg: Option<&str> = diag
@@ -146,16 +146,22 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
 
         eprintln!("{dp}  {g} |");
         for ln in ctx_start..=ctx_end {
-            if ln == 0 || ln > total { continue; }
+            if ln == 0 || ln > total {
+                continue;
+            }
             let src_line = all_lines[ln - 1];
-            let ln_s     = format!("{:>width$}", ln, width = gutter_w);
+            let ln_s = format!("{:>width$}", ln, width = gutter_w);
 
             if ln == line {
                 // Primary error line — full brightness.
                 eprintln!("{dp}  {ln_s} | {src_line}");
 
                 // Underline: ^ for errors, ~ for warnings/notes.
-                let caret = if diag.severity == Severity::Error { '^' } else { '~' };
+                let caret = if diag.severity == Severity::Error {
+                    '^'
+                } else {
+                    '~'
+                };
                 let uline = format!(
                     "{}{}",
                     " ".repeat(col.saturating_sub(1)),
@@ -195,14 +201,13 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
 
         if let Some(edit) = &sug.edit {
             let (edit_ln, edit_col) = byte_to_line_col(src, edit.span.start as usize);
-            let edit_raw_len = (edit.span.end as usize)
-                .saturating_sub(edit.span.start as usize);
+            let edit_raw_len = (edit.span.end as usize).saturating_sub(edit.span.start as usize);
 
             if edit_ln > 0 && edit_ln <= all_lines.len() {
                 let src_line = all_lines[edit_ln - 1];
-                let col0     = edit_col.saturating_sub(1);         // 0-based column
-                let col0c    = col0.min(src_line.len());            // clamped
-                let end0c    = (col0 + edit_raw_len).min(src_line.len());
+                let col0 = edit_col.saturating_sub(1); // 0-based column
+                let col0c = col0.min(src_line.len()); // clamped
+                let end0c = (col0 + edit_raw_len).min(src_line.len());
 
                 let patched = format!(
                     "{}{}{}",
@@ -211,8 +216,8 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
                     &src_line[end0c..],
                 );
 
-                let gw   = edit_ln.to_string().len();
-                let gp   = " ".repeat(gw);
+                let gw = edit_ln.to_string().len();
+                let gp = " ".repeat(gw);
                 let ln_s = format!("{:>width$}", edit_ln, width = gw);
                 let plus = format!(
                     "{}{}",
@@ -236,7 +241,7 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
     if !diag.cause_chain.is_empty() {
         eprintln!("{dp}");
         for (i, cause) in diag.cause_chain.iter().enumerate() {
-            let n       = i + 1;
+            let n = i + 1;
             let total_c = diag.cause_chain.len();
             eprintln!("{dp}  {dim}caused by ({n}/{total_c}):{reset}");
             render_one(cause, source_map, depth + 1);

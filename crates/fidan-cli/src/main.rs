@@ -219,7 +219,9 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
             "",
             &format!("could not compile `{source_name}` — {error_count} error{s}"),
         );
-        eprintln!("         run `fidan check` to list all errors, or `--max-errors N` to stop early");
+        eprintln!(
+            "         run `fidan check` to list all errors, or `--max-errors N` to stop early"
+        );
     }
     match opts.mode {
         ExecutionMode::Interpret => {
@@ -280,7 +282,10 @@ fn run_repl() -> Result<()> {
         os,
         arch
     );
-    println!("Type :help for commands. Press Ctrl+C to cancel, Ctrl+D to exit.");
+    #[cfg(target_os = "windows")]
+    println!("Type :help for commands. Press Ctrl+Z to exit.");
+    #[cfg(not(target_os = "windows"))]
+    println!("Type :help for commands. Press Ctrl+D to exit.");
     println!();
 
     let stdin = std::io::stdin();
@@ -297,9 +302,9 @@ fn run_repl() -> Result<()> {
             let is_tty = stdout.is_terminal();
             let mut out = stdout.lock();
             if is_tty {
-                write!(out, " \x1b[1;36m»\x1b[0m  ")?;
+                write!(out, " \x1b[1;36mƒ>\x1b[0m  ")?;
             } else {
-                write!(out, "==>  ")?;
+                write!(out, " ƒ>  ")?;
             }
             out.flush()?;
         }
@@ -320,23 +325,69 @@ fn run_repl() -> Result<()> {
         }
         // ── Colon commands ────────────────────────────────────────
         if let Some(cmd) = trimmed.strip_prefix(':') {
-            match cmd.trim() {
+            // Split into keyword + optional argument  (":ast var x = 1" → "ast", "var x = 1")
+            let (cmd_word, cmd_arg) = cmd
+                .trim()
+                .split_once(' ')
+                .map(|(w, a)| (w, a.trim()))
+                .unwrap_or((cmd.trim(), ""));
+
+            match cmd_word {
                 "exit" | "quit" | "q" => break,
+
                 "reset" => {
-                    println!("  (interner reset)");
-                    // Re-entry after reset requires a new interner — inform user
-                    // and continue; true reset happens in Phase 5 with eval state.
+                    println!("  (session state cleared)");
+                    // True eval-state reset happens in Phase 5.
                     continue;
                 }
+
                 "help" => {
-                    println!("  :help          show this message");
-                    println!("  :exit / :quit  leave the REPL");
-                    println!("  :reset         clear the session state");
-                    println!("  :type <expr>   print the inferred type  (Phase 5)");
-                    println!("  :ast  <expr>   print the AST            (debug)");
-                    println!("  :last --full   expand the last cause chain (Phase 5)");
+                    println!("  :help              show this message");
+                    println!("  :exit / :quit / :q  leave the REPL");
+                    println!("  :reset             clear the session state");
+                    println!("  :ast  <snippet>    show the parsed AST node counts  (debug)");
+                    println!("  :type <expr>       print the inferred type           (Phase 5)");
+                    println!("  :last [--full]     show the last error's cause chain (Phase 5)");
                     continue;
                 }
+
+                // ── :ast <snippet> ────────────────────────────────────────
+                "ast" => {
+                    if cmd_arg.is_empty() {
+                        eprintln!("  usage: :ast <snippet>");
+                        continue;
+                    }
+                    line_no += 1;
+                    let sname = format!("<repl:{line_no}>");
+                    let smap = Arc::new(SourceMap::new());
+                    let f = smap.add_file(sname.as_str(), cmd_arg);
+                    let toks = Lexer::new(&f, Arc::clone(&interner)).tokenise();
+                    let (m, ast_diags) = fidan_parser::parse(&toks, f.id, Arc::clone(&interner));
+                    for d in &ast_diags {
+                        fidan_diagnostics::render_to_stderr(d, &smap);
+                    }
+                    if ast_diags.is_empty() {
+                        println!("  items : {}", m.items.len());
+                        println!("  exprs : {}", m.arena.exprs.len());
+                        println!("  stmts : {}", m.arena.stmts.len());
+                    }
+                    continue;
+                }
+
+                // ── :type <expr>  (Phase 5) ───────────────────────────────
+                "type" => {
+                    eprintln!(
+                        "  :type — full type inference in the REPL is not yet implemented (Phase 5)"
+                    );
+                    continue;
+                }
+
+                // ── :last [--full]  (Phase 5) ─────────────────────────────
+                "last" => {
+                    eprintln!("  :last — error history is not yet implemented (Phase 5)");
+                    continue;
+                }
+
                 other => {
                     eprintln!("  unknown command `:{other}`. Type :help for a list.");
                     continue;
@@ -370,6 +421,6 @@ fn run_repl() -> Result<()> {
     }
 
     println!();
-    println!("Bye!");
+    println!("\nBye! 👋");
     Ok(())
 }
