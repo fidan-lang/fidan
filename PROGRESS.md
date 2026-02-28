@@ -61,7 +61,7 @@
 | Error recovery (Unknown token) | ✅ | `TokenKind::Unknown(char)` |
 | Lexer test: tokenise `test/examples/test.fdn` | ⬜ | Phase 2 |
 | Lexer test: round-trip all token types | ✅ | 10 unit tests, all passing |
-| `--emit tokens` output in CLI | ⬜ | Phase 1 extension |
+| `--emit tokens` output in CLI | ✅ | `fidan run --emit tokens file.fdn` works |
 
 ---
 
@@ -145,9 +145,9 @@
 ### `fidan-diagnostics`
 | Item | Status | Notes |
 |---|---|---|
-| `Diagnostic` / `Label` / `Suggestion` types | ⬜ | |
-| `ariadne` rendering integration | ⬜ | |
-| `FixEngine` with E1xx, E2xx, E3xx rules | ⬜ | |
+| `Diagnostic` / `Label` / `Suggestion` types | ✅ | `Severity`, `Diagnostic`, `Label` in separate modules |
+| `ariadne` rendering integration | ✅ | `render_to_stderr()` with ariadne 0.6 `(Id, Range)` span API |
+| `FixEngine` with E1xx, E2xx, E3xx rules | ⬜ | Skeleton only — Phase 4 proper |
 | Edit-distance suggestions for undefined names | ⬜ | |
 | All error codes produce rendered output | ⬜ | |
 
@@ -177,14 +177,14 @@
 ### `fidan-runtime`
 | Item | Status | Notes |
 |---|---|---|
-| `FidanValue` enum | ⬜ | |
-| `OwnedRef<T>` (`Rc<RefCell<T>>`, interpreter-internal) | ⬜ | |
-| `SharedRef<T>` (`Arc<Mutex<T>>`, for `Shared oftype T`) | ⬜ | |
-| `FidanObject`, `FidanClass` | ⬜ | |
-| `FidanList` (COW) | ⬜ | |
-| `FidanDict` (COW) | ⬜ | |
-| `FidanString` (COW) | ⬜ | |
-| Drop / owned-value lifetime tracking | ⬜ | |
+| `FidanValue` enum | ✅ | Integer, Float, Boolean, Nothing, String, List, Dict, Object, Shared, Function |
+| `OwnedRef<T>` (`Rc<RefCell<T>>`, interpreter-internal) | ✅ | `derive(Debug, Clone)`, COW helpers |
+| `SharedRef<T>` (`Arc<Mutex<T>>`, for `Shared oftype T`) | ✅ | `derive(Debug, Clone)` |
+| `FidanObject`, `FidanClass` | ✅ | Field lookup, inheritance chain via `parent: Option<Arc<FidanClass>>` |
+| `FidanList` (COW) | ✅ | `Arc<Vec<T>>` + `Arc::make_mut` on mutation |
+| `FidanDict` (COW) | ✅ | `Arc<HashMap<K,V>>` + `Arc::make_mut` on mutation |
+| `FidanString` (COW) | ✅ | `Arc<str>`, `append()` produces new Arc |
+| Drop / owned-value lifetime tracking | ⬜ | Phase 5 — interpreter needed |
 
 ### `fidan-interp`
 | Item | Status | Notes |
@@ -270,7 +270,9 @@
 
 | Item | Status | Notes |
 |---|---|---|
-| All `fidan` subcommands | ⬜ | |
+| All `fidan` subcommands | 🔨 | `run`, `build`, `test`, `lsp` wired; backends are stubs |
+| `--emit tokens` | ✅ | Drives lexer, prints full token stream |
+| `--emit ast/hir/mir` | ⬜ | Phase 2+ |
 | REPL with history + multi-line | ⬜ | |
 | LSP server | ⬜ | |
 | VS Code extension skeleton | ⬜ | |
@@ -300,7 +302,7 @@
 
 | Suite | Status | Notes |
 |---|---|---|
-| Lexer unit tests | ⬜ | |
+| Lexer unit tests | ✅ | 10/10 passing in `fidan-lexer` |
 | Parser unit tests | ⬜ | |
 | Typeck unit tests | ⬜ | |
 | Interpreter integration (`test.fdn`) | ⬜ | |
@@ -316,4 +318,4 @@ _None yet — implementation not started._
 
 ---
 
-*Last updated: 2026-02-28 — Phase 1 starting.*
+*Last updated: 2026-02-28 — Phase 1 complete; diagnostics renderer + runtime value model + CLI `--emit tokens` done.*

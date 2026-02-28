@@ -8,3 +8,4 @@ mod fix_engine;
 pub use diagnostic::{Diagnostic, DiagnosticKind, Severity};
 pub use label::Label;
 pub use fix_engine::FixEngine;
+pub use render::render_to_stderr;

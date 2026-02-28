@@ -1,11 +1,12 @@
 ## TEST PROGRAM ## (Comment using `#` for single-line comments or `#/ ... /#` for multi-line comments (can be nested))
 
+#/
 var x set 10 # declare a variable (type is inferred automatically)
 var x oftype integer # declare a variable with an explicit type, but without initializing it
 # Declared variables with no value are automatically initialized to `nothing`.
 # All types are nullable (nothing) by default, so you can assign `nothing` to any variable regardless of its type.
+/#
 
-#/
 object Creature {
     var species oftype string = "Unknown"
 
@@ -83,5 +84,3 @@ action main {
 
 print("Hello, world!") ## Print a message
 main() ## Call the main action
-
-/#
