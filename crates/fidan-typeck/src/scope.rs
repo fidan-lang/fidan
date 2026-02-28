@@ -109,4 +109,12 @@ impl SymbolTable {
     pub fn current_kind(&self) -> ScopeKind {
         self.scopes.last().map(|s| s.kind).unwrap_or(ScopeKind::Module)
     }
+
+    /// Iterate over every `Symbol` key defined in any scope level.
+    ///
+    /// Used by the fix engine to find "did you mean" candidates when a name
+    /// cannot be resolved.
+    pub fn all_names(&self) -> impl Iterator<Item = Symbol> + '_ {
+        self.scopes.iter().flat_map(|s| s.symbols.keys().copied())
+    }
 }

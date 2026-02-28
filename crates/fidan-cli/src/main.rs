@@ -35,9 +35,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run a Fidan source file using the interpreter
+    /// Run a Fidan source file (pass `-` to read from stdin)
     Run {
-        /// Path to the .fdn source file
+        /// Path to the .fdn source file, or `-` to read from stdin
         file: PathBuf,
         /// Emit intermediate representation: tokens | ast | hir | mir
         #[arg(long, value_delimiter = ',')]
@@ -59,6 +59,8 @@ enum Command {
     },
     /// Run `test { ... }` blocks in a Fidan source file
     Test { file: PathBuf },
+    /// Start an interactive REPL (lex + parse + typecheck each line)
+    Repl,
     /// Start the language server (LSP)
     Lsp,
 }
@@ -114,6 +116,7 @@ fn main() -> Result<()> {
             };
             run_pipeline(opts)
         }
+        Command::Repl => run_repl(),
         Command::Lsp => {
             render_message_to_stderr(
                 Severity::Note,
@@ -130,8 +133,10 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     use fidan_source::SourceMap;
     use std::sync::Arc;
 
-    // ── Extension check ────────────────────────────────────────────────────────
-    if opts.input.extension().and_then(|e| e.to_str()) != Some("fdn") {
+    let is_stdin = opts.input.as_os_str() == "-";
+
+    // ── Extension check (skipped for stdin) ───────────────────────────────────
+    if !is_stdin && opts.input.extension().and_then(|e| e.to_str()) != Some("fdn") {
         render_message_to_stderr(
             Severity::Warning,
             "W001",
@@ -143,11 +148,21 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     }
 
     // ── Load source ────────────────────────────────────────────────────────────
-    let src = std::fs::read_to_string(&opts.input)
-        .with_context(|| format!("cannot read {:?}", opts.input))?;
+    let (source_name, src) = if is_stdin {
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .context("cannot read from stdin")?;
+        ("<stdin>".to_string(), buf)
+    } else {
+        let s = std::fs::read_to_string(&opts.input)
+            .with_context(|| format!("cannot read {:?}", opts.input))?;
+        (opts.input.display().to_string(), s)
+    };
 
     let source_map = Arc::new(SourceMap::new());
-    let file = source_map.add_file(opts.input.display().to_string().as_str(), src.as_str());
+    let file = source_map.add_file(source_name.as_str(), src.as_str());
 
     let interner = Arc::new(SymbolInterner::new());
 
@@ -156,7 +171,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
 
     // ── --emit tokens ──────────────────────────────────────────────────────────
     if opts.emit.contains(&EmitKind::Tokens) {
-        println!("=== tokens: {} ===", opts.input.display());
+        println!("=== tokens: {source_name} ===");
         for tok in &tokens {
             println!("  {:?}", tok);
         }
@@ -172,7 +187,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
 
     // ── --emit ast ─────────────────────────────────────────────────────────────
     if opts.emit.contains(&EmitKind::Ast) {
-        println!("=== ast: {} ===", opts.input.display());
+        println!("=== ast: {source_name} ===");
         println!("  items: {}", module.items.len());
         println!("  exprs: {}", module.arena.exprs.len());
         println!("  stmts: {}", module.arena.stmts.len());
@@ -214,5 +229,112 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+// ── REPL ───────────────────────────────────────────────────────────────────────────
+
+/// Interactive lex + parse + typecheck loop.
+///
+/// Each line is treated as a self-contained Fidan snippet.  The interpreter
+/// (Phase 5) will be wired here once available — for now this REPL is useful
+/// for exploring the parser and type-checker interactively.
+fn run_repl() -> Result<()> {
+    use fidan_lexer::{Lexer, SymbolInterner};
+    use fidan_source::SourceMap;
+    use std::io::{BufRead, Write};
+    use std::sync::Arc;
+
+    // ── Banner (Python style) ───────────────────────────────────────────────
+    let profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    println!(
+        "Fidan {} ({}) on {}/{}",
+        env!("CARGO_PKG_VERSION"),
+        profile,
+        os,
+        arch
+    );
+    println!(
+        "{}",
+        concat!("Type \"help\" for more information, ", "\"exit\" to quit.",)
+    );
+    println!();
+
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+
+    // Persist the interner so symbol IDs are stable across REPL lines.
+    let interner = Arc::new(SymbolInterner::new());
+    let mut line_no: u32 = 0;
+
+    loop {
+        // ── Prompt ─────────────────────────────────────────────────
+        {
+            use std::io::IsTerminal;
+            let is_tty = stdout.is_terminal();
+            let mut out = stdout.lock();
+            if is_tty {
+                write!(out, " \x1b[1;36m»\x1b[0m  ")?;
+            } else {
+                write!(out, "==>  ")?;
+            }
+            out.flush()?;
+        }
+
+        // ── Read ─────────────────────────────────────────────────
+        let mut line = String::new();
+        match stdin.lock().read_line(&mut line) {
+            Ok(0) => break, // EOF (Ctrl+D / Ctrl+Z)
+            Ok(_) => {}
+            Err(e) => {
+                eprintln!("read error: {e}");
+                break;
+            }
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed == "exit" || trimmed == "quit" {
+            break;
+        }
+
+        // ── Lex + parse + typecheck ───────────────────────────────
+        line_no += 1;
+        let source_name = format!("<repl:{line_no}>");
+        let source_map = Arc::new(SourceMap::new());
+        let file = source_map.add_file(source_name.as_str(), trimmed);
+        let tokens = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+
+        let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+
+        for diag in &parse_diags {
+            fidan_diagnostics::render_to_stderr(diag, &source_map);
+        }
+
+        if parse_diags.is_empty() {
+            let type_diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
+            if type_diags.is_empty() {
+                println!(
+                    "  ✓  {} item(s)  {} expr(s)",
+                    module.items.len(),
+                    module.arena.exprs.len(),
+                );
+            } else {
+                for diag in &type_diags {
+                    fidan_diagnostics::render_to_stderr(diag, &source_map);
+                }
+            }
+        }
+    }
+
+    println!();
+    println!("Bye!");
     Ok(())
 }

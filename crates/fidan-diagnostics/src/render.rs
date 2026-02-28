@@ -1,112 +1,190 @@
 use crate::{Diagnostic, Severity};
-use ariadne::{CharSet, Color, Config, Label, Report, ReportKind, sources};
 use fidan_source::SourceMap;
 
-// ── Spanless message renderer ─────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Fidan Diagnostics renderer
+//
+// Error format (colour terminal):
+//
+//   FidanError: undefined name 'greting'
+//     --> test.fdn:2:7
+//
+//     2 │ print(greting)
+//       │       ~~~~~~~
+//
+//     note: did you mean 'greeting'?
+//
+// Cause-chain (Python traceback style, each level indented):
+//
+//   FidanError: type mismatch
+//     --> test.fdn:5:3
+//     ...
+//
+//     caused by:
+//       FidanError: undefined name 'bar'
+//         --> test.fdn:2:7
+//         ...
+//
+// Spanless pipeline messages:
+//
+//    ◆  note  unimplemented  interpreter not yet implemented (Phase 5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ── internal helpers ──────────────────────────────────────────────────────────
+
+/// Convert a byte offset into a 1-based `(line, column)` pair.
+fn byte_to_line_col(src: &str, offset: usize) -> (usize, usize) {
+    let clamped = offset.min(src.len());
+    let before = &src[..clamped];
+    let line = before.chars().filter(|c| *c == '\n').count() + 1;
+    let col = before.rfind('\n').map_or(clamped, |n| clamped - n - 1) + 1;
+    (line, col)
+}
+
+fn is_color_enabled() -> bool {
+    use std::io::IsTerminal;
+    std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
+}
+
+// ── spanless message renderer ─────────────────────────────────────────────────
 
 /// Render a single **spanless** diagnostic message to stderr.
 ///
-/// Use this for messages that are not anchored to a specific source location
-/// (e.g. CLI warnings, pipeline stub notices, file-level conditions).
+/// Used for pipeline-level messages that are not anchored to a source span
+/// (e.g. "LSP not implemented", ".fdn extension warning", phase stubs).
+/// Render a single **spanless** pipeline-level message to stderr.
 ///
-/// **⚠ Placeholder format** — the current output (`warning[W001]: …`) intentionally
-/// reuses Rust-style formatting as a stopgap. Phase 4 will replace this with
-/// Fidan's own branded visual identity (custom badges, cause-chain display,
-/// stdout/stderr separation, NLP explanations). See PROGRESS.md §Phase 4.
-///
-/// Colour is suppressed when `NO_COLOR` is set or stderr is not a terminal.
+/// These have no source location (e.g. phase stubs, extension warnings).
+/// Badge format:  ◆  note  code  message
 pub fn render_message_to_stderr(severity: Severity, code: &str, message: &str) {
-    use std::io::IsTerminal;
-    let use_color = std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal();
-
-    if use_color {
-        // severity label colour
-        let color = match severity {
-            Severity::Error => "\x1b[1;31m",   // bold red
-            Severity::Warning => "\x1b[1;33m", // bold yellow
-            Severity::Note => "\x1b[1;36m",    // bold cyan
+    if is_color_enabled() {
+        let (sym, sev_color) = match severity {
+            Severity::Error => ("✗", "\x1b[1;31m"),
+            Severity::Warning => ("▲", "\x1b[1;33m"),
+            Severity::Note => ("◆", "\x1b[1;36m"),
         };
-        let bold = "\x1b[1m";
+        let sev_str = severity.to_string();
         let reset = "\x1b[0m";
-
+        let dim = "\x1b[2m";
         if code.is_empty() {
-            eprintln!("{color}{severity}{reset}{bold}: {message}{reset}");
+            eprintln!(" {sev_color}{sym}  {sev_str}{reset}  {message}");
         } else {
-            eprintln!("{color}{severity}[{code}]{reset}{bold}: {message}{reset}");
+            eprintln!(" {sev_color}{sym}  {sev_str}{reset}  {dim}{code}{reset}  {message}");
         }
     } else {
-        // Plain fallback — no ANSI, identical information
+        let sev_str = severity.to_string();
         if code.is_empty() {
-            eprintln!("{severity}: {message}");
+            eprintln!("{sev_str}  {message}");
         } else {
-            eprintln!("{severity}[{code}]: {message}");
+            eprintln!("{sev_str}  {code}  {message}");
         }
     }
 }
 
-/// Render a single diagnostic to **stderr** using ariadne.
-///
-/// `source_map` is used to look up the source text and file name from the
-/// `FileId` stored in the diagnostic's span.
+// ── span-anchored renderer ────────────────────────────────────────────────────
+
+/// Render a span-anchored `Diagnostic` to stderr.
 pub fn render_to_stderr(diag: &Diagnostic, source_map: &SourceMap) {
+    render_one(diag, source_map, 0);
+}
+
+fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
     let file = source_map.get(diag.span.file);
-    let name: String = file.name.to_string();
-    let src: String = file.src.to_string();
+    let name: &str = &file.name;
+    let src: &str = &file.src;
 
-    let kind = match diag.severity {
-        Severity::Error => ReportKind::Error,
-        Severity::Warning => ReportKind::Warning,
-        Severity::Note => ReportKind::Advice,
-    };
+    let (line, col) = byte_to_line_col(src, diag.span.start as usize);
+    let span_len = (diag.span.end as usize)
+        .saturating_sub(diag.span.start as usize)
+        .max(1);
 
-    // Use Unicode box-drawing characters only when writing directly to a TTY
-    // (a real terminal that supports UTF-8).  When stderr is a pipe — e.g. when
-    // the user runs `2>&1` in PowerShell — UTF-8 box chars get garbled by the
-    // shell's code-page.  Falling back to ASCII keeps the output readable.
-    use std::io::IsTerminal;
-    let char_set = if std::io::stderr().is_terminal() {
-        CharSet::Unicode
+    // Indentation grows with each level of the cause chain.
+    let pad = "  ".repeat(depth);
+
+    let color = is_color_enabled();
+    let (hdr_c, under_c, reset, bold, dim) = if color {
+        let h = match diag.severity {
+            Severity::Error => "\x1b[1;31m",   // bold red
+            Severity::Warning => "\x1b[1;33m", // bold yellow
+            Severity::Note => "\x1b[1;36m",    // bold cyan
+        };
+        (h, "\x1b[33m", "\x1b[0m", "\x1b[1m", "\x1b[2m")
     } else {
-        CharSet::Ascii
+        ("", "", "", "", "")
     };
-    let cfg = Config::default().with_char_set(char_set);
 
-    // In ariadne 0.6 the primary span (file, range) is passed directly to build().
-    let primary_range = diag.span.start as usize..diag.span.end as usize;
-    let mut b = Report::build(kind, (name.clone(), primary_range.clone()))
-        .with_config(cfg)
-        .with_message(&diag.message);
+    // "FidanError" / "FidanWarning" / "note"
+    let kind_label = match diag.severity {
+        Severity::Error => "FidanError",
+        Severity::Warning => "FidanWarning",
+        Severity::Note => "note",
+    };
 
-    if !diag.code.is_empty() {
-        b = b.with_code(&diag.code);
+    // ── header ────────────────────────────────────────────────────────────────
+    eprintln!("{pad}{hdr_c}{bold}{kind_label}{reset}: {}", diag.message);
+
+    // ── location ──────────────────────────────────────────────────────────────
+    eprintln!("{pad}  {dim}-->{reset} {name}:{line}:{col}");
+    eprintln!("{pad}");
+
+    // ── source snippet with underline ─────────────────────────────────────────
+    let lines: Vec<&str> = src.lines().collect();
+    if line > 0 && line <= lines.len() {
+        let src_line = lines[line - 1];
+        let line_no_str = line.to_string();
+        let gutter_pad = " ".repeat(line_no_str.len());
+
+        let under_col = col.saturating_sub(1); // 0-based column
+        let underline = format!("{}{}", " ".repeat(under_col), "~".repeat(span_len));
+
+        // First labelled span message (if any) goes inline after the underline.
+        let label_msg: Option<&str> = diag
+            .labels
+            .first()
+            .filter(|l| !l.message.is_empty())
+            .map(|l| l.message.as_str());
+
+        eprintln!("{pad}  {gutter_pad} {dim}│{reset}");
+        eprintln!("{pad}  {line_no_str} {dim}│{reset} {src_line}");
+        if let Some(lmsg) = label_msg {
+            eprintln!(
+                "{pad}  {gutter_pad} {dim}│{reset} {under_c}{underline}{reset}  {hdr_c}{lmsg}{reset}"
+            );
+        } else {
+            eprintln!("{pad}  {gutter_pad} {dim}│{reset} {under_c}{underline}{reset}");
+        }
+        eprintln!("{pad}");
     }
 
-    let primary_color = match diag.severity {
-        Severity::Error => Color::Red,
-        Severity::Warning => Color::Yellow,
-        Severity::Note => Color::BrightBlue,
-    };
+    // ── notes ─────────────────────────────────────────────────────────────────
+    for note in &diag.notes {
+        eprintln!("{pad}  {dim}note:{reset} {note}");
+    }
 
-    if diag.labels.is_empty() {
-        // Emit an implicit primary label so ariadne has something to underline.
-        b = b.with_label(Label::new((name.clone(), primary_range)).with_color(primary_color));
-    } else {
-        for lbl in &diag.labels {
-            let color = if lbl.primary {
-                primary_color
-            } else {
-                Color::Blue
-            };
-            let range = lbl.span.start as usize..lbl.span.end as usize;
-            let mut al = Label::new((name.clone(), range)).with_color(color);
-            if !lbl.message.is_empty() {
-                al = al.with_message(&lbl.message);
-            }
-            b = b.with_label(al);
+    // ── help / suggestions ────────────────────────────────────────────────────
+    for sug in &diag.suggestions {
+        if let Some(edit) = &sug.edit {
+            eprintln!(
+                "{pad}  {dim}help:{reset} {} (replace with `{}`)",
+                sug.message, edit.replacement
+            );
+        } else {
+            eprintln!("{pad}  {dim}help:{reset} {}", sug.message);
         }
     }
 
-    b.finish()
-        .eprint(sources([(name, src)]))
-        .expect("failed to render diagnostic");
+    if (!diag.notes.is_empty() || !diag.suggestions.is_empty()) && diag.cause_chain.is_empty() {
+        eprintln!("{pad}");
+    }
+
+    // ── cause chain ───────────────────────────────────────────────────────────
+    //
+    // Rendered like a Python traceback, each cause indented one level deeper.
+    if !diag.cause_chain.is_empty() {
+        eprintln!("{pad}");
+        eprintln!("{pad}  {dim}caused by:{reset}");
+        for cause in &diag.cause_chain {
+            render_one(cause, source_map, depth + 1);
+        }
+    }
 }

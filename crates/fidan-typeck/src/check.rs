@@ -2,7 +2,7 @@
 use std::sync::Arc;
 use rustc_hash::FxHashMap;
 use fidan_ast::{AstArena, BinOp, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp};
-use fidan_diagnostics::Diagnostic;
+use fidan_diagnostics::{Diagnostic, FixEngine};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::{FileId, Span};
 use crate::scope::{Initialized, ScopeKind, SymbolInfo, SymbolKind, SymbolTable};
@@ -473,7 +473,25 @@ impl TypeChecker {
                     Some(info) => info.ty.clone(),
                     None => {
                         let s = resolved.to_string();
-                        self.emit_error("E101", format!("undefined name '{s}'"), span);
+                        // Collect every known symbol name for "did you mean?" suggestion.
+                        let candidates: Vec<String> = self
+                            .table
+                            .all_names()
+                            .map(|sym| self.interner.resolve(sym).to_string())
+                            .collect();
+                        let candidate_refs: Vec<&str> =
+                            candidates.iter().map(String::as_str).collect();
+                        let mut diag = Diagnostic::error(
+                            "E101",
+                            format!("undefined name '{s}'"),
+                            span,
+                        );
+                        if let Some(hint) =
+                            FixEngine::suggest_name(&s, candidate_refs.into_iter())
+                        {
+                            diag = diag.with_note(hint);
+                        }
+                        self.diags.push(diag);
                         FidanType::Error
                     }
                 }

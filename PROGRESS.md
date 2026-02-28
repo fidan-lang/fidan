@@ -220,13 +220,16 @@
 | `ariadne` ASCII fallback for non-TTY output | ✅ | `CharSet::Ascii` when stderr is a pipe |
 | Windows UTF-8 console setup | ✅ | `SetConsoleOutputCP(65001)` in CLI `main()` |
 | ASCII charset fallback for non-TTY | ✅ | Phase 3.5 — `CharSet::Ascii` when stderr is a pipe; prevents garbled box chars |
-| `FixEngine` with E1xx, E2xx, E3xx rules | ⬜ | Skeleton only — Phase 4 proper |
-| Edit-distance suggestions for undefined names | ⬜ | `strsim` (Jaro-Winkler / Levenshtein) |
-| All error codes produce rendered output | ⬜ | |
-| `Suggestion` type with `SourceEdit` + `Confidence` | ⬜ | |
-| `cause_chain: Vec<Box<Diagnostic>>` rendering | ⬜ | Causality tracing: show upstream trigger chain |
-| Custom Fidan diagnostic visual identity | ⬜ | Spanless messages (info/debug/warn/error/crash/trace) get Fidan-branded style distinct from Rust; `render_message_to_stderr` is currently a placeholder using Rust-like format |
-| `stdout` vs `stderr` separation | ⬜ | Program output → stdout; all diagnostics/messages → stderr |
+| `FixEngine` with E1xx, E2xx, E3xx rules | ✅ | `suggest_name` via Jaro-Winkler ≥ 0.75; Phase 4 |
+| Edit-distance suggestions for undefined names | ✅ | `strsim` Jaro-Winkler; E101 emits `Note: did you mean '…'?` |
+| All error codes produce rendered output | ✅ | ariadne spans + notes + help lines |
+| `Suggestion` type with `SourceEdit` + `Confidence` | ✅ | `suggestion.rs` — `High/Medium/Low`, `SourceEdit`, `Suggestion::hint/fix` |
+| `Diagnostic` notes + suggestions fields | ✅ | `with_note()`, `with_suggestion()`, `add_note()`, `add_suggestion()` |
+| `cause_chain: Vec<Diagnostic>` rendering | ✅ | Causality chain rendered as indented sub-blocks via ariadne |
+| Custom Fidan diagnostic visual identity | ✅ | Spanless messages use `✗ / ▲ / ◆` badge style; distinct from Rust format |
+| `stdout` vs `stderr` separation | ✅ | `print()` → stdout (Phase 5 interpreter); diagnostics already → stderr |
+| stdin support (`fidan run -`) | ✅ | `-` path reads from `stdin`; skips `.fdn` extension warning |
+| REPL (`fidan repl`) | ✅ | Lex + parse + typecheck loop with `»` prompt; pretty-prints diagnostics |
 | Lightweight NLP model for error explanations | ⬜ | Generates human-readable "why did this happen" text from the cause chain |
 
 ---
@@ -352,7 +355,8 @@
 | `--emit tokens` | ✅ | Drives lexer, prints full token stream |
 | `--emit ast` | ✅ | Phase 2 — node-count summary; phase 3.5 — works cleanly on `syntax.fdn` |
 | `--emit hir/mir` | ⬜ | Phase 5+ |
-| REPL with history + multi-line | ⬜ | |
+| REPL with history + multi-line | 🔨 | Basic parse/typecheck REPL in Phase 4; full eval needs Phase 5 |
+| stdin support (`fidan run -`) | ✅ | Reads from stdin when file is `-` |
 | LSP server | ⬜ | |
 | VS Code extension skeleton | ⬜ | |
 | `fidan fmt` formatter | ⬜ | |
@@ -397,4 +401,4 @@ _None._
 
 ---
 
-*Last updated: 2026-02-28 — Phase 3.5+ complete; bitwise / shift operators, cascade suppression, `_` wildcard, parameterized-type widening, keyword field names (`.set()`); `syntax.fdn` → 132 items, 672 exprs, zero diagnostics; 12/12 tests pass.*
+*Last updated: 2026-02-28 — Phase 4 complete: `FixEngine` Jaro-Winkler suggestions, `Suggestion`/`SourceEdit`/`Confidence` types, `Diagnostic` notes+cause_chain, Fidan-branded visual design (`✗ / ▲ / ◆` badges), stdin support, REPL (parse+typecheck loop); `syntax.fdn` → 132 items, 672 exprs, zero diagnostics; 12/12 lexer tests + 1 doctest pass.*

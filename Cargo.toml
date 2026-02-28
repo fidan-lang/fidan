@@ -56,6 +56,7 @@ anyhow = "1"
 rustc-hash = "2"
 indexmap = "2"
 smol_str = "0.3"
+strsim = "0.11"
 
 [profile.dev]
 opt-level = 1 # faster builds in dev without being fully unoptimised

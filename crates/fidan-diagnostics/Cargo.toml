@@ -5,5 +5,5 @@ edition.workspace = true
 
 [dependencies]
 fidan-source = { workspace = true }
-ariadne = { workspace = true }
 thiserror = { workspace = true }
+strsim = { workspace = true }
