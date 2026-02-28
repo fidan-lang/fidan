@@ -345,10 +345,10 @@ action demonstrateControlFlow {
 
     # ── for loop ──────────────────────────────────────────────────────────────
     var total = 0
-    for i in 1..11 {                  # i = 1, 2, ..., 10
+    for i in 1...10 {                  # i = 1, 2, ..., 10
         total = total + i
     }
-    print("Sum 1..10 = {total}")
+    print("Sum 1...10 = {total}")
 
     # for over a list
     var fruits = ["apple", "banana", "cherry"]
