@@ -17,3 +17,4 @@ fidan-parser = { workspace = true }
 fidan-typeck = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+rustyline = { workspace = true }

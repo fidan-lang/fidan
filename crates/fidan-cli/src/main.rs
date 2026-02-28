@@ -254,7 +254,49 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     Ok(())
 }
 
-// ── REPL ───────────────────────────────────────────────────────────────────────────
+// ── REPL helper ─────────────────────────────────────────────────────────────────────
+//
+// Implementing the `Helper` bundle lets us colour the prompt via `Highlighter`
+// while rustyline calculates cursor position from the *plain* prompt string.
+// This avoids the over-wide cursor that appears when ANSI codes are embedded
+// directly in the prompt string (even with \x01/\x02 guards on Windows).
+
+struct ReplHelper;
+
+impl rustyline::Helper for ReplHelper {}
+
+impl rustyline::completion::Completer for ReplHelper {
+    type Candidate = rustyline::completion::Pair;
+}
+
+impl rustyline::hint::Hinter for ReplHelper {
+    type Hint = String;
+}
+
+impl rustyline::validate::Validator for ReplHelper {}
+
+impl rustyline::highlight::Highlighter for ReplHelper {
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(
+        &'s self,
+        prompt: &'p str,
+        _default: bool,
+    ) -> std::borrow::Cow<'b, str> {
+        // Wrap the plain prompt in bold-cyan colour codes for display only.
+        // rustyline never passes this string through its width logic.
+        std::borrow::Cow::Owned(format!("\x1b[1;36m{prompt}\x1b[0m"))
+    }
+
+    fn highlight_char(
+        &self,
+        _line: &str,
+        _pos: usize,
+        _kind: rustyline::highlight::CmdKind,
+    ) -> bool {
+        false
+    }
+}
+
+// ── REPL ─────────────────────────────────────────────────────────────────────────────
 
 /// Interactive lex + parse + typecheck loop.
 ///
@@ -264,10 +306,10 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
 fn run_repl() -> Result<()> {
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
-    use std::io::{BufRead, Write};
+    use rustyline::error::ReadlineError;
     use std::sync::Arc;
 
-    // ── Banner (Python style) ───────────────────────────────────────────────
+    // ── Banner ─────────────────────────────────────────────────────────────
     let profile = if cfg!(debug_assertions) {
         "debug"
     } else {
@@ -282,50 +324,51 @@ fn run_repl() -> Result<()> {
         os,
         arch
     );
-    #[cfg(target_os = "windows")]
-    println!("Type :help for commands. Press Ctrl+Z to exit.");
-    #[cfg(not(target_os = "windows"))]
-    println!("Type :help for commands. Press Ctrl+D to exit.");
+    println!(
+        "Type :help for commands. Ctrl+C cancels a line, Ctrl+L clears screen, Ctrl+D to exit."
+    );
     println!();
 
-    let stdin = std::io::stdin();
-    let stdout = std::io::stdout();
+    // ── rustyline editor ───────────────────────────────────────────────────
+    // Using Editor<ReplHelper> so the Highlighter colours the prompt while
+    // rustyline measures cursor position from the plain string only.
+    let mut rl = rustyline::Editor::<ReplHelper, rustyline::history::DefaultHistory>::new()?;
+    rl.set_helper(Some(ReplHelper));
+    // Ctrl+L is bound to ClearScreen by rustyline's default Emacs keymap.
+
+    // Plain string — no escape codes.  ReplHelper::highlight_prompt wraps it
+    // in colour for display; rustyline uses this for all width arithmetic.
+    let prompt = " ƒ>  ";
 
     // Persist the interner so symbol IDs are stable across REPL lines.
     let interner = Arc::new(SymbolInterner::new());
     let mut line_no: u32 = 0;
 
     loop {
-        // ── Prompt ─────────────────────────────────────────────────
-        {
-            use std::io::IsTerminal;
-            let is_tty = stdout.is_terminal();
-            let mut out = stdout.lock();
-            if is_tty {
-                write!(out, " \x1b[1;36mƒ>\x1b[0m  ")?;
-            } else {
-                write!(out, " ƒ>  ")?;
+        let line = match rl.readline(prompt) {
+            Ok(l) => l,
+            Err(ReadlineError::Interrupted) => {
+                // Ctrl+C — cancel the current line and re-prompt (do not exit).
+                continue;
             }
-            out.flush()?;
-        }
-
-        // ── Read ─────────────────────────────────────────────────
-        let mut line = String::new();
-        match stdin.lock().read_line(&mut line) {
-            Ok(0) => break, // EOF (Ctrl+D / Ctrl+Z)
-            Ok(_) => {}
+            Err(ReadlineError::Eof) => break, // Ctrl+D / Ctrl+Z+Enter
             Err(e) => {
                 eprintln!("read error: {e}");
                 break;
             }
-        }
+        };
+
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
+
+        // Push to history so up/down arrows work.
+        let _ = rl.add_history_entry(trimmed);
+
         // ── Colon commands ────────────────────────────────────────
         if let Some(cmd) = trimmed.strip_prefix(':') {
-            // Split into keyword + optional argument  (":ast var x = 1" → "ast", "var x = 1")
+            // Split on first space: ":ast var x = 1" → ("ast", "var x = 1")
             let (cmd_word, cmd_arg) = cmd
                 .trim()
                 .split_once(' ')
@@ -342,12 +385,21 @@ fn run_repl() -> Result<()> {
                 }
 
                 "help" => {
-                    println!("  :help              show this message");
+                    println!("  :help               show this message");
                     println!("  :exit / :quit / :q  leave the REPL");
-                    println!("  :reset             clear the session state");
-                    println!("  :ast  <snippet>    show the parsed AST node counts  (debug)");
-                    println!("  :type <expr>       print the inferred type           (Phase 5)");
-                    println!("  :last [--full]     show the last error's cause chain (Phase 5)");
+                    println!("  :clear / :cls       clear the terminal (also Ctrl+L)");
+                    println!("  :reset              clear the session state");
+                    println!("  :ast  <snippet>     show the parsed AST node counts (debug)");
+                    println!("  :type <expr>        print the inferred type (Phase 5)");
+                    println!("  :last [--full]      show the last error's cause chain (Phase 5)");
+                    continue;
+                }
+
+                // ── :clear / :cls ─────────────────────────────────────────
+                "clear" | "cls" => {
+                    // ANSI: erase display + move cursor to top-left.
+                    print!("\x1b[2J\x1b[1;1H");
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
                     continue;
                 }
 
@@ -421,6 +473,6 @@ fn run_repl() -> Result<()> {
     }
 
     println!();
-    println!("\nBye! 👋");
+    println!("Bye! 👋");
     Ok(())
 }
