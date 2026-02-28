@@ -590,9 +590,9 @@ action demonstrateExpressions {
 # ── 16. MAIN (convention — not required by the language) ─────────────────────
 
 action main {
-    # Object construction (via initialize convention)
+    # Object construction (calls the `new` action by convention)
     var animal = Animal("Cat", "Meow")
-    var rex    = Dog("Rex")
+    var rex    = Dog.new("Rex") # Can also call `new` explicitly
     var guide  = GuideDog("Buddy", "Alice")
 
     animal.speak()
