@@ -88,12 +88,22 @@ impl TypeChecker {
         let builtins: &[(&str, SymbolKind)] = &[
             ("print", SymbolKind::BuiltinAction),
             ("println", SymbolKind::BuiltinAction),
+            ("eprint", SymbolKind::BuiltinAction),
             ("input", SymbolKind::BuiltinAction),
             ("len", SymbolKind::BuiltinAction),
+            ("type", SymbolKind::BuiltinAction),
             ("string", SymbolKind::BuiltinAction),
             ("integer", SymbolKind::BuiltinAction),
             ("float", SymbolKind::BuiltinAction),
             ("boolean", SymbolKind::BuiltinAction),
+            // Math free-functions
+            ("abs", SymbolKind::BuiltinAction),
+            ("sqrt", SymbolKind::BuiltinAction),
+            ("floor", SymbolKind::BuiltinAction),
+            ("ceil", SymbolKind::BuiltinAction),
+            ("round", SymbolKind::BuiltinAction),
+            ("max", SymbolKind::BuiltinAction),
+            ("min", SymbolKind::BuiltinAction),
         ];
         for &(name, kind) in builtins {
             let sym = self.interner.intern(name);
@@ -1192,28 +1202,64 @@ impl TypeChecker {
     ) -> FidanType {
         let callee = module.arena.get_expr(callee_id).clone();
         match callee {
-            Expr::Ident { name, .. } => {
+            Expr::Ident {
+                name,
+                span: callee_span,
+            } => {
                 let name_str = self.interner.resolve(name).to_string();
                 // Built-in return types
                 match name_str.as_str() {
-                    "print" | "println" => return FidanType::Nothing,
+                    "print" | "println" | "eprint" => return FidanType::Nothing,
                     "input" => return FidanType::String,
                     "len" => return FidanType::Integer,
+                    "type" => return FidanType::String,
                     "string" => return FidanType::String,
                     "integer" => return FidanType::Integer,
-                    "float" => return FidanType::Float,
+                    "float" | "sqrt" => return FidanType::Float,
                     "boolean" => return FidanType::Boolean,
+                    "floor" | "ceil" | "round" => return FidanType::Integer,
+                    "abs" | "max" | "min" => return FidanType::Dynamic,
                     _ => {}
                 }
-                // Object constructor call
-                if let Some(kind) = self.table.lookup(name).map(|i| i.kind) {
-                    if kind == SymbolKind::Object {
+                // Look up in symbol table: Object constructor, user action, or builtin.
+                match self.table.lookup(name).map(|i| i.kind) {
+                    Some(SymbolKind::Object) => {
                         self.check_required_params(name, args, span);
                         return FidanType::Object(name);
                     }
+                    Some(_) => {
+                        // Action, Var holding a function, etc. — valid call, return type unknown.
+                        return FidanType::Dynamic;
+                    }
+                    None => {
+                        // Not a builtin, not declared — undefined callee.
+                        let s = name_str.clone();
+                        let candidates: Vec<String> = self
+                            .table
+                            .all_names()
+                            .map(|sym| self.interner.resolve(sym).to_string())
+                            .collect();
+                        let candidate_refs: Vec<&str> =
+                            candidates.iter().map(String::as_str).collect();
+                        let mut diag = Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0101"),
+                            format!("undefined name `{s}`"),
+                            callee_span,
+                        )
+                        .with_label(Label::primary(callee_span, "unknown name"));
+                        if let Some(best) = FixEngine::suggest_name(&s, candidate_refs.into_iter())
+                        {
+                            diag = diag.with_suggestion(Suggestion::fix(
+                                format!("did you mean `{best}`?"),
+                                callee_span,
+                                best,
+                                Confidence::High,
+                            ));
+                        }
+                        self.diags.push(diag);
+                        return FidanType::Error;
+                    }
                 }
-                // Regular action — look up declared return type if we have it
-                FidanType::Dynamic
             }
 
             Expr::Field { object, field, .. } => {
