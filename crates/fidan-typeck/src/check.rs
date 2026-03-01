@@ -304,7 +304,10 @@ impl TypeChecker {
                     },
                 );
             }
-            Item::ExprStmt(_) | Item::Assign { .. } | Item::Use { .. } | Item::Destructure { .. } => {}
+            Item::ExprStmt(_)
+            | Item::Assign { .. }
+            | Item::Use { .. }
+            | Item::Destructure { .. } => {}
         }
     }
 
@@ -571,7 +574,10 @@ impl TypeChecker {
                     _ => {
                         self.emit_error(
                             fidan_diagnostics::diag_code!("E0201"),
-                            format!("cannot destructure non-tuple type `{}`", self.ty_name(&val_ty)),
+                            format!(
+                                "cannot destructure non-tuple type `{}`",
+                                self.ty_name(&val_ty)
+                            ),
                             span,
                         );
                         vec![FidanType::Error; bindings.len()]
@@ -799,6 +805,17 @@ impl TypeChecker {
         span: Span,
         module: &Module,
     ) {
+        // A `const var` with no initialiser is always `nothing` and can never
+        // be changed — that is never useful.
+        if is_const && init.is_none() {
+            let n = self.interner.resolve(name).to_string();
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0104"),
+                format!("constant `{n}` must have an initializer"),
+                span,
+            );
+        }
+
         let declared = ty.as_ref().map(|t| self.resolve_type_expr(t));
 
         let inferred = if let Some(init_id) = init {
@@ -818,7 +835,13 @@ impl TypeChecker {
             declared.clone().unwrap_or(FidanType::Nothing)
         };
 
-        let final_ty = declared.unwrap_or(inferred);
+        // When the annotation is the bare `tuple` keyword (no element types),
+        // prefer the more-specific type inferred from the initializer.
+        let final_ty = match declared {
+            Some(FidanType::Tuple(ref e)) if e.is_empty() => inferred,
+            Some(d) => d,
+            None => inferred,
+        };
         self.table.define(
             name,
             SymbolInfo {
@@ -1315,10 +1338,7 @@ impl TypeChecker {
             TypeExpr::Dynamic { .. } => FidanType::Dynamic,
             TypeExpr::Nothing { .. } => FidanType::Nothing,
             TypeExpr::Tuple { elements, .. } => {
-                let types = elements
-                    .iter()
-                    .map(|e| self.resolve_type_expr(e))
-                    .collect();
+                let types = elements.iter().map(|e| self.resolve_type_expr(e)).collect();
                 FidanType::Tuple(types)
             }
         }
@@ -1431,20 +1451,33 @@ impl TypeChecker {
     /// statements are almost always a mistake — either a typo or leftover
     /// debug code.  Identifiers and calls are intentional and not warned.
     fn warn_bare_literal(&mut self, expr_id: ExprId, module: &Module) {
-        let (is_literal, span) = match module.arena.get_expr(expr_id) {
-            Expr::IntLit { span, .. } => (true, *span),
-            Expr::FloatLit { span, .. } => (true, *span),
-            Expr::BoolLit { span, .. } => (true, *span),
-            Expr::StrLit { span, .. } => (true, *span),
-            Expr::Nothing { span } => (true, *span),
-            _ => (false, Span::new(self.file_id, 0, 0)),
-        };
-        if is_literal {
-            self.emit_warning(
-                fidan_diagnostics::diag_code!("W2002"),
-                "bare literal statement has no effect — did you mean to assign or print it?",
-                span,
-            );
+        match module.arena.get_expr(expr_id) {
+            Expr::IntLit { span, .. }
+            | Expr::FloatLit { span, .. }
+            | Expr::BoolLit { span, .. }
+            | Expr::StrLit { span, .. }
+            | Expr::Nothing { span } => {
+                self.emit_warning(
+                    fidan_diagnostics::diag_code!("W2002"),
+                    "bare literal statement has no effect — did you mean to assign or print it?",
+                    *span,
+                );
+            }
+            Expr::Ident { name, span } => {
+                let name = *name;
+                let span = *span;
+                if let Some(info) = self.table.lookup(name) {
+                    if matches!(info.kind, SymbolKind::BuiltinAction | SymbolKind::Action) {
+                        let n = self.interner.resolve(name).to_string();
+                        self.emit_warning(
+                            fidan_diagnostics::diag_code!("W2003"),
+                            format!("bare reference to action `{n}` has no effect — did you mean to call it with `{n}(...)`?"),
+                            span,
+                        );
+                    }
+                }
+            }
+            _ => {}
         }
     }
 

@@ -65,6 +65,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "cannot assign to constant",
         category: "names",
     },
+    DiagnosticCode {
+        code: "E0104",
+        title: "constant must have an initializer",
+        category: "names",
+    },
     // ── Type system ───────────────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0201",
@@ -123,6 +128,11 @@ pub static CODES: &[DiagnosticCode] = &[
     DiagnosticCode {
         code: "W2002",
         title: "bare literal has no effect",
+        category: "lint",
+    },
+    DiagnosticCode {
+        code: "W2003",
+        title: "bare action reference has no effect",
         category: "lint",
     },
     // ── Runtime: control flow ─────────────────────────────────────────────────

@@ -133,6 +133,20 @@ or remove the reassignment.
 "#,
         ),
 
+        "E0104" => Some(
+            r#"A `const var` declaration has no initializer.  A constant whose value
+is `nothing` and can never be changed is always useless.
+
+Erroneous example:
+
+    const var MAX           # error: constant must have an initializer
+
+Fix: provide an initial value:
+
+    const var MAX set 100   # OK
+"#,
+        ),
+
         // ── Type system ───────────────────────────────────────────────────────
         "E0201" => Some(
             r#"The type of the value being assigned or used as an initialiser does not
@@ -325,6 +339,23 @@ Fix: assign the value or pass it somewhere useful:
 
     var answer = 42
     print("hello")
+"#,
+        ),
+
+        "W2003" => Some(
+            r#"An action (function) name appears as a standalone expression without
+being called.  The reference resolves to the action itself but is
+immediately discarded — no code inside the action runs.
+
+Erroneous example:
+
+    print           # warning: bare reference — print never runs
+    greet           # warning: ditto
+
+Fix: call the action with parentheses (and any required arguments):
+
+    print("hello")
+    greet(name)
 "#,
         ),
 
