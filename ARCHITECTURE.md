@@ -29,6 +29,7 @@
 19. [Key Technical Decisions & Rationale](#19-key-technical-decisions--rationale)
 20. [Implementation Phases (Milestones)](#20-implementation-phases-milestones)
 21. [Pitfalls & Pre-planned Mitigations](#21-pitfalls--pre-planned-mitigations)
+22. [Differentiating Features Roadmap](#22-differentiating-features-roadmap)
 
 ---
 
@@ -2335,3 +2336,272 @@ This phase replaces Cranelift as the AOT backend with LLVM and adds all performa
 
 *This document is the ground truth for the Fidan implementation. It should be updated as
 decisions change. All architectural changes should be reflected here before code is written.*
+
+---
+
+## 22. Differentiating Features Roadmap
+
+> These features are not scheduled for immediate implementation. They are recorded here as
+> first-class architectural commitments — each one is designed to exploit Fidan's existing
+> foundations (deterministic execution, structured diagnostics, controlled memory model, span
+> tracking) in ways that no mainstream language can easily replicate.
+
+---
+
+### 22.1 – Time-Travel Debugging (`--trace-time`)
+
+**Elevator pitch:** Step *backwards* through any execution, inspect every variable at every
+past moment — built into the runtime, not a plugin.
+
+**Why Fidan can do this when others cannot:**
+
+| Language | Status |
+|---|---|
+| Python | Not possible (GIL, mutable everything) |
+| C++ | Essentially impossible (raw pointers, UB) |
+| Rust | Extremely hard (borrow checker fights you) |
+| Dart | Limited snapshots only |
+| **Fidan** | **Deterministic execution + controlled memory model + structured diagnostics** |
+
+**What it records:**
+- State diff per step: only changed variables (memory-efficient delta log)
+- Call stack snapshots at each frame push/pop
+- Works in both interpreter mode and precompiled (`@precompile`) mode
+
+**CLI surface:**
+```
+fidan run app.fdn --trace-time
+# produces: app.fdn.trace (binary diff log)
+
+fidan replay app.fdn.trace
+# interactive: step forward/backward, inspect state
+```
+
+**Implementation notes (for when this is scheduled):**
+- New crate: `fidan-timetrace` — `TraceRecorder` writes diff log; `TracePlayer` reads it
+- `fidan-interp` gets an optional `RecordHook` injected at frame push, variable write
+- `@precompile` JIT functions emit trace callbacks via Cranelift `call_indirect` to a C ABI hook
+- Trace format: length-prefixed binary (variable ID, old value, new value, step counter)
+- Target: MVP records variables + call stack; advanced version records heap object mutations
+
+---
+
+### 22.2 – Built-in Code Explanation (`fidan explain --line N`)
+
+**Elevator pitch:** Ask Fidan what any line does — fully offline, fully deterministic, zero AI.
+
+```
+fidan explain app.fdn --line 42
+```
+
+**Output per line:**
+```
+line 42: total = total + i
+
+  what it does    assigns the sum of `total` and `i` to `total`
+  values flowing  total: integer (currently 0), i: integer (loop variable)
+  depends on      `total` (line 38), `i` (for-loop induction variable, line 39)
+  mutates         `total`
+  could go wrong  integer overflow if total + i exceeds integer range
+```
+
+**Why no mainstream language has this:**
+- Requires span tracking from source to runtime value (Fidan has this)
+- Requires def-use chains (available once MIR/SSA is in place)
+- Requires type inference results to be queryable per-span (typeck already stores this)
+
+**Implementation notes:**
+- New sub-command in `fidan-cli`: `run_explain_line`
+- Uses MIR def-use chains (`fidan-mir`) + typeck inference results
+- Phase: schedulable after Phase 5 (MIR) + Phase 3 (typeck)
+- The existing `fidan explain <CODE>` (diagnostic code explanations) is a separate feature;
+  this is *source-line* explanation, a different code path
+
+---
+
+### 22.3 – Deterministic Replayable Bugs (`--replay`)
+
+**Elevator pitch:** Every runtime error carries a replay ID. Run the exact same failure again,
+anytime, on any machine.
+
+```
+runtime error[R2001]: division by zero
+  → app.fdn:14:17
+
+replay id: 7f3a-19b2
+
+reproduce with:
+  fidan run app.fdn --replay 7f3a-19b2
+```
+
+**Why this is possible:**
+- Fidan's execution is deterministic by default (no hidden entropy, no OS scheduling in the
+  interpreter path)
+- A replay ID encodes the PRNG seed + any external inputs that were captured at panic time
+- Re-running with `--replay` re-injects the same inputs and seeds → identical execution
+
+**What gets captured:**
+- PRNG seed (if language-level random is used)
+- Captured stdin / file reads at panic time (stored in replay bundle)
+- Clock values (frozen to capture time)
+
+**Implementation notes:**
+- New type in `fidan-runtime`: `ReplayBundle { id: ReplayId, seed: u64, inputs: Vec<CapturedInput> }`
+- Panic handler in `fidan-interp` serialises bundle to `~/.fidan/replays/<id>.bundle`
+- `--replay <id>` deserialises bundle and injects a `ReplayDriver` that overrides all I/O
+- Replay IDs are 8-hex-char (4 bytes) for readability; collisions handled by appending a counter
+
+---
+
+### 22.4 – Language-Level Profiling (`fidan profile`)
+
+**Elevator pitch:** Zero annotations, zero flags, zero tooling setup. Just run `fidan profile`.
+
+```
+fidan profile app.fdn
+```
+
+**Output:**
+```
+profile: app.fdn  (1 234 ms total)
+
+  hot paths
+    action compute_score  called 10 000×  avg 0.12 ms  total 1 200 ms  91.3%
+    action parse_token    called 84 000×  avg 0.001 ms total   84 ms   6.4%
+
+  allocation points
+    line 88  list literal   10 000 allocs  avg 24 B
+    line 109 string interp   84 000 allocs  avg 12 B
+
+  suggestion
+    action compute_score is >80% of runtime
+    consider annotating with @precompile
+```
+
+**Why Fidan already has everything needed:**
+- Frame tracking → call counts are free (already implemented for stack traces)
+- Span tracking → pinpoint allocations to source line
+- MIR instruction count → cost model for `@precompile` suggestions
+
+**Implementation notes:**
+- New `fidan-profiler` crate (or module inside `fidan-interp`)
+- `ProfileSink` trait: `on_call(action, span)`, `on_alloc(span, bytes)`, `on_return(action, duration)`
+- Injected into `fidan-interp` via the same `RecordHook` mechanism as time-travel debugging
+- `fidan profile` = `fidan run` with `ProfileSink` enabled + report rendered at exit
+- Output format: human-readable terminal table (default) + `--profile-out app.fdn.prof` (JSON)
+
+---
+
+### 22.5 – Compile-Time "Why Is This Slow?" (`W5xxx` hints)
+
+**Elevator pitch:** Not just *what* is slow — *why*, with a concrete fix suggestion. Emitted by
+the compiler, not a profiler.
+
+**Example diagnostic output:**
+```
+warning[W5001]: loop body cannot be precompiled
+  → app.fdn:34:5
+   |
+34 |     for item in data {
+   |     ^^^
+   |
+   = reason: loop variable `item` has type `flexible` (dynamic dispatch required)
+   = reason: closure on line 37 captures mutable `total` (prevents hoisting)
+
+  suggestion: annotate enclosing action with @precompile
+  suggestion: replace `flexible` with a concrete type (e.g. `integer`) if inputs allow
+```
+
+**New diagnostic codes:**
+
+| Code | Meaning |
+|---|---|
+| `W5001` | Loop not precompilable — dynamic type in induction variable |
+| `W5002` | Loop not precompilable — closure captures mutable outer variable |
+| `W5003` | Action called in hot path but lacks `@precompile` |
+| `W5004` | `@precompile` has no effect in AOT build mode (supersedes proposed W3001) |
+
+**Implementation notes:**
+- New pass in `fidan-passes`: `precompile_analysis.rs`
+- Runs after constant-folding; inspects MIR for dynamic-dispatch instructions in loop bodies
+- Emits `W5xxx` diagnostics via the existing `fidan-diagnostics` machinery
+- Phase: schedulable after Phase 9 (Cranelift JIT) when `@precompile` semantics are stable
+
+---
+
+### 22.6 – Zero-Config Sandboxing (`--sandbox`)
+
+**Elevator pitch:** Safe-by-default script execution. No setup, no seccomp boilerplate, no OS
+expertise required.
+
+```
+fidan run script.fdn --sandbox
+```
+
+**Default sandbox policy:**
+
+| Resource | Default | Override flag |
+|---|---|---|
+| File system | denied | `--allow-read=./data` |
+| Network | denied | `--allow-net=api.example.com` |
+| Environment variables | denied | `--allow-env` |
+| Subprocess spawn | denied | `--allow-spawn` |
+| CPU / wall time | 30 s | `--time-limit=N` |
+| Memory | 256 MB | `--mem-limit=N` |
+
+**Why this is ergonomically ahead of alternatives:**
+- Python: `subprocess`, `os`, `socket` all open by default; sandboxing requires seccomp + effort
+- C++: no concept of sandboxing
+- Rust: safe memory but unrestricted I/O
+- Deno does this for JS — Fidan would be the **first systems-adjacent language** with it built in
+
+**Implementation notes:**
+- New crate: `fidan-sandbox`
+- All I/O in `fidan-stdlib` (file, net, env, spawn) routes through a `SandboxPolicy` trait
+- `fidan-driver` constructs the policy from CLI flags and passes it into the session
+- OS enforcement: `seccomp-bpf` on Linux, Job Objects on Windows (defence-in-depth over
+  stdlib-only interception)
+- Policy violations produce `E6001: operation not permitted in sandbox` with the resource named
+
+---
+
+### 22.7 – Strict / "No Foot-Guns" Mode (`--strict`)
+
+**Elevator pitch:** A production-grade lint tier that promotes every dangerous pattern from
+warning to hard error.
+
+```
+fidan build app.fdn --strict
+```
+
+**What `--strict` escalates from warning to error:**
+
+| Check | Normal code | `--strict` |
+|---|---|---|
+| Unused variables | `W1001` | **error** |
+| Implicit `nothing` flows into typed variable | `W2001` | **error** |
+| Unchecked error from action that can throw | `W2003` | **error** |
+| `dynamic` / `flexible` type in hot path | `W5001` | **error** |
+| Action with no return type annotation | `W2004` | **error** |
+| `@precompile` in AOT build (no-op) | `W5004` | **error** |
+
+**Implementation notes:**
+- New `--strict` flag in `fidan-driver/src/options.rs`: `strict_mode: bool`
+- `fidan-typeck` checks `session.options.strict_mode`; if true, promotes listed W codes to E
+- `fidan-diagnostics` utility: `Diagnostic::escalate()` upgrades severity in-place
+- Phase: schedulable at any point after Phase 3 (typeck); no MIR dependency
+- Composable with `--sandbox`: `fidan build app.fdn --strict --sandbox` is valid
+
+---
+
+### Feature → Phase Dependency Map
+
+| Feature | Earliest schedulable after | Estimated effort |
+|---|---|---|
+| 22.7 Strict mode | Phase 3 (typeck) | 1–2 days |
+| 22.5 Compile-time slow hints | Phase 9 (Cranelift JIT) | 1 week |
+| 22.4 Language profiling | Phase 5 (MIR interpreter) | 1–2 weeks |
+| 22.3 Replayable bugs | Phase 5 (MIR interpreter) | 1–2 weeks |
+| 22.6 Sandboxing | Phase 7 (stdlib) | 2–3 weeks |
+| 22.2 Explain line | Phase 5 (MIR + typeck) | 2–3 weeks |
+| 22.1 Time-travel debug | Phase 9 (JIT tracing hooks) | 3–5 weeks |
