@@ -2001,6 +2001,16 @@ The REPL maintains a persistent `Session` and `Interpreter`. Each line is parsed
 statement or expression. Expressions' results are printed. The symbol table persists across
 lines. Hot-patches the interpreter's environment on each entry.
 
+> **Current implementation:** The REPL uses the direct AST-walking interpreter (`fidan-interp`)
+> as a bootstrap shortcut — it provides stateful, line-by-line execution without requiring a
+> full MIR re-compilation on each input.  This is intentional and correct for now.
+>
+> **Planned migration (Phase 10):** The REPL will be migrated to the MIR pipeline, giving it
+> the same execution semantics as `fidan run`.  The approach is an incremental MIR append model:
+> each new line is lowered to MIR and merged into the persistent `MirProgram`, after which only
+> the newly-emitted basic blocks are executed.  The AST-walking interpreter (`interp.rs`) will
+> be retired once this migration is complete.
+
 ---
 
 ## 18. Stage 15 – Language Server (`fidan-lsp`)
@@ -2285,6 +2295,7 @@ Cranelift's **permanent, final role** in the architecture — it will never be r
 **Goal:** Usable development experience.
 
 - [ ] All `fidan` subcommands working
+- [ ] REPL migrated to MIR pipeline (incremental MIR append model; retire AST walker)
 - [ ] REPL with history and multi-line input
 - [ ] LSP server: diagnostics, hover, go-to-def, completion
 - [ ] VS Code extension skeleton (JSON grammar + LSP client)

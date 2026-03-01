@@ -190,7 +190,9 @@ impl<'m> Interpreter<'m> {
                     self.eval_assign(*target, val)?;
                     last_expr_val = None; // assignment — suppress echo
                 }
-                Item::Destructure { bindings, value, .. } => {
+                Item::Destructure {
+                    bindings, value, ..
+                } => {
                     let tuple_val = self.eval_expr(*value)?;
                     let items: Vec<FidanValue> = match tuple_val {
                         FidanValue::Tuple(v) => v,
@@ -379,7 +381,8 @@ impl<'m> Interpreter<'m> {
             Expr::Ident { name, .. } => {
                 let name_str = self.interner.resolve(name).to_string();
 
-                // 1. Built-in function
+                // 1. Built-in function (free-standing only; method-only builtins
+                //    are not callable without a receiver).
                 let raw_args = self.eval_args_raw(&args)?;
                 let vals: Vec<FidanValue> = raw_args.iter().map(|(_, v)| v.clone()).collect();
                 if let Some(result) = builtins::call_builtin(&name_str, vals) {
@@ -510,12 +513,6 @@ impl<'m> Interpreter<'m> {
             return self.call_method_on(obj_val, parent_name, method_name, raw_args);
         }
 
-        // Method not found — try as a builtin by string name
-        let vals2: Vec<FidanValue> = raw_args.into_iter().map(|(_, v)| v).collect();
-        if let Some(r) = builtins::call_builtin(&method_str, vals2) {
-            return Ok(r);
-        }
-
         Ok(FidanValue::Nothing)
     }
 
@@ -567,6 +564,7 @@ impl<'m> Interpreter<'m> {
 
         Arc::new(FidanClass {
             name: class_name,
+            name_str: self.interner.resolve(class_name),
             parent: None, // not used by the AST interpreter
             fields: all_fields,
             methods: HashMap::new(), // not used by the AST interpreter
@@ -728,7 +726,9 @@ impl<'m> Interpreter<'m> {
                 Ok(FidanValue::Nothing)
             }
 
-            Stmt::Destructure { bindings, value, .. } => {
+            Stmt::Destructure {
+                bindings, value, ..
+            } => {
                 let tuple_val = self.eval_expr(value)?;
                 let items: Vec<FidanValue> = match tuple_val {
                     FidanValue::Tuple(v) => v,
@@ -1264,85 +1264,11 @@ impl<'m> Interpreter<'m> {
         method: Symbol,
         args: Vec<FidanValue>,
     ) -> Option<FidanValue> {
-        let name = self.interner.resolve(method);
-        let name = name.as_ref();
-
-        match obj {
-            FidanValue::List(l) => match name {
-                "append" | "add" | "push" => {
-                    for arg in args {
-                        l.borrow_mut().append(arg);
-                    }
-                    Some(FidanValue::Nothing)
-                }
-                "len" | "length" => Some(FidanValue::Integer(l.borrow().len() as i64)),
-                "get" => {
-                    if let Some(FidanValue::Integer(i)) = args.first() {
-                        Some(
-                            l.borrow()
-                                .get(*i as usize)
-                                .cloned()
-                                .unwrap_or(FidanValue::Nothing),
-                        )
-                    } else {
-                        Some(FidanValue::Nothing)
-                    }
-                }
-                _ => None,
-            },
-            FidanValue::Dict(d) => match name {
-                "get" => {
-                    if let Some(FidanValue::String(k)) = args.first() {
-                        Some(d.borrow().get(k).cloned().unwrap_or(FidanValue::Nothing))
-                    } else {
-                        Some(FidanValue::Nothing)
-                    }
-                }
-                "set" | "insert" => {
-                    if let (Some(FidanValue::String(k)), Some(v)) = (args.first(), args.get(1)) {
-                        d.borrow_mut().insert(k.clone(), v.clone());
-                        Some(FidanValue::Nothing)
-                    } else {
-                        Some(FidanValue::Nothing)
-                    }
-                }
-                "len" | "length" => Some(FidanValue::Integer(d.borrow().len() as i64)),
-                _ => None,
-            },
-            FidanValue::String(s) => match name {
-                "len" | "length" => Some(FidanValue::Integer(s.len() as i64)),
-                "upper" | "to_upper" => Some(FidanValue::String(FidanString::new(
-                    &s.as_str().to_uppercase(),
-                ))),
-                "lower" | "to_lower" => Some(FidanValue::String(FidanString::new(
-                    &s.as_str().to_lowercase(),
-                ))),
-                "trim" => Some(FidanValue::String(FidanString::new(s.as_str().trim()))),
-                "contains" => {
-                    if let Some(FidanValue::String(needle)) = args.first() {
-                        Some(FidanValue::Boolean(s.as_str().contains(needle.as_str())))
-                    } else {
-                        Some(FidanValue::Boolean(false))
-                    }
-                }
-                "starts_with" => {
-                    if let Some(FidanValue::String(prefix)) = args.first() {
-                        Some(FidanValue::Boolean(s.as_str().starts_with(prefix.as_str())))
-                    } else {
-                        Some(FidanValue::Boolean(false))
-                    }
-                }
-                "ends_with" => {
-                    if let Some(FidanValue::String(suffix)) = args.first() {
-                        Some(FidanValue::Boolean(s.as_str().ends_with(suffix.as_str())))
-                    } else {
-                        Some(FidanValue::Boolean(false))
-                    }
-                }
-                _ => None,
-            },
-            _ => None,
-        }
+        let method_name = self.interner.resolve(method);
+        // Delegate entirely to the single source of truth for bootstrap methods.
+        // call_bootstrap_method clones the OwnedRef / SharedRef so mutations still
+        // propagate through the shared reference-counted containers.
+        crate::bootstrap::call_bootstrap_method(obj.clone(), method_name.as_ref(), args)
     }
 
     // ── Iteration ─────────────────────────────────────────────────────────────
@@ -1373,7 +1299,11 @@ impl<'m> Interpreter<'m> {
             (String(x), String(y)) => x.as_str() == y.as_str(),
             (Nothing, _) | (_, Nothing) => false,
             (Tuple(xs), Tuple(ys)) => {
-                xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(a, b)| self.values_equal(a, b))
+                xs.len() == ys.len()
+                    && xs
+                        .iter()
+                        .zip(ys.iter())
+                        .all(|(a, b)| self.values_equal(a, b))
             }
             _ => false,
         }

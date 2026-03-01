@@ -117,7 +117,9 @@ impl<'a> Printer<'a> {
                 let names: Vec<String> = bindings.iter().map(|s| self.sym(*s)).collect();
                 println!("{p}Destructure  ({}) = {}", names.join(", "), self.expr_hint(*value));
             }
-
+            Item::Stmt(sid) => {
+                self.print_stmt(*sid, depth);
+            }
             Item::Use {
                 path,
                 alias,

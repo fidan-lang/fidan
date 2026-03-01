@@ -4,6 +4,7 @@
 //! When HIR/MIR lowering is complete (Phase 6+), this will be replaced by
 //! a proper SSA/MIR walker.
 
+mod bootstrap;
 mod builtins;
 mod env;
 mod frame;

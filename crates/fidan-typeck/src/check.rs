@@ -339,6 +339,7 @@ impl TypeChecker {
             Item::ExprStmt(_)
             | Item::Assign { .. }
             | Item::Use { .. }
+            | Item::Stmt(_)
             | Item::Destructure { .. } => {}
         }
     }
@@ -442,6 +443,11 @@ impl TypeChecker {
             }
 
             Item::Use { .. } => {}
+
+            // ── module-level statement (for, while, if, check, attempt, etc.) ──
+            Item::Stmt(stmt_id) => {
+                self.check_stmt(*stmt_id, module);
+            }
 
             // ── module-level destructure ─────────────────────────────────
             Item::Destructure {

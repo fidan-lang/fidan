@@ -6,15 +6,13 @@
 // the type-annotation map produced by `fidan-typeck` and emits an owned,
 // fully-typed HIR tree.
 
-use fidan_ast::{
-    Arg, AstArena, BinOp, Expr, ExprId, InterpPart, Item, Module, Param, Stmt, StmtId,
-};
-use fidan_lexer::Symbol;
+use fidan_ast::{Arg, AstArena, Expr, ExprId, InterpPart, Item, Module, Param, Stmt, StmtId};
+use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::Span;
 use fidan_typeck::{FidanType, TypedModule};
 
 use crate::hir::{
-    HirArg, HirCheckArm, HirCheckExprArm, HirCatchClause, HirElseIf, HirExpr, HirExprKind,
+    HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr, HirExprKind,
     HirField, HirFunction, HirGlobal, HirInterpPart, HirModule, HirObject, HirParam, HirStmt,
     HirTask,
 };
@@ -24,6 +22,7 @@ use crate::hir::{
 struct Ctx<'a> {
     arena: &'a AstArena,
     typed: &'a TypedModule,
+    interner: &'a SymbolInterner,
 }
 
 impl<'a> Ctx<'a> {
@@ -106,25 +105,22 @@ impl<'a> Ctx<'a> {
                 HirExprKind::Tuple(elements.iter().map(|&e| self.lower_expr(e)).collect())
             }
 
-            Expr::StringInterp { parts, .. } => HirExprKind::StringInterp(
-                parts.iter().map(|p| self.lower_interp_part(p)).collect(),
-            ),
+            Expr::StringInterp { parts, .. } => {
+                HirExprKind::StringInterp(parts.iter().map(|p| self.lower_interp_part(p)).collect())
+            }
 
-            Expr::Spawn { expr, .. } => {
-                HirExprKind::Spawn(Box::new(self.lower_expr(expr)))
-            }
-            Expr::Await { expr, .. } => {
-                HirExprKind::Await(Box::new(self.lower_expr(expr)))
-            }
+            Expr::Spawn { expr, .. } => HirExprKind::Spawn(Box::new(self.lower_expr(expr))),
+            Expr::Await { expr, .. } => HirExprKind::Await(Box::new(self.lower_expr(expr))),
 
             // Assignments as expressions (compound assign / plain assign)
             // In HIR we keep them as expressions; MIR lowering will handle them.
-            Expr::Assign { target, value, .. } => HirExprKind::Binary {
-                op: BinOp::Eq, // sentinel: MIR lowering recognises Eq as assignment
-                lhs: Box::new(self.lower_expr(target)),
-                rhs: Box::new(self.lower_expr(value)),
+            Expr::Assign { target, value, .. } => HirExprKind::Assign {
+                target: Box::new(self.lower_expr(target)),
+                value: Box::new(self.lower_expr(value)),
             },
-            Expr::CompoundAssign { op, target, value, .. } => HirExprKind::Binary {
+            Expr::CompoundAssign {
+                op, target, value, ..
+            } => HirExprKind::Binary {
                 op,
                 lhs: Box::new(self.lower_expr(target)),
                 rhs: Box::new(self.lower_expr(value)),
@@ -182,9 +178,7 @@ impl<'a> Ctx<'a> {
             } => {
                 // The resolved type of a `var` declaration is the type of the
                 // initialiser expression, or FidanType::Nothing if no init.
-                let ty = init
-                    .map(|e| self.ty(e))
-                    .unwrap_or(FidanType::Nothing);
+                let ty = init.map(|e| self.ty(e)).unwrap_or(FidanType::Nothing);
                 HirStmt::VarDecl {
                     name,
                     ty,
@@ -213,7 +207,11 @@ impl<'a> Ctx<'a> {
                 }
             }
 
-            Stmt::Assign { target, value, span } => HirStmt::Assign {
+            Stmt::Assign {
+                target,
+                value,
+                span,
+            } => HirStmt::Assign {
                 target: self.lower_expr(target),
                 value: self.lower_expr(value),
                 span,
@@ -310,7 +308,11 @@ impl<'a> Ctx<'a> {
                     .iter()
                     .map(|c| HirCatchClause {
                         binding: c.binding,
-                        ty: FidanType::Dynamic, // exception type is dynamic for now
+                        ty: c
+                            .ty
+                            .as_ref()
+                            .map(|te| resolve_type_expr_simple(te, self.interner))
+                            .unwrap_or(FidanType::Dynamic),
                         body: self.lower_stmts(&c.body),
                         span: c.span,
                     })
@@ -385,7 +387,7 @@ impl<'a> Ctx<'a> {
                         // Resolve from the type expression directly.
                         // TypedModule doesn't directly expose a resolve_type_expr,
                         // so we make a best-effort map from named types here.
-                        resolve_type_expr_simple(&p.ty)
+                        resolve_type_expr_simple(&p.ty, self.interner)
                     });
                 HirParam {
                     name: p.name,
@@ -422,30 +424,43 @@ impl<'a> Ctx<'a> {
 
 // ── Utility: shallow type-expr resolver ───────────────────────────────────────
 
-/// Resolve a `TypeExpr` to a `FidanType` without access to the full typeck context.
-/// Only handles primitive/named types; uses `Dynamic` for complex unknowns.
-fn resolve_type_expr_simple(te: &fidan_ast::TypeExpr) -> FidanType {
+/// Resolve a `TypeExpr` to a `FidanType` using the symbol interner for named types.
+///
+/// Primitive names (`string`, `integer`, `float`, `boolean`, `nothing`, `dynamic`) map to
+/// their corresponding `FidanType` variants.  All other names are treated as user-defined
+/// object types (`FidanType::Object(sym)`).  Parameterised forms `list oftype T`,
+/// `Shared oftype T`, and `Pending oftype T` produce the correct wrapper type.
+fn resolve_type_expr_simple(te: &fidan_ast::TypeExpr, interner: &SymbolInterner) -> FidanType {
     match te {
-        fidan_ast::TypeExpr::Named { name, .. } => {
-            let _ = name;
-            FidanType::Dynamic
-        }
+        fidan_ast::TypeExpr::Named { name, .. } => match interner.resolve(*name).as_ref() {
+            "string" => FidanType::String,
+            "integer" => FidanType::Integer,
+            "float" => FidanType::Float,
+            "boolean" => FidanType::Boolean,
+            "nothing" => FidanType::Nothing,
+            "dynamic" => FidanType::Dynamic,
+            _ => FidanType::Object(*name),
+        },
         fidan_ast::TypeExpr::Dynamic { .. } => FidanType::Dynamic,
         fidan_ast::TypeExpr::Nothing { .. } => FidanType::Nothing,
         fidan_ast::TypeExpr::Oftype { base, param, .. } => {
-            let b = resolve_type_expr_simple(base);
-            let p = resolve_type_expr_simple(param);
-            match b {
-                FidanType::Dynamic => FidanType::Dynamic,
-                _ => {
-                    let _ = p;
-                    FidanType::Dynamic
-                }
+            let p = resolve_type_expr_simple(param, interner);
+            match resolve_type_expr_simple(base, interner) {
+                FidanType::Object(sym) => match interner.resolve(sym).as_ref() {
+                    "list" | "List" => FidanType::List(Box::new(p)),
+                    "Shared" => FidanType::Shared(Box::new(p)),
+                    "Pending" => FidanType::Pending(Box::new(p)),
+                    _ => FidanType::Dynamic,
+                },
+                _ => FidanType::Dynamic,
             }
         }
-        fidan_ast::TypeExpr::Tuple { elements, .. } => {
-            FidanType::Tuple(elements.iter().map(|e| resolve_type_expr_simple(e)).collect())
-        }
+        fidan_ast::TypeExpr::Tuple { elements, .. } => FidanType::Tuple(
+            elements
+                .iter()
+                .map(|e| resolve_type_expr_simple(e, interner))
+                .collect(),
+        ),
     }
 }
 
@@ -455,15 +470,16 @@ fn resolve_type_expr_simple(te: &fidan_ast::TypeExpr) -> FidanType {
 ///
 /// This function is infallible: any unsupported construct is lowered to an
 /// `HirStmt::Error` / `HirExprKind::Error` placeholder.
-pub fn lower_module(module: &Module, typed: &TypedModule) -> HirModule {
+pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInterner) -> HirModule {
     let ctx = Ctx {
         arena: &module.arena,
         typed,
+        interner,
     };
 
     let mut objects: Vec<crate::hir::HirObject> = vec![];
     let mut functions: Vec<HirFunction> = vec![];
-    let mut globals: Vec<HirGlobal> = vec![];
+    let globals: Vec<HirGlobal> = vec![];
     let mut init_stmts: Vec<HirStmt> = vec![];
 
     for &item_id in &module.items {
@@ -552,7 +568,15 @@ pub fn lower_module(module: &Module, typed: &TypedModule) -> HirModule {
                     .get(&name)
                     .map(|a| a.return_ty.clone())
                     .unwrap_or(FidanType::Nothing);
-                functions.push(ctx.lower_function(name, None, &params, ret, &body, is_parallel, span));
+                functions.push(ctx.lower_function(
+                    name,
+                    None,
+                    &params,
+                    ret,
+                    &body,
+                    is_parallel,
+                    span,
+                ));
             }
 
             Item::ExtensionAction {
@@ -590,7 +614,9 @@ pub fn lower_module(module: &Module, typed: &TypedModule) -> HirModule {
                 span,
             } => {
                 let ty = init.map(|e| ctx.ty(e)).unwrap_or(FidanType::Nothing);
-                globals.push(HirGlobal {
+                // Push as an ordered init-statement so that variable declarations
+                // appear in source order relative to expressions (not hoisted above all stmts).
+                init_stmts.push(HirStmt::VarDecl {
                     name,
                     ty,
                     init: init.map(|e| ctx.lower_expr(e)),
@@ -621,12 +647,21 @@ pub fn lower_module(module: &Module, typed: &TypedModule) -> HirModule {
                 init_stmts.push(HirStmt::Expr(ctx.lower_expr(expr_id)));
             }
 
-            Item::Assign { target, value, span } => {
+            Item::Assign {
+                target,
+                value,
+                span,
+            } => {
                 init_stmts.push(HirStmt::Assign {
                     target: ctx.lower_expr(target),
                     value: ctx.lower_expr(value),
                     span,
                 });
+            }
+
+            // Top-level control-flow statements (for, while, if, check, attempt, etc.)
+            Item::Stmt(stmt_id) => {
+                init_stmts.push(ctx.lower_stmt(stmt_id));
             }
 
             // Module imports: not yet wired up — skip silently.

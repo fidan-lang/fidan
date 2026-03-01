@@ -415,7 +415,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     // ── --emit hir ─────────────────────────────────────────────────────────────
     if opts.emit.contains(&EmitKind::Hir) {
         if let Some(ref tm) = typed_module {
-            let hir = fidan_hir::lower_module(&module, tm);
+            let hir = fidan_hir::lower_module(&module, tm, &interner);
             println!("=== hir: {source_name} ===");
             println!("  objects:    {}", hir.objects.len());
             println!("  functions:  {}", hir.functions.len());
@@ -455,7 +455,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     // ── --emit mir ─────────────────────────────────────────────────────────────
     if opts.emit.contains(&EmitKind::Mir) {
         if let Some(ref tm) = typed_module {
-            let hir = fidan_hir::lower_module(&module, tm);
+            let hir = fidan_hir::lower_module(&module, tm, &interner);
             let mir = fidan_mir::lower_program(&hir, &interner);
             println!("=== mir: {source_name} ===");
             println!("  functions: {}", mir.functions.len());
@@ -487,7 +487,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
             if error_count == 0 {
                 // ── MIR pipeline (Phase 6) ────────────────────────────────────
                 let result = if let Some(ref tm) = typed_module {
-                    let hir = fidan_hir::lower_module(&module, tm);
+                    let hir = fidan_hir::lower_module(&module, tm, &interner);
                     let mut mir = fidan_mir::lower_program(&hir, &interner);
                     fidan_passes::run_all(&mut mir);
                     fidan_interp::run_mir(mir, Arc::clone(&interner))

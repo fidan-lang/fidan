@@ -95,9 +95,14 @@ struct FnCtx<'p> {
     /// Set of function names that are extension actions.
     /// Free calls to these need an implicit-`this` = nothing prepended.
     fn_is_extension: HashSet<Symbol>,
-    /// Stack of (header_bb, exit_bb) for break/continue targeting.
+    /// Stack of (continue_bb, exit_bb) for break/continue targeting.
     /// Innermost loop is at the back.
     loop_stack: Vec<(BlockId, BlockId)>,
+    /// Records all `continue` sites: maps continue_target_bb to a list of
+    /// (source_bb, env_snapshot_at_that_point).
+    continue_sites: HashMap<BlockId, Vec<(BlockId, HashMap<Symbol, LocalId>)>>,
+    /// Symbol for `"_"` — the wildcard pattern in `check` arms.
+    wildcard_sym: Symbol,
 }
 
 impl<'p> FnCtx<'p> {
@@ -187,6 +192,9 @@ impl<'p> FnCtx<'p> {
             HirExprKind::Var(name) => {
                 if let Some(local) = self.lookup_var(*name) {
                     Operand::Local(local)
+                } else if let Some(fid) = self.fn_map.get(name).copied() {
+                    // Function/action referenced as a first-class value.
+                    Operand::Const(MirLit::FunctionRef(fid.0))
                 } else {
                     // Unknown/builtin — represent as Nothing for now.
                     Operand::Const(MirLit::Nothing)
@@ -210,13 +218,42 @@ impl<'p> FnCtx<'p> {
             }
 
             // ── Binary / Unary ────────────────────────────────────────────────
-            HirExprKind::Binary { op, lhs, rhs } => {
-                // Sentinel: BinOp::Eq used for assignment-as-expression in HIR.
-                // Lower as a no-op here; assignments are handled in statements.
-                if *op == BinOp::Eq {
-                    return self.lower_expr(rhs);
+            HirExprKind::Assign { target, value } => {
+                // Assignment-as-expression. We lower the value and store it.
+                let val = self.lower_expr(value);
+                match &target.kind {
+                    HirExprKind::Var(name) => {
+                        let dest = self.alloc_local();
+                        self.emit(Instr::Assign {
+                            dest,
+                            ty: fidan_ty_to_mir(&target.ty),
+                            rhs: Rvalue::Use(val.clone()),
+                        });
+                        self.define_var(*name, dest);
+                    }
+                    HirExprKind::Field { object, field } => {
+                        let recv = self.lower_expr(object);
+                        self.emit(Instr::SetField {
+                            object: recv,
+                            field: *field,
+                            value: val.clone(),
+                        });
+                    }
+                    HirExprKind::Index { object, index } => {
+                        let obj = self.lower_expr(object);
+                        let idx = self.lower_expr(index);
+                        self.emit(Instr::SetIndex {
+                            object: obj,
+                            index: idx,
+                            value: val.clone(),
+                        });
+                    }
+                    _ => {}
                 }
-                let l = self.lower_expr(lhs);
+                val
+            }
+
+            HirExprKind::Binary { op, lhs, rhs } => {                let l = self.lower_expr(lhs);
                 let r = self.lower_expr(rhs);
                 let dest = self.alloc_local();
                 self.emit(Instr::Assign {
@@ -418,6 +455,9 @@ impl<'p> FnCtx<'p> {
                                 return Operand::Local(dest);
                             }
                             Callee::Fn(fid)
+                        } else if let Some(&local) = self.env.get(name) {
+                            // Local variable holding a function/action value — call dynamically.
+                            Callee::Dynamic(Operand::Local(local))
                         } else {
                             Callee::Builtin(*name)
                         }
@@ -558,26 +598,33 @@ impl<'p> FnCtx<'p> {
         let mut phi_ops: Vec<(BlockId, Operand)> = vec![];
 
         for arm in arms {
-            let arm_bb = self.alloc_block();
+            let arm_bb  = self.alloc_block();
             let next_bb = self.alloc_block();
 
-            // Condition: scrutinee == pattern
-            let pat = self.lower_expr(&arm.pattern);
-            let match_local = self.alloc_local();
-            self.emit(Instr::Assign {
-                dest: match_local,
-                ty: MirTy::Boolean,
-                rhs: Rvalue::Binary {
-                    op: BinOp::Eq,
-                    lhs: scrut.clone(),
-                    rhs: pat,
-                },
-            });
-            self.set_terminator(Terminator::Branch {
-                cond: Operand::Local(match_local),
-                then_bb: arm_bb,
-                else_bb: next_bb,
-            });
+            // Wildcard `_` pattern: unconditionally enter the arm.
+            let is_wildcard = matches!(&arm.pattern.kind, HirExprKind::Var(s) if *s == self.wildcard_sym);
+
+            if is_wildcard {
+                self.goto(arm_bb);
+            } else {
+                // Condition: scrutinee == pattern
+                let pat = self.lower_expr(&arm.pattern);
+                let match_local = self.alloc_local();
+                self.emit(Instr::Assign {
+                    dest: match_local,
+                    ty: MirTy::Boolean,
+                    rhs: Rvalue::Binary {
+                        op: BinOp::Eq,
+                        lhs: scrut.clone(),
+                        rhs: pat,
+                    },
+                });
+                self.set_terminator(Terminator::Branch {
+                    cond: Operand::Local(match_local),
+                    then_bb: arm_bb,
+                    else_bb: next_bb,
+                });
+            }
 
             // Arm body — lower all stmts, capturing the last expression value.
             self.switch_to(arm_bb);
@@ -603,6 +650,10 @@ impl<'p> FnCtx<'p> {
             }
             phi_ops.push((arm_end, arm_val));
 
+            if is_wildcard {
+                self.switch_to(next_bb);
+                break;
+            }
             self.switch_to(next_bb);
         }
 
@@ -843,6 +894,9 @@ impl<'p> FnCtx<'p> {
                                         return;
                                     }
                                     Callee::Fn(fid)
+                                } else if let Some(&local) = self.env.get(name) {
+                                    // Local variable holding a function/action value — call dynamically.
+                                    Callee::Dynamic(Operand::Local(local))
                                 } else {
                                     Callee::Builtin(*name)
                                 }
@@ -882,8 +936,15 @@ impl<'p> FnCtx<'p> {
                 }
             }
             HirStmt::Continue { .. } => {
-                if let Some(&(header_bb, _)) = self.loop_stack.last() {
-                    self.goto(header_bb);
+                if let Some(&(continue_bb, _)) = self.loop_stack.last() {
+                    // Snapshot env so we can build step_bb phis later.
+                    let snap = self.env.clone();
+                    let from_bb = self.cur_bb;
+                    self.continue_sites
+                        .entry(continue_bb)
+                        .or_default()
+                        .push((from_bb, snap));
+                    self.goto(continue_bb);
                 } else {
                     self.set_terminator(Terminator::Unreachable);
                 }
@@ -1064,41 +1125,93 @@ impl<'p> FnCtx<'p> {
     fn lower_check_stmt(&mut self, scrutinee: &HirExpr, arms: &[HirCheckArm]) {
         let scrut = self.lower_expr(scrutinee);
         let join_bb = self.alloc_block();
+        let env_before = self.env.clone();
+
+        // Track (arm_end_bb, env_after_arm) for phi-node merging at the join.
+        let mut arm_end_envs: Vec<(BlockId, VarEnv)> = vec![];
 
         for arm in arms {
-            let arm_bb = self.alloc_block();
+            let arm_bb  = self.alloc_block();
             let next_bb = self.alloc_block();
 
-            let pat = self.lower_expr(&arm.pattern);
-            let cmp = self.alloc_local();
-            self.emit(Instr::Assign {
-                dest: cmp,
-                ty: MirTy::Boolean,
-                rhs: Rvalue::Binary {
-                    op: BinOp::Eq,
-                    lhs: scrut.clone(),
-                    rhs: pat,
-                },
-            });
-            self.set_terminator(Terminator::Branch {
-                cond: Operand::Local(cmp),
-                then_bb: arm_bb,
-                else_bb: next_bb,
-            });
+            // Wildcard `_` arm: unconditionally enters the arm body.
+            let is_wildcard = matches!(&arm.pattern.kind, HirExprKind::Var(s) if *s == self.wildcard_sym);
 
+            if is_wildcard {
+                self.goto(arm_bb);
+            } else {
+                self.env = env_before.clone();
+                let pat = self.lower_expr(&arm.pattern);
+                let cmp = self.alloc_local();
+                self.emit(Instr::Assign {
+                    dest: cmp,
+                    ty: MirTy::Boolean,
+                    rhs: Rvalue::Binary {
+                        op: BinOp::Eq,
+                        lhs: scrut.clone(),
+                        rhs: pat,
+                    },
+                });
+                self.set_terminator(Terminator::Branch {
+                    cond: Operand::Local(cmp),
+                    then_bb: arm_bb,
+                    else_bb: next_bb,
+                });
+            }
+
+            self.env = env_before.clone();
             self.switch_to(arm_bb);
             self.lower_stmts(&arm.body);
+            let arm_end = self.cur_bb;
+            arm_end_envs.push((arm_end, self.env.clone()));
             if !self.terminated {
                 self.goto(join_bb);
             }
 
+            if is_wildcard {
+                // Wildcard catches everything; remaining arms are unreachable.
+                self.switch_to(next_bb);
+                break;
+            }
+            self.env = env_before.clone();
             self.switch_to(next_bb);
         }
 
+        // Fallthrough — no arm matched, env stays as env_before.
+        let fallthrough_bb = self.cur_bb;
+        arm_end_envs.push((fallthrough_bb, env_before.clone()));
         if !self.terminated {
             self.goto(join_bb);
         }
+
+        // Switch to join and emit phi nodes for variables changed in any arm.
         self.switch_to(join_bb);
+        self.env = env_before.clone();
+
+        let mut changed: Vec<Symbol> = vec![];
+        for (_, arm_env) in &arm_end_envs {
+            for sym in env_diff(&env_before, arm_env) {
+                if !changed.contains(&sym) {
+                    changed.push(sym);
+                }
+            }
+        }
+        for sym in changed {
+            let phi_local = self.alloc_local();
+            let phi_ops: Vec<(BlockId, Operand)> = arm_end_envs
+                .iter()
+                .map(|(bb, arm_env)| {
+                    let op = arm_env
+                        .get(&sym)
+                        .or_else(|| env_before.get(&sym))
+                        .map(|&l| Operand::Local(l))
+                        .unwrap_or(Operand::Const(MirLit::Nothing));
+                    (*bb, op)
+                })
+                .collect();
+            self.add_phi(join_bb, phi_local, MirTy::Dynamic, phi_ops);
+            self.define_var(sym, phi_local);
+        }
     }
 
     // ── for-loop lowering ─────────────────────────────────────────────────────
@@ -1134,8 +1247,9 @@ impl<'p> FnCtx<'p> {
 
         let pre_bb = self.cur_bb;
         let header_bb = self.alloc_block();
-        let body_bb = self.alloc_block();
-        let exit_bb = self.alloc_block();
+        let body_bb   = self.alloc_block();
+        let step_bb   = self.alloc_block(); // where `continue` jumps to; increments idx
+        let exit_bb   = self.alloc_block();
 
         self.goto(header_bb);
         self.switch_to(header_bb);
@@ -1202,9 +1316,60 @@ impl<'p> FnCtx<'p> {
         });
         self.define_var(binding, binding_local);
 
-        self.loop_stack.push((header_bb, exit_bb));
+        // `continue` targets step_bb (index increment), not the header directly.
+        self.loop_stack.push((step_bb, exit_bb));
         self.lower_stmts(body);
         self.loop_stack.pop();
+
+        // Snapshot the env at body-end (for the normal fallthrough path).
+        let body_end_bb = self.cur_bb;
+        let body_end_terminated = self.terminated;
+        let body_end_env = self.env.clone();
+        if !self.terminated {
+            self.goto(step_bb);
+        }
+
+        // Collect all continue sites that targeted step_bb.
+        let cont_sites = self.continue_sites.remove(&step_bb).unwrap_or_default();
+
+        // ── step_bb: build phi nodes for mutable vars, increment index ─────────
+        self.switch_to(step_bb);
+
+        // For each phi var: create a phi in step_bb merging body_end + all continue sites.
+        // step_bb phi output → used as the back-edge value for header_bb phi.
+        let mut step_phi_locals: Vec<LocalId> = Vec::new();
+        for (sym, _) in &phi_vars {
+            let mut phi_operands: Vec<(BlockId, Operand)> = Vec::new();
+            // body-end fallthrough (only if it wasn't terminated by break/continue)
+            if !body_end_terminated {
+                let local = body_end_env.get(sym).copied().unwrap_or_else(|| env_before[sym]);
+                phi_operands.push((body_end_bb, Operand::Local(local)));
+            }
+            // each continue site
+            for (from_bb, env_snap) in &cont_sites {
+                let local = env_snap.get(sym).copied().unwrap_or_else(|| env_before[sym]);
+                phi_operands.push((*from_bb, Operand::Local(local)));
+            }
+            match phi_operands.len() {
+                0 => {
+                    // No predecessors — use the initial (header phi) value.
+                    step_phi_locals.push(env_before[sym]);
+                }
+                1 => {
+                    // Single predecessor — no phi needed.
+                    let local = match phi_operands[0].1 {
+                        Operand::Local(l) => l,
+                        _ => env_before[sym],
+                    };
+                    step_phi_locals.push(local);
+                }
+                _ => {
+                    let phi_local = self.alloc_local();
+                    self.add_phi(step_bb, phi_local, MirTy::Dynamic, phi_operands);
+                    step_phi_locals.push(phi_local);
+                }
+            }
+        }
 
         // idx_next = idx_phi + 1
         let idx_next = self.alloc_local();
@@ -1217,28 +1382,20 @@ impl<'p> FnCtx<'p> {
                 rhs: Operand::Const(MirLit::Int(1)),
             },
         });
+        let step_end = self.cur_bb;
+        self.goto(header_bb);
 
-        let body_end = self.cur_bb;
-        if !self.terminated {
-            self.goto(header_bb);
-        }
-
-        // ── Back-patch phis ───────────────────────────────────────────────────
-        // User-var phis come first in the list; idx phi is last.
+        // ── Back-patch header_bb phis ─────────────────────────────────────────
+        // All back-edges to header come from step_end only.
         let idx_phi_pos = phi_vars.len();
         self.func_mut().block_mut(header_bb).phis[idx_phi_pos]
             .operands
-            .push((body_end, Operand::Local(idx_next)));
+            .push((step_end, Operand::Local(idx_next)));
 
-        for (i, (sym, _)) in phi_vars.iter().enumerate() {
-            let body_local = self
-                .env
-                .get(sym)
-                .copied()
-                .unwrap_or_else(|| env_before[sym]);
+        for (i, step_local) in step_phi_locals.iter().enumerate() {
             self.func_mut().block_mut(header_bb).phis[i]
                 .operands
-                .push((body_end, Operand::Local(body_local)));
+                .push((step_end, Operand::Local(*step_local)));
         }
 
         // ── Exit ──────────────────────────────────────────────────────────────
@@ -1329,6 +1486,12 @@ impl<'p> FnCtx<'p> {
         let finally_bb = self.alloc_block();
         let join_bb = self.alloc_block();
 
+        let env_before = self.env.clone();
+
+        // Collect (end_bb, env_snapshot) for each path that exits normally
+        // (no throw). These are used to build phi nodes at the join point.
+        let mut join_arms: Vec<(BlockId, VarEnv)> = Vec::new();
+
         // ── Try body ──────────────────────────────────────────────────────────
         self.emit(Instr::PushCatch(catch_dispatch_bb));
         self.lower_stmts(body);
@@ -1340,6 +1503,8 @@ impl<'p> FnCtx<'p> {
         }
 
         // ── Catch dispatch ────────────────────────────────────────────────────
+        // Reset env to before-state for catch dispatch (it's a separate path).
+        self.env = env_before.clone();
         // Read + save the exception exactly once (CatchException consumes it).
         self.switch_to(catch_dispatch_bb);
         let err_save = self.alloc_local();
@@ -1404,6 +1569,7 @@ impl<'p> FnCtx<'p> {
             }
 
             // ── Clause body ────────────────────────────────────────────────────
+            self.env = env_before.clone(); // Each clause starts from the same env
             self.switch_to(clause_bb);
             if let Some(binding) = clause.binding {
                 self.define_var(binding, err_save);
@@ -1414,10 +1580,12 @@ impl<'p> FnCtx<'p> {
                 self.emit(Instr::PopCatch);
             }
             if !self.terminated {
+                join_arms.push((self.cur_bb, self.env.clone()));
                 self.goto(finally_bb);
             }
 
             // Advance the "current block" to the next clause's entry.
+            self.env = env_before.clone();
             self.switch_to(no_match_bb);
 
             // After the last clause, if nothing matched → rethrow original error.
@@ -1433,6 +1601,7 @@ impl<'p> FnCtx<'p> {
 
         // ── Re-throw landing pad: run finally, then propagate ─────────────────
         if let Some(rt_bb) = rethrow_bb {
+            self.env = env_before.clone();
             self.switch_to(rt_bb);
             let reexc = self.alloc_local();
             self.emit(Instr::Assign {
@@ -1451,16 +1620,57 @@ impl<'p> FnCtx<'p> {
         }
 
         // ── Otherwise block (no exception) ────────────────────────────────────
+        self.env = env_before.clone();
         self.switch_to(otherwise_bb);
         if let Some(stmts) = otherwise {
             self.lower_stmts(stmts);
         }
         if !self.terminated {
+            join_arms.push((self.cur_bb, self.env.clone()));
             self.goto(finally_bb);
         }
 
         // ── Finally block ──────────────────────────────────────────────────────
+        // The finally block runs for all normal exit paths.
+        // We need phi nodes at finally_bb to merge vars from all arms.
+        self.env = env_before.clone();
         self.switch_to(finally_bb);
+
+        // Build phi nodes at finally_bb for all variables changed in any arm.
+        // Only consider variables that existed before the attempt (in env_before).
+        // Variables declared inside catch clauses are not merged.
+        if !join_arms.is_empty() {
+            let mut changed: Vec<Symbol> = Vec::new();
+            for (_, env_arm) in &join_arms {
+                for sym in env_diff(&env_before, env_arm) {
+                    // Only merge variables that existed before the attempt.
+                    if env_before.contains_key(&sym) && !changed.contains(&sym) {
+                        changed.push(sym);
+                    }
+                }
+            }
+            for sym in changed {
+                let operands: Vec<(BlockId, Operand)> = join_arms.iter().map(|(end_bb, env_arm)| {
+                    let local = env_arm.get(&sym)
+                        .or_else(|| env_before.get(&sym))
+                        .copied()
+                        .expect("variable should exist in either arm env or env_before");
+                    (*end_bb, Operand::Local(local))
+                }).collect();
+                if operands.len() == 1 {
+                    // Only one incoming arm — no phi needed, just use the value.
+                    self.define_var(sym, match operands[0].1 {
+                        Operand::Local(l) => l,
+                        _ => env_before[&sym],
+                    });
+                } else {
+                    let phi_local = self.alloc_local();
+                    self.add_phi(finally_bb, phi_local, MirTy::Dynamic, operands);
+                    self.define_var(sym, phi_local);
+                }
+            }
+        }
+
         if let Some(stmts) = finally {
             self.lower_stmts(stmts);
         }
@@ -1500,6 +1710,11 @@ fn collect_assigned_vars_impl(stmts: &[HirStmt], out: &mut HashSet<Symbol>) {
             HirStmt::Assign { target, .. } => {
                 if let HirExprKind::Var(name) = &target.kind {
                     out.insert(*name);
+                }
+            }
+            HirStmt::Destructure { bindings, .. } => {
+                for &sym in bindings {
+                    out.insert(sym);
                 }
             }
             HirStmt::If {
@@ -1564,10 +1779,11 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
     let mut prog = MirProgram::new();
 
     // `new` is the constructor method name; `this` is the implicit first param.
-    let new_sym = interner.intern("new");
-    let len_sym = interner.intern("len");
-    let type_sym = interner.intern("type");
-    let this_name = interner.intern("this");
+    let new_sym      = interner.intern("new");
+    let len_sym      = interner.intern("len");
+    let type_sym     = interner.intern("type");
+    let wildcard_sym = interner.intern("_");
+    let this_name    = interner.intern("this");
 
     // ── Pre-pass ①: sentinel top-level init fn ───────────────────────────────
     let init_sym = Symbol(0);
@@ -1650,6 +1866,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                         new_sym: Symbol,
                         len_sym: Symbol,
                         type_sym: Symbol,
+                        wildcard_sym: Symbol,
                         func: &HirFunction,
                         fn_id: FunctionId,
                         owner_class: Option<Symbol>| {
@@ -1671,6 +1888,8 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             type_sym,
             fn_is_extension: fn_is_extension.clone(),
             loop_stack: vec![],
+            continue_sites: HashMap::new(),
+            wildcard_sym,
         };
 
         // For methods (and extension actions): implicit `this` as param 0.
@@ -1715,6 +1934,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             new_sym,
             len_sym,
             type_sym,
+            wildcard_sym,
             func,
             fn_id,
             owner_class,
@@ -1734,6 +1954,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 new_sym,
                 len_sym,
                 type_sym,
+                wildcard_sym,
                 method,
                 fn_id,
                 Some(obj.name),
@@ -1762,6 +1983,8 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             type_sym,
             fn_is_extension: fn_is_extension.clone(),
             loop_stack: vec![],
+            continue_sites: HashMap::new(),
+            wildcard_sym,
         };
 
         for g in &hir.globals {

@@ -66,6 +66,8 @@ pub enum MirLit {
     Bool(bool),
     Str(String),
     Nothing,
+    /// A reference to a known function/action, used to pass actions as values.
+    FunctionRef(u32),
 }
 
 // ── Operands ───────────────────────────────────────────────────────────────────

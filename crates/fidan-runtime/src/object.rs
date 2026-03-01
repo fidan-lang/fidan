@@ -11,10 +11,12 @@ pub struct FieldDef {
 
 #[derive(Debug)]
 pub struct FidanClass {
-    pub name:    Symbol,
-    pub parent:  Option<Arc<FidanClass>>,
-    pub fields:  Vec<FieldDef>,
-    pub methods: HashMap<Symbol, crate::FunctionId>,
+    pub name:     Symbol,
+    /// Human-readable class name string (for display / error messages).
+    pub name_str: Arc<str>,
+    pub parent:   Option<Arc<FidanClass>>,
+    pub fields:   Vec<FieldDef>,
+    pub methods:  HashMap<Symbol, crate::FunctionId>,
 }
 
 impl FidanClass {

@@ -29,14 +29,32 @@ use crate::interp::RunError;
 /// Parent classes are resolved recursively; cycles are silently broken.
 fn build_class_table(
     objects: &[MirObjectInfo],
+    interner: &SymbolInterner,
 ) -> std::collections::HashMap<fidan_lexer::Symbol, Arc<FidanClass>> {
     use std::collections::HashMap;
     let mut table: HashMap<fidan_lexer::Symbol, Arc<FidanClass>> = HashMap::new();
 
     // Build in the order objects appear (HIR outputs parents before children).
     for obj in objects {
-        let field_defs: Vec<FieldDef> = obj
-            .field_names
+        // Collect inherited fields from parent chain first, then own fields.
+        let mut all_field_names: Vec<fidan_lexer::Symbol> = Vec::new();
+        if let Some(parent_sym) = obj.parent {
+            if let Some(parent_class) = table.get(&parent_sym) {
+                // Add parent fields (in their original order).
+                for fd in &parent_class.fields {
+                    if !all_field_names.contains(&fd.name) {
+                        all_field_names.push(fd.name);
+                    }
+                }
+            }
+        }
+        for &f in &obj.field_names {
+            if !all_field_names.contains(&f) {
+                all_field_names.push(f);
+            }
+        }
+
+        let field_defs: Vec<FieldDef> = all_field_names
             .iter()
             .enumerate()
             .map(|(i, &sym)| FieldDef {
@@ -49,8 +67,10 @@ fn build_class_table(
             method_map.insert(sym, RuntimeFnId(fid.0));
         }
         let parent = obj.parent.and_then(|p| table.get(&p).cloned());
+        let name_str = interner.resolve(obj.name);
         let class = Arc::new(FidanClass {
             name: obj.name,
+            name_str,
             parent,
             fields: field_defs,
             methods: method_map,
@@ -109,7 +129,7 @@ pub struct MirMachine {
 
 impl MirMachine {
     pub fn new(program: Arc<MirProgram>, interner: Arc<SymbolInterner>) -> Self {
-        let classes = build_class_table(&program.objects);
+        let classes = build_class_table(&program.objects, &interner);
         Self {
             program,
             interner,
@@ -484,6 +504,10 @@ impl MirMachine {
             Callee::Fn(fn_id) => self.call_function(*fn_id, args),
             Callee::Builtin(sym) => {
                 let name: Arc<str> = self.sym_str(*sym);
+                // Constructor builtins (e.g. `Shared(val)`) take priority; then
+                // true language builtins (print, input, len, type conversions, math).
+                // String/list/dict receiver methods are NOT free functions and must
+                // be invoked via `receiver.method()` — they live in call_bootstrap_method.
                 builtins::call_builtin_constructor(&name, args.clone())
                     .or_else(|| builtins::call_builtin(&name, args))
                     .ok_or_else(|| MirSignal::Panic(format!("unknown builtin `{}`", name)))
@@ -536,10 +560,8 @@ impl MirMachine {
                 return self.call_function(FunctionId(id), fn_args);
             }
         }
-        // Fall through: treat method as a global builtin with receiver as first arg.
-        let mut all_args = vec![receiver];
-        all_args.extend(args);
-        builtins::call_builtin(method, all_args)
+        // Fall through: bootstrap stdlib methods (pre-Phase 7 stdlib).
+        crate::bootstrap::call_bootstrap_method(receiver, method, args)
             .ok_or_else(|| MirSignal::Panic(format!("no method `{}` found", method)))
     }
 
@@ -562,8 +584,10 @@ impl MirMachine {
                     index: i,
                 })
                 .collect();
+            let name_str = self.interner.resolve(ty);
             let class = Arc::new(FidanClass {
                 name: ty,
+                name_str,
                 parent: None,
                 fields: field_defs,
                 methods: Default::default(),
@@ -693,6 +717,7 @@ fn mir_lit_to_value(lit: MirLit) -> FidanValue {
         MirLit::Bool(b) => FidanValue::Boolean(b),
         MirLit::Str(s) => FidanValue::String(FidanString::new(&s)),
         MirLit::Nothing => FidanValue::Nothing,
+        MirLit::FunctionRef(id) => FidanValue::Function(RuntimeFnId(id)),
     }
 }
 
@@ -716,6 +741,9 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
             Integer(a % b)
         }
         (BinOp::Pow, Integer(a), Integer(b)) => Integer(a.wrapping_pow(*b as u32)),
+        (BinOp::Pow, Float(a), Float(b)) => Float(a.powf(*b)),
+        (BinOp::Pow, Integer(a), Float(b)) => Float((*a as f64).powf(*b)),
+        (BinOp::Pow, Float(a), Integer(b)) => Float(a.powf(*b as f64)),
         // Arithmetic — float
         (BinOp::Add, Float(a), Float(b)) => Float(a + b),
         (BinOp::Sub, Float(a), Float(b)) => Float(a - b),

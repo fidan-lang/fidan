@@ -65,6 +65,8 @@ pub enum Item {
         re_export: bool,
         span: Span,
     },
+    /// A top-level statement (for, while, if, check, attempt, etc.)
+    Stmt(StmtId),
 }
 
 #[derive(Debug, Clone)]

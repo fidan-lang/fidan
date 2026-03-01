@@ -243,6 +243,11 @@ pub enum HirExprKind {
         lhs: Box<HirExpr>,
         rhs: Box<HirExpr>,
     },
+    /// Assignment-as-expression: `target = value`.  Lowered separately from `BinOp::Eq` (==).
+    Assign {
+        target: Box<HirExpr>,
+        value: Box<HirExpr>,
+    },
     Unary {
         op: UnOp,
         operand: Box<HirExpr>,

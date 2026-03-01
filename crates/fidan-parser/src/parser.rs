@@ -2,7 +2,7 @@
 use std::sync::Arc;
 
 use fidan_ast::{
-    Expr, Item, ItemId, Module, Stmt, StmtId,
+    BinOp, Expr, Item, ItemId, Module, Stmt, StmtId,
     CatchClause, CheckArm, Decorator, ElseIf, FieldDecl, Param, Task, TypeExpr,
 };
 use fidan_diagnostics::Diagnostic;
@@ -26,6 +26,10 @@ pub struct Parser<'t> {
     pub(crate) sym_returns:  Symbol,
     pub(crate) sym_default:  Symbol,
     pub(crate) sym_else:     Symbol,
+    /// Sub-token stream for string-interpolation fragment re-lexing.
+    /// When `Some`, `peek` / `advance` / `current_span` read from the fragment
+    /// buffer instead of the main `tokens` slice.
+    pub(crate) fragment:     Option<(Vec<Token>, usize)>,
 }
 
 impl<'t> Parser<'t> {
@@ -45,6 +49,7 @@ impl<'t> Parser<'t> {
             sym_returns,
             sym_default,
             sym_else,
+            fragment: None,
         }
     }
 
@@ -55,25 +60,36 @@ impl<'t> Parser<'t> {
     // ── Token navigation ──────────────────────────────────────────────────────
 
     pub(crate) fn peek(&self) -> &TokenKind {
-        &self.tokens[self.pos].kind
+        if let Some((ref toks, pos)) = self.fragment {
+            &toks[pos.min(toks.len().saturating_sub(1))].kind
+        } else {
+            &self.tokens[self.pos].kind
+        }
     }
 
     /// Look `n` tokens ahead without consuming.
     pub(crate) fn peek_nth(&self, n: usize) -> &TokenKind {
-        let i = (self.pos + n).min(self.tokens.len() - 1);
-        &self.tokens[i].kind
+        &self.tokens[self.pos.saturating_add(n).min(self.tokens.len() - 1)].kind
     }
 
     pub(crate) fn current_span(&self) -> Span {
-        self.tokens[self.pos].span
+        if let Some((ref toks, pos)) = self.fragment {
+            toks[pos.min(toks.len().saturating_sub(1))].span
+        } else {
+            self.tokens[self.pos].span
+        }
     }
 
-    pub(crate) fn advance(&mut self) -> &Token {
-        let tok = &self.tokens[self.pos];
-        if self.pos + 1 < self.tokens.len() {
-            self.pos += 1;
+    pub(crate) fn advance(&mut self) -> Token {
+        if let Some((ref toks, ref mut pos)) = self.fragment {
+            let tok = toks[*pos].clone();
+            if *pos + 1 < toks.len() { *pos += 1; }
+            tok
+        } else {
+            let tok = self.tokens[self.pos].clone();
+            if self.pos + 1 < self.tokens.len() { self.pos += 1; }
+            tok
         }
-        tok
     }
 
     /// Consume the current token if its discriminant matches `kind`.
@@ -196,16 +212,6 @@ impl<'t> Parser<'t> {
         match self.peek().clone() {
             TokenKind::Object   => Some(self.parse_object_decl()),
             TokenKind::Action   => Some(self.parse_action_decl(false)),
-            TokenKind::Parallel => {
-                let span = self.current_span();
-                self.advance(); // eat `parallel`
-                if matches!(self.peek(), TokenKind::Action) {
-                    Some(self.parse_action_decl(true))
-                } else {
-                    self.error("expected `action` after top-level `parallel`", span);
-                    None
-                }
-            }
             TokenKind::Use    => Some(self.parse_use_decl(false)),
             TokenKind::Export => {
                 self.advance(); // eat `export`
@@ -241,6 +247,35 @@ impl<'t> Parser<'t> {
                     name, ty, init, is_const: true,
                     span: Span::new(self.module.file, start, end),
                 }))
+            }
+            // Control-flow statements at module/top-level scope — delegate to parse_stmt.
+            TokenKind::For
+            | TokenKind::While
+            | TokenKind::If
+            | TokenKind::Check
+            | TokenKind::Attempt
+            | TokenKind::Panic
+            | TokenKind::Break
+            | TokenKind::Continue
+            | TokenKind::Return
+            | TokenKind::Concurrent => {
+                if let Some(sid) = self.parse_stmt() {
+                    return Some(self.module.arena.alloc_item(Item::Stmt(sid)));
+                }
+                return None;
+            }
+            TokenKind::Parallel => {
+                // `parallel action` → declaration; `parallel for` / `parallel {` → stmt
+                let span = self.current_span();
+                let _ = span;
+                if matches!(self.peek_nth(1), TokenKind::Action) {
+                    self.advance(); // eat `parallel`
+                    return Some(self.parse_action_decl(true));
+                } else if let Some(sid) = self.parse_stmt() {
+                    return Some(self.module.arena.alloc_item(Item::Stmt(sid)));
+                } else {
+                    return None;
+                }
             }
             TokenKind::Var => {
                 // Top-level variable declaration (possibly tuple destructure)
@@ -301,6 +336,27 @@ impl<'t> Parser<'t> {
                         target: expr,
                         value,
                         span: Span::new(self.module.file, start, end),
+                    }));
+                }
+                // Compound assignment at module scope: `x += rhs`, etc.
+                let compound_op = match self.peek() {
+                    TokenKind::PlusEq  => Some(BinOp::Add),
+                    TokenKind::MinusEq => Some(BinOp::Sub),
+                    TokenKind::StarEq  => Some(BinOp::Mul),
+                    TokenKind::SlashEq => Some(BinOp::Div),
+                    _ => None,
+                };
+                if let Some(op) = compound_op {
+                    self.advance();
+                    let rhs = self.parse_expr();
+                    let end = self.current_span().end;
+                    let span = Span::new(self.module.file, start, end);
+                    let bin_expr = self.module.arena.alloc_expr(Expr::Binary { op, lhs: expr, rhs, span });
+                    self.skip_one_terminator();
+                    return Some(self.module.arena.alloc_item(Item::Assign {
+                        target: expr,
+                        value:  bin_expr,
+                        span,
                     }));
                 }
                 let _span = self.module.arena.get_expr(expr).span();
@@ -1050,6 +1106,34 @@ impl<'t> Parser<'t> {
             return self.module.arena.alloc_stmt(Stmt::Assign {
                 target: expr_id, value,
                 span: Span::new(self.module.file, start, end),
+            });
+        }
+        // Compound assignment: `lhs += rhs`, `lhs -= rhs`, `lhs *= rhs`, `lhs /= rhs`
+        // Desugar to `lhs = lhs op rhs`.
+        let compound_op = match self.peek() {
+            TokenKind::PlusEq  => Some(BinOp::Add),
+            TokenKind::MinusEq => Some(BinOp::Sub),
+            TokenKind::StarEq  => Some(BinOp::Mul),
+            TokenKind::SlashEq => Some(BinOp::Div),
+            _ => None,
+        };
+        if let Some(op) = compound_op {
+            self.advance(); // consume the op= token
+            let rhs = self.parse_expr();
+            let end = self.current_span().end;
+            let span = Span::new(self.module.file, start, end);
+            // Build `lhs op rhs`
+            let bin_expr = self.module.arena.alloc_expr(Expr::Binary {
+                op,
+                lhs: expr_id,
+                rhs,
+                span,
+            });
+            self.skip_one_terminator();
+            return self.module.arena.alloc_stmt(Stmt::Assign {
+                target: expr_id,
+                value:  bin_expr,
+                span,
             });
         }
         // Expression statement

@@ -1,0 +1,434 @@
+#/ ─────────────────────────────────────────────────────────────────────────────
+   comprehensive.fdn
+   Full-coverage test for every Fidan syntax and runtime feature.
+   Expected output is shown in the comments after each section.
+   Run: fidan run test/examples/comprehensive.fdn
+   ─────────────────────────────────────────────────────────────────────────────
+/#
+
+# ── §1  Variables, constants, types ──────────────────────────────────────────
+var a oftype integer = 10
+var b = 20
+const var PI = 3.14159
+var greeting = "hello"
+var flag = true
+var empty = nothing
+
+print("§1 vars: {a} {b} {PI} {greeting} {flag} {empty}")
+# expected: §1 vars: 10 20 3.14159 hello true nothing
+
+# ── §2  Arithmetic and compound assignments ───────────────────────────────────
+var x = 5
+x += 3          # x = 8
+x -= 1          # x = 7
+x *= 2          # x = 14
+x /= 2          # x = 7
+print("§2 compound assign: {x}")
+# expected: §2 compound assign: 7
+
+var sum = 0
+for i in 1..10 {           # 1..10 is exclusive end
+    sum += i
+}
+print("§2 sum 1..9 = {sum}")
+# expected: §2 sum 1..9 = 45
+
+# ── §3  String interpolation (simple and complex expressions) ─────────────────
+var name = "Alice"
+var age  = 30
+print("§3 simple: Hello, {name}! You are {age} years old.")
+# expected: §3 simple: Hello, Alice! You are 30 years old.
+
+var result = 1 + 2 * 3
+print("§3 expr in var: {result}")
+# expected: §3 expr in var: 7
+
+print("§3 inline expr: {1 + 2 * 3}")
+# expected: §3 inline expr: 7
+
+print("§3 inline bool: {10 > 5}")
+# expected: §3 inline bool: true
+
+# ── §4  String methods ────────────────────────────────────────────────────────
+var s = "  Hello, World!  "
+print("§4 trim: '{s.trim()}'")
+# expected: §4 trim: 'Hello, World!'
+
+var lower_s = "FIDAN"
+print("§4 lower: {lower_s.lower()}")
+# expected: §4 lower: fidan
+
+var upper_s = "fidan"
+print("§4 upper: {upper_s.upper()}")
+# expected: §4 upper: FIDAN
+
+var sentence = "the quick brown fox"
+print("§4 contains 'quick': {sentence.contains(\"quick\")}")
+print("§4 contains 'slow': {sentence.contains(\"slow\")}")
+# expected: §4 contains 'quick': true
+# expected: §4 contains 'slow': false
+
+print("§4 starts_with 'the': {sentence.startsWith(\"the\")}")
+print("§4 ends_with 'fox': {sentence.endsWith(\"fox\")}")
+# expected: §4 starts_with 'the': true
+# expected: §4 ends_with 'fox': true
+
+var replaced = sentence.replace("fox", "cat")
+print("§4 replace: {replaced}")
+# expected: §4 replace: the quick brown cat
+
+var csv = "one,two,three"
+var parts = csv.split(",")
+print("§4 split len: {parts.len()}")
+print("§4 split[0]: {parts[0]}")
+print("§4 split[2]: {parts[2]}")
+# expected: §4 split len: 3
+# expected: §4 split[0]: one
+# expected: §4 split[2]: three
+
+var words = ["Hello", "World", "Fidan"]
+print("§4 join: {words.join(\", \")}")
+# expected: §4 join: Hello, World, Fidan
+
+# ── §5  List methods ──────────────────────────────────────────────────────────
+var nums = [3, 1, 4, 1, 5, 9, 2, 6]
+nums.append(7)
+print("§5 after append len: {nums.len()}")
+# expected: §5 after append len: 9
+
+nums.sort()
+print("§5 sorted[0]: {nums[0]}")
+print("§5 sorted[-1]: {nums[-1]}")
+# expected: §5 sorted[0]: 1
+# expected: §5 sorted[-1]: 9
+
+nums.reverse()
+print("§5 reversed[0]: {nums[0]}")
+# expected: §5 reversed[0]: 9
+
+print("§5 contains 5: {nums.contains(5)}")
+print("§5 contains 99: {nums.contains(99)}")
+# expected: §5 contains 5: true
+# expected: §5 contains 99: false
+
+var idx = nums.find(5)
+print("§5 find 5 idx: {idx}")
+# expected: §5 find 5 idx: (some non-negative integer — just check it's not -1)
+
+var removed = nums.remove(0)
+print("§5 removed[0] = {removed}")
+# expected: §5 removed[0] = 9
+
+# ── §6  Dict operations ───────────────────────────────────────────────────────
+var scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
+print("§6 Alice: {scores[\"Alice\"]}")
+print("§6 Bob: {scores[\"Bob\"]}")
+scores["Dave"] = 88
+print("§6 Dave: {scores[\"Dave\"]}")
+# expected: §6 Alice: 95
+# expected: §6 Bob: 87
+# expected: §6 Dave: 88
+
+# ── §7  Tuple destructuring ───────────────────────────────────────────────────
+var t = (10, 20, 30)
+var (p, q, r) = t
+print("§7 destruct: {p} {q} {r}")
+# expected: §7 destruct: 10 20 30
+
+# ── §8  Numeric helpers ───────────────────────────────────────────────────────
+print("§8 abs(-7): {abs(-7)}")
+print("§8 sqrt(16.0): {sqrt(16.0)}")
+print("§8 floor(3.7): {floor(3.7)}")
+print("§8 ceil(3.2): {ceil(3.2)}")
+print("§8 round(2.5): {round(2.5)}")
+print("§8 max(3,7): {max(3, 7)}")
+print("§8 min(3,7): {min(3, 7)}")
+# expected: §8 abs(-7): 7
+# expected: §8 sqrt(16.0): 4.0
+# expected: §8 floor(3.7): 3
+# expected: §8 ceil(3.2): 4
+# expected: §8 round(2.5): 3
+# expected: §8 max(3,7): 7
+# expected: §8 min(3,7): 3
+
+# ── §9  Control flow — for, while, break, continue ───────────────────────────
+var evens = []
+for i in 1..11 {
+    if i % 2 == 0 {
+        evens.append(i)
+    }
+}
+print("§9 evens: {evens.join(\", \")}")
+# expected: §9 evens: 2, 4, 6, 8, 10
+
+var n = 1
+var product = 1
+while n <= 5 {
+    product *= n
+    n += 1
+}
+print("§9 5! = {product}")
+# expected: §9 5! = 120
+
+# break / continue
+var acc = 0
+for i in 1..20 {
+    if i > 10 { break }
+    if i % 2 == 1 { continue }
+    acc += i
+}
+print("§9 break+continue sum even 1..10 = {acc}")
+# expected: §9 break+continue sum even 1..10 = 30
+
+# nested loops
+var matrix_sum = 0
+for row in 1..4 {
+    for col in 1..4 {
+        matrix_sum += row * col
+    }
+}
+print("§9 matrix sum: {matrix_sum}")
+# expected: §9 matrix sum: 36
+
+# ── §10  Check statement with wildcard and env merging ────────────────────────
+var grade = "B"
+var description = "unknown"
+check grade {
+    "A" => { description = "excellent" }
+    "B" => { description = "good" }
+    "C" => { description = "average" }
+    _   => { description = "other" }
+}
+print("§10 grade B = {description}")
+# expected: §10 grade B = good
+
+var grade2 = "Z"
+var desc2 = "not set"
+check grade2 {
+    "A" => { desc2 = "A grade" }
+    _   => { desc2 = "other grade" }
+}
+print("§10 wildcard: {desc2}")
+# expected: §10 wildcard: other grade
+
+# check expression (used as a value)
+var day = 3
+var day_name = check day {
+    1 => "Monday"
+    2 => "Tuesday"
+    3 => "Wednesday"
+    4 => "Thursday"
+    5 => "Friday"
+    _ => "Weekend"
+}
+print("§10 day_name: {day_name}")
+# expected: §10 day_name: Wednesday
+
+# ── §11  Objects, inheritance, display ───────────────────────────────────────
+object Animal {
+    var species oftype string = "Unknown"
+    var sound   oftype string = "..."
+
+    new with (required species oftype string, required sound oftype string) {
+        this.species = species
+        this.sound   = sound
+    }
+
+    action describe returns string {
+        return "I am a {this.species} and I say '{this.sound}'."
+    }
+}
+
+object Dog extends Animal {
+    var name oftype string
+
+    new with (required name oftype string) {
+        this.name = name
+        parent("Dog", "Woof")
+    }
+
+    action greet returns string {
+        return "Hi, I am {this.name}! {this.describe()}"
+    }
+}
+
+var fido = Dog("Fido")
+print("§11 Dog.greet: {fido.greet()}")
+# expected: §11 Dog.greet: Hi, I am Fido! I am a Dog and I say 'Woof'.
+
+# Test object display shows class name
+print("§11 obj display: {string(fido)}")
+# expected: §11 obj display: <Dog>
+
+# ── §12  Exception handling ───────────────────────────────────────────────────
+attempt {
+    panic("test error")
+} catch err {
+    print("§12 caught: {err}")
+} otherwise {
+    print("§12 no error")
+} finally {
+    print("§12 finally ran")
+}
+# expected: §12 caught: test error
+# expected: §12 finally ran
+
+# finally runs even when no error
+attempt {
+    var ok = 42
+} otherwise {
+    print("§12 otherwise ran")
+} finally {
+    print("§12 finally ran (no error)")
+}
+# expected: §12 otherwise ran
+# expected: §12 finally ran (no error)
+
+# rethrow through finally
+var rethrow_caught = false
+attempt {
+    attempt {
+        panic("deep error")
+    } catch inner_err {
+        panic(inner_err) # rethrow
+    } finally {
+        print("§12 inner finally")
+    }
+} catch outer_err {
+    rethrow_caught = true
+    print("§12 outer caught: {outer_err}")
+}
+print("§12 rethrow_caught: {rethrow_caught}")
+# expected: §12 inner finally
+# expected: §12 outer caught: deep error
+# expected: §12 rethrow_caught: true
+
+# ── §13  Operators — arithmetic, logica bitwise ───────────────────────────────
+print("§13 pow: {2 ** 10}")
+print("§13 rem: {17 % 5}")
+print("§13 bitand: {6 & 3}")
+print("§13 bitor: {6 | 9}")
+print("§13 bitxor: {5 ^ 3}")
+print("§13 shl: {1 << 4}")
+print("§13 shr: {64 >> 3}")
+print("§13 and: {true and false}")
+print("§13 or: {false or true}")
+print("§13 not: {not true}")
+# expected: §13 pow: 1024
+# expected: §13 rem: 2
+# expected: §13 bitand: 2
+# expected: §13 bitor: 15
+# expected: §13 bitxor: 6
+# expected: §13 shl: 16
+# expected: §13 shr: 8
+# expected: §13 and: false
+# expected: §13 or: true
+# expected: §13 not: false
+
+# ── §14  Type conversions ─────────────────────────────────────────────────────
+print("§14 int('42'): {integer(\"42\")}")
+print("§14 float('3.14'): {float(\"3.14\")}")
+print("§14 string(99): {string(99)}")
+print("§14 boolean(0): {boolean(0)}")
+print("§14 boolean(1): {boolean(1)}")
+# expected: §14 int('42'): 42
+# expected: §14 float('3.14'): 3.14
+# expected: §14 string(99): 99
+# expected: §14 boolean(0): false
+# expected: §14 boolean(1): true
+
+# ── §15  Ternary and null-coalesce ─────────────────────────────────────────────
+var score = 75
+var grade_result = "pass" if score >= 60 else "fail"
+print("§15 ternary: {grade_result}")
+# expected: §15 ternary: pass
+
+var maybe = nothing
+var default_val = maybe ?? "default"
+print("§15 null-coalesce: {default_val}")
+# expected: §15 null-coalesce: default
+
+var present = "real"
+var coalesced = present ?? "fallback"
+print("§15 coalesce present: {coalesced}")
+# expected: §15 coalesce present: real
+
+# ── §16  Inclusive range ──────────────────────────────────────────────────────
+var range_sum = 0
+for i in 1...5 {    # inclusive: 1,2,3,4,5
+    range_sum += i
+}
+print("§16 inclusive sum 1..5 = {range_sum}")
+# expected: §16 inclusive sum 1..5 = 15
+
+# ── §17  Nested objects and deeper method calls ───────────────────────────────
+object Point {
+    var x oftype float = 0.0
+    var y oftype float = 0.0
+
+    new with (required x oftype float, required y oftype float) {
+        this.x = x
+        this.y = y
+    }
+
+    action distance_to with (required other oftype Point) returns float {
+        var dx = this.x - other.x
+        var dy = this.y - other.y
+        return sqrt(dx * dx + dy * dy)
+    }
+
+    action to_string returns string {
+        return "({this.x}, {this.y})"
+    }
+}
+
+var p1 = Point(0.0, 0.0)
+var p2 = Point(3.0, 4.0)
+print("§17 p1: {p1.to_string()}")
+print("§17 p2: {p2.to_string()}")
+print("§17 dist: {p1.distance_to(p2)}")
+# expected: §17 p1: (0.0, 0.0)
+# expected: §17 p2: (3.0, 4.0)
+# expected: §17 dist: 5.0
+
+# ── §18  Actions as first-class values ────────────────────────────────────────
+action double with (required n oftype integer) returns integer {
+    return n * 2
+}
+
+action apply with (required callback, required val oftype integer) returns integer {
+    return callback(val)
+}
+
+var doubled = apply(double, 21)
+print("§18 first-class action: {doubled}")
+# expected: §18 first-class action: 42
+
+# ── §19  Deeply nested control flow with mutations ────────────────────────────
+var counter = 0
+for outer in 1..4 {
+    var inner_sum = 0
+    for inner in 1..(outer + 1) {
+        inner_sum += inner
+        counter += 1
+    }
+}
+print("§19 counter (nested loops): {counter}")
+# expected: §19 counter (nested loops): 6  (1 + 2 + 3 iterations)
+
+# ── §20  Multiple catch clauses ───────────────────────────────────────────────
+var caught_type = "none"
+attempt {
+    panic("string exception")
+} catch err -> string {
+    caught_type = "string"
+    print("§20 string catch: {err}")
+} catch err {
+    caught_type = "generic"
+}
+print("§20 type caught: {caught_type}")
+# expected: §20 string catch: string exception
+# expected: §20 type caught: string
+
+# ── §21  all done  ────────────────────────────────────────────────────────────
+print("All comprehensive tests done!")
