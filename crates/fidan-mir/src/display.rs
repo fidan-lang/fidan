@@ -104,6 +104,13 @@ fn print_instr(instr: &Instr) {
             let args_str = args.iter().map(fmt_op).collect::<Vec<_>>().join(", ");
             println!("    _{} = spawn fn{}({})", dest.0, task_fn.0, args_str);
         }
+        Instr::SpawnDynamic { dest, method, args } => {
+            let args_str = args.iter().map(fmt_op).collect::<Vec<_>>().join(", ");
+            match method {
+                Some(sym) => println!("    _{} = spawn_method .{}({})", dest.0, sym.0, args_str),
+                None      => println!("    _{} = spawn_dynamic ({})", dest.0, args_str),
+            }
+        }
         Instr::ParallelIter { collection, body_fn, closure_args } => {
             let ca = closure_args.iter().map(fmt_op).collect::<Vec<_>>().join(", ");
             println!("    parallel_iter {} fn{}[{}]", fmt_op(collection), body_fn.0, ca);

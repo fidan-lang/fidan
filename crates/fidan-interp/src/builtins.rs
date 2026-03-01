@@ -1,4 +1,4 @@
-use fidan_runtime::{FidanValue, FidanString, SharedRef};
+use fidan_runtime::{FidanString, FidanValue, SharedRef};
 use std::io::BufRead;
 
 /// Try to handle a call to a built-in function.
@@ -138,10 +138,18 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             let b = iter.next().unwrap_or(FidanValue::Nothing);
             Some(match (&a, &b) {
                 (FidanValue::Integer(x), FidanValue::Integer(y)) => {
-                    if x >= y { a } else { b }
+                    if x >= y {
+                        a
+                    } else {
+                        b
+                    }
                 }
                 (FidanValue::Float(x), FidanValue::Float(y)) => {
-                    if x >= y { a } else { b }
+                    if x >= y {
+                        a
+                    } else {
+                        b
+                    }
                 }
                 _ => a,
             })
@@ -152,13 +160,32 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             let b = iter.next().unwrap_or(FidanValue::Nothing);
             Some(match (&a, &b) {
                 (FidanValue::Integer(x), FidanValue::Integer(y)) => {
-                    if x <= y { a } else { b }
+                    if x <= y {
+                        a
+                    } else {
+                        b
+                    }
                 }
                 (FidanValue::Float(x), FidanValue::Float(y)) => {
-                    if x <= y { a } else { b }
+                    if x <= y {
+                        a
+                    } else {
+                        b
+                    }
                 }
                 _ => a,
             })
+        }
+
+        // ── Concurrency helpers ───────────────────────────────────────────────
+        "wait" => {
+            let ms = match args.into_iter().next().unwrap_or(FidanValue::Nothing) {
+                FidanValue::Integer(n) => n.max(0) as u64,
+                FidanValue::Float(f) => f.max(0.0) as u64,
+                _ => 0,
+            };
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            Some(FidanValue::Nothing)
         }
 
         _ => None,
@@ -216,6 +243,7 @@ pub fn display(val: &FidanValue) -> String {
             let inner = s.0.lock().unwrap();
             format!("Shared({})", display(&inner))
         }
+        FidanValue::Pending(_) => "<pending>".to_string(),
         FidanValue::Function(id) => format!("<action#{}>", id.0),
     }
 }

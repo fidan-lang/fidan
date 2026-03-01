@@ -11,6 +11,10 @@ use fidan_source::{FileId, Span};
 
 // ── Parser struct ─────────────────────────────────────────────────────────────
 
+/// Maximum number of errors before the parser gives up entirely.
+/// Prevents infinite loops caused by error-recovery that makes no token progress.
+pub(crate) const MAX_ERRORS: usize = 50;
+
 pub struct Parser<'t> {
     pub(crate) tokens:       &'t [Token],
     pub(crate) pos:          usize,
@@ -21,6 +25,9 @@ pub struct Parser<'t> {
     /// Further errors are suppressed until `synchronize()` resets this flag,
     /// preventing one bad token from producing hundreds of cascade diagnostics.
     pub(crate) recovering:   bool,
+    /// When `true`, the parser has hit the error cap and should unwind immediately.
+    /// Checked by all major parsing loops to avoid infinite recovery cycles.
+    pub(crate) bail:         bool,
     // Contextual keyword symbols (interned once at construction)
     pub(crate) sym_with:     Symbol,
     pub(crate) sym_returns:  Symbol,
@@ -45,6 +52,7 @@ impl<'t> Parser<'t> {
             diags: Vec::new(),
             interner,
             recovering: false,
+            bail: false,
             sym_with,
             sym_returns,
             sym_default,
@@ -194,14 +202,21 @@ impl<'t> Parser<'t> {
 
     pub fn parse_module(&mut self) {
         loop {
+            if self.bail { break; }
             self.skip_terminators();
             if matches!(self.peek(), TokenKind::Eof) {
                 break;
             }
+            let pos_before = self.pos;
             if let Some(id) = self.parse_top_level() {
                 self.module.items.push(id);
             } else {
                 self.synchronize();
+                // If synchronize made no progress (e.g. stuck on a stray `}`),
+                // force-advance to prevent an infinite loop.
+                if self.pos == pos_before {
+                    self.advance();
+                }
             }
         }
     }
@@ -750,12 +765,17 @@ impl<'t> Parser<'t> {
         self.expect_tok(&TokenKind::LBrace);
         let mut stmts = vec![];
         loop {
+            if self.bail { break; }
             self.skip_terminators();
             if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) { break; }
+            let pos_before = self.pos;
             if let Some(s) = self.parse_stmt() {
                 stmts.push(s);
             } else {
                 self.synchronize();
+                if self.pos == pos_before {
+                    self.advance();
+                }
             }
         }
         self.expect_tok(&TokenKind::RBrace);
@@ -1066,6 +1086,7 @@ impl<'t> Parser<'t> {
         self.expect_tok(&TokenKind::LBrace);
         let mut tasks = vec![];
         loop {
+            if self.bail { break; }
             self.skip_terminators();
             if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) { break; }
             if matches!(self.peek(), TokenKind::Task) {
@@ -1083,7 +1104,13 @@ impl<'t> Parser<'t> {
             } else {
                 let span = self.current_span();
                 self.error("expected `task` inside concurrent/parallel block", span);
+                let pos_before = self.pos;
                 self.synchronize();
+                // If synchronize made no progress (hit a keyword sync-point immediately),
+                // force-consume one token to guarantee the loop terminates.
+                if self.pos == pos_before {
+                    self.advance();
+                }
             }
         }
         let end = self.current_span().end;

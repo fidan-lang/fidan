@@ -1,0 +1,30 @@
+## Test: spawn on method calls and dynamic fn-values
+
+object Worker {
+    var id oftype integer = 0
+
+    new with (required id oftype integer) {
+        this.id = id
+    }
+
+    action compute with (required x oftype integer) returns integer {
+        return this.id * 100 + x
+    }
+}
+
+# Test spawn on a method call
+var w = Worker(3)
+var h1 = spawn w.compute(7)
+var h2 = spawn w.compute(42)
+var r1 = await h1
+var r2 = await h2
+print("w.compute(7)  = " + string(r1))   ## expect 307
+print("w.compute(42) = " + string(r2))   ## expect 342
+
+# Test concurrent block with tasks that capture outer variables
+var base = 100
+concurrent {
+    task { print("task A: base=" + string(base)) }
+    task { print("task B: base=" + string(base)) }
+}
+print("done")

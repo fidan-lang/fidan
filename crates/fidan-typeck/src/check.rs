@@ -104,6 +104,10 @@ impl TypeChecker {
             ("round", SymbolKind::BuiltinAction),
             ("max", SymbolKind::BuiltinAction),
             ("min", SymbolKind::BuiltinAction),
+            // Concurrency helpers
+            ("wait", SymbolKind::BuiltinAction),
+            // Type constructors
+            ("Shared", SymbolKind::BuiltinAction),
         ];
         for &(name, kind) in builtins {
             let sym = self.interner.intern(name);

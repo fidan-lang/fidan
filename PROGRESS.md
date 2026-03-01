@@ -252,10 +252,10 @@
 |---|---|---|
 | `BasicBlock`, `Phi`, SSA locals | ✅ | `BlockId`, `LocalId`, `FunctionId`; `PhiNode`; full `MirFunction`/`MirProgram` |
 | All `MirInstruction` variants | ✅ | `Assign`, `Call`, `SetField`, `GetField`, `GetIndex`, `SetIndex`, `Drop`, `AwaitPending`, `Nop` + placeholders for concurrency |
-| Parallel MIR instructions | ✅ | `SpawnConcurrent`, `SpawnParallel`, `JoinAll`, `SpawnExpr`, `ParallelIter` (lowered but sequential in Phase 5) |
+| Parallel MIR instructions | ✅ | `SpawnConcurrent`, `SpawnParallel`, `JoinAll`, `SpawnExpr`, `ParallelIter`, `SpawnDynamic` — all fully wired |
 | HIR → MIR lowering (Braun SSA) | ✅ | `lower_program()`: scope-based renaming, φ-nodes at if/else joins, for/while loop headers back-patched; all stmt/expr variants covered |
 | Exception landing pads | ✅ | `lower_attempt()` — try/catch/otherwise/finally basic-block structure |
-| `concurrent` → `SpawnConcurrent` + `JoinAll` | ✅ | `ConcurrentBlock` lowered sequentially (Phase 5.5 will add real scheduling) |
+| `concurrent` / `parallel` → `SpawnConcurrent`/`SpawnParallel` + `JoinAll` | ✅ | Each task body lifted to a synthetic `MirFunction`; real OS threads via `std::thread::scope` (Phase 5.5) |
 | MIR text dump (`--emit mir`) | ✅ | `display::print_program` — function headers, BB labels, φ-nodes, instructions, terminators |
 
 ### `fidan-runtime`
@@ -285,8 +285,8 @@
 | `check` statement + `check` expression | ✅ | Wildcard `_` + value matching |
 | Binary / unary operators (all variants) | ✅ | Arithmetic, bitwise, comparison, logical (short-circuit) |
 | `for` / `while` / `parallel for` loops | ✅ | Break / Continue signals propagate correctly |
-| Concurrent block (sequential fallback) | ✅ | Phase 5.5 will add real green threads |
-| `spawn` / `await` (sequential fallback) | ✅ | Evaluated synchronously; async in Phase 5.5 |
+| `concurrent { task{} }` / `parallel { task{} }` (real threads) | ✅ | Task bodies lifted to synthetic `MirFunction`s; `std::thread::scope` + `JoinAll` — real OS parallelism |
+| `spawn` / `await` (real async) | ✅ | `SpawnExpr` → `std::thread::spawn` returning `JoinHandle`; `AwaitPending` joins the handle; `SpawnDynamic` handles `spawn obj.method(args)` and `spawn fnVar(args)` |
 | Green-thread scheduler (`corosensei`) | ⬜ | |
 | Exception unwind loop | ✅ | Signal::Panic caught by attempt/catch |
 | `test/examples/test.fdn` runs, output verified | ✅ | 7 lines of output, exactly correct |
@@ -303,16 +303,18 @@
 
 | Item | Status | Notes |
 |---|---|---|
-| Rayon thread pool in `fidan-runtime` | ⬜ | |
-| Thread-crossing type rule enforcement | ⬜ | |
-| `SpawnParallel` + `JoinAll` → Rayon | ⬜ | |
-| `ParallelIter` → `par_iter` | ⬜ | |
-| `SpawnExpr` + `AwaitPending` | ⬜ | |
-| `Shared oftype T` runtime type | ⬜ | |
-| `std.parallel` module | ⬜ | |
-| `parallel_check.rs` E4xx errors | ⬜ | Phase 5.5 — needs MIR |
+| OS thread integration in `fidan-runtime` + Rayon | ✅ | `std::thread::scope` for `parallel`/`concurrent` tasks; Rayon `par_iter` for `ParallelIter` |
+| Thread-crossing type rule enforcement | ⬜ | `parallel_check.rs` data-race analysis — compile-time E4xx — not yet built |
+| `SpawnParallel` + `JoinAll` → real OS threads | ✅ | `std::thread::scope` with scoped handles collected into `JoinAll` |
+| `ParallelIter` → `par_iter` | ✅ | Rayon `par_iter()` + `for_each` in `mir_interp.rs`; captures passed as `ParallelCapture` vec |
+| `SpawnExpr` + `AwaitPending` | ✅ | `spawn expr` → `std::thread::spawn` → `FidanValue::Pending(JoinHandle)`; `await` calls `.join()` |
+| `Shared oftype T` runtime type | ✅ | `Arc<Mutex<FidanValue>>` in `fidan-runtime`; `.get()` / `.update()` / `.withLock()` interpreter builtins |
+| `SpawnDynamic` — spawn on method/dynamic calls | ✅ | New MIR instruction; `spawn obj.method(args)` → `dispatch_method` in thread; `spawn fnVar(args)` → dynamic `call_function` in thread |
+| `std.parallel` module | ⬜ | Phase 7 — `parallelMap`, `parallelFilter`, `Shared`, `Pending` as stdlib exports |
+| `parallel_check.rs` E4xx errors | ⬜ | Compile-time data-race detection; needs dedicated MIR analysis pass |
+| W3xx: unawaited `Pending` dropped | ⬜ | Runtime warning when `Pending oftype T` is dropped without `await` |
 | Parallel task failure display | ⬜ | `runtime error[R9001]: N tasks failed in 'parallel' block` + per-task failure list |
-| Parallel benchmark | ⬜ | |
+| Parallel benchmark | ⬜ | `scripts/performance_bm.sh` equivalent — `parallel for` vs sequential on compute-heavy workload |
 
 ---
 
@@ -430,3 +432,4 @@ _None._
 
 *Last updated: 2026-03-01 — Phase 6 optimization passes complete (constant folding, dead code elimination, copy propagation, unreachable pruning — all 4 in `fidan-passes`); MIR interpreter complete (`fidan-interp/src/mir_interp.rs`); `fidan run` now executes the full MIR pipeline (HIR → MIR → optimization passes → MIR interpreter); `test/examples/test.fdn` produces all 7 expected output lines correctly. Key MIR lowering fixes: per-class `method_ids` map prevents function-ID collision for same-named methods across classes; `this` parameter added as implicit param 0 for all object methods; `HirExprKind::This`/`Parent` lower to the `this` local register; `parent.method(args)` lowers to a direct `Callee::Fn(parent_fn_id)` call (not virtual dispatch); parameter stubs (`_N = nothing`) removed from function bodies — the frame pre-initialises all locals + call ABI fills params before bb0 runs. Previous: Phase 5 HIR/MIR complete.*
 *Last updated: 2026-03-02 — All 21 sections of `test/examples/comprehensive.fdn` now pass correctly. Key fixes this session: (1) `continue` in for-loops caused phi-node `nothing` values — fixed by introducing a dedicated `step_bb` for index increment and tracking all continue-site env snapshots to build proper phi nodes in `step_bb`; (2) typed `catch err -> string` clauses were all lowered as `FidanType::Dynamic` — fixed by reading `CatchClause.ty` in HIR lower via `resolve_type_expr_simple`; (3) parent class fields not accessible in child objects — fixed by including inherited parent fields when building `FidanClass::fields` in `build_class_table`; (4) `lower_attempt` (try/catch/finally) did not create phi nodes for variables modified in catch/otherwise branches — fixed by tracking `(end_bb, env_snapshot)` for each normal-exit path and building phi nodes at `finally_bb`. All existing test files (`test/*.fdn`) continue to pass without regressions.*
+*Last updated: 2026-03-01 — Phase 5.5 parallel execution complete. `parallel for` dispatches to Rayon `par_iter` (real multi-core); `parallel { task{} }` and `concurrent { task{} }` each lift task bodies to synthetic `MirFunction`s via the `PendingParallelFor` deferred-body mechanism and spawn real OS threads via `std::thread::scope` + `JoinAll`; `spawn expr` / `await handle` backed by `std::thread::spawn` returning `FidanValue::Pending(JoinHandle)` — `AwaitPending` calls `.join()`; new `SpawnDynamic` MIR instruction handles `spawn obj.method(args)` (dynamic method dispatch in spawned thread) and `spawn fnVar(args)` (dynamic fn-value call in spawned thread); `Shared oftype T` backed by `Arc<Mutex<FidanValue>>` with `.get()` / `.update()` / `.withLock()` interpreter builtins; `SpawnDynamic` propagated to both optimization passes (`dead_code.rs`, `copy_propagation.rs`) and `mir_interp.rs`; new test file `test/examples/spawn_method_test.fdn` validates method-spawn (results 307, 342) and concurrent-block real parallelism; all existing test files pass without regressions. Remaining Phase 5.5 work: `parallel_check.rs` compile-time E4xx data-race detection, W3xx unawaited-Pending warning, parallel task failure display, benchmark.*

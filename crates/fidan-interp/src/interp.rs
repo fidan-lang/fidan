@@ -821,7 +821,10 @@ impl<'m> Interpreter<'m> {
                 body,
                 ..
             } => {
-                // Sequential fallback — Phase 5.5 adds real parallelism.
+                // NOTE: Real OS-thread parallelism is implemented in the MIR
+                // interpreter (fidan run).  The tree-walk interpreter (REPL /
+                // eval mode) uses `Rc`-based state that is not `Send`, so it
+                // falls back to sequential execution here.
                 let iter_val = self.eval_expr(iterable)?;
                 let items = self.collect_iterable(iter_val)?;
                 for item in items {
@@ -837,7 +840,8 @@ impl<'m> Interpreter<'m> {
             }
 
             Stmt::ConcurrentBlock { tasks, .. } => {
-                // Sequential fallback.
+                // NOTE: Same as above — sequential in tree-walk mode.
+                // MIR interpreter executes these as real parallel threads.
                 for task in tasks {
                     self.exec_body(&task.body)?;
                 }

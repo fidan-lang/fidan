@@ -16,8 +16,8 @@ use fidan_mir::{
     Operand, Rvalue, Terminator,
 };
 use fidan_runtime::{
-    FidanClass, FidanDict, FidanList, FidanObject, FidanString, FidanValue, FieldDef,
-    FunctionId as RuntimeFnId, OwnedRef,
+    FidanClass, FidanDict, FidanList, FidanObject, FidanPending, FidanString, FidanValue, FieldDef,
+    FunctionId as RuntimeFnId, OwnedRef, ParallelArgs, ParallelCapture,
 };
 
 use crate::builtins;
@@ -127,6 +127,11 @@ pub struct MirMachine {
     classes: std::collections::HashMap<Symbol, Arc<FidanClass>>,
 }
 
+// SAFETY: All fields are either `Arc<T>` (Send+Sync when T:Send+Sync) or a
+// `HashMap` of `Arc<FidanClass>` (Send+Sync).  `MirMachine` itself holds no
+// `Rc` — frame-local `Rc` only lives on the call stack of a single thread.
+unsafe impl Send for MirMachine {}
+
 impl MirMachine {
     pub fn new(program: Arc<MirProgram>, interner: Arc<SymbolInterner>) -> Self {
         let classes = build_class_table(&program.objects, &interner);
@@ -134,6 +139,19 @@ impl MirMachine {
             program,
             interner,
             classes,
+        }
+    }
+
+    /// Create a lightweight clone of this machine for use on a parallel thread.
+    ///
+    /// `Arc` fields (`program`, `interner`) are bumped by a single atomic
+    /// refcount.  The `classes` map clones its `Arc<FidanClass>` pointers —
+    /// O(n-classes), but class tables are small.
+    fn clone_for_thread(&self) -> MirMachine {
+        MirMachine {
+            program: Arc::clone(&self.program),
+            interner: Arc::clone(&self.interner),
+            classes: self.classes.clone(),
         }
     }
 
@@ -349,7 +367,21 @@ impl MirMachine {
             Instr::PopCatch => {
                 frame.catch_stack.pop();
             }
-            // Concurrency: sequential stubs.
+            // ── Concurrency / Parallelism ─────────────────────────────────────
+            //
+            // SpawnParallel / SpawnConcurrent: launch the task on a real OS
+            // thread.  The caller is expected to `JoinAll` the handles later.
+            //
+            // SpawnExpr: same, but the result is `await`-ed explicitly.
+            //
+            // Each thread gets its own `MirMachine` (clone_for_thread is O(1)
+            // for Arc fields).  Captured values go through `parallel_capture()`
+            // to produce fresh `Rc<RefCell<T>>` wrappers around the shared CoW
+            // `Arc<…>` inner data — zero data copying until first mutation.
+            //
+            // IMPORTANT: closures capture `ParallelArgs` (whole type, Send) and
+            // unwrap via `.into_vec()` method call — NOT `.0` field access.
+            // Rust 2021 partial-capture would otherwise see `!Send FidanValue`.
             Instr::SpawnConcurrent {
                 handle,
                 task_fn,
@@ -360,46 +392,139 @@ impl MirMachine {
                 task_fn,
                 args,
             } => {
-                let arg_vals: Vec<FidanValue> =
-                    args.iter().map(|a| self.eval_operand(a, frame)).collect();
-                let result = self.call_function(task_fn, arg_vals)?;
-                frame.store(handle, result);
+                let args_bundle = ParallelArgs::from_captures(
+                    args.iter()
+                        .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture())),
+                );
+                let mut child = self.clone_for_thread();
+                let pending = FidanPending::spawn_with_args(args_bundle, move |bundle| {
+                    child
+                        .call_function(task_fn, bundle.into_vec())
+                        .unwrap_or(FidanValue::Nothing)
+                });
+                frame.store(handle, FidanValue::Pending(pending));
             }
+
             Instr::SpawnExpr {
                 dest,
                 task_fn,
                 args,
             } => {
-                let arg_vals: Vec<FidanValue> =
-                    args.iter().map(|a| self.eval_operand(a, frame)).collect();
-                let result = self.call_function(task_fn, arg_vals)?;
-                frame.store(dest, result);
+                let args_bundle = ParallelArgs::from_captures(
+                    args.iter()
+                        .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture())),
+                );
+                let mut child = self.clone_for_thread();
+                let pending = FidanPending::spawn_with_args(args_bundle, move |bundle| {
+                    child
+                        .call_function(task_fn, bundle.into_vec())
+                        .unwrap_or(FidanValue::Nothing)
+                });
+                frame.store(dest, FidanValue::Pending(pending));
             }
-            Instr::JoinAll { .. } => {
-                // All handles are already completed (sequential stub).
+
+            Instr::SpawnDynamic { dest, method, args } => {
+                // Evaluate all args (args[0] = receiver or fn-value) in the
+                // current frame and capture them for the new thread.
+                let caps: Vec<ParallelCapture> = args
+                    .iter()
+                    .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture()))
+                    .collect();
+                // Look up the method name before moving `self` into the closure.
+                let method_name: Option<Arc<str>> = method.map(|sym| self.sym_str(sym));
+                let bundle = ParallelArgs::from_captures(caps);
+                let mut child = self.clone_for_thread();
+                let pending = FidanPending::spawn_with_args(bundle, move |bundle| {
+                    let mut vals = bundle.into_vec();
+                    if vals.is_empty() {
+                        return FidanValue::Nothing;
+                    }
+                    let first = vals.remove(0);
+                    match method_name {
+                        Some(ref name) => {
+                            // Method dispatch: first value is the receiver.
+                            child.dispatch_method(first, name, vals)
+                                .unwrap_or(FidanValue::Nothing)
+                        }
+                        None => match first {
+                            // Dynamic fn-value dispatch.
+                            FidanValue::Function(RuntimeFnId(id)) => {
+                                child.call_function(FunctionId(id), vals)
+                                    .unwrap_or(FidanValue::Nothing)
+                            }
+                            _ => FidanValue::Nothing,
+                        },
+                    }
+                });
+                frame.store(dest, FidanValue::Pending(pending));
             }
+
+            Instr::JoinAll { handles } => {
+                // Wait for every handle in declaration order.  Results are
+                // written back into the same local slots (Pending → resolved).
+                let resolved: Vec<(LocalId, FidanValue)> = handles
+                    .iter()
+                    .map(|&local| {
+                        let val = frame.load(local);
+                        let result = if let FidanValue::Pending(p) = &val {
+                            p.join()
+                        } else {
+                            val // already resolved (sequential fallback)
+                        };
+                        (local, result)
+                    })
+                    .collect();
+                for (local, result) in resolved {
+                    frame.store(local, result);
+                }
+            }
+
             Instr::AwaitPending { dest, handle } => {
-                // In sequential mode, the handle IS the value.
-                let v = self.eval_operand(&handle, frame);
-                frame.store(dest, v);
+                let val = self.eval_operand(&handle, frame);
+                let resolved = if let FidanValue::Pending(p) = &val {
+                    p.join()
+                } else {
+                    val
+                };
+                frame.store(dest, resolved);
             }
+
             Instr::ParallelIter {
                 collection,
                 body_fn,
                 closure_args,
             } => {
                 let coll = self.eval_operand(&collection, frame);
-                let extra: Vec<FidanValue> = closure_args
+                // Capture the shared "environment" args once; per-item bundles
+                // below each include a capture-clone of these.
+                let env_caps: Vec<ParallelCapture> = closure_args
                     .iter()
-                    .map(|a| self.eval_operand(a, frame))
+                    .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture()))
                     .collect();
+
                 if let FidanValue::List(list_ref) = coll {
+                    // Snapshot the list before spawning (immutable during iter).
                     let items: Vec<FidanValue> = list_ref.borrow().iter().cloned().collect();
-                    for item in items {
-                        let mut fn_args = vec![item];
-                        fn_args.extend(extra.clone());
-                        self.call_function(body_fn, fn_args)?;
-                    }
+
+                    std::thread::scope(|s| {
+                        for item in &items {
+                            // Build per-thread bundle using whole-struct captures.
+                            let mut caps = vec![ParallelCapture(item.parallel_capture())];
+                            caps.extend(
+                                env_caps
+                                    .iter()
+                                    .map(|c| ParallelCapture(c.0.parallel_capture())),
+                            );
+                            let bundle = ParallelArgs::from_captures(caps);
+                            let mut child = self.clone_for_thread();
+                            // Closures capture `bundle: ParallelArgs` (Send) and
+                            // `child: MirMachine` (unsafe Send) — not FidanValue.
+                            s.spawn(move || {
+                                child.call_function(body_fn, bundle.into_vec()).ok();
+                            });
+                        }
+                        // Scope joins all threads implicitly on drop.
+                    });
                 }
             }
         }

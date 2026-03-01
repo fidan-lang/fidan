@@ -1,4 +1,7 @@
+use std::sync::Arc;
+
 use crate::{FidanDict, FidanList, FidanObject, FidanString, OwnedRef, SharedRef};
+use crate::parallel::FidanPending;
 
 /// Opaque function identifier — same as fidan-mir's FunctionId but re-exported here
 /// so fidan-runtime doesn't depend on fidan-mir (no circular dep).
@@ -29,6 +32,8 @@ pub enum FidanValue {
     Function(FunctionId),
     /// Tuple: `(v1, v2, ...)`
     Tuple(Vec<FidanValue>),
+    /// A value being computed on a background thread (`spawn` expression).
+    Pending(FidanPending),
 }
 
 impl FidanValue {
@@ -45,6 +50,7 @@ impl FidanValue {
             FidanValue::Shared(_) => "Shared",
             FidanValue::Function(_) => "action",
             FidanValue::Tuple(_) => "tuple",
+            FidanValue::Pending(_) => "pending",
         }
     }
 
@@ -60,6 +66,63 @@ impl FidanValue {
             FidanValue::Float(f) => *f != 0.0,
             FidanValue::String(s) => !s.is_empty(),
             _ => true,
+        }
+    }
+
+    /// Create a version of this value safe to send into a parallel task.
+    ///
+    /// - **Primitives / String / Function** — cheap bit-copy or Arc bump.
+    /// - **List / Dict** — new `Rc<RefCell<T>>` wrapping the *shared* inner
+    ///   `Arc<Vec>` / `Arc<HashMap>`.  No data is copied until mutation (CoW).
+    /// - **Object** — each field is recursively captured; `Arc<FidanClass>`
+    ///   metadata is shared.
+    /// - **Shared** — `Arc<Mutex<T>>` is intentionally shared across threads.
+    /// - **Pending** — clones the `Arc<Mutex<JoinHandle>>` pointer.
+    /// - **Tuple** — recurse per element.
+    pub fn parallel_capture(&self) -> FidanValue {
+        match self {
+            FidanValue::Integer(n)   => FidanValue::Integer(*n),
+            FidanValue::Float(f)     => FidanValue::Float(*f),
+            FidanValue::Boolean(b)   => FidanValue::Boolean(*b),
+            FidanValue::Nothing      => FidanValue::Nothing,
+            FidanValue::Function(id) => FidanValue::Function(*id),
+
+            // Arc<str> — single atomic refcount bump, no data copy.
+            FidanValue::String(s) => FidanValue::String(s.clone()),
+
+            // New Rc+RefCell wrapping the *same* inner Arc<Vec> (CoW preserved).
+            FidanValue::List(r) => {
+                let inner = r.borrow().clone(); // O(1): clones Arc<Vec>
+                FidanValue::List(OwnedRef::new(inner))
+            }
+
+            // New Rc+RefCell wrapping the *same* inner Arc<HashMap> (CoW preserved).
+            FidanValue::Dict(r) => {
+                let inner = r.borrow().clone(); // O(1): clones Arc<HashMap>
+                FidanValue::Dict(OwnedRef::new(inner))
+            }
+
+            // Field-by-field capture; Arc<FidanClass> is shared.
+            FidanValue::Object(r) => {
+                let obj = r.borrow();
+                let fields: Vec<FidanValue> =
+                    obj.fields.iter().map(|f| f.parallel_capture()).collect();
+                FidanValue::Object(OwnedRef::new(FidanObject {
+                    class: Arc::clone(&obj.class),
+                    fields,
+                }))
+            }
+
+            // Intentionally shared across threads.
+            FidanValue::Shared(s) => FidanValue::Shared(s.clone()),
+
+            // Share the Arc<Mutex<JoinHandle>>.
+            FidanValue::Pending(p) => FidanValue::Pending(p.clone()),
+
+            // Recurse per element.
+            FidanValue::Tuple(elems) => {
+                FidanValue::Tuple(elems.iter().map(|e| e.parallel_capture()).collect())
+            }
         }
     }
 }

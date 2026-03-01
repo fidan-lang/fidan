@@ -8,7 +8,9 @@
 // SSA.  For loops we use a two-pass approach (placeholder φ-nodes that are
 // back-patched after the body is lowered).
 
-use std::collections::{HashMap, HashSet};
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::rc::Rc;
 
 use fidan_ast::BinOp;
 use fidan_hir::{
@@ -22,6 +24,115 @@ use crate::mir::{
     BlockId, Callee, FunctionId, Instr, LocalId, MirFunction, MirLit, MirObjectInfo, MirParam,
     MirProgram, MirStringPart, MirTy, Operand, PhiNode, Rvalue, Terminator,
 };
+
+// ── Parallel-for deferred body ───────────────────────────────────────────────
+
+/// A `parallel for` body that needs to be lowered into a synthetic function
+/// AFTER the enclosing function finishes (because we only have one `&mut MirProgram`).
+///
+/// SAFETY: `body_ptr`/`body_len` form a raw slice pointing into the `HirModule`
+/// that is alive for the entire duration of `lower_program`.  All accesses happen
+/// within that same call, single-threaded.
+struct PendingParallelFor {
+    fn_id:      FunctionId,
+    /// Per-iteration binding for `parallel for`; `None` for `concurrent { task {} }` bodies.
+    binding:    Option<(Symbol, MirTy)>,
+    /// Outer-scope variables captured by the body: become extra params after the binding.
+    env_params: Vec<(Symbol, MirTy)>,
+    body_ptr:   *const HirStmt,
+    body_len:   usize,
+}
+
+// SAFETY: used only in single-threaded lower_program; raw ptrs into &HirModule.
+unsafe impl Send for PendingParallelFor {}
+
+// ── HIR free-variable visitors ────────────────────────────────────────────────
+
+/// Collect every `Var` symbol referenced in `stmts` (not necessarily free:
+/// the caller filters to symbols live in the current scope).
+fn collect_hir_used_vars(stmts: &[HirStmt]) -> HashSet<Symbol> {
+    let mut out = HashSet::new();
+    hir_walk_stmts(stmts, &mut out);
+    out
+}
+
+fn hir_walk_stmts(stmts: &[HirStmt], out: &mut HashSet<Symbol>) {
+    for s in stmts { hir_walk_stmt(s, out); }
+}
+
+fn hir_walk_stmt(s: &HirStmt, out: &mut HashSet<Symbol>) {
+    match s {
+        HirStmt::VarDecl { init, .. }       => { if let Some(e) = init { hir_walk_expr(e, out); } }
+        HirStmt::Destructure { value, .. }  => hir_walk_expr(value, out),
+        HirStmt::Assign { target, value, .. } => { hir_walk_expr(target, out); hir_walk_expr(value, out); }
+        HirStmt::Expr(e)                    => hir_walk_expr(e, out),
+        HirStmt::Return { value, .. }       => { if let Some(e) = value { hir_walk_expr(e, out); } }
+        HirStmt::Panic { value, .. }        => hir_walk_expr(value, out),
+        HirStmt::If { condition, then_body, else_ifs, else_body, .. } => {
+            hir_walk_expr(condition, out);
+            hir_walk_stmts(then_body, out);
+            for ei in else_ifs { hir_walk_expr(&ei.condition, out); hir_walk_stmts(&ei.body, out); }
+            if let Some(eb) = else_body { hir_walk_stmts(eb, out); }
+        }
+        HirStmt::Check { scrutinee, arms, .. } => {
+            hir_walk_expr(scrutinee, out);
+            for arm in arms { hir_walk_stmts(&arm.body, out); }
+        }
+        HirStmt::For        { iterable, body, .. }
+        | HirStmt::ParallelFor { iterable, body, .. } => {
+            hir_walk_expr(iterable, out); hir_walk_stmts(body, out);
+        }
+        HirStmt::While { condition, body, .. } => {
+            hir_walk_expr(condition, out); hir_walk_stmts(body, out);
+        }
+        HirStmt::Attempt { body, catches, otherwise, finally, .. } => {
+            hir_walk_stmts(body, out);
+            for c in catches { hir_walk_stmts(&c.body, out); }
+            if let Some(ob) = otherwise { hir_walk_stmts(ob, out); }
+            if let Some(fb) = finally   { hir_walk_stmts(fb, out); }
+        }
+        HirStmt::ConcurrentBlock { tasks, .. } => {
+            for t in tasks { hir_walk_stmts(&t.body, out); }
+        }
+        HirStmt::Break { .. } | HirStmt::Continue { .. } | HirStmt::Error { .. } => {}
+    }
+}
+
+fn hir_walk_expr(e: &HirExpr, out: &mut HashSet<Symbol>) {
+    match &e.kind {
+        HirExprKind::Var(sym)                          => { out.insert(*sym); }
+        HirExprKind::Binary { lhs, rhs, .. }           => { hir_walk_expr(lhs, out); hir_walk_expr(rhs, out); }
+        HirExprKind::Assign { target, value }          => { hir_walk_expr(target, out); hir_walk_expr(value, out); }
+        HirExprKind::Unary  { operand, .. }            => hir_walk_expr(operand, out),
+        HirExprKind::NullCoalesce { lhs, rhs }         => { hir_walk_expr(lhs, out); hir_walk_expr(rhs, out); }
+        HirExprKind::IfExpr { condition, then_val, else_val } => {
+            hir_walk_expr(condition, out); hir_walk_expr(then_val, out); hir_walk_expr(else_val, out);
+        }
+        HirExprKind::Call { callee, args } => {
+            hir_walk_expr(callee, out);
+            for a in args { hir_walk_expr(&a.value, out); }
+        }
+        HirExprKind::Field { object, .. }              => hir_walk_expr(object, out),
+        HirExprKind::Index { object, index }           => { hir_walk_expr(object, out); hir_walk_expr(index, out); }
+        HirExprKind::List(items)                       => { for e in items { hir_walk_expr(e, out); } }
+        HirExprKind::Dict(pairs)                       => { for (k,v) in pairs { hir_walk_expr(k, out); hir_walk_expr(v, out); } }
+        HirExprKind::Tuple(items)                      => { for e in items { hir_walk_expr(e, out); } }
+        HirExprKind::StringInterp(parts)               => {
+            for p in parts { if let HirInterpPart::Expr(e) = p { hir_walk_expr(e, out); } }
+        }
+        HirExprKind::Spawn(e) | HirExprKind::Await(e) => hir_walk_expr(e, out),
+        HirExprKind::CheckExpr { scrutinee, arms }     => {
+            hir_walk_expr(scrutinee, out);
+            for arm in arms {
+                hir_walk_expr(&arm.pattern, out);
+                hir_walk_stmts(&arm.body, out);
+            }
+        }
+        HirExprKind::IntLit(_) | HirExprKind::FloatLit(_) | HirExprKind::StrLit(_)
+        | HirExprKind::BoolLit(_) | HirExprKind::Nothing | HirExprKind::This
+        | HirExprKind::Parent   | HirExprKind::Error => {}
+    }
+}
 
 // ── Type conversion ────────────────────────────────────────────────────────────
 
@@ -95,6 +206,9 @@ struct FnCtx<'p> {
     /// Set of function names that are extension actions.
     /// Free calls to these need an implicit-`this` = nothing prepended.
     fn_is_extension: HashSet<Symbol>,
+    /// Pending parallel-for bodies discovered while lowering this function.
+    /// Drained by lower_program after all named functions are done.
+    par_for_pending: Rc<RefCell<VecDeque<PendingParallelFor>>>,
     /// Stack of (continue_bb, exit_bb) for break/continue targeting.
     /// Innermost loop is at the back.
     loop_stack: Vec<(BlockId, BlockId)>,
@@ -253,7 +367,8 @@ impl<'p> FnCtx<'p> {
                 val
             }
 
-            HirExprKind::Binary { op, lhs, rhs } => {                let l = self.lower_expr(lhs);
+            HirExprKind::Binary { op, lhs, rhs } => {
+                let l = self.lower_expr(lhs);
                 let r = self.lower_expr(rhs);
                 let dest = self.alloc_local();
                 self.emit(Instr::Assign {
@@ -558,14 +673,49 @@ impl<'p> FnCtx<'p> {
 
             // ── Concurrency ───────────────────────────────────────────────────
             HirExprKind::Spawn(inner) => {
-                // For now: treat `spawn expr` as a regular call (Phase 5.5 will add real async)
+                if let HirExprKind::Call { callee, args } = &inner.kind {
+                    match &callee.kind {
+                        // Direct free-function: `spawn fn(args)` — statically resolved.
+                        HirExprKind::Var(name) => {
+                            if let Some(&fn_id) = self.fn_map.get(name) {
+                                let arg_ops: Vec<Operand> =
+                                    args.iter().map(|a| self.lower_expr(&a.value)).collect();
+                                let dest = self.alloc_local();
+                                self.emit(Instr::SpawnExpr { dest, task_fn: fn_id, args: arg_ops });
+                                return Operand::Local(dest);
+                            }
+                            // Named var that isn't in fn_map → treat as a function-value.
+                            let fn_op = self.lower_expr(callee);
+                            let mut spawn_args = vec![fn_op];
+                            spawn_args.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                            let dest = self.alloc_local();
+                            self.emit(Instr::SpawnDynamic { dest, method: None, args: spawn_args });
+                            return Operand::Local(dest);
+                        }
+                        // Method call: `spawn obj.method(args)`.
+                        HirExprKind::Field { object, field } => {
+                            let recv_op = self.lower_expr(object);
+                            let mut spawn_args = vec![recv_op];
+                            spawn_args.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                            let dest = self.alloc_local();
+                            self.emit(Instr::SpawnDynamic { dest, method: Some(*field), args: spawn_args });
+                            return Operand::Local(dest);
+                        }
+                        // Any other callee shape: evaluate and dispatch dynamically.
+                        _ => {
+                            let fn_op = self.lower_expr(callee);
+                            let mut spawn_args = vec![fn_op];
+                            spawn_args.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                            let dest = self.alloc_local();
+                            self.emit(Instr::SpawnDynamic { dest, method: None, args: spawn_args });
+                            return Operand::Local(dest);
+                        }
+                    }
+                }
+                // Non-call spawn (unusual, e.g. `spawn someExpr`) → synchronous fallback.
                 let op = self.lower_expr(inner);
                 let dest = self.alloc_local();
-                self.emit(Instr::Assign {
-                    dest,
-                    ty,
-                    rhs: Rvalue::Use(op),
-                });
+                self.emit(Instr::Assign { dest, ty, rhs: Rvalue::Use(op) });
                 Operand::Local(dest)
             }
             HirExprKind::Await(inner) => {
@@ -598,11 +748,12 @@ impl<'p> FnCtx<'p> {
         let mut phi_ops: Vec<(BlockId, Operand)> = vec![];
 
         for arm in arms {
-            let arm_bb  = self.alloc_block();
+            let arm_bb = self.alloc_block();
             let next_bb = self.alloc_block();
 
             // Wildcard `_` pattern: unconditionally enter the arm.
-            let is_wildcard = matches!(&arm.pattern.kind, HirExprKind::Var(s) if *s == self.wildcard_sym);
+            let is_wildcard =
+                matches!(&arm.pattern.kind, HirExprKind::Var(s) if *s == self.wildcard_sym);
 
             if is_wildcard {
                 self.goto(arm_bb);
@@ -1004,7 +1155,9 @@ impl<'p> FnCtx<'p> {
             }
 
             // ── Parallel for ─────────────────────────────────────────────────
-            // Phase 5.5: emit linearised for-loop (real parallel lowering later).
+            // Emit a real `ParallelIter` MIR instruction. The body gets its
+            // own synthetic function that is lowered after the current function
+            // is complete (via `par_for_pending` drain loop in lower_program).
             HirStmt::ParallelFor {
                 binding,
                 binding_ty,
@@ -1012,14 +1165,99 @@ impl<'p> FnCtx<'p> {
                 body,
                 ..
             } => {
-                self.lower_for_loop(*binding, binding_ty, iterable, body);
+                // 1. Lower the iterable into an operand in the current function.
+                let collection = self.lower_expr(iterable);
+
+                // 2. Collect every variable referenced inside the body that is
+                //    already defined in the current function's environment.
+                //    These become extra parameters of the synthetic body function
+                //    (the "closure args").
+                let used = collect_hir_used_vars(body);
+                let mut env_params: Vec<(Symbol, MirTy)> = Vec::new();
+                let mut closure_args: Vec<Operand> = Vec::new();
+                for (&sym, &local) in &self.env {
+                    // Only include symbols that are actually referenced in the body
+                    // and that are NOT the loop binding itself.
+                    if sym != *binding && used.contains(&sym) {
+                        env_params.push((sym, MirTy::Dynamic));
+                        closure_args.push(Operand::Local(local));
+                    }
+                }
+
+                // 3. Pre-allocate a FunctionId + placeholder entry in prog.functions.
+                let body_fn_id = FunctionId(self.prog.functions.len() as u32);
+                // The name is purely informational (for dumps/debug).
+                let par_sym = *binding; // reuse the binding symbol as a hint
+                self.prog.functions.push(MirFunction::new(
+                    body_fn_id,
+                    par_sym,
+                    MirTy::Nothing,
+                ));
+
+                // 4. Emit the ParallelIter instruction in the current function.
+                self.emit(Instr::ParallelIter {
+                    collection,
+                    body_fn: body_fn_id,
+                    closure_args,
+                });
+
+                // 5. Defer lowering of the body to after the current function
+                //    body finishes (only one &mut MirProgram borrow at a time).
+                self.par_for_pending.borrow_mut().push_back(PendingParallelFor {
+                    fn_id: body_fn_id,
+                    binding: Some((*binding, fidan_ty_to_mir(binding_ty))),
+                    env_params,
+                    body_ptr: body.as_ptr(),
+                    body_len: body.len(),
+                });
             }
 
             // ── Concurrent block ─────────────────────────────────────────────
-            // Phase 5.5: emit sequential lowering (real concurrent lowering later).
+            // Each task body becomes a synthetic function, spawned on a real OS
+            // thread via SpawnConcurrent.  JoinAll waits for all of them.
             HirStmt::ConcurrentBlock { tasks, .. } => {
+                let mut handles: Vec<LocalId> = Vec::new();
                 for task in tasks {
-                    self.lower_stmts(&task.body);
+                    // Collect variables captured from the outer scope.
+                    let used = collect_hir_used_vars(&task.body);
+                    let mut env_params: Vec<(Symbol, MirTy)> = Vec::new();
+                    let mut closure_args: Vec<Operand> = Vec::new();
+                    for (&sym, &local) in &self.env {
+                        if used.contains(&sym) {
+                            env_params.push((sym, MirTy::Dynamic));
+                            closure_args.push(Operand::Local(local));
+                        }
+                    }
+
+                    // Pre-allocate a synthetic function for this task body.
+                    let task_fn_id = FunctionId(self.prog.functions.len() as u32);
+                    self.prog.functions.push(MirFunction::new(
+                        task_fn_id,
+                        self.new_sym, // name is informational only
+                        MirTy::Nothing,
+                    ));
+
+                    // Spawn the task and collect its handle.
+                    let handle = self.alloc_local();
+                    self.emit(Instr::SpawnConcurrent {
+                        handle,
+                        task_fn: task_fn_id,
+                        args: closure_args,
+                    });
+                    handles.push(handle);
+
+                    // Defer body lowering via the shared pending queue.
+                    self.par_for_pending.borrow_mut().push_back(PendingParallelFor {
+                        fn_id: task_fn_id,
+                        binding: None, // no per-iteration binding for tasks
+                        env_params,
+                        body_ptr: task.body.as_ptr(),
+                        body_len: task.body.len(),
+                    });
+                }
+                // Wait for all tasks to complete.
+                if !handles.is_empty() {
+                    self.emit(Instr::JoinAll { handles });
                 }
             }
 
@@ -1131,11 +1369,12 @@ impl<'p> FnCtx<'p> {
         let mut arm_end_envs: Vec<(BlockId, VarEnv)> = vec![];
 
         for arm in arms {
-            let arm_bb  = self.alloc_block();
+            let arm_bb = self.alloc_block();
             let next_bb = self.alloc_block();
 
             // Wildcard `_` arm: unconditionally enters the arm body.
-            let is_wildcard = matches!(&arm.pattern.kind, HirExprKind::Var(s) if *s == self.wildcard_sym);
+            let is_wildcard =
+                matches!(&arm.pattern.kind, HirExprKind::Var(s) if *s == self.wildcard_sym);
 
             if is_wildcard {
                 self.goto(arm_bb);
@@ -1247,9 +1486,9 @@ impl<'p> FnCtx<'p> {
 
         let pre_bb = self.cur_bb;
         let header_bb = self.alloc_block();
-        let body_bb   = self.alloc_block();
-        let step_bb   = self.alloc_block(); // where `continue` jumps to; increments idx
-        let exit_bb   = self.alloc_block();
+        let body_bb = self.alloc_block();
+        let step_bb = self.alloc_block(); // where `continue` jumps to; increments idx
+        let exit_bb = self.alloc_block();
 
         self.goto(header_bb);
         self.switch_to(header_bb);
@@ -1342,12 +1581,18 @@ impl<'p> FnCtx<'p> {
             let mut phi_operands: Vec<(BlockId, Operand)> = Vec::new();
             // body-end fallthrough (only if it wasn't terminated by break/continue)
             if !body_end_terminated {
-                let local = body_end_env.get(sym).copied().unwrap_or_else(|| env_before[sym]);
+                let local = body_end_env
+                    .get(sym)
+                    .copied()
+                    .unwrap_or_else(|| env_before[sym]);
                 phi_operands.push((body_end_bb, Operand::Local(local)));
             }
             // each continue site
             for (from_bb, env_snap) in &cont_sites {
-                let local = env_snap.get(sym).copied().unwrap_or_else(|| env_before[sym]);
+                let local = env_snap
+                    .get(sym)
+                    .copied()
+                    .unwrap_or_else(|| env_before[sym]);
                 phi_operands.push((*from_bb, Operand::Local(local)));
             }
             match phi_operands.len() {
@@ -1650,19 +1895,26 @@ impl<'p> FnCtx<'p> {
                 }
             }
             for sym in changed {
-                let operands: Vec<(BlockId, Operand)> = join_arms.iter().map(|(end_bb, env_arm)| {
-                    let local = env_arm.get(&sym)
-                        .or_else(|| env_before.get(&sym))
-                        .copied()
-                        .expect("variable should exist in either arm env or env_before");
-                    (*end_bb, Operand::Local(local))
-                }).collect();
+                let operands: Vec<(BlockId, Operand)> = join_arms
+                    .iter()
+                    .map(|(end_bb, env_arm)| {
+                        let local = env_arm
+                            .get(&sym)
+                            .or_else(|| env_before.get(&sym))
+                            .copied()
+                            .expect("variable should exist in either arm env or env_before");
+                        (*end_bb, Operand::Local(local))
+                    })
+                    .collect();
                 if operands.len() == 1 {
                     // Only one incoming arm — no phi needed, just use the value.
-                    self.define_var(sym, match operands[0].1 {
-                        Operand::Local(l) => l,
-                        _ => env_before[&sym],
-                    });
+                    self.define_var(
+                        sym,
+                        match operands[0].1 {
+                            Operand::Local(l) => l,
+                            _ => env_before[&sym],
+                        },
+                    );
                 } else {
                     let phi_local = self.alloc_local();
                     self.add_phi(finally_bb, phi_local, MirTy::Dynamic, operands);
@@ -1779,11 +2031,11 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
     let mut prog = MirProgram::new();
 
     // `new` is the constructor method name; `this` is the implicit first param.
-    let new_sym      = interner.intern("new");
-    let len_sym      = interner.intern("len");
-    let type_sym     = interner.intern("type");
+    let new_sym = interner.intern("new");
+    let len_sym = interner.intern("len");
+    let type_sym = interner.intern("type");
     let wildcard_sym = interner.intern("_");
-    let this_name    = interner.intern("this");
+    let this_name = interner.intern("this");
 
     // ── Pre-pass ①: sentinel top-level init fn ───────────────────────────────
     let init_sym = Symbol(0);
@@ -1856,7 +2108,12 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
         prog.objects.push(obj_info);
     }
 
+    // Shared queue for deferred parallel-for body functions.
+    let pending_par_fors: Rc<RefCell<VecDeque<PendingParallelFor>>> =
+        Rc::new(RefCell::new(VecDeque::new()));
+
     // ── Closure: lower one HirFunction body into an already-allocated fn ─────
+    // `pending_par_fors` is captured by clone (Rc is cheap to clone).
     let lower_hir_fn = |prog: &mut MirProgram,
                         fn_map: &HashMap<Symbol, FunctionId>,
                         obj_map: &HashMap<Symbol, FunctionId>,
@@ -1869,7 +2126,8 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                         wildcard_sym: Symbol,
                         func: &HirFunction,
                         fn_id: FunctionId,
-                        owner_class: Option<Symbol>| {
+                        owner_class: Option<Symbol>,
+                        pending: Rc<RefCell<VecDeque<PendingParallelFor>>>| {
         let entry_bb = prog.function_mut(fn_id).alloc_block();
         let mut ctx = FnCtx {
             prog,
@@ -1890,6 +2148,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             loop_stack: vec![],
             continue_sites: HashMap::new(),
             wildcard_sym,
+            par_for_pending: pending,
         };
 
         // For methods (and extension actions): implicit `this` as param 0.
@@ -1938,6 +2197,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             func,
             fn_id,
             owner_class,
+            Rc::clone(&pending_par_fors),
         );
     }
     // ── Lower object methods ──────────────────────────────────────────────────
@@ -1958,6 +2218,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 method,
                 fn_id,
                 Some(obj.name),
+                Rc::clone(&pending_par_fors),
             );
         }
     }
@@ -1985,6 +2246,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             loop_stack: vec![],
             continue_sites: HashMap::new(),
             wildcard_sym,
+            par_for_pending: Rc::clone(&pending_par_fors),
         };
 
         for g in &hir.globals {
@@ -2008,6 +2270,58 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
         }
 
         ctx.lower_stmts(&hir.init_stmts);
+        if !ctx.terminated {
+            ctx.set_terminator(Terminator::Return(None));
+        }
+    }
+
+    // ── Lower pending parallel-for body functions ─────────────────────────────
+    // New entries can appear during this loop (nested parallel-for), so we
+    // keep processing until the queue is fully drained.
+    loop {
+        let Some(pf) = pending_par_fors.borrow_mut().pop_front() else { break };
+        // SAFETY: raw ptrs point into HirStmt slices owned by `hir`, which
+        // lives for the entire duration of lower_program.
+        let body: &[HirStmt] = unsafe { std::slice::from_raw_parts(pf.body_ptr, pf.body_len) };
+        let entry_bb = prog.function_mut(pf.fn_id).alloc_block();
+        let mut ctx = FnCtx {
+            prog: &mut prog,
+            fn_id: pf.fn_id,
+            cur_bb: entry_bb,
+            env: VarEnv::new(),
+            fn_map: fn_map.clone(),
+            obj_map: obj_map.clone(),
+            terminated: false,
+            this_reg: None,
+            owner_class: None,
+            parent_map: parent_map.clone(),
+            method_ids: method_ids.clone(),
+            new_sym,
+            len_sym,
+            type_sym,
+            fn_is_extension: fn_is_extension.clone(),
+            loop_stack: vec![],
+            continue_sites: HashMap::new(),
+            wildcard_sym,
+            par_for_pending: Rc::clone(&pending_par_fors),
+        };
+        // First param (parallel for only): the per-iteration loop binding.
+        if let Some((binding_sym, binding_ty)) = pf.binding {
+            let binding_local = ctx.alloc_local();
+            ctx.define_var(binding_sym, binding_local);
+            ctx.func_mut().params.push(MirParam {
+                local: binding_local,
+                name:  binding_sym,
+                ty:    binding_ty,
+            });
+        }
+        // Subsequent params: captured env variables (parallel for + concurrent tasks).
+        for (sym, ty) in pf.env_params {
+            let local = ctx.alloc_local();
+            ctx.define_var(sym, local);
+            ctx.func_mut().params.push(MirParam { local, name: sym, ty });
+        }
+        ctx.lower_stmts(body);
         if !ctx.terminated {
             ctx.set_terminator(Terminator::Return(None));
         }

@@ -1,0 +1,35 @@
+# Phase 8 parallel / concurrent demo
+
+# §1 spawn / await
+print("§1 spawn / await:")
+action double with (required x) {
+    return x * 2
+}
+action add_ten with (required x) {
+    return x + 10
+}
+
+var h1 = spawn double(21)
+var h2 = spawn add_ten(32)
+var r1 = await h1
+var r2 = await h2
+print("  double(21)=" + string(r1))
+print("  add_ten(32)=" + string(r2))
+
+# §2 parallel for
+print("§2 parallel for:")
+parallel for n in [10, 20, 30] {
+    if n == 10 {
+        # For now, this is a builtin. Later, it will be part of std.time
+        wait(1000) ## Wait (sleep) for 1 second to demonstrate that the iterations run in parallel
+    }
+    print("  n=" + string(n) + " sq=" + string(n * n))
+}
+
+# §3 concurrent block
+print("§3 concurrent:")
+concurrent {
+    task { print("  task A") }
+    task { print("  task B") }
+}
+print("Parallel demo done!")

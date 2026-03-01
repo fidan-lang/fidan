@@ -214,6 +214,14 @@ pub enum Instr {
         task_fn: FunctionId,
         args: Vec<Operand>,
     },
+    /// `spawn callee(args)` where the callee is not a statically-resolved `FunctionId`.
+    /// `method = Some(sym)` → method dispatch; receiver is `args[0]`.
+    /// `method = None`      → dynamic function-value dispatch; fn-value is `args[0]`.
+    SpawnDynamic {
+        dest: LocalId,
+        method: Option<Symbol>,
+        args: Vec<Operand>,
+    },
     /// `await pending` — block until the `Pending oftype T` resolves.
     AwaitPending { dest: LocalId, handle: Operand },
     /// `parallel for item in collection { body }` — distribute iterations.

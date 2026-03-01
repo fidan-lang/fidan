@@ -1890,7 +1890,7 @@ The stdlib is organized into a `std` namespace:
 | `std.debug` | assert, assertEq, inspect, profile | custom |
 | `std.test` | describe/it test blocks, expect(...).to... matchers | custom |
 | `std.cli` | Argument parsing, colored output, progress bars | `clap`, `indicatif` |
-| `std.time` | DateTime, Duration, sleep | `chrono` |
+| `std.time` | DateTime, Duration, wait | `chrono` |
 | `std.json` | parse, stringify, path queries | `serde_json` |
 | `std.env` | Environment variables, platform info | `std::env` |
 
