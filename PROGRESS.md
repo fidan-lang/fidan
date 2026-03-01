@@ -244,19 +244,19 @@
 ### `fidan-hir`
 | Item | Status | Notes |
 |---|---|---|
-| HIR types | ⬜ | |
-| AST → HIR lowering | ⬜ | |
+| HIR types | ✅ | Complete type system: `HirModule`, `HirObject`, `HirFunction`, `HirStmt`, `HirExpr` + `HirExprKind` with all variants; every expr carries `FidanType` |
+| AST → HIR lowering | ✅ | Full `lower_module()` — all statements/expressions; ternary desugared to `IfExpr`; param types resolved from `TypedModule` |
 
 ### `fidan-mir`
 | Item | Status | Notes |
 |---|---|---|
-| `BasicBlock`, `Phi`, SSA locals | ⬜ | |
-| All `MirInstruction` variants | ⬜ | |
-| Parallel MIR instructions | ⬜ | |
-| HIR → MIR lowering (Braun SSA) | ⬜ | |
-| Exception landing pads | ⬜ | |
-| `concurrent` → `SpawnConcurrent` + `JoinAll` | ⬜ | |
-| MIR text dump (`--emit mir`) | ⬜ | |
+| `BasicBlock`, `Phi`, SSA locals | ✅ | `BlockId`, `LocalId`, `FunctionId`; `PhiNode`; full `MirFunction`/`MirProgram` |
+| All `MirInstruction` variants | ✅ | `Assign`, `Call`, `SetField`, `GetField`, `GetIndex`, `SetIndex`, `Drop`, `AwaitPending`, `Nop` + placeholders for concurrency |
+| Parallel MIR instructions | ✅ | `SpawnConcurrent`, `SpawnParallel`, `JoinAll`, `SpawnExpr`, `ParallelIter` (lowered but sequential in Phase 5) |
+| HIR → MIR lowering (Braun SSA) | ✅ | `lower_program()`: scope-based renaming, φ-nodes at if/else joins, for/while loop headers back-patched; all stmt/expr variants covered |
+| Exception landing pads | ✅ | `lower_attempt()` — try/catch/otherwise/finally basic-block structure |
+| `concurrent` → `SpawnConcurrent` + `JoinAll` | ✅ | `ConcurrentBlock` lowered sequentially (Phase 5.5 will add real scheduling) |
+| MIR text dump (`--emit mir`) | ✅ | `display::print_program` — function headers, BB labels, φ-nodes, instructions, terminators |
 
 ### `fidan-runtime`
 | Item | Status | Notes |
@@ -376,7 +376,7 @@
 | All `fidan` subcommands | ✅ | `run`, `build`, `check`, `fix`, `explain`, `test`, `lsp` wired; backends are stubs where needed |
 | `--emit tokens` | ✅ | Drives lexer, prints full token stream |
 | `--emit ast` | ✅ | Phase 2 — node-count summary; phase 3.5 — works cleanly on `syntax.fdn` |
-| `--emit hir/mir` | ⬜ | Phase 5+ |
+| `--emit hir/mir` | ✅ | `fidan run file.fdn --emit hir` and `--emit mir` both work |
 | REPL with history + multi-line | 🔨 | Colon commands done; full eval working; multi-line block input still needs Phase 5 |
 | stdin support (`fidan run -`) | ✅ | Reads from stdin when file is `-` |
 | `fidan check` | ✅ | Parse + typecheck only; exits non-zero on any error; `--max-errors N` accepted |
@@ -426,4 +426,4 @@ _None._
 
 ---
 
-*Last updated: 2026-02-28 — Phase 5 leftovers + Phase 10 CLI gaps complete: runtime call-stack capture (`Signal::Panic` carries `trace`; `Env::frame_names`); `--trace short/full/compact` flag on `fidan run`; REPL `:type`/`:last`/`:last --full` + error history buffer; `fidan check` (parse+typecheck, exits non-zero on errors, `--max-errors N`); `fidan fix [--dry-run]` (applies `Confidence::High` `SourceEdit` suggestions); `fidan explain <code>` (code registry lookup); `TraceMode` + `max_errors` added to `CompileOptions`; `ExecutionMode::Check` added.*
+*Last updated: 2026-02-28 — Phase 5 HIR/MIR complete: full `HirModule` type system; AST→HIR lowering (`lower_module`); `TypedModule` from typeck with per-expression type map; full MIR type system (SSA `BasicBlock`/`PhiNode`/`MirFunction`/`MirProgram`); HIR→MIR Braun-style SSA lowering (`lower_program`) with φ-nodes at if/else joins and back-patched loop headers; `display::print_program` for MIR text dump; `--emit hir` and `--emit mir` both wired into CLI and verified on `test/examples/test.fdn`. Previous: Phase 5 leftovers + Phase 10 CLI gaps: runtime call-stack capture; `--trace` flag; REPL commands; `fidan check/fix/explain`.*

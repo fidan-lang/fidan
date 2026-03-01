@@ -396,15 +396,73 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
             .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
             .count();
 
-    if lex_diags.is_empty() && parse_diags.is_empty() {
-        let type_diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
-        for diag in &type_diags {
+    // Always run the full typed path so HIR/MIR emit has type information.
+    let typed_module = if lex_diags.is_empty() && parse_diags.is_empty() {
+        let tm = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+        for diag in &tm.diagnostics {
             fidan_diagnostics::render_to_stderr(diag, &source_map);
         }
-        error_count += type_diags
+        error_count += tm
+            .diagnostics
             .iter()
             .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
             .count();
+        Some(tm)
+    } else {
+        None
+    };
+
+    // ── --emit hir ─────────────────────────────────────────────────────────────
+    if opts.emit.contains(&EmitKind::Hir) {
+        if let Some(ref tm) = typed_module {
+            let hir = fidan_hir::lower_module(&module, tm);
+            println!("=== hir: {source_name} ===");
+            println!("  objects:    {}", hir.objects.len());
+            println!("  functions:  {}", hir.functions.len());
+            println!("  globals:    {}", hir.globals.len());
+            println!("  init_stmts: {}", hir.init_stmts.len());
+            for obj in &hir.objects {
+                let name = interner.resolve(obj.name);
+                let parent = obj.parent.map(|p| interner.resolve(p).to_string()).unwrap_or_default();
+                if parent.is_empty() {
+                    println!("  object {name}");
+                } else {
+                    println!("  object {name} extends {parent}");
+                }
+                for f in &obj.fields {
+                    let fname = interner.resolve(f.name);
+                    println!("    field {fname}: {:?}", f.ty);
+                }
+                for m in &obj.methods {
+                    let mname = interner.resolve(m.name);
+                    println!("    method {mname}() -> {:?}  ({} stmts)", m.return_ty, m.body.len());
+                }
+            }
+            for func in &hir.functions {
+                let fname = interner.resolve(func.name);
+                let ext = func.extends.map(|e| format!(" extends {}", interner.resolve(e))).unwrap_or_default();
+                println!("  action {fname}{ext}() -> {:?}  ({} stmts)", func.return_ty, func.body.len());
+            }
+            for g in &hir.globals {
+                let gname = interner.resolve(g.name);
+                println!("  global {}{gname}: {:?}", if g.is_const { "const " } else { "" }, g.ty);
+            }
+        } else {
+            eprintln!("  (HIR not available — parse or lex errors present)");
+        }
+    }
+
+    // ── --emit mir ─────────────────────────────────────────────────────────────
+    if opts.emit.contains(&EmitKind::Mir) {
+        if let Some(ref tm) = typed_module {
+            let hir = fidan_hir::lower_module(&module, tm);
+            let mir = fidan_mir::lower_program(&hir);
+            println!("=== mir: {source_name} ===");
+            println!("  functions: {}", mir.functions.len());
+            fidan_mir::print_program(&mir);
+        } else {
+            eprintln!("  (MIR not available — parse or lex errors present)");
+        }
     }
 
     // ── Multi-error footer ───────────────────────────────

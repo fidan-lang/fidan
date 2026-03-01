@@ -15,6 +15,8 @@ fidan-lexer = { workspace = true }
 fidan-ast = { workspace = true }
 fidan-parser = { workspace = true }
 fidan-typeck = { workspace = true }
+fidan-hir = { workspace = true }
+fidan-mir = { workspace = true }
 fidan-interp = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }

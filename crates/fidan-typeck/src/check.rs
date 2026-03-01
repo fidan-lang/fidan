@@ -50,6 +50,11 @@ pub struct TypeChecker {
     /// Re-declarations (`var x` when `x` already exists) are silently allowed
     /// in the REPL so the user can freely change a binding's type.
     is_repl: bool,
+    /// Type of every expression, keyed by `ExprId`.  Populated during type inference.
+    /// Used by HIR lowering to annotate HIR nodes with concrete types.
+    pub(crate) expr_types: FxHashMap<ExprId, FidanType>,
+    /// Top-level action signatures (name → ActionInfo).  Populated during Pass 1.
+    pub(crate) actions: FxHashMap<Symbol, ActionInfo>,
 }
 
 impl TypeChecker {
@@ -63,6 +68,8 @@ impl TypeChecker {
             this_ty: None,
             file_id,
             is_repl: false,
+            expr_types: FxHashMap::default(),
+            actions: FxHashMap::default(),
         };
         tc.register_builtins();
         tc
@@ -141,6 +148,17 @@ impl TypeChecker {
 
     pub fn finish(self) -> Vec<Diagnostic> {
         self.diags
+    }
+
+    /// Consume the checker and return full type-information alongside diagnostics.
+    /// Used by HIR lowering which needs to annotate every node with its inferred type.
+    pub fn finish_typed(self) -> crate::TypedModule {
+        crate::TypedModule {
+            diagnostics: self.diags,
+            expr_types: self.expr_types,
+            objects: self.objects,
+            actions: self.actions,
+        }
     }
 
     /// Drain accumulated diagnostics without consuming the checker.
@@ -231,12 +249,26 @@ impl TypeChecker {
             }
             Item::ActionDecl {
                 name,
-                params: _,
-                return_ty: _,
+                params,
+                return_ty,
                 span,
                 ..
+            } => {
+                // Record the action's full signature for HIR lowering.
+                let info = self.build_action_info(params, return_ty, *span);
+                self.actions.insert(*name, info);
+                self.table.define(
+                    *name,
+                    SymbolInfo {
+                        kind: SymbolKind::Action,
+                        ty: FidanType::Function,
+                        span: *span,
+                        is_mutable: false,
+                        initialized: Initialized::Yes,
+                    },
+                );
             }
-            | Item::ExtensionAction {
+            Item::ExtensionAction {
                 name,
                 params: _,
                 return_ty: _,
@@ -881,7 +913,14 @@ impl TypeChecker {
 
     // ── Expression inference ──────────────────────────────────────────────
 
+    /// Infer the type of `expr_id`, record the result in `expr_types`, and return it.
     pub(crate) fn infer_expr(&mut self, expr_id: ExprId, module: &Module) -> FidanType {
+        let ty = self.infer_expr_inner(expr_id, module);
+        self.expr_types.insert(expr_id, ty.clone());
+        ty
+    }
+
+    fn infer_expr_inner(&mut self, expr_id: ExprId, module: &Module) -> FidanType {
         let expr = module.arena.get_expr(expr_id).clone();
         match expr {
             Expr::IntLit { .. } => FidanType::Integer,
