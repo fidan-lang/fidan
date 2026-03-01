@@ -147,6 +147,36 @@ Fix: provide an initial value:
 "#,
         ),
 
+        "E0105" => Some(
+            r#"A type annotation refers to a name that is not a built-in type and has
+not been declared as an `object` in the current scope.  This usually
+means a typo in the type name.
+
+Built-in types you can use in annotations:
+
+    integer   float   boolean   string   nothing   dynamic
+    list      dict    map       shared   pending
+
+Erroneous example:
+
+    var age oftype integre = 25        # error: `integre` is not a known type
+    var flag oftype Booleon = true     # error: `Booleon` is not a known type
+
+Fix: correct the spelling:
+
+    var age oftype integer = 25        # OK
+    var flag oftype boolean = true     # OK
+
+For container types, the `oftype` keyword introduces the element type:
+
+    var nums oftype list oftype integer    # list of integers
+    var data oftype map oftype string      # map with string values
+
+Note: Fidan performs a similarity search and will suggest the closest
+matching type name when a typo is detected.
+"#,
+        ),
+
         // ── Type system ───────────────────────────────────────────────────────
         "E0201" => Some(
             r#"The type of the value being assigned or used as an initialiser does not

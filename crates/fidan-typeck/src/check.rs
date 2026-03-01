@@ -50,6 +50,10 @@ pub struct TypeChecker {
     /// Re-declarations (`var x` when `x` already exists) are silently allowed
     /// in the REPL so the user can freely change a binding's type.
     is_repl: bool,
+    /// When `true` the checker is in the registration pass (Pass 1).
+    /// `resolve_type_expr` will **not** emit E0105 in this mode — Pass 2 is
+    /// responsible for emitting type-annotation errors so they fire exactly once.
+    registering: bool,
     /// Type of every expression, keyed by `ExprId`.  Populated during type inference.
     /// Used by HIR lowering to annotate HIR nodes with concrete types.
     pub(crate) expr_types: FxHashMap<ExprId, FidanType>,
@@ -68,6 +72,7 @@ impl TypeChecker {
             this_ty: None,
             file_id,
             is_repl: false,
+            registering: false,
             expr_types: FxHashMap::default(),
             actions: FxHashMap::default(),
         };
@@ -129,6 +134,8 @@ impl TypeChecker {
     /// Run the full type checker over `module`.  Returns all diagnostics.
     pub fn check_module(&mut self, module: &Module) {
         // Pass 1: register every top-level declaration so forward references work.
+        // Suppress E0105 diagnostics here — Pass 2 re-resolves and emits them.
+        self.registering = true;
         for &item_id in &module.items {
             let item = module.arena.get_item(item_id);
             self.register_top_level(item, &module.arena);
@@ -152,6 +159,7 @@ impl TypeChecker {
                 }
             }
         }
+        self.registering = false;
 
         // Pass 2: full type check.
         for &item_id in &module.items {
@@ -193,10 +201,12 @@ impl TypeChecker {
     pub fn infer_snippet_type(&mut self, module: &Module) -> Option<String> {
         // Pass 1: register top-level declarations in case the snippet contains
         // `object` or `action` items (rare but consistent).
+        self.registering = true;
         for &item_id in &module.items {
             let item = module.arena.get_item(item_id);
             self.register_top_level(item, &module.arena);
         }
+        self.registering = false;
 
         // Find the last top-level ExprStmt — that is the expression the user
         // wants to know the type of.
@@ -1411,23 +1421,48 @@ impl TypeChecker {
 
     // ── TypeExpr resolution ───────────────────────────────────────────────
 
-    pub(crate) fn resolve_type_expr(&self, te: &TypeExpr) -> FidanType {
+    pub(crate) fn resolve_type_expr(&mut self, te: &TypeExpr) -> FidanType {
         match te {
-            TypeExpr::Named { name, .. } => self.resolve_named_type(*name),
-            TypeExpr::Oftype { base, param, .. } => {
-                let base_str = match base.as_ref() {
-                    TypeExpr::Named { name, .. } => {
-                        self.interner.resolve(*name).to_lowercase().to_string()
-                    }
+            TypeExpr::Named { name, span } => self.resolve_named_type(*name, *span),
+            TypeExpr::Oftype { base, param, span } => {
+                let (base_str, base_span) = match base.as_ref() {
+                    TypeExpr::Named { name, span: bspan } => (
+                        self.interner.resolve(*name).to_lowercase().to_string(),
+                        *bspan,
+                    ),
                     _ => return FidanType::Unknown,
                 };
                 let inner = self.resolve_type_expr(param);
                 match base_str.as_str() {
                     "list" => FidanType::List(Box::new(inner)),
-                    "dict" => FidanType::Dict(Box::new(FidanType::String), Box::new(inner)),
+                    "dict" | "map" => FidanType::Dict(Box::new(FidanType::String), Box::new(inner)),
                     "shared" => FidanType::Shared(Box::new(inner)),
                     "pending" => FidanType::Pending(Box::new(inner)),
-                    _ => FidanType::Unknown,
+                    _ => {
+                        // Unknown container base (e.g. `lis oftype integer`)
+                        if self.registering {
+                            return FidanType::Error;
+                        }
+                        let candidates = ["list", "dict", "map", "shared", "pending"];
+                        let mut diag = Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0105"),
+                            format!("undefined type `{base_str}`"),
+                            *span,
+                        )
+                        .with_label(Label::primary(base_span, "unknown type name"));
+                        if let Some(best) =
+                            FixEngine::suggest_name(&base_str, candidates.iter().copied())
+                        {
+                            diag = diag.with_suggestion(Suggestion::fix(
+                                format!("did you mean `{best}`?"),
+                                base_span,
+                                best.to_string(),
+                                Confidence::High,
+                            ));
+                        }
+                        self.diags.push(diag);
+                        FidanType::Error
+                    }
                 }
             }
             TypeExpr::Dynamic { .. } => FidanType::Dynamic,
@@ -1439,7 +1474,7 @@ impl TypeChecker {
         }
     }
 
-    fn resolve_named_type(&self, sym: Symbol) -> FidanType {
+    fn resolve_named_type(&mut self, sym: Symbol, span: Span) -> FidanType {
         let s = self.interner.resolve(sym);
         match s.to_lowercase().as_str() {
             "integer" | "int" => FidanType::Integer,
@@ -1447,31 +1482,79 @@ impl TypeChecker {
             "boolean" | "bool" => FidanType::Boolean,
             "string" | "text" => FidanType::String,
             "nothing" | "null" | "none" => FidanType::Nothing,
-            "dynamic" | "any" => FidanType::Dynamic,
-            _ => FidanType::Object(sym), // user-defined type
+            "dynamic" | "any" | "flexible" => FidanType::Dynamic,
+            // Bare container keywords without `oftype` — treat as dynamic rather than erroring
+            "list" | "dict" | "map" | "shared" | "pending" | "tuple" => FidanType::Dynamic,
+            _ => {
+                // Might be a user-defined object type
+                if self.objects.contains_key(&sym) {
+                    return FidanType::Object(sym);
+                }
+                // Unknown type — emit a diagnostic and suppress cascades
+                let bad = s.to_string();
+                if self.registering {
+                    // In Pass 1 we just return Error as a placeholder;
+                    // Pass 2 will emit the real E0105 diagnostic.
+                    return FidanType::Error;
+                }
+                let builtin_names = [
+                    "integer", "float", "boolean", "string", "nothing", "dynamic", "list", "dict",
+                    "map", "shared", "pending",
+                ];
+                let obj_names: Vec<String> = self
+                    .objects
+                    .keys()
+                    .map(|k| self.interner.resolve(*k).to_string())
+                    .collect();
+                let mut candidates: Vec<&str> = builtin_names.iter().copied().collect();
+                for n in &obj_names {
+                    candidates.push(n.as_str());
+                }
+                let mut diag = Diagnostic::error(
+                    fidan_diagnostics::diag_code!("E0105"),
+                    format!("undefined type `{bad}`"),
+                    span,
+                )
+                .with_label(Label::primary(span, "unknown type name"));
+                if let Some(best) = FixEngine::suggest_name(&bad, candidates.into_iter()) {
+                    diag = diag.with_suggestion(Suggestion::fix(
+                        format!("did you mean `{best}`?"),
+                        span,
+                        best,
+                        Confidence::High,
+                    ));
+                }
+                self.diags.push(diag);
+                FidanType::Error
+            }
         }
     }
 
     fn build_action_info(
-        &self,
+        &mut self,
         params: &[Param],
         return_ty: &Option<TypeExpr>,
         span: Span,
     ) -> ActionInfo {
-        ActionInfo {
-            params: params
-                .iter()
-                .map(|p| ParamInfo {
+        let param_infos: Vec<ParamInfo> = params
+            .iter()
+            .map(|p| {
+                let ty = self.resolve_type_expr(&p.ty.clone());
+                ParamInfo {
                     name: p.name,
-                    ty: self.resolve_type_expr(&p.ty),
+                    ty,
                     required: p.required,
                     has_default: p.default.is_some(),
-                })
-                .collect(),
-            return_ty: return_ty
-                .as_ref()
-                .map(|t| self.resolve_type_expr(t))
-                .unwrap_or(FidanType::Nothing),
+                }
+            })
+            .collect();
+        let ret_ty = return_ty
+            .as_ref()
+            .map(|t| self.resolve_type_expr(&t.clone()))
+            .unwrap_or(FidanType::Nothing);
+        ActionInfo {
+            params: param_infos,
+            return_ty: ret_ty,
             span,
         }
     }

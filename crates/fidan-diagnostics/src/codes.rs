@@ -70,6 +70,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "constant must have an initializer",
         category: "names",
     },
+    DiagnosticCode {
+        code: "E0105",
+        title: "undefined type name",
+        category: "names",
+    },
     // ── Type system ───────────────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0201",
