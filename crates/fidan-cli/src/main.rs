@@ -423,7 +423,10 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
             println!("  init_stmts: {}", hir.init_stmts.len());
             for obj in &hir.objects {
                 let name = interner.resolve(obj.name);
-                let parent = obj.parent.map(|p| interner.resolve(p).to_string()).unwrap_or_default();
+                let parent = obj
+                    .parent
+                    .map(|p| interner.resolve(p).to_string())
+                    .unwrap_or_default();
                 if parent.is_empty() {
                     println!("  object {name}");
                 } else {
@@ -435,17 +438,32 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                 }
                 for m in &obj.methods {
                     let mname = interner.resolve(m.name);
-                    println!("    method {mname}() -> {:?}  ({} stmts)", m.return_ty, m.body.len());
+                    println!(
+                        "    method {mname}() -> {:?}  ({} stmts)",
+                        m.return_ty,
+                        m.body.len()
+                    );
                 }
             }
             for func in &hir.functions {
                 let fname = interner.resolve(func.name);
-                let ext = func.extends.map(|e| format!(" extends {}", interner.resolve(e))).unwrap_or_default();
-                println!("  action {fname}{ext}() -> {:?}  ({} stmts)", func.return_ty, func.body.len());
+                let ext = func
+                    .extends
+                    .map(|e| format!(" extends {}", interner.resolve(e)))
+                    .unwrap_or_default();
+                println!(
+                    "  action {fname}{ext}() -> {:?}  ({} stmts)",
+                    func.return_ty,
+                    func.body.len()
+                );
             }
             for g in &hir.globals {
                 let gname = interner.resolve(g.name);
-                println!("  global {}{gname}: {:?}", if g.is_const { "const " } else { "" }, g.ty);
+                println!(
+                    "  global {}{gname}: {:?}",
+                    if g.is_const { "const " } else { "" },
+                    g.ty
+                );
             }
         } else {
             eprintln!("  (HIR not available — parse or lex errors present)");
@@ -814,12 +832,14 @@ fn run_repl() -> Result<()> {
         let (tokens, lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
         for diag in &lex_diags {
             fidan_diagnostics::render_to_stderr(diag, &source_map);
+            error_history.push(format!("[{}]: {}", diag.code, diag.message));
         }
 
         let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
 
         for diag in &parse_diags {
             fidan_diagnostics::render_to_stderr(diag, &source_map);
+            error_history.push(format!("[{}]: {}", diag.code, diag.message));
         }
 
         if lex_diags.is_empty() && parse_diags.is_empty() {
@@ -841,6 +861,7 @@ fn run_repl() -> Result<()> {
             } else {
                 for diag in &type_diags {
                     fidan_diagnostics::render_to_stderr(diag, &source_map);
+                    error_history.push(format!("[{}]: {}", diag.code, diag.message));
                 }
             }
         }
