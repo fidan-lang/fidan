@@ -52,7 +52,9 @@ pub enum MirTy {
 }
 
 impl MirTy {
-    pub fn is_nothing(&self) -> bool { matches!(self, MirTy::Nothing) }
+    pub fn is_nothing(&self) -> bool {
+        matches!(self, MirTy::Nothing)
+    }
 }
 
 // ── Literals ───────────────────────────────────────────────────────────────────
@@ -84,6 +86,9 @@ pub enum Callee {
     Fn(FunctionId),
     /// Method dispatch via vtable: `receiver.method(...)`.
     Method { receiver: Operand, method: Symbol },
+    /// Call to a named built-in function (e.g. `print`, `len`).
+    /// Stored as a `Symbol` so the interpreter can resolve the name.
+    Builtin(Symbol),
     /// Dynamic call through a function-value operand.
     Dynamic(Operand),
 }
@@ -103,18 +108,37 @@ pub enum MirStringPart {
 pub enum Rvalue {
     /// `dest = operand`  (copy / move).
     Use(Operand),
-    Binary { op: BinOp, lhs: Operand, rhs: Operand },
-    Unary  { op: UnOp,  operand: Operand },
-    NullCoalesce { lhs: Operand, rhs: Operand },
-    Call   { callee: Callee, args: Vec<Operand> },
+    Binary {
+        op: BinOp,
+        lhs: Operand,
+        rhs: Operand,
+    },
+    Unary {
+        op: UnOp,
+        operand: Operand,
+    },
+    NullCoalesce {
+        lhs: Operand,
+        rhs: Operand,
+    },
+    Call {
+        callee: Callee,
+        args: Vec<Operand>,
+    },
     /// Construct an object: `TypeName(field1: v1, field2: v2, ...)`.
-    Construct { ty: Symbol, fields: Vec<(Symbol, Operand)> },
-    List  (Vec<Operand>),
-    Dict  (Vec<(Operand, Operand)>),
-    Tuple (Vec<Operand>),
+    Construct {
+        ty: Symbol,
+        fields: Vec<(Symbol, Operand)>,
+    },
+    List(Vec<Operand>),
+    Dict(Vec<(Operand, Operand)>),
+    Tuple(Vec<Operand>),
     StringInterp(Vec<MirStringPart>),
     /// A compile-time literal that needs no evaluation.
     Literal(MirLit),
+    /// Read the exception that caused the current catch-block to be entered.
+    /// Placed by the lowerer as the initialiser of each `catch err {` binding.
+    CatchException,
 }
 
 // ── Instructions ──────────────────────────────────────────────────────────────
@@ -124,7 +148,11 @@ pub enum Rvalue {
 pub enum Instr {
     // ── Core ──────────────────────────────────────────────────────────────────
     /// `dest: ty = rhs`  (SSA definition — each local is defined exactly once)
-    Assign { dest: LocalId, ty: MirTy, rhs: Rvalue },
+    Assign {
+        dest: LocalId,
+        ty: MirTy,
+        rhs: Rvalue,
+    },
 
     /// Function / method call whose result (if any) is stored in `dest`.
     Call {
@@ -135,34 +163,74 @@ pub enum Instr {
     },
 
     /// `object.field = value`
-    SetField  { object: Operand, field: Symbol, value: Operand },
+    SetField {
+        object: Operand,
+        field: Symbol,
+        value: Operand,
+    },
     /// `dest = object.field`
-    GetField  { dest: LocalId,   object: Operand, field: Symbol },
+    GetField {
+        dest: LocalId,
+        object: Operand,
+        field: Symbol,
+    },
 
     /// `dest = object[index]`
-    GetIndex { dest: LocalId, object: Operand, index: Operand },
+    GetIndex {
+        dest: LocalId,
+        object: Operand,
+        index: Operand,
+    },
     /// `object[index] = value`
-    SetIndex { object: Operand, index: Operand, value: Operand },
+    SetIndex {
+        object: Operand,
+        index: Operand,
+        value: Operand,
+    },
 
     /// Explicit scope-exit: owned value is freed here.
     Drop { local: LocalId },
 
     // ── Concurrency (Phase 5.5) ───────────────────────────────────────────────
     /// Spawn a cooperative green-thread task (`concurrent` block).
-    SpawnConcurrent { handle: LocalId, task_fn: FunctionId, args: Vec<Operand> },
+    SpawnConcurrent {
+        handle: LocalId,
+        task_fn: FunctionId,
+        args: Vec<Operand>,
+    },
     /// Spawn a parallel OS-thread task (`parallel` block / `parallel action`).
-    SpawnParallel   { handle: LocalId, task_fn: FunctionId, args: Vec<Operand> },
+    SpawnParallel {
+        handle: LocalId,
+        task_fn: FunctionId,
+        args: Vec<Operand>,
+    },
     /// Wait for ALL given join handles (end of a concurrent / parallel block).
     JoinAll { handles: Vec<LocalId> },
     /// `spawn expr` — non-blocking call, result is `Pending oftype T`.
-    SpawnExpr { dest: LocalId, task_fn: FunctionId, args: Vec<Operand> },
+    SpawnExpr {
+        dest: LocalId,
+        task_fn: FunctionId,
+        args: Vec<Operand>,
+    },
     /// `await pending` — block until the `Pending oftype T` resolves.
     AwaitPending { dest: LocalId, handle: Operand },
     /// `parallel for item in collection { body }` — distribute iterations.
-    ParallelIter { collection: Operand, body_fn: FunctionId, closure_args: Vec<Operand> },
+    ParallelIter {
+        collection: Operand,
+        body_fn: FunctionId,
+        closure_args: Vec<Operand>,
+    },
 
     /// No-op (used as a placeholder during construction / optimisation).
     Nop,
+
+    // ── Exception handling ────────────────────────────────────────────────────
+    /// Push `catch_bb` onto the interpreter's exception-handler stack.
+    /// All `Terminator::Throw`s encountered while this is active jump to
+    /// `catch_bb` instead of propagating out of the function.
+    PushCatch(BlockId),
+    /// Pop the innermost exception handler installed by `PushCatch`.
+    PopCatch,
 }
 
 // ── Terminators ────────────────────────────────────────────────────────────────
@@ -175,7 +243,11 @@ pub enum Terminator {
     /// Unconditional jump.
     Goto(BlockId),
     /// Conditional branch.
-    Branch { cond: Operand, then_bb: BlockId, else_bb: BlockId },
+    Branch {
+        cond: Operand,
+        then_bb: BlockId,
+        else_bb: BlockId,
+    },
     /// Throw an exception; unwinds to the nearest `Attempt` landing pad.
     Throw { value: Operand },
     /// Statically unreachable (e.g., after a `panic` with no catch).
@@ -191,8 +263,8 @@ pub enum Terminator {
 /// Merged value depends on which predecessor block was taken.
 #[derive(Debug, Clone)]
 pub struct PhiNode {
-    pub result:   LocalId,
-    pub ty:       MirTy,
+    pub result: LocalId,
+    pub ty: MirTy,
     /// `(predecessor block, operand in that predecessor)`
     pub operands: Vec<(BlockId, Operand)>,
 }
@@ -201,11 +273,11 @@ pub struct PhiNode {
 
 #[derive(Debug)]
 pub struct BasicBlock {
-    pub id:           BlockId,
+    pub id: BlockId,
     /// φ-nodes — must appear before all other instructions.
-    pub phis:         Vec<PhiNode>,
+    pub phis: Vec<PhiNode>,
     pub instructions: Vec<Instr>,
-    pub terminator:   Terminator,
+    pub terminator: Terminator,
 }
 
 impl BasicBlock {
@@ -233,11 +305,11 @@ pub struct MirParam {
 
 #[derive(Debug)]
 pub struct MirFunction {
-    pub id:          FunctionId,
-    pub name:        Symbol,
-    pub params:      Vec<MirParam>,
-    pub return_ty:   MirTy,
-    pub blocks:      Vec<BasicBlock>,
+    pub id: FunctionId,
+    pub name: Symbol,
+    pub params: Vec<MirParam>,
+    pub return_ty: MirTy,
+    pub blocks: Vec<BasicBlock>,
     /// Total number of SSA locals allocated (used to size `locals` array at runtime).
     pub local_count: u32,
 }
@@ -277,6 +349,22 @@ impl MirFunction {
     }
 }
 
+// ── Object class metadata ─────────────────────────────────────────────────────
+
+/// Object class information embedded in the MIR so the interpreter does not
+/// need the HIR at runtime.
+#[derive(Debug)]
+pub struct MirObjectInfo {
+    pub name: Symbol,
+    pub parent: Option<Symbol>,
+    /// Ordered field names (index == slot index in FidanObject).
+    pub field_names: Vec<Symbol>,
+    /// Own-method dispatch: `method_sym → FunctionId`.
+    pub methods: std::collections::HashMap<Symbol, FunctionId>,
+    /// The `initialize` FunctionId (if any).
+    pub init_fn: Option<FunctionId>,
+}
+
 // ── Program ───────────────────────────────────────────────────────────────────
 
 /// The entire program as a collection of MIR functions.
@@ -285,10 +373,14 @@ impl MirFunction {
 #[derive(Debug, Default)]
 pub struct MirProgram {
     pub functions: Vec<MirFunction>,
+    /// Object class metadata.  Empty if no objects are defined.
+    pub objects: Vec<MirObjectInfo>,
 }
 
 impl MirProgram {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// Register a new function and return its `FunctionId`.
     pub fn add_function(&mut self, f: MirFunction) -> FunctionId {

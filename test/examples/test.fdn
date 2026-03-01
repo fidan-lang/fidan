@@ -10,7 +10,7 @@ var x oftype integer # declare a variable with an explicit type, but without ini
 object Creature {
     var species oftype string = "Unknown"
 
-    action initialize with (species oftype string default "Unknown") { # If nothing is passed for species, it defaults to "Unknown" (if `nothing` is passed, it will NOT be treated as "Unknown"!!!)
+    new with (optional species oftype string default "Unknown") { # If nothing is passed for species, it defaults to "Unknown" (if `nothing` is passed, it will NOT be treated as "Unknown"!!!)
         this.species = species
     }
 
@@ -26,11 +26,11 @@ object Person extends Creature {
     # Can use `also` or `,` to separate parameters in the same parameter list
     # `required` means the parameter must be passed when calling the action, otherwise it will throw an error
     # You can wrap parameters in parentheses to group them together for readability, but it's not required
-    action initialize with (required name oftype string also optional age oftype integer = 18) returns nothing { # `=` is an alias for `default` or rather `set`
+    new with (required name oftype string also optional age oftype integer = 18) { # `=` is an alias for `default` or rather `set`
         this.name = name
         this.age = age
 
-        parent.initialize(species set "Human")
+        parent(species set "Human")
     }
 
     action introduce returns nothing {

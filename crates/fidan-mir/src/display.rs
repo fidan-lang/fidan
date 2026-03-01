@@ -111,6 +111,12 @@ fn print_instr(instr: &Instr) {
         Instr::Nop => {
             println!("    nop");
         }
+        Instr::PushCatch(bb) => {
+            println!("    push_catch bb{}", bb.0);
+        }
+        Instr::PopCatch => {
+            println!("    pop_catch");
+        }
     }
 }
 
@@ -163,9 +169,10 @@ fn fmt_op(op: &Operand) -> String {
 
 fn fmt_callee(callee: &Callee) -> String {
     match callee {
-        Callee::Fn(id)                   => format!("fn{}", id.0),
-        Callee::Method { receiver, method } => format!("{}.{}", fmt_op(receiver), sym_str(method.0)),
-        Callee::Dynamic(op)              => format!("dyn({})", fmt_op(op)),
+        Callee::Fn(id)                       => format!("fn{}", id.0),
+        Callee::Method { receiver, method }  => format!("{}.{}", fmt_op(receiver), sym_str(method.0)),
+        Callee::Builtin(sym)                 => format!("builtin({})", sym_str(sym.0)),
+        Callee::Dynamic(op)                  => format!("dyn({})", fmt_op(op)),
     }
 }
 
@@ -207,6 +214,7 @@ fn fmt_rvalue(rv: &Rvalue) -> String {
             format!("\"{}\"", s)
         }
         Rvalue::Literal(lit)  => fmt_op(&Operand::Const(lit.clone())),
+        Rvalue::CatchException => "catch_exception".to_string(),
     }
 }
 

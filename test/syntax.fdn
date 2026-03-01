@@ -605,7 +605,11 @@ action main {
 
     # All sections
     demonstrateControlFlow()
-    demonstrateErrors()
+    attempt {
+        demonstrateErrors()
+    } catch err {
+        print("Caught re-throw from demonstrateErrors: {err}")
+    }
     demonstrateMatch()
     demonstrateConcurrency()
     demonstrateCalls()

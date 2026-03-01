@@ -1,4 +1,4 @@
-use fidan_runtime::{FidanString, FidanValue};
+use fidan_runtime::{FidanString, FidanValue, SharedRef};
 use std::io::BufRead;
 
 /// Try to handle a call to a built-in function.
@@ -89,6 +89,17 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "type" => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Some(FidanValue::String(FidanString::new(v.type_name())))
+        }
+        _ => None,
+    }
+}
+
+/// Try to handle a call to a builtin type constructor (e.g. `Shared(val)`).
+pub fn call_builtin_constructor(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
+    match name {
+        "Shared" => {
+            let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            Some(FidanValue::Shared(SharedRef::new(inner)))
         }
         _ => None,
     }

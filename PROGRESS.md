@@ -273,7 +273,7 @@
 ### `fidan-interp`
 | Item | Status | Notes |
 |---|---|---|
-| MIR walker / eval loop | ⬜ | Phase 6 — when HIR/MIR lowering is done |
+| MIR walker / eval loop (`mir_interp.rs`) | ✅ | Full SSA-form MIR interpreter: `MirMachine` runs `call_function` / `run_function`; φ-node resolution; all `Rvalue` variants; try/catch landing pads; method dispatch (`Callee::Method`/`Callee::Fn`/`Callee::Builtin`); object construction (`Rvalue::Construct`) + class table from `MirObjectInfo` |
 | Call stack + `CallFrame` | ✅ | `env.rs` frame stack; `frame.rs` Signal enum |
 | Built-in functions (`print`, `input`, `len`, etc.) | ✅ | `builtins.rs` — print, input, len, string, integer, float, boolean, range, append |
 | AST-walking interpreter (Phase 5 bootstrap) | ✅ | `interp.rs` — full eval_expr / exec_stmt; `fidan run test.fdn` works end-to-end |
@@ -320,10 +320,12 @@
 
 | Item | Status | Notes |
 |---|---|---|
-| `ConstantFolding` | ⬜ | |
-| `DeadCodeElimination` | ⬜ | |
-| `CopyPropagation` | ⬜ | |
-| `UnreachablePruning` | ⬜ | |
+| `ConstantFolding` | ✅ | Folds integer/float/boolean/string binary and unary constant expressions; emitted as `Rvalue::Literal` |
+| `DeadCodeElimination` | ✅ | Removes unused locals (written but never read after analysis over all BBs) |
+| `CopyPropagation` | ✅ | Replaces `_a = _b; … use _a` with direct use of `_b` across a function |
+| `UnreachablePruning` | ✅ | Removes basic blocks with `Terminator::Unreachable` and dead successors |
+| `run_all()` pass manager | ✅ | `fidan-passes/src/lib.rs` — runs all 4 passes in order on a `MirProgram` |
+| CLI wiring | ✅ | `fidan run` pipeline: HIR → MIR → `run_all(&mut mir)` → `run_mir(mir)` |
 | Benchmark before/after | ⬜ | |
 
 ---
@@ -426,4 +428,4 @@ _None._
 
 ---
 
-*Last updated: 2026-02-28 — Phase 5 HIR/MIR complete: full `HirModule` type system; AST→HIR lowering (`lower_module`); `TypedModule` from typeck with per-expression type map; full MIR type system (SSA `BasicBlock`/`PhiNode`/`MirFunction`/`MirProgram`); HIR→MIR Braun-style SSA lowering (`lower_program`) with φ-nodes at if/else joins and back-patched loop headers; `display::print_program` for MIR text dump; `--emit hir` and `--emit mir` both wired into CLI and verified on `test/examples/test.fdn`. Previous: Phase 5 leftovers + Phase 10 CLI gaps: runtime call-stack capture; `--trace` flag; REPL commands; `fidan check/fix/explain`.*
+*Last updated: 2026-03-01 — Phase 6 optimization passes complete (constant folding, dead code elimination, copy propagation, unreachable pruning — all 4 in `fidan-passes`); MIR interpreter complete (`fidan-interp/src/mir_interp.rs`); `fidan run` now executes the full MIR pipeline (HIR → MIR → optimization passes → MIR interpreter); `test/examples/test.fdn` produces all 7 expected output lines correctly. Key MIR lowering fixes: per-class `method_ids` map prevents function-ID collision for same-named methods across classes; `this` parameter added as implicit param 0 for all object methods; `HirExprKind::This`/`Parent` lower to the `this` local register; `parent.method(args)` lowers to a direct `Callee::Fn(parent_fn_id)` call (not virtual dispatch); parameter stubs (`_N = nothing`) removed from function bodies — the frame pre-initialises all locals + call ABI fills params before bb0 runs. Previous: Phase 5 HIR/MIR complete.*

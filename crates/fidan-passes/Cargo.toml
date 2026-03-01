@@ -5,4 +5,5 @@ edition.workspace = true
 
 [dependencies]
 fidan-source = { workspace = true }
+fidan-ast = { workspace = true }
 fidan-mir = { workspace = true }

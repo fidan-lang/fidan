@@ -456,7 +456,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     if opts.emit.contains(&EmitKind::Mir) {
         if let Some(ref tm) = typed_module {
             let hir = fidan_hir::lower_module(&module, tm);
-            let mir = fidan_mir::lower_program(&hir);
+            let mir = fidan_mir::lower_program(&hir, &interner);
             println!("=== mir: {source_name} ===");
             println!("  functions: {}", mir.functions.len());
             fidan_mir::print_program(&mir);
@@ -485,7 +485,17 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     match opts.mode {
         ExecutionMode::Interpret => {
             if error_count == 0 {
-                if let Err(err) = fidan_interp::run(&module, Arc::clone(&interner)) {
+                // ── MIR pipeline (Phase 6) ────────────────────────────────────
+                let result = if let Some(ref tm) = typed_module {
+                    let hir = fidan_hir::lower_module(&module, tm);
+                    let mut mir = fidan_mir::lower_program(&hir, &interner);
+                    fidan_passes::run_all(&mut mir);
+                    fidan_interp::run_mir(mir, Arc::clone(&interner))
+                } else {
+                    // Fallback: should never happen since error_count == 0 implies typed_module.
+                    Ok(())
+                };
+                if let Err(err) = result {
                     render_message_to_stderr(
                         Severity::Error,
                         fidan_diagnostics::diag_code!("R0001"),
