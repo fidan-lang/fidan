@@ -66,7 +66,11 @@ enum Command {
     /// Run `test { ... }` blocks in a Fidan source file
     Test { file: PathBuf },
     /// Start an interactive REPL (lex + parse + typecheck each line)
-    Repl,
+    Repl {
+        /// Print the call stack on uncaught panics: none | short | full | compact
+        #[arg(long, default_value = "short")]
+        trace: String,
+    },
     /// Start the language server (LSP)
     Lsp,
     /// Check a Fidan source file for errors without running it
@@ -303,7 +307,10 @@ fn main() -> Result<()> {
             run_explain(&code);
             Ok(())
         }
-        Command::Repl => run_repl(),
+        Command::Repl { trace } => {
+            let trace_mode = parse_trace(&trace)?;
+            run_repl(trace_mode)
+        }
         Command::Lsp => {
             render_message_to_stderr(
                 Severity::Note,
@@ -311,6 +318,57 @@ fn main() -> Result<()> {
                 "LSP server not yet implemented (Phase 10)",
             );
             Ok(())
+        }
+    }
+}
+
+// ── Shared trace renderer ────────────────────────────────────────────────────────────
+
+/// Print the call-stack trace for a runtime error according to `mode`.
+/// Does nothing when `mode` is `None` or the trace is empty.
+fn render_trace_to_stderr(trace: &[fidan_interp::TraceFrame], mode: TraceMode) {
+    if trace.is_empty() || mode == TraceMode::None {
+        return;
+    }
+    if mode == TraceMode::Compact {
+        let names: Vec<String> = trace
+            .iter()
+            .map(|f| f.label.split('(').next().unwrap_or(&f.label).to_string())
+            .collect();
+        eprintln!("  stack: {}", names.join(" ← "));
+    } else {
+        let frames = match mode {
+            TraceMode::Short => &trace[..trace.len().min(5)],
+            _ => trace,
+        };
+        eprintln!("  stack trace (innermost first):");
+        for (i, frame) in frames.iter().enumerate() {
+            let display = match mode {
+                TraceMode::Short => frame
+                    .label
+                    .split('(')
+                    .next()
+                    .unwrap_or(&frame.label)
+                    .to_string(),
+                _ => frame.label.clone(),
+            };
+            let relation = if i == 0 {
+                "  ← panicked here".to_string()
+            } else if let Some(caller) = frames.get(i + 1) {
+                let caller_name = caller.label.split('(').next().unwrap_or(&caller.label);
+                format!("  ← called by {caller_name}")
+            } else {
+                String::new()
+            };
+            eprintln!("    #{i}  {display}{relation}");
+            if mode == TraceMode::Full {
+                if let Some(ref loc) = frame.location {
+                    eprintln!("         at {loc}");
+                }
+            }
+        }
+        if matches!(mode, TraceMode::Short) && trace.len() > 5 {
+            eprintln!("    ... {} more frames omitted", trace.len() - 5);
         }
     }
 }
@@ -508,7 +566,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                     let hir = fidan_hir::lower_module(&module, tm, &interner);
                     let mut mir = fidan_mir::lower_program(&hir, &interner);
                     fidan_passes::run_all(&mut mir);
-                    fidan_interp::run_mir(mir, Arc::clone(&interner))
+                    fidan_interp::run_mir(mir, Arc::clone(&interner), Arc::clone(&source_map))
                 } else {
                     // Fallback: should never happen since error_count == 0 implies typed_module.
                     Ok(())
@@ -520,24 +578,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                         &err.message,
                     );
                     if !err.trace.is_empty() && opts.trace != TraceMode::None {
-                        let frames: &[String] = match opts.trace {
-                            TraceMode::Short => &err.trace[..err.trace.len().min(5)],
-                            _ => &err.trace,
-                        };
-                        if opts.trace == TraceMode::Compact {
-                            eprintln!("  stack: {}", frames.join(" ← "));
-                        } else {
-                            eprintln!("  stack trace (innermost first):");
-                            for (i, frame) in frames.iter().enumerate() {
-                                if i == 0 {
-                                    eprintln!("    #{i}  {frame}  ← panicked here");
-                                } else if let Some(outer) = frames.get(i + 1) {
-                                    eprintln!("    #{i}  {frame}  ← called by {outer}");
-                                } else {
-                                    eprintln!("    #{i}  {frame}");
-                                }
-                            }
-                        }
+                        render_trace_to_stderr(&err.trace, opts.trace);
                     }
                 }
             }
@@ -619,7 +660,7 @@ impl rustyline::highlight::Highlighter for ReplHelper {
 /// [`TypeChecker`] accumulates symbol definitions across lines so names defined
 /// on line N are visible on line N+1.  The interpreter runs after every clean
 /// type-check so side effects (print, etc.) are visible immediately.
-fn run_repl() -> Result<()> {
+fn run_repl(trace_mode: TraceMode) -> Result<()> {
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
     use rustyline::error::ReadlineError;
@@ -846,16 +887,17 @@ fn run_repl() -> Result<()> {
             tc.check_module(&module);
             let type_diags = tc.drain_diags();
             if type_diags.is_empty() {
-                match fidan_interp::run_repl_line(&mut repl_state, &module) {
+                match fidan_interp::run_repl_line(&mut repl_state, module) {
                     Ok(Some(echo)) => println!("{echo}"),
                     Ok(None) => {}
-                    Err(msg) => {
+                    Err(e) => {
                         render_message_to_stderr(
                             Severity::Error,
                             fidan_diagnostics::diag_code!("R0001"),
-                            &msg,
+                            &e.message,
                         );
-                        error_history.push(msg);
+                        render_trace_to_stderr(&e.trace, trace_mode);
+                        error_history.push(e.message);
                     }
                 }
             } else {

@@ -28,6 +28,11 @@ use crate::frame::{InterpResult, Signal};
 struct FuncDef {
     params: Vec<Param>,
     body: Vec<StmtId>,
+    /// Raw address of the [`AstArena`] that owns this body's nodes,
+    /// stored as `usize` so that `FuncDef` stays `Send + Sync`.
+    /// Kept alive by `ReplState::old_modules` (REPL) or the module
+    /// that owns the current compilation (single-file run).
+    arena_addr: usize,
 }
 
 /// Class definition: layout + method table.
@@ -42,8 +47,10 @@ struct ClassDef {
 
 // ── Public interpreter struct ─────────────────────────────────────────────────
 
-pub struct Interpreter<'m> {
-    arena: &'m AstArena,
+pub struct Interpreter {
+    /// Raw address of the currently-active [`AstArena`].  Swapped on each
+    /// `exec_callable` invocation to the arena that owns the callee's nodes.
+    arena_addr: usize,
     interner: Arc<SymbolInterner>,
 
     /// Top-level `action` declarations.
@@ -62,14 +69,14 @@ pub struct Interpreter<'m> {
     sym_initialize: Symbol,
 }
 
-impl<'m> Interpreter<'m> {
+impl Interpreter {
     // ── Construction ──────────────────────────────────────────────────────────
 
-    fn new(module: &'m Module, interner: Arc<SymbolInterner>) -> Self {
+    fn new(module: &Module, interner: Arc<SymbolInterner>) -> Self {
         let sym_initialize = interner.intern("new");
 
         let mut interp = Interpreter {
-            arena: &module.arena,
+            arena_addr: &module.arena as *const _ as usize,
             interner: Arc::clone(&interner),
             functions: HashMap::new(),
             ext_actions: HashMap::new(),
@@ -82,11 +89,31 @@ impl<'m> Interpreter<'m> {
         interp
     }
 
+    // ── Arena accessor ─────────────────────────────────────────────────────
+
+    /// Borrow the currently-active [`AstArena`].
+    ///
+    /// # Safety
+    /// The address was captured on construction or swapped in from a
+    /// `FuncDef`.  Both cases guarantee the arena outlives this borrow.
+    /// The returned `'static` lifetime is a deliberate unsafety: the actual
+    /// lifetime is that of the arena in `old_modules` (REPL) or the current
+    /// module (single-file run), both of which outlive any call into the
+    /// interpreter.  Using `'static` (rather than `'_`) keeps the borrow off
+    /// `self`, matching the semantics of the original `&'m AstArena` field
+    /// and allowing `self` to be mutated while an arena reference is live.
+    #[inline]
+    #[allow(clippy::mut_from_ref)]
+    fn ar(&self) -> &'static AstArena {
+        unsafe { &*(self.arena_addr as *const AstArena) }
+    }
+
     // ── Registration pass ─────────────────────────────────────────────────────
 
     fn register_module(&mut self, module: &Module) {
+        // During registration the arena_addr must already point at module.arena.
         for &iid in &module.items {
-            match self.arena.get_item(iid) {
+            match self.ar().get_item(iid) {
                 Item::ObjectDecl {
                     name,
                     parent,
@@ -99,7 +126,7 @@ impl<'m> Interpreter<'m> {
 
                     let mut mmap: HashMap<Symbol, FuncDef> = HashMap::new();
                     for &mid in methods {
-                        match self.arena.get_item(mid) {
+                        match self.ar().get_item(mid) {
                             Item::ActionDecl {
                                 name: mname,
                                 params,
@@ -111,6 +138,7 @@ impl<'m> Interpreter<'m> {
                                     FuncDef {
                                         params: params.clone(),
                                         body: body.clone(),
+                                        arena_addr: self.arena_addr,
                                     },
                                 );
                             }
@@ -136,6 +164,7 @@ impl<'m> Interpreter<'m> {
                         FuncDef {
                             params: params.clone(),
                             body: body.clone(),
+                            arena_addr: self.arena_addr,
                         },
                     );
                 }
@@ -152,6 +181,7 @@ impl<'m> Interpreter<'m> {
                         FuncDef {
                             params: params.clone(),
                             body: body.clone(),
+                            arena_addr: self.arena_addr,
                         },
                     );
                 }
@@ -172,7 +202,7 @@ impl<'m> Interpreter<'m> {
     fn run_module_repl(&mut self, module: &Module) -> InterpResult<Option<FidanValue>> {
         let mut last_expr_val: Option<FidanValue> = None;
         for &iid in &module.items {
-            match self.arena.get_item(iid) {
+            match self.ar().get_item(iid) {
                 Item::VarDecl { name, init, .. } => {
                     let val = match init {
                         Some(eid) => self.eval_expr(*eid)?,
@@ -214,7 +244,7 @@ impl<'m> Interpreter<'m> {
 
     fn eval_expr(&mut self, id: ExprId) -> InterpResult<FidanValue> {
         // Clone to release the arena borrow before making recursive calls.
-        let expr = self.arena.get_expr(id).clone();
+        let expr = self.ar().get_expr(id).clone();
 
         match expr {
             // Literals –––––––––––––––––––––––––––––––––––––––––––––––––––––
@@ -348,7 +378,7 @@ impl<'m> Interpreter<'m> {
                 for arm in arms {
                     // Wildcard `_` always matches.
                     let is_wildcard = {
-                        let pexpr = self.arena.get_expr(arm.pattern).clone();
+                        let pexpr = self.ar().get_expr(arm.pattern).clone();
                         matches!(pexpr, Expr::Ident { name, .. } if {
                             let s = self.interner.resolve(name);
                             s.as_ref() == "_"
@@ -374,7 +404,7 @@ impl<'m> Interpreter<'m> {
     // ── Call dispatch ─────────────────────────────────────────────────────────
 
     fn eval_call(&mut self, callee_id: ExprId, args: Vec<Arg>) -> InterpResult<FidanValue> {
-        let callee = self.arena.get_expr(callee_id).clone();
+        let callee = self.ar().get_expr(callee_id).clone();
 
         match callee {
             // ── Ident call: free function, constructor, or builtin ───────
@@ -430,7 +460,7 @@ impl<'m> Interpreter<'m> {
                 field,
                 ..
             } => {
-                let obj_expr = self.arena.get_expr(obj_id).clone();
+                let obj_expr = self.ar().get_expr(obj_id).clone();
                 let is_parent_call = matches!(obj_expr, Expr::Parent { .. });
 
                 // Get the receiver object.
@@ -629,12 +659,18 @@ impl<'m> Interpreter<'m> {
                 format!("{name}({})", args_display.join(", "))
             }
         };
+        // Swap to the arena that owns this function's body nodes.
+        // Unconditionally restored below so panics/returns don't leave a
+        // stale pointer in place.
+        let saved_arena = self.arena_addr;
+        self.arena_addr = fdef.arena_addr;
         self.env.push_frame(Some(frame_label), this);
         for (sym, val) in locals {
             self.env.define(sym, val);
         }
         let result = self.exec_body(&fdef.body);
         self.env.pop_frame();
+        self.arena_addr = saved_arena;
         match result {
             Ok(v) | Err(Signal::Return(v)) => Ok(v),
             Err(e) => Err(e),
@@ -708,7 +744,7 @@ impl<'m> Interpreter<'m> {
     // ── Statement executor ────────────────────────────────────────────────────
 
     fn exec_stmt(&mut self, id: StmtId) -> InterpResult<FidanValue> {
-        let stmt = self.arena.get_stmt(id).clone();
+        let stmt = self.ar().get_stmt(id).clone();
 
         match stmt {
             Stmt::VarDecl { name, init, .. } => {
@@ -941,7 +977,7 @@ impl<'m> Interpreter<'m> {
                 let val = self.eval_expr(scrutinee)?;
                 for arm in &arms {
                     let is_wildcard = {
-                        let pexpr = self.arena.get_expr(arm.pattern).clone();
+                        let pexpr = self.ar().get_expr(arm.pattern).clone();
                         matches!(pexpr, Expr::Ident { name, .. } if {
                             let s = self.interner.resolve(name);
                             s.as_ref() == "_"
@@ -974,7 +1010,7 @@ impl<'m> Interpreter<'m> {
     // ── Assignment to an lvalue ───────────────────────────────────────────────
 
     fn eval_assign(&mut self, target_id: ExprId, value: FidanValue) -> InterpResult<()> {
-        let target = self.arena.get_expr(target_id).clone();
+        let target = self.ar().get_expr(target_id).clone();
         match target {
             Expr::Ident { name, .. } => {
                 if !self.env.assign(name, value.clone()) {
@@ -1347,13 +1383,23 @@ impl<'m> Interpreter<'m> {
 ///
 /// Prints to stdout via built-in `print`, returns `Ok(())` on success, or
 /// `Err(message)` if an uncaught `panic` terminates execution.
+
+/// A single frame in a stack trace.
+#[derive(Clone, Debug)]
+pub struct TraceFrame {
+    /// Function name with argument values: `inner(msg = "iteration 42")`
+    pub label: String,
+    /// Source location of the call site (`"file.fdn:2:5"`), if known.
+    pub location: Option<String>,
+}
+
 /// Error returned from [`run`] when an uncaught panic propagates to the top level.
 pub struct RunError {
     /// Short description of the panic value shown in the error message.
     pub message: String,
     /// Call stack at the moment of the panic, **innermost frame first**.
     /// Empty when the panic originated outside any named function.
-    pub trace: Vec<String>,
+    pub trace: Vec<TraceFrame>,
 }
 
 pub fn run(module: &Module, interner: Arc<SymbolInterner>) -> Result<(), RunError> {
@@ -1362,7 +1408,13 @@ pub fn run(module: &Module, interner: Arc<SymbolInterner>) -> Result<(), RunErro
         Ok(()) | Err(Signal::Return(_)) => Ok(()),
         Err(Signal::Panic { value, trace }) => Err(RunError {
             message: format!("runtime panic: {}", builtins::display(&value)),
-            trace,
+            trace: trace
+                .into_iter()
+                .map(|label| TraceFrame {
+                    label,
+                    location: None,
+                })
+                .collect(),
         }),
         Err(Signal::Break) => Err(RunError {
             message: "unexpected `break` outside a loop".to_string(),
@@ -1388,6 +1440,10 @@ pub struct ReplState {
     ext_actions: HashMap<Symbol, HashMap<Symbol, FuncDef>>,
     classes: HashMap<Symbol, ClassDef>,
     sym_initialize: Symbol,
+    /// Modules from previous REPL lines, kept alive so that the
+    /// `FuncDef::arena_addr` raw pointers remain valid.  Boxed so that
+    /// each module lives at a stable heap address even as the Vec grows.
+    old_modules: Vec<Box<Module>>,
 }
 
 /// Create a fresh [`ReplState`] for a new REPL session.
@@ -1400,6 +1456,7 @@ pub fn new_repl_state(interner: Arc<SymbolInterner>) -> ReplState {
         ext_actions: HashMap::new(),
         classes: HashMap::new(),
         sym_initialize,
+        old_modules: Vec::new(),
     }
 }
 
@@ -1411,10 +1468,22 @@ pub fn new_repl_state(interner: Arc<SymbolInterner>) -> ReplState {
 /// Returns `Ok(Some(display_string))` when the last item was a bare expression
 /// with a non-`Nothing` result — the caller should print that string.
 /// Returns `Ok(None)` for declarations, assignments, or `Nothing` results.
-pub fn run_repl_line(state: &mut ReplState, module: &Module) -> Result<Option<String>, String> {
+/// Execute one REPL line, taking ownership of the parsed [`Module`] so its
+/// arena remains valid for the lifetime of the [`ReplState`].
+///
+/// Returns `Ok(Some(display_string))` for bare expression results,
+/// `Ok(None)` for declarations / Nothing results, or `Err(RunError)` on
+/// panic — with a populated `trace` field when the error arose inside a
+/// named function.
+pub fn run_repl_line(state: &mut ReplState, module: Module) -> Result<Option<String>, RunError> {
+    // Heap-allocate the module so its arena sits at a stable address.  The
+    // raw pointer we store in `Interpreter.arena_addr` (and in any `FuncDef`
+    // registered during this line) stays valid even after the `Box` is
+    // appended to `old_modules` later.
+    let module = Box::new(module);
     // Swap persistent state into a temporary interpreter bound to this module.
     let mut interp = Interpreter {
-        arena: &module.arena,
+        arena_addr: &module.arena as *const _ as usize,
         interner: Arc::clone(&state.interner),
         functions: std::mem::take(&mut state.functions),
         ext_actions: std::mem::take(&mut state.ext_actions),
@@ -1423,13 +1492,15 @@ pub fn run_repl_line(state: &mut ReplState, module: &Module) -> Result<Option<St
         sym_initialize: state.sym_initialize,
     };
     // Register new top-level declarations from this line.
-    interp.register_module(module);
-    let result = interp.run_module_repl(module);
+    interp.register_module(&module);
+    let result = interp.run_module_repl(&module);
     // Write back persistent state regardless of success/failure.
     state.functions = interp.functions;
     state.ext_actions = interp.ext_actions;
     state.classes = interp.classes;
     state.env = interp.env;
+    // Keep the module alive so FuncDef::arena_addr pointers stay valid.
+    state.old_modules.push(module);
     match result {
         Ok(maybe_val) => {
             let echo = match maybe_val {
@@ -1439,10 +1510,23 @@ pub fn run_repl_line(state: &mut ReplState, module: &Module) -> Result<Option<St
             Ok(echo)
         }
         Err(Signal::Return(_)) => Ok(None),
-        Err(Signal::Panic { value, .. }) => {
-            Err(format!("runtime panic: {}", builtins::display(&value)))
-        }
-        Err(Signal::Break) => Err("unexpected `break` outside a loop".to_string()),
-        Err(Signal::Continue) => Err("unexpected `continue` outside a loop".to_string()),
+        Err(Signal::Panic { value, trace }) => Err(RunError {
+            message: format!("runtime panic: {}", builtins::display(&value)),
+            trace: trace
+                .into_iter()
+                .map(|label| TraceFrame {
+                    label,
+                    location: None,
+                })
+                .collect(),
+        }),
+        Err(Signal::Break) => Err(RunError {
+            message: "unexpected `break` outside a loop".to_string(),
+            trace: vec![],
+        }),
+        Err(Signal::Continue) => Err(RunError {
+            message: "unexpected `continue` outside a loop".to_string(),
+            trace: vec![],
+        }),
     }
 }

@@ -11,5 +11,5 @@ mod frame;
 mod interp;
 mod mir_interp;
 
-pub use interp::{ReplState, RunError, new_repl_state, run, run_repl_line};
+pub use interp::{ReplState, RunError, TraceFrame, new_repl_state, run, run_repl_line};
 pub use mir_interp::run_mir;

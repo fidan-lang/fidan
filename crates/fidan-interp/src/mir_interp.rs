@@ -19,9 +19,10 @@ use fidan_runtime::{
     FidanClass, FidanDict, FidanList, FidanObject, FidanPending, FidanString, FidanValue, FieldDef,
     FunctionId as RuntimeFnId, OwnedRef, ParallelArgs, ParallelCapture,
 };
+use fidan_source::{SourceMap, Span};
 
 use crate::builtins;
-use crate::interp::RunError;
+use crate::interp::{RunError, TraceFrame};
 
 // ── Object class table ────────────────────────────────────────────────────────
 
@@ -125,11 +126,18 @@ pub struct MirMachine {
     program: Arc<MirProgram>,
     interner: Arc<SymbolInterner>,
     classes: std::collections::HashMap<Symbol, Arc<FidanClass>>,
-    /// Names of all currently executing functions, outermost first.
-    call_stack: Vec<String>,
+    /// Source map for resolving spans to file/line/col in stack traces.
+    source_map: Arc<SourceMap>,
+    /// Names + call-site spans of all currently executing functions, outermost first.
+    /// Each entry is `(full_label, call_site_span)` where the span is where *this*
+    /// function was called from (i.e. the `Instr::Call` span in the caller).
+    call_stack: Vec<(String, Option<Span>)>,
+    /// Span of the `Instr::Call` currently being dispatched — consumed by the
+    /// next `call_function` invocation to annotate its stack frame.
+    pending_call_span: Option<Span>,
     /// Call stack snapshot at the point of the first uncaught panic/throw,
     /// innermost first.  Populated once and never overwritten.
-    panic_trace: Vec<String>,
+    panic_trace: Vec<TraceFrame>,
 }
 
 // SAFETY: All fields are either `Arc<T>` (Send+Sync when T:Send+Sync) or a
@@ -138,13 +146,19 @@ pub struct MirMachine {
 unsafe impl Send for MirMachine {}
 
 impl MirMachine {
-    pub fn new(program: Arc<MirProgram>, interner: Arc<SymbolInterner>) -> Self {
+    pub fn new(
+        program: Arc<MirProgram>,
+        interner: Arc<SymbolInterner>,
+        source_map: Arc<SourceMap>,
+    ) -> Self {
         let classes = build_class_table(&program.objects, &interner);
         Self {
             program,
             interner,
             classes,
+            source_map,
             call_stack: Vec::new(),
+            pending_call_span: None,
             panic_trace: Vec::new(),
         }
     }
@@ -159,7 +173,9 @@ impl MirMachine {
             program: Arc::clone(&self.program),
             interner: Arc::clone(&self.interner),
             classes: self.classes.clone(),
+            source_map: Arc::clone(&self.source_map),
             call_stack: Vec::new(),
+            pending_call_span: None,
             panic_trace: Vec::new(),
         }
     }
@@ -198,13 +214,29 @@ impl MirMachine {
 
         let mut frame = CallFrame::new(local_count, fn_name.clone());
 
-        // Bind parameters.
+        // Bind parameters and build a rich call-site label: `name(param = val, ...)`.
+        let mut arg_parts: Vec<String> = Vec::new();
         for (i, param) in func.params.iter().enumerate() {
             let val = args.get(i).cloned().unwrap_or(FidanValue::Nothing);
+            let pname = self.sym_str(param.name).to_string();
+            let vdisplay = match &val {
+                fidan_runtime::FidanValue::String(_) => {
+                    format!("{:?}", builtins::display(&val))
+                }
+                _ => builtins::display(&val),
+            };
+            arg_parts.push(format!("{pname} = {vdisplay}"));
             frame.store(param.local, val);
         }
+        let full_label = if arg_parts.is_empty() {
+            format!("{fn_name}()")
+        } else {
+            format!("{fn_name}({})", arg_parts.join(", "))
+        };
 
-        self.call_stack.push(fn_name);
+        // Consume the call-site span set by exec_instr just before calling us.
+        let call_site_span = self.pending_call_span.take();
+        self.call_stack.push((full_label, call_site_span));
 
         // Block-level execution starting at entry (BlockId(0)).
         let result = self.run_function(fn_id, &mut frame);
@@ -218,8 +250,18 @@ impl MirMachine {
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i > 0) // skip entry function at index 0
-                .map(|(_, s)| s.clone())
                 .rev()
+                .map(|(_, (label, span))| {
+                    let location = span.map(|s| {
+                        let file = self.source_map.get(s.file);
+                        let (line, col) = file.line_col(s.start);
+                        format!("{}:{}:{}", file.name, line, col)
+                    });
+                    TraceFrame {
+                        label: label.clone(),
+                        location,
+                    }
+                })
                 .collect();
         }
 
@@ -336,8 +378,13 @@ impl MirMachine {
                 frame.store(dest, val);
             }
             Instr::Call {
-                dest, callee, args, ..
+                dest,
+                callee,
+                args,
+                span,
             } => {
+                // Record the call-site span so call_function can attach it to the frame.
+                self.pending_call_span = Some(span);
                 let arg_vals: Vec<FidanValue> =
                     args.iter().map(|a| self.eval_operand(a, frame)).collect();
                 let result = self.dispatch_call(&callee, arg_vals, frame)?;
@@ -1004,7 +1051,11 @@ fn eval_unary(op: UnOp, v: FidanValue) -> Result<FidanValue, MirSignal> {
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /// Run a `MirProgram` from its entry function.
-pub fn run_mir(program: MirProgram, interner: Arc<SymbolInterner>) -> Result<(), RunError> {
-    let mut machine = MirMachine::new(Arc::new(program), interner);
+pub fn run_mir(
+    program: MirProgram,
+    interner: Arc<SymbolInterner>,
+    source_map: Arc<SourceMap>,
+) -> Result<(), RunError> {
+    let mut machine = MirMachine::new(Arc::new(program), interner, source_map);
     machine.run()
 }
