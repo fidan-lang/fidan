@@ -2,8 +2,8 @@
 use std::sync::Arc;
 
 use fidan_ast::{
-    BinOp, Expr, Item, ItemId, Module, Stmt, StmtId,
-    CatchClause, CheckArm, Decorator, ElseIf, FieldDecl, Param, Task, TypeExpr,
+    BinOp, CatchClause, CheckArm, Decorator, ElseIf, Expr, FieldDecl, Item, ItemId, Module, Param,
+    Stmt, StmtId, Task, TypeExpr,
 };
 use fidan_diagnostics::Diagnostic;
 use fidan_lexer::{Symbol, SymbolInterner, Token, TokenKind};
@@ -16,35 +16,35 @@ use fidan_source::{FileId, Span};
 pub(crate) const MAX_ERRORS: usize = 50;
 
 pub struct Parser<'t> {
-    pub(crate) tokens:       &'t [Token],
-    pub(crate) pos:          usize,
-    pub(crate) module:       Module,
-    pub(crate) diags:        Vec<Diagnostic>,
-    pub(crate) interner:     Arc<SymbolInterner>,
+    pub(crate) tokens: &'t [Token],
+    pub(crate) pos: usize,
+    pub(crate) module: Module,
+    pub(crate) diags: Vec<Diagnostic>,
+    pub(crate) interner: Arc<SymbolInterner>,
     /// When `true`, the parser is in post-error recovery mode.
     /// Further errors are suppressed until `synchronize()` resets this flag,
     /// preventing one bad token from producing hundreds of cascade diagnostics.
-    pub(crate) recovering:   bool,
+    pub(crate) recovering: bool,
     /// When `true`, the parser has hit the error cap and should unwind immediately.
     /// Checked by all major parsing loops to avoid infinite recovery cycles.
-    pub(crate) bail:         bool,
+    pub(crate) bail: bool,
     // Contextual keyword symbols (interned once at construction)
-    pub(crate) sym_with:     Symbol,
-    pub(crate) sym_returns:  Symbol,
-    pub(crate) sym_default:  Symbol,
-    pub(crate) sym_else:     Symbol,
+    pub(crate) sym_with: Symbol,
+    pub(crate) sym_returns: Symbol,
+    pub(crate) sym_default: Symbol,
+    pub(crate) sym_else: Symbol,
     /// Sub-token stream for string-interpolation fragment re-lexing.
     /// When `Some`, `peek` / `advance` / `current_span` read from the fragment
     /// buffer instead of the main `tokens` slice.
-    pub(crate) fragment:     Option<(Vec<Token>, usize)>,
+    pub(crate) fragment: Option<(Vec<Token>, usize)>,
 }
 
 impl<'t> Parser<'t> {
     pub fn new(tokens: &'t [Token], file_id: FileId, interner: Arc<SymbolInterner>) -> Self {
-        let sym_with    = interner.intern("with");
+        let sym_with = interner.intern("with");
         let sym_returns = interner.intern("returns");
         let sym_default = interner.intern("default");
-        let sym_else    = interner.intern("else");
+        let sym_else = interner.intern("else");
         Self {
             tokens,
             pos: 0,
@@ -91,11 +91,15 @@ impl<'t> Parser<'t> {
     pub(crate) fn advance(&mut self) -> Token {
         if let Some((ref toks, ref mut pos)) = self.fragment {
             let tok = toks[*pos].clone();
-            if *pos + 1 < toks.len() { *pos += 1; }
+            if *pos + 1 < toks.len() {
+                *pos += 1;
+            }
             tok
         } else {
             let tok = self.tokens[self.pos].clone();
-            if self.pos + 1 < self.tokens.len() { self.pos += 1; }
+            if self.pos + 1 < self.tokens.len() {
+                self.pos += 1;
+            }
             tok
         }
     }
@@ -185,7 +189,7 @@ impl<'t> Parser<'t> {
     /// `obj.new`) — same rule as Python, Swift, Kotlin, etc.
     pub(crate) fn expect_field_name(&mut self) -> Symbol {
         let span = self.current_span();
-        let tok  = self.peek().clone();
+        let tok = self.peek().clone();
         if let TokenKind::Ident(sym) = tok {
             self.advance();
             return sym;
@@ -202,7 +206,9 @@ impl<'t> Parser<'t> {
 
     pub fn parse_module(&mut self) {
         loop {
-            if self.bail { break; }
+            if self.bail {
+                break;
+            }
             self.skip_terminators();
             if matches!(self.peek(), TokenKind::Eof) {
                 break;
@@ -225,9 +231,9 @@ impl<'t> Parser<'t> {
         let _decs = self.parse_decorators();
         self.skip_terminators(); // skip any newlines between decorator and declaration
         match self.peek().clone() {
-            TokenKind::Object   => Some(self.parse_object_decl()),
-            TokenKind::Action   => Some(self.parse_action_decl(false)),
-            TokenKind::Use    => Some(self.parse_use_decl(false)),
+            TokenKind::Object => Some(self.parse_object_decl()),
+            TokenKind::Action => Some(self.parse_action_decl(false)),
+            TokenKind::Use => Some(self.parse_use_decl(false)),
             TokenKind::Export => {
                 self.advance(); // eat `export`
                 if matches!(self.peek(), TokenKind::Use) {
@@ -249,7 +255,11 @@ impl<'t> Parser<'t> {
                 }
                 self.advance(); // eat `var`
                 let name = self.expect_ident_sym("expected variable name");
-                let ty   = if self.eat_type_ann() { Some(self.parse_type_expr()) } else { None };
+                let ty = if self.eat_type_ann() {
+                    Some(self.parse_type_expr())
+                } else {
+                    None
+                };
                 let init = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
                     self.advance();
                     Some(self.parse_expr())
@@ -259,7 +269,10 @@ impl<'t> Parser<'t> {
                 let end = self.current_span().end;
                 self.skip_one_terminator();
                 Some(self.module.arena.alloc_item(Item::VarDecl {
-                    name, ty, init, is_const: true,
+                    name,
+                    ty,
+                    init,
+                    is_const: true,
                     span: Span::new(self.module.file, start, end),
                 }))
             }
@@ -302,9 +315,13 @@ impl<'t> Parser<'t> {
                     let mut bindings = vec![];
                     loop {
                         self.skip_terminators();
-                        if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) { break; }
+                        if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+                            break;
+                        }
                         bindings.push(self.expect_ident_sym("expected binding name"));
-                        if !self.eat(&TokenKind::Comma) { break; }
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
                     }
                     self.expect_tok(&TokenKind::RParen);
                     if !matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
@@ -323,7 +340,11 @@ impl<'t> Parser<'t> {
                     }));
                 }
                 let name = self.expect_ident_sym("expected variable name");
-                let ty   = if self.eat_type_ann() { Some(self.parse_type_expr()) } else { None };
+                let ty = if self.eat_type_ann() {
+                    Some(self.parse_type_expr())
+                } else {
+                    None
+                };
                 let init = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
                     self.advance();
                     Some(self.parse_expr())
@@ -333,19 +354,22 @@ impl<'t> Parser<'t> {
                 let end = self.current_span().end;
                 self.skip_one_terminator();
                 Some(self.module.arena.alloc_item(Item::VarDecl {
-                    name, ty, init, is_const: false,
+                    name,
+                    ty,
+                    init,
+                    is_const: false,
                     span: Span::new(self.module.file, start, end),
                 }))
             }
             _ => {
                 // Top-level expression statement or assignment
                 let start = self.current_span().start;
-                let expr  = self.parse_expr();
+                let expr = self.parse_expr();
                 // `x = rhs` or `x set rhs` at module / REPL scope
                 if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
                     self.advance(); // eat `=` / `set`
                     let value = self.parse_expr();
-                    let end   = self.current_span().end;
+                    let end = self.current_span().end;
                     self.skip_one_terminator();
                     return Some(self.module.arena.alloc_item(Item::Assign {
                         target: expr,
@@ -355,9 +379,9 @@ impl<'t> Parser<'t> {
                 }
                 // Compound assignment at module scope: `x += rhs`, etc.
                 let compound_op = match self.peek() {
-                    TokenKind::PlusEq  => Some(BinOp::Add),
+                    TokenKind::PlusEq => Some(BinOp::Add),
                     TokenKind::MinusEq => Some(BinOp::Sub),
-                    TokenKind::StarEq  => Some(BinOp::Mul),
+                    TokenKind::StarEq => Some(BinOp::Mul),
                     TokenKind::SlashEq => Some(BinOp::Div),
                     _ => None,
                 };
@@ -366,11 +390,16 @@ impl<'t> Parser<'t> {
                     let rhs = self.parse_expr();
                     let end = self.current_span().end;
                     let span = Span::new(self.module.file, start, end);
-                    let bin_expr = self.module.arena.alloc_expr(Expr::Binary { op, lhs: expr, rhs, span });
+                    let bin_expr = self.module.arena.alloc_expr(Expr::Binary {
+                        op,
+                        lhs: expr,
+                        rhs,
+                        span,
+                    });
                     self.skip_one_terminator();
                     return Some(self.module.arena.alloc_item(Item::Assign {
                         target: expr,
-                        value:  bin_expr,
+                        value: bin_expr,
                         span,
                     }));
                 }
@@ -394,7 +423,9 @@ impl<'t> Parser<'t> {
                 let mut args = vec![];
                 while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
                     args.push(self.parse_expr());
-                    if !self.eat(&TokenKind::Comma) { break; }
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
                 }
                 self.expect_tok(&TokenKind::RParen);
                 args
@@ -402,7 +433,11 @@ impl<'t> Parser<'t> {
                 vec![]
             };
             let end = self.current_span().end;
-            decs.push(Decorator { name, args, span: Span::new(self.module.file, start, end) });
+            decs.push(Decorator {
+                name,
+                args,
+                span: Span::new(self.module.file, start, end),
+            });
         }
         decs
     }
@@ -412,7 +447,7 @@ impl<'t> Parser<'t> {
     fn parse_object_decl(&mut self) -> ItemId {
         let start = self.current_span().start;
         self.advance(); // eat `object`
-        let name   = self.expect_ident_sym("expected object name");
+        let name = self.expect_ident_sym("expected object name");
         let parent = if self.eat(&TokenKind::Extends) {
             Some(self.expect_ident_sym("expected parent name after `extends`"))
         } else {
@@ -421,7 +456,7 @@ impl<'t> Parser<'t> {
         self.skip_terminators();
         self.expect_tok(&TokenKind::LBrace);
 
-        let mut fields  = vec![];
+        let mut fields = vec![];
         let mut methods = vec![];
 
         loop {
@@ -451,19 +486,39 @@ impl<'t> Parser<'t> {
                         vec![]
                     };
                     self.skip_terminators();
+                    // `returns <type>` is invalid on a constructor — emit a
+                    // targeted error and skip the annotation so the block can
+                    // still be parsed (error recovery).
+                    if self.at_ident(self.sym_returns) {
+                        let returns_span = self.current_span();
+                        self.advance(); // eat `returns`
+                        self.parse_type_expr(); // consume and discard the type
+                        self.error(
+                            "constructors cannot declare a return type — the enclosing object is returned implicitly to the caller",
+                            returns_span,
+                        );
+                        self.recovering = false; // allow errors inside the block to surface
+                    }
                     let body = self.parse_block();
-                    let end  = self.current_span().end;
+                    let end = self.current_span().end;
                     let ctor_name = self.interner.intern("new");
                     let ctor_id = self.module.arena.alloc_item(Item::ActionDecl {
-                        name: ctor_name, params, return_ty: None, body,
-                        decorators: vec![], is_parallel: false,
+                        name: ctor_name,
+                        params,
+                        return_ty: None,
+                        body,
+                        decorators: vec![],
+                        is_parallel: false,
                         span: Span::new(self.module.file, item_start, end),
                     });
                     methods.push(ctor_id);
                 }
                 _ => {
                     let span = self.current_span();
-                    self.error("expected field (`var`) or method (`action`) in object body", span);
+                    self.error(
+                        "expected field (`var`) or method (`action`) in object body",
+                        span,
+                    );
                     self.synchronize();
                 }
             }
@@ -472,7 +527,10 @@ impl<'t> Parser<'t> {
         let end = self.current_span().end;
         self.expect_tok(&TokenKind::RBrace);
         self.module.arena.alloc_item(Item::ObjectDecl {
-            name, parent, fields, methods,
+            name,
+            parent,
+            fields,
+            methods,
             span: Span::new(self.module.file, start, end),
         })
     }
@@ -483,10 +541,12 @@ impl<'t> Parser<'t> {
         let start = self.current_span().start;
         self.advance(); // eat `var`
         let name = self.expect_ident_sym("expected field name");
-        let ty   = if self.eat_type_ann() {
+        let ty = if self.eat_type_ann() {
             self.parse_type_expr()
         } else {
-            TypeExpr::Dynamic { span: self.current_span() }
+            TypeExpr::Dynamic {
+                span: self.current_span(),
+            }
         };
         let default = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
             self.advance();
@@ -499,7 +559,13 @@ impl<'t> Parser<'t> {
         };
         let end = self.current_span().end;
         self.skip_one_terminator();
-        FieldDecl { name, ty, required: false, default, span: Span::new(self.module.file, start, end) }
+        FieldDecl {
+            name,
+            ty,
+            required: false,
+            default,
+            span: Span::new(self.module.file, start, end),
+        }
     }
 
     // ── Action declaration ────────────────────────────────────────────────────
@@ -534,18 +600,27 @@ impl<'t> Parser<'t> {
 
         self.skip_terminators();
         let body = self.parse_block();
-        let end  = self.current_span().end;
+        let end = self.current_span().end;
 
         if let Some(ext) = extends {
             self.module.arena.alloc_item(Item::ExtensionAction {
-                name, extends: ext, params, return_ty, body,
-                decorators: vec![], is_parallel,
+                name,
+                extends: ext,
+                params,
+                return_ty,
+                body,
+                decorators: vec![],
+                is_parallel,
                 span: Span::new(self.module.file, start, end),
             })
         } else {
             self.module.arena.alloc_item(Item::ActionDecl {
-                name, params, return_ty, body,
-                decorators: vec![], is_parallel,
+                name,
+                params,
+                return_ty,
+                body,
+                decorators: vec![],
+                is_parallel,
                 span: Span::new(self.module.file, start, end),
             })
         }
@@ -561,17 +636,27 @@ impl<'t> Parser<'t> {
         loop {
             self.skip_terminators();
             // Stop markers
-            if self.at_ident(self.sym_returns) { break; }
+            if self.at_ident(self.sym_returns) {
+                break;
+            }
             match self.peek() {
                 TokenKind::LBrace | TokenKind::Eof => break,
-                TokenKind::Comma => { self.advance(); continue; }
+                TokenKind::Comma => {
+                    self.advance();
+                    continue;
+                }
                 TokenKind::LParen => {
                     // Parenthesized sub-group: `(param, param)`
                     self.advance();
                     loop {
                         self.skip_terminators();
-                        if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) { break; }
-                        if matches!(self.peek(), TokenKind::Comma) { self.advance(); continue; }
+                        if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+                            break;
+                        }
+                        if matches!(self.peek(), TokenKind::Comma) {
+                            self.advance();
+                            continue;
+                        }
                         params.push(self.parse_single_param());
                     }
                     self.eat(&TokenKind::RParen);
@@ -590,10 +675,12 @@ impl<'t> Parser<'t> {
         let required = self.eat(&TokenKind::Required);
         let _optional = !required && self.eat(&TokenKind::Optional);
         let name = self.expect_ident_sym("expected parameter name");
-        let ty   = if self.eat_type_ann() {
+        let ty = if self.eat_type_ann() {
             self.parse_type_expr()
         } else {
-            TypeExpr::Dynamic { span: self.current_span() }
+            TypeExpr::Dynamic {
+                span: self.current_span(),
+            }
         };
         let default = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
             self.advance();
@@ -605,7 +692,13 @@ impl<'t> Parser<'t> {
             None
         };
         let end = self.current_span().end;
-        Param { name, ty, required, default, span: Span::new(self.module.file, start, end) }
+        Param {
+            name,
+            ty,
+            required,
+            default,
+            span: Span::new(self.module.file, start, end),
+        }
     }
 
     // ── Type expressions ──────────────────────────────────────────────────────
@@ -613,12 +706,21 @@ impl<'t> Parser<'t> {
     pub(crate) fn parse_type_expr(&mut self) -> TypeExpr {
         let span = self.current_span();
         match self.peek().clone() {
-            TokenKind::Dynamic  => { self.advance(); TypeExpr::Dynamic { span } }
-            TokenKind::Nothing  => { self.advance(); TypeExpr::Nothing { span } }
-            // `tuple` keyword — untyped tuple, elements unknown
-            TokenKind::Tuple    => {
+            TokenKind::Dynamic => {
                 self.advance();
-                TypeExpr::Tuple { elements: vec![], span }
+                TypeExpr::Dynamic { span }
+            }
+            TokenKind::Nothing => {
+                self.advance();
+                TypeExpr::Nothing { span }
+            }
+            // `tuple` keyword — untyped tuple, elements unknown
+            TokenKind::Tuple => {
+                self.advance();
+                TypeExpr::Tuple {
+                    elements: vec![],
+                    span,
+                }
             }
             TokenKind::Ident(name) => {
                 self.advance();
@@ -626,11 +728,11 @@ impl<'t> Parser<'t> {
                 // `list oftype T`, `list -> T`, `Shared oftype T`, etc.
                 if self.eat_type_ann() {
                     let param = self.parse_type_expr();
-                    let end   = param.span_end();
+                    let end = param.span_end();
                     TypeExpr::Oftype {
-                        base:  Box::new(base),
+                        base: Box::new(base),
                         param: Box::new(param),
-                        span:  Span::new(self.module.file, span.start, end),
+                        span: Span::new(self.module.file, span.start, end),
                     }
                 } else {
                     base
@@ -641,14 +743,16 @@ impl<'t> Parser<'t> {
                 let param = if self.eat_type_ann() {
                     self.parse_type_expr()
                 } else {
-                    TypeExpr::Dynamic { span: self.current_span() }
+                    TypeExpr::Dynamic {
+                        span: self.current_span(),
+                    }
                 };
-                let end  = param.span_end();
+                let end = param.span_end();
                 let name = self.interner.intern("Shared");
                 TypeExpr::Oftype {
-                    base:  Box::new(TypeExpr::Named { name, span }),
+                    base: Box::new(TypeExpr::Named { name, span }),
                     param: Box::new(param),
-                    span:  Span::new(self.module.file, span.start, end),
+                    span: Span::new(self.module.file, span.start, end),
                 }
             }
             TokenKind::Pending => {
@@ -656,14 +760,16 @@ impl<'t> Parser<'t> {
                 let param = if self.eat_type_ann() {
                     self.parse_type_expr()
                 } else {
-                    TypeExpr::Dynamic { span: self.current_span() }
+                    TypeExpr::Dynamic {
+                        span: self.current_span(),
+                    }
                 };
-                let end  = param.span_end();
+                let end = param.span_end();
                 let name = self.interner.intern("Pending");
                 TypeExpr::Oftype {
-                    base:  Box::new(TypeExpr::Named { name, span }),
+                    base: Box::new(TypeExpr::Named { name, span }),
                     param: Box::new(param),
-                    span:  Span::new(self.module.file, span.start, end),
+                    span: Span::new(self.module.file, span.start, end),
                 }
             }
             TokenKind::LParen => {
@@ -673,9 +779,13 @@ impl<'t> Parser<'t> {
                 let mut types: Vec<Box<TypeExpr>> = vec![];
                 loop {
                     self.skip_terminators();
-                    if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) { break; }
+                    if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+                        break;
+                    }
                     types.push(Box::new(self.parse_type_expr()));
-                    if !self.eat(&TokenKind::Comma) { break; }
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
                 }
                 let end = self.current_span().end;
                 self.eat(&TokenKind::RParen);
@@ -709,9 +819,13 @@ impl<'t> Parser<'t> {
                 let mut names = vec![];
                 loop {
                     self.skip_terminators();
-                    if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) { break; }
+                    if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
+                        break;
+                    }
                     names.push(self.expect_ident_sym("expected import name"));
-                    if !self.eat(&TokenKind::Comma) { break; }
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
                 }
                 self.eat(&TokenKind::RBrace);
                 grouped_names = Some(names);
@@ -730,7 +844,9 @@ impl<'t> Parser<'t> {
                 let mut full_path = path.clone();
                 full_path.push(name);
                 let id = self.module.arena.alloc_item(Item::Use {
-                    path: full_path, alias: None, re_export,
+                    path: full_path,
+                    alias: None,
+                    re_export,
                     span: Span::new(self.module.file, start, end),
                 });
                 if first_id.is_none() {
@@ -742,7 +858,9 @@ impl<'t> Parser<'t> {
             // If the group was empty, emit a single Use with the prefix path.
             first_id.unwrap_or_else(|| {
                 self.module.arena.alloc_item(Item::Use {
-                    path, alias: None, re_export,
+                    path,
+                    alias: None,
+                    re_export,
                     span: Span::new(self.module.file, start, end),
                 })
             })
@@ -753,7 +871,9 @@ impl<'t> Parser<'t> {
                 None
             };
             self.module.arena.alloc_item(Item::Use {
-                path, alias, re_export,
+                path,
+                alias,
+                re_export,
                 span: Span::new(self.module.file, start, end),
             })
         }
@@ -765,9 +885,13 @@ impl<'t> Parser<'t> {
         self.expect_tok(&TokenKind::LBrace);
         let mut stmts = vec![];
         loop {
-            if self.bail { break; }
+            if self.bail {
+                break;
+            }
             self.skip_terminators();
-            if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) { break; }
+            if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
             let pos_before = self.pos;
             if let Some(s) = self.parse_stmt() {
                 stmts.push(s);
@@ -785,17 +909,27 @@ impl<'t> Parser<'t> {
     pub fn parse_stmt(&mut self) -> Option<StmtId> {
         self.skip_terminators();
         let s = match self.peek().clone() {
-            TokenKind::Const    => self.parse_var_decl_stmt(true),
-            TokenKind::Var      => self.parse_var_decl_stmt(false),
-            TokenKind::Return   => self.parse_return_stmt(),
-            TokenKind::Break    => { let sp = self.current_span(); self.advance(); self.skip_one_terminator(); self.module.arena.alloc_stmt(Stmt::Break    { span: sp }) }
-            TokenKind::Continue => { let sp = self.current_span(); self.advance(); self.skip_one_terminator(); self.module.arena.alloc_stmt(Stmt::Continue { span: sp }) }
-            TokenKind::If       => self.parse_if_stmt(),
-            TokenKind::For      => self.parse_for_stmt(),
-            TokenKind::While    => self.parse_while_stmt(),
-            TokenKind::Attempt  => self.parse_attempt_stmt(),
-            TokenKind::Panic    => self.parse_panic_stmt(),
-            TokenKind::Check    => self.parse_check_stmt(),
+            TokenKind::Const => self.parse_var_decl_stmt(true),
+            TokenKind::Var => self.parse_var_decl_stmt(false),
+            TokenKind::Return => self.parse_return_stmt(),
+            TokenKind::Break => {
+                let sp = self.current_span();
+                self.advance();
+                self.skip_one_terminator();
+                self.module.arena.alloc_stmt(Stmt::Break { span: sp })
+            }
+            TokenKind::Continue => {
+                let sp = self.current_span();
+                self.advance();
+                self.skip_one_terminator();
+                self.module.arena.alloc_stmt(Stmt::Continue { span: sp })
+            }
+            TokenKind::If => self.parse_if_stmt(),
+            TokenKind::For => self.parse_for_stmt(),
+            TokenKind::While => self.parse_while_stmt(),
+            TokenKind::Attempt => self.parse_attempt_stmt(),
+            TokenKind::Panic => self.parse_panic_stmt(),
+            TokenKind::Check => self.parse_check_stmt(),
             TokenKind::Parallel => {
                 let span = self.current_span();
                 self.advance();
@@ -832,9 +966,13 @@ impl<'t> Parser<'t> {
             let mut bindings = vec![];
             loop {
                 self.skip_terminators();
-                if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) { break; }
+                if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+                    break;
+                }
                 bindings.push(self.expect_ident_sym("expected binding name"));
-                if !self.eat(&TokenKind::Comma) { break; }
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
             }
             self.expect_tok(&TokenKind::RParen);
             // Require `=` / `set`
@@ -845,7 +983,7 @@ impl<'t> Parser<'t> {
                 self.advance();
             }
             let value = self.parse_expr();
-            let end   = self.current_span().end;
+            let end = self.current_span().end;
             self.skip_one_terminator();
             return self.module.arena.alloc_stmt(Stmt::Destructure {
                 bindings,
@@ -855,7 +993,11 @@ impl<'t> Parser<'t> {
         }
 
         let name = self.expect_ident_sym("expected variable name");
-        let ty   = if self.eat_type_ann() { Some(self.parse_type_expr()) } else { None };
+        let ty = if self.eat_type_ann() {
+            Some(self.parse_type_expr())
+        } else {
+            None
+        };
         let init = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
             self.advance();
             Some(self.parse_expr())
@@ -865,7 +1007,10 @@ impl<'t> Parser<'t> {
         let end = self.current_span().end;
         self.skip_one_terminator();
         self.module.arena.alloc_stmt(Stmt::VarDecl {
-            name, ty, init, is_const,
+            name,
+            ty,
+            init,
+            is_const,
             span: Span::new(self.module.file, start, end),
         })
     }
@@ -873,14 +1018,20 @@ impl<'t> Parser<'t> {
     fn parse_return_stmt(&mut self) -> StmtId {
         let start = self.current_span().start;
         self.advance(); // eat `return`
-        let value = if !matches!(self.peek(), TokenKind::Newline | TokenKind::Semicolon | TokenKind::RBrace | TokenKind::Eof) {
+        let value = if !matches!(
+            self.peek(),
+            TokenKind::Newline | TokenKind::Semicolon | TokenKind::RBrace | TokenKind::Eof
+        ) {
             Some(self.parse_expr())
         } else {
             None
         };
         let end = self.current_span().end;
         self.skip_one_terminator();
-        self.module.arena.alloc_stmt(Stmt::Return { value, span: Span::new(self.module.file, start, end) })
+        self.module.arena.alloc_stmt(Stmt::Return {
+            value,
+            span: Span::new(self.module.file, start, end),
+        })
     }
 
     fn parse_panic_stmt(&mut self) -> StmtId {
@@ -888,10 +1039,13 @@ impl<'t> Parser<'t> {
         self.advance(); // eat `panic`
         self.expect_tok(&TokenKind::LParen);
         let value = self.parse_expr();
-        let end   = self.current_span().end;
+        let end = self.current_span().end;
         self.expect_tok(&TokenKind::RParen);
         self.skip_one_terminator();
-        self.module.arena.alloc_stmt(Stmt::Panic { value, span: Span::new(self.module.file, start, end) })
+        self.module.arena.alloc_stmt(Stmt::Panic {
+            value,
+            span: Span::new(self.module.file, start, end),
+        })
     }
 
     // ── Check / pattern-match statement ──────────────────────────────────────
@@ -912,14 +1066,19 @@ impl<'t> Parser<'t> {
         let mut arms = vec![];
         loop {
             self.skip_terminators();
-            if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) { break; }
+            if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
             let arm_start = self.current_span().start;
             // Pattern: `otherwise` becomes wildcard (`_`), else any expression
             let pattern = if matches!(self.peek(), TokenKind::Otherwise) {
                 let sp = self.current_span();
                 self.advance();
                 let wild = self.interner.intern("_");
-                self.module.arena.alloc_expr(Expr::Ident { name: wild, span: sp })
+                self.module.arena.alloc_expr(Expr::Ident {
+                    name: wild,
+                    span: sp,
+                })
             } else {
                 self.parse_expr()
             };
@@ -931,7 +1090,10 @@ impl<'t> Parser<'t> {
                 let expr = self.parse_expr();
                 let expr_span = self.module.arena.get_expr(expr).span();
                 self.skip_one_terminator();
-                vec![self.module.arena.alloc_stmt(Stmt::Expr { expr, span: expr_span })]
+                vec![self.module.arena.alloc_stmt(Stmt::Expr {
+                    expr,
+                    span: expr_span,
+                })]
             };
             let arm_end = self.current_span().end;
             arms.push(CheckArm {
@@ -943,11 +1105,11 @@ impl<'t> Parser<'t> {
         let end = self.current_span().end;
         self.expect_tok(&TokenKind::RBrace);
         self.module.arena.alloc_stmt(Stmt::Check {
-            scrutinee, arms,
+            scrutinee,
+            arms,
             span: Span::new(self.module.file, start, end),
         })
     }
-
 
     fn parse_if_stmt(&mut self) -> StmtId {
         let start = self.current_span().start;
@@ -956,7 +1118,7 @@ impl<'t> Parser<'t> {
         self.skip_terminators();
         let then_body = self.parse_block();
 
-        let mut else_ifs  = vec![];
+        let mut else_ifs = vec![];
         let mut else_body = None;
 
         loop {
@@ -966,11 +1128,15 @@ impl<'t> Parser<'t> {
                 // `otherwise when` or `else if` (else→Otherwise, then If) = else-if chain
                 if matches!(self.peek(), TokenKind::When | TokenKind::If) {
                     self.advance(); // eat `when` or `if`
-                    let cond  = self.parse_expr();
+                    let cond = self.parse_expr();
                     self.skip_terminators();
-                    let body  = self.parse_block();
-                    let end   = self.current_span().end;
-                    else_ifs.push(ElseIf { condition: cond, body, span: Span::new(self.module.file, start, end) });
+                    let body = self.parse_block();
+                    let end = self.current_span().end;
+                    else_ifs.push(ElseIf {
+                        condition: cond,
+                        body,
+                        span: Span::new(self.module.file, start, end),
+                    });
                 } else {
                     // `otherwise { ... }` / `else { ... }` = plain else
                     self.skip_terminators();
@@ -984,31 +1150,43 @@ impl<'t> Parser<'t> {
 
         let end = self.current_span().end;
         self.module.arena.alloc_stmt(Stmt::If {
-            condition, then_body, else_ifs, else_body,
+            condition,
+            then_body,
+            else_ifs,
+            else_body,
             span: Span::new(self.module.file, start, end),
         })
     }
 
     fn parse_for_stmt(&mut self) -> StmtId {
-        let start   = self.current_span().start;
+        let start = self.current_span().start;
         self.advance(); // eat `for`
         let binding = self.expect_ident_sym("expected loop variable");
         self.expect_tok(&TokenKind::In);
         let iterable = self.parse_expr();
         self.skip_terminators();
         let body = self.parse_block();
-        let end  = self.current_span().end;
-        self.module.arena.alloc_stmt(Stmt::For { binding, iterable, body, span: Span::new(self.module.file, start, end) })
+        let end = self.current_span().end;
+        self.module.arena.alloc_stmt(Stmt::For {
+            binding,
+            iterable,
+            body,
+            span: Span::new(self.module.file, start, end),
+        })
     }
 
     fn parse_while_stmt(&mut self) -> StmtId {
-        let start     = self.current_span().start;
+        let start = self.current_span().start;
         self.advance(); // eat `while`
         let condition = self.parse_expr();
         self.skip_terminators();
         let body = self.parse_block();
-        let end  = self.current_span().end;
-        self.module.arena.alloc_stmt(Stmt::While { condition, body, span: Span::new(self.module.file, start, end) })
+        let end = self.current_span().end;
+        self.module.arena.alloc_stmt(Stmt::While {
+            condition,
+            body,
+            span: Span::new(self.module.file, start, end),
+        })
     }
 
     fn parse_attempt_stmt(&mut self) -> StmtId {
@@ -1017,9 +1195,9 @@ impl<'t> Parser<'t> {
         self.skip_terminators();
         let body = self.parse_block();
 
-        let mut catches   = vec![];
+        let mut catches = vec![];
         let mut otherwise = None;
-        let mut finally   = None;
+        let mut finally = None;
 
         loop {
             self.skip_terminators();
@@ -1031,12 +1209,18 @@ impl<'t> Parser<'t> {
                     } else {
                         None
                     };
-                    let ty = if self.eat_type_ann() { Some(self.parse_type_expr()) } else { None };
+                    let ty = if self.eat_type_ann() {
+                        Some(self.parse_type_expr())
+                    } else {
+                        None
+                    };
                     self.skip_terminators();
                     let cbody = self.parse_block();
-                    let end   = self.current_span().end;
+                    let end = self.current_span().end;
                     catches.push(CatchClause {
-                        binding, ty, body: cbody,
+                        binding,
+                        ty,
+                        body: cbody,
                         span: Span::new(self.module.file, start, end),
                     });
                 }
@@ -1061,22 +1245,27 @@ impl<'t> Parser<'t> {
 
         let end = self.current_span().end;
         self.module.arena.alloc_stmt(Stmt::Attempt {
-            body, catches, otherwise, finally,
+            body,
+            catches,
+            otherwise,
+            finally,
             span: Span::new(self.module.file, start, end),
         })
     }
 
     fn parse_parallel_for(&mut self) -> StmtId {
-        let start   = self.current_span().start;
+        let start = self.current_span().start;
         self.advance(); // eat `for`
-        let binding  = self.expect_ident_sym("expected loop variable");
+        let binding = self.expect_ident_sym("expected loop variable");
         self.expect_tok(&TokenKind::In);
         let iterable = self.parse_expr();
         self.skip_terminators();
         let body = self.parse_block();
-        let end  = self.current_span().end;
+        let end = self.current_span().end;
         self.module.arena.alloc_stmt(Stmt::ParallelFor {
-            binding, iterable, body,
+            binding,
+            iterable,
+            body,
             span: Span::new(self.module.file, start, end),
         })
     }
@@ -1086,11 +1275,15 @@ impl<'t> Parser<'t> {
         self.expect_tok(&TokenKind::LBrace);
         let mut tasks = vec![];
         loop {
-            if self.bail { break; }
+            if self.bail {
+                break;
+            }
             self.skip_terminators();
-            if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) { break; }
+            if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
+                break;
+            }
             if matches!(self.peek(), TokenKind::Task) {
-                let ts   = self.current_span().start;
+                let ts = self.current_span().start;
                 self.advance();
                 let name = if matches!(self.peek(), TokenKind::Ident(_)) {
                     Some(self.expect_ident_sym("task name"))
@@ -1099,8 +1292,12 @@ impl<'t> Parser<'t> {
                 };
                 self.skip_terminators();
                 let body = self.parse_block();
-                let te   = self.current_span().end;
-                tasks.push(Task { name, body, span: Span::new(self.module.file, ts, te) });
+                let te = self.current_span().end;
+                tasks.push(Task {
+                    name,
+                    body,
+                    span: Span::new(self.module.file, ts, te),
+                });
             } else {
                 let span = self.current_span();
                 self.error("expected `task` inside concurrent/parallel block", span);
@@ -1116,31 +1313,33 @@ impl<'t> Parser<'t> {
         let end = self.current_span().end;
         self.expect_tok(&TokenKind::RBrace);
         self.module.arena.alloc_stmt(Stmt::ConcurrentBlock {
-            is_parallel, tasks,
+            is_parallel,
+            tasks,
             span: Span::new(self.module.file, start, end),
         })
     }
 
     fn parse_assign_or_expr_stmt(&mut self) -> StmtId {
-        let start   = self.current_span().start;
+        let start = self.current_span().start;
         let expr_id = self.parse_expr();
         // Assignment: `lhs = rhs` or `lhs set rhs`
         if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
             self.advance();
             let value = self.parse_expr();
-            let end   = self.current_span().end;
+            let end = self.current_span().end;
             self.skip_one_terminator();
             return self.module.arena.alloc_stmt(Stmt::Assign {
-                target: expr_id, value,
+                target: expr_id,
+                value,
                 span: Span::new(self.module.file, start, end),
             });
         }
         // Compound assignment: `lhs += rhs`, `lhs -= rhs`, `lhs *= rhs`, `lhs /= rhs`
         // Desugar to `lhs = lhs op rhs`.
         let compound_op = match self.peek() {
-            TokenKind::PlusEq  => Some(BinOp::Add),
+            TokenKind::PlusEq => Some(BinOp::Add),
             TokenKind::MinusEq => Some(BinOp::Sub),
-            TokenKind::StarEq  => Some(BinOp::Mul),
+            TokenKind::StarEq => Some(BinOp::Mul),
             TokenKind::SlashEq => Some(BinOp::Div),
             _ => None,
         };
@@ -1159,7 +1358,7 @@ impl<'t> Parser<'t> {
             self.skip_one_terminator();
             return self.module.arena.alloc_stmt(Stmt::Assign {
                 target: expr_id,
-                value:  bin_expr,
+                value: bin_expr,
                 span,
             });
         }

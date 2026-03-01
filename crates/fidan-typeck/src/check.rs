@@ -408,13 +408,23 @@ impl TypeChecker {
 
             // ── action / extension action ────────────────────────────────
             Item::ActionDecl {
+                name,
                 params,
                 return_ty,
                 body,
                 ..
             } => {
+                // A `new` constructor inside an object always returns nothing — the
+                // runtime constructs the object itself and discards any return value.
+                let sym_new = self.interner.intern("new");
+                let is_ctor = *name == sym_new && self.this_ty.is_some();
+                let implicit_ret = if is_ctor {
+                    Some(FidanType::Nothing)
+                } else {
+                    None
+                };
                 // `this_ty` is already set if we're inside an ObjectDecl scope.
-                self.check_action_body(params, return_ty, body, None, module);
+                self.check_action_body(params, return_ty, body, None, implicit_ret, module);
             }
 
             Item::ExtensionAction {
@@ -426,7 +436,7 @@ impl TypeChecker {
             } => {
                 let ext_ty = FidanType::Object(*extends);
                 let prev_this = self.this_ty.replace(ext_ty.clone());
-                self.check_action_body(params, return_ty, body, Some(ext_ty), module);
+                self.check_action_body(params, return_ty, body, Some(ext_ty), None, module);
                 self.this_ty = prev_this;
             }
 
@@ -509,13 +519,19 @@ impl TypeChecker {
         // If Some, inject a `this` binding for extension actions (object scope already
         // provides `this` for regular methods).
         inject_this: Option<FidanType>,
+        // If Some, overrides the resolved return type (e.g. `Nothing` for `new` constructors).
+        implicit_return_ty: Option<FidanType>,
         module: &Module,
     ) {
-        let ret = return_ty
-            .as_ref()
-            .map(|t| self.resolve_type_expr(t))
-            .unwrap_or(FidanType::Nothing);
-        let prev_ret = self.current_return_ty.replace(ret);
+        let ret = if let Some(implicit) = implicit_return_ty {
+            Some(implicit)
+        } else {
+            return_ty.as_ref().map(|t| self.resolve_type_expr(t))
+        };
+        // `None` means no annotation → return type is inferred / unconstrained.
+        // Only set `current_return_ty` to `Some(T)` when an explicit annotation
+        // was written; otherwise any `return value` is accepted.
+        let prev_ret = std::mem::replace(&mut self.current_return_ty, ret);
 
         self.table.push_scope(ScopeKind::Action);
 

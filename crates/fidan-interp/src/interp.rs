@@ -66,7 +66,7 @@ impl<'m> Interpreter<'m> {
     // ── Construction ──────────────────────────────────────────────────────────
 
     fn new(module: &'m Module, interner: Arc<SymbolInterner>) -> Self {
-        let sym_initialize = interner.intern("initialize");
+        let sym_initialize = interner.intern("new");
 
         let mut interp = Interpreter {
             arena: &module.arena,
@@ -1392,7 +1392,7 @@ pub struct ReplState {
 
 /// Create a fresh [`ReplState`] for a new REPL session.
 pub fn new_repl_state(interner: Arc<SymbolInterner>) -> ReplState {
-    let sym_initialize = interner.intern("initialize");
+    let sym_initialize = interner.intern("new");
     ReplState {
         interner,
         env: Env::new(),
