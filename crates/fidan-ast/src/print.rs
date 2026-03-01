@@ -39,6 +39,14 @@ impl<'a> Printer<'a> {
             }
             TypeExpr::Dynamic { .. } => "flexible".into(),
             TypeExpr::Nothing { .. } => "nothing".into(),
+            TypeExpr::Tuple { elements, .. } => {
+                if elements.is_empty() {
+                    "tuple".into()
+                } else {
+                    let parts: Vec<String> = elements.iter().map(|e| self.ty(e)).collect();
+                    format!("({})", parts.join(", "))
+                }
+            }
         }
     }
 
@@ -61,6 +69,7 @@ impl<'a> Printer<'a> {
             Expr::Unary { op, operand, .. } => format!("{:?}({})", op, self.expr_hint(*operand)),
             Expr::List { elements, .. } => format!("[…{}]", elements.len()),
             Expr::Dict { entries, .. } => format!("{{…{}}}", entries.len()),
+            Expr::Tuple { elements, .. } => format!("(…{})", elements.len()),
             Expr::Ternary { .. } => "<ternary>".into(),
             Expr::Assign { .. } => "<assign>".into(),
             Expr::Spawn { .. } => "spawn …".into(),
@@ -85,7 +94,8 @@ impl<'a> Printer<'a> {
     fn print_item(&self, item: &Item, depth: usize) {
         let p = Self::pad(depth);
         match item {
-            Item::VarDecl { name, ty, init, .. } => {
+            Item::VarDecl { name, ty, init, is_const, .. } => {
+                let kw = if *is_const { "const var" } else { "var" };
                 let ty_s = ty
                     .as_ref()
                     .map(|t| format!(": {}", self.ty(t)))
@@ -93,7 +103,7 @@ impl<'a> Printer<'a> {
                 let ini_s = init
                     .map(|id| format!(" = {}", self.expr_hint(id)))
                     .unwrap_or_default();
-                println!("{p}VarDecl  {}{ty_s}{ini_s}", self.sym(*name));
+                println!("{p}VarDecl({kw})  {}{ty_s}{ini_s}", self.sym(*name));
             }
 
             Item::ExprStmt(id) => {
@@ -102,6 +112,10 @@ impl<'a> Printer<'a> {
 
             Item::Assign { target, value, .. } => {
                 println!("{p}Assign  {} = {}", self.expr_hint(*target), self.expr_hint(*value));
+            }
+            Item::Destructure { bindings, value, .. } => {
+                let names: Vec<String> = bindings.iter().map(|s| self.sym(*s)).collect();
+                println!("{p}Destructure  ({}) = {}", names.join(", "), self.expr_hint(*value));
             }
 
             Item::Use {
@@ -208,7 +222,8 @@ impl<'a> Printer<'a> {
         let p = Self::pad(depth);
         let s = self.arena.get_stmt(sid);
         match s {
-            Stmt::VarDecl { name, ty, init, .. } => {
+            Stmt::VarDecl { name, ty, init, is_const, .. } => {
+                let kw = if *is_const { "const var" } else { "var" };
                 let ty_s = ty
                     .as_ref()
                     .map(|t| format!(": {}", self.ty(t)))
@@ -216,13 +231,17 @@ impl<'a> Printer<'a> {
                 let ini_s = init
                     .map(|id| format!(" = {}", self.expr_hint(id)))
                     .unwrap_or_default();
-                println!("{p}var  {}{ty_s}{ini_s}", self.sym(*name));
+                println!("{p}{kw}  {}{ty_s}{ini_s}", self.sym(*name));
             }
             Stmt::Assign { target, value, .. } => println!(
                 "{p}assign  {} = {}",
                 self.expr_hint(*target),
                 self.expr_hint(*value)
             ),
+            Stmt::Destructure { bindings, value, .. } => {
+                let names: Vec<String> = bindings.iter().map(|s| self.sym(*s)).collect();
+                println!("{p}destructure  ({}) = {}", names.join(", "), self.expr_hint(*value));
+            }
             Stmt::Expr { expr, .. } => println!("{p}expr  {}", self.expr_hint(*expr)),
             Stmt::Return { value, .. } => {
                 let v = value

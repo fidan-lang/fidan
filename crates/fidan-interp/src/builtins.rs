@@ -81,6 +81,7 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 FidanValue::String(s) => s.len() as i64,
                 FidanValue::List(l) => l.borrow().len() as i64,
                 FidanValue::Dict(d) => d.borrow().len() as i64,
+                FidanValue::Tuple(t) => t.len() as i64,
                 _ => return Some(FidanValue::Nothing),
             };
             Some(FidanValue::Integer(n))
@@ -120,6 +121,10 @@ pub fn display(val: &FidanValue) -> String {
                 .map(|(k, v)| format!("{}: {}", k.as_str(), display(v)))
                 .collect();
             format!("{{{}}}", pairs.join(", "))
+        }
+        FidanValue::Tuple(items) => {
+            let parts: Vec<String> = items.iter().map(display).collect();
+            format!("({})", parts.join(", "))
         }
         FidanValue::Object(o) => {
             let class_name = {

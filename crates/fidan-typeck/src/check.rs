@@ -258,6 +258,7 @@ impl TypeChecker {
                 name,
                 ty,
                 init: _,
+                is_const,
                 span,
             } => {
                 // Redeclaration check at pass 1 — fires exactly once on the
@@ -298,12 +299,12 @@ impl TypeChecker {
                         kind: SymbolKind::Var,
                         ty: var_ty,
                         span: *span,
-                        is_mutable: true,
+                        is_mutable: !is_const,
                         initialized: Initialized::No,
                     },
                 );
             }
-            Item::ExprStmt(_) | Item::Assign { .. } | Item::Use { .. } => {}
+            Item::ExprStmt(_) | Item::Assign { .. } | Item::Use { .. } | Item::Destructure { .. } => {}
         }
     }
 
@@ -374,9 +375,10 @@ impl TypeChecker {
                 name,
                 ty,
                 init,
+                is_const,
                 span,
             } => {
-                self.check_var_decl(*name, ty, *init, *span, module);
+                self.check_var_decl(*name, ty, *init, *is_const, *span, module);
             }
 
             // ── module-level expression ──────────────────────────────────
@@ -391,6 +393,7 @@ impl TypeChecker {
                 value,
                 span,
             } => {
+                self.check_const_assign(*target, *span, module);
                 let rhs = self.infer_expr(*value, module);
                 let lhs = self.infer_expr(*target, module);
                 if !lhs.is_assignable_from(&rhs) {
@@ -404,6 +407,32 @@ impl TypeChecker {
             }
 
             Item::Use { .. } => {}
+
+            // ── module-level destructure ─────────────────────────────────
+            Item::Destructure {
+                bindings,
+                value,
+                span,
+            } => {
+                let val_ty = self.infer_expr(*value, module);
+                let elem_types: Vec<FidanType> = match &val_ty {
+                    FidanType::Tuple(elems) => elems.clone(),
+                    _ => vec![FidanType::Dynamic; bindings.len()],
+                };
+                for (i, &binding) in bindings.iter().enumerate() {
+                    let bty = elem_types.get(i).cloned().unwrap_or(FidanType::Dynamic);
+                    self.table.define(
+                        binding,
+                        SymbolInfo {
+                            kind: SymbolKind::Var,
+                            ty: bty,
+                            span: *span,
+                            is_mutable: true,
+                            initialized: Initialized::Yes,
+                        },
+                    );
+                }
+            }
         }
     }
 
@@ -479,6 +508,7 @@ impl TypeChecker {
                 name,
                 ty,
                 init,
+                is_const,
                 span,
             } => {
                 // Local redeclaration check (action bodies have no pass 1).
@@ -506,7 +536,7 @@ impl TypeChecker {
                         }
                     }
                 }
-                self.check_var_decl(name, &ty, init, span, module);
+                self.check_var_decl(name, &ty, init, is_const, span, module);
             }
 
             Stmt::Assign {
@@ -514,6 +544,7 @@ impl TypeChecker {
                 value,
                 span,
             } => {
+                self.check_const_assign(target, span, module);
                 let rhs = self.infer_expr(value, module);
                 let lhs = self.infer_expr(target, module);
                 if !lhs.is_assignable_from(&rhs) {
@@ -522,6 +553,41 @@ impl TypeChecker {
                         fidan_diagnostics::diag_code!("E0201"),
                         format!("type mismatch: cannot assign `{r}` to `{l}`"),
                         span,
+                    );
+                }
+            }
+
+            Stmt::Destructure {
+                bindings,
+                value,
+                span,
+            } => {
+                let val_ty = self.infer_expr(value, module);
+                let elem_types: Vec<FidanType> = match &val_ty {
+                    FidanType::Tuple(elems) => elems.clone(),
+                    FidanType::Unknown | FidanType::Error | FidanType::Dynamic => {
+                        vec![FidanType::Dynamic; bindings.len()]
+                    }
+                    _ => {
+                        self.emit_error(
+                            fidan_diagnostics::diag_code!("E0201"),
+                            format!("cannot destructure non-tuple type `{}`", self.ty_name(&val_ty)),
+                            span,
+                        );
+                        vec![FidanType::Error; bindings.len()]
+                    }
+                };
+                for (i, &binding) in bindings.iter().enumerate() {
+                    let bty = elem_types.get(i).cloned().unwrap_or(FidanType::Dynamic);
+                    self.table.define(
+                        binding,
+                        SymbolInfo {
+                            kind: SymbolKind::Var,
+                            ty: bty,
+                            span,
+                            is_mutable: true,
+                            initialized: Initialized::Yes,
+                        },
                     );
                 }
             }
@@ -729,6 +795,7 @@ impl TypeChecker {
         name: Symbol,
         ty: &Option<TypeExpr>,
         init: Option<ExprId>,
+        is_const: bool,
         span: Span,
         module: &Module,
     ) {
@@ -758,7 +825,7 @@ impl TypeChecker {
                 kind: SymbolKind::Var,
                 ty: final_ty,
                 span,
-                is_mutable: true,
+                is_mutable: !is_const,
                 initialized: if init.is_some() {
                     Initialized::Yes
                 } else {
@@ -766,6 +833,27 @@ impl TypeChecker {
                 },
             },
         );
+    }
+
+    /// Emit E0103 if `target` resolves to an immutable (`const var`) symbol.
+    fn check_const_assign(&mut self, target_id: ExprId, span: Span, module: &Module) {
+        let expr = module.arena.get_expr(target_id).clone();
+        if let Expr::Ident { name, .. } = expr {
+            if let Some(info) = self.table.lookup(name) {
+                if !info.is_mutable {
+                    let n = self.interner.resolve(name).to_string();
+                    let def_span = info.span;
+                    self.diags.push(
+                        Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0103"),
+                            format!("cannot assign to constant `{n}`"),
+                            span,
+                        )
+                        .with_label(Label::secondary(def_span, "defined as `const var` here")),
+                    );
+                }
+            }
+        }
     }
 
     // ── Expression inference ──────────────────────────────────────────────
@@ -955,6 +1043,14 @@ impl TypeChecker {
                     self.infer_expr(*v, module);
                 }
                 FidanType::Dict(Box::new(FidanType::String), Box::new(FidanType::Dynamic))
+            }
+
+            Expr::Tuple { elements, .. } => {
+                let types = elements
+                    .iter()
+                    .map(|&e| self.infer_expr(e, module))
+                    .collect();
+                FidanType::Tuple(types)
             }
 
             Expr::Check {
@@ -1218,6 +1314,13 @@ impl TypeChecker {
             }
             TypeExpr::Dynamic { .. } => FidanType::Dynamic,
             TypeExpr::Nothing { .. } => FidanType::Nothing,
+            TypeExpr::Tuple { elements, .. } => {
+                let types = elements
+                    .iter()
+                    .map(|e| self.resolve_type_expr(e))
+                    .collect();
+                FidanType::Tuple(types)
+            }
         }
     }
 

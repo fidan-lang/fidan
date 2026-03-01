@@ -190,6 +190,18 @@ impl<'m> Interpreter<'m> {
                     self.eval_assign(*target, val)?;
                     last_expr_val = None; // assignment — suppress echo
                 }
+                Item::Destructure { bindings, value, .. } => {
+                    let tuple_val = self.eval_expr(*value)?;
+                    let items: Vec<FidanValue> = match tuple_val {
+                        FidanValue::Tuple(v) => v,
+                        other => vec![other],
+                    };
+                    for (i, &binding) in bindings.iter().enumerate() {
+                        let v = items.get(i).cloned().unwrap_or(FidanValue::Nothing);
+                        self.env.define(binding, v);
+                    }
+                    last_expr_val = None;
+                }
                 _ => {}
             }
         }
@@ -316,6 +328,14 @@ impl<'m> Interpreter<'m> {
                     dict.insert(key_str, val);
                 }
                 Ok(FidanValue::Dict(OwnedRef::new(dict)))
+            }
+
+            Expr::Tuple { elements, .. } => {
+                let mut items = Vec::with_capacity(elements.len());
+                for eid in elements {
+                    items.push(self.eval_expr(eid)?);
+                }
+                Ok(FidanValue::Tuple(items))
             }
 
             // Check (inline match expression) ––––––––––––––––––––––––––
@@ -705,6 +725,19 @@ impl<'m> Interpreter<'m> {
             Stmt::Assign { target, value, .. } => {
                 let val = self.eval_expr(value)?;
                 self.eval_assign(target, val)?;
+                Ok(FidanValue::Nothing)
+            }
+
+            Stmt::Destructure { bindings, value, .. } => {
+                let tuple_val = self.eval_expr(value)?;
+                let items: Vec<FidanValue> = match tuple_val {
+                    FidanValue::Tuple(v) => v,
+                    other => vec![other],
+                };
+                for (i, &binding) in bindings.iter().enumerate() {
+                    let v = items.get(i).cloned().unwrap_or(FidanValue::Nothing);
+                    self.env.define(binding, v);
+                }
                 Ok(FidanValue::Nothing)
             }
 
@@ -1339,6 +1372,9 @@ impl<'m> Interpreter<'m> {
             (Nothing, Nothing) => true,
             (String(x), String(y)) => x.as_str() == y.as_str(),
             (Nothing, _) | (_, Nothing) => false,
+            (Tuple(xs), Tuple(ys)) => {
+                xs.len() == ys.len() && xs.iter().zip(ys.iter()).all(|(a, b)| self.values_equal(a, b))
+            }
             _ => false,
         }
     }

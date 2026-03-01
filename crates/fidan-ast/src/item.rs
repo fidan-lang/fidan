@@ -6,11 +6,13 @@ use fidan_source::Span;
 /// Top-level items (declarations).
 #[derive(Debug, Clone)]
 pub enum Item {
-    /// `var name oftype T = expr` at module scope
+    /// `var name oftype T = expr`  /  `const var name oftype T = expr` at module scope
     VarDecl {
         name: fidan_lexer::Symbol,
         ty: Option<crate::stmt::TypeExpr>,
         init: Option<crate::ExprId>,
+        /// `true` when declared with `const var`.
+        is_const: bool,
         span: fidan_source::Span,
     },
     /// A top-level expression statement, e.g. `print("Hello")` or `main()`
@@ -18,6 +20,12 @@ pub enum Item {
     /// A top-level assignment, e.g. `x = 1` or `obj.field = val`
     Assign {
         target: crate::ExprId,
+        value: crate::ExprId,
+        span: fidan_source::Span,
+    },
+    /// `var (a, b) = expr` — tuple destructuring at module scope
+    Destructure {
+        bindings: Vec<Symbol>,
         value: crate::ExprId,
         span: fidan_source::Span,
     },

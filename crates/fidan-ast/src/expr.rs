@@ -120,6 +120,11 @@ pub enum Expr {
         entries: Vec<(ExprId, ExprId)>,
         span: Span,
     },
+    /// Tuple literal: `(a, b, c)`
+    Tuple {
+        elements: Vec<ExprId>,
+        span: Span,
+    },
 
     // Check-expression: `check x { pattern => expr, ... }`
     Check {
@@ -160,6 +165,7 @@ impl Expr {
             Expr::Ternary { span, .. } => *span,
             Expr::List { span, .. } => *span,
             Expr::Dict { span, .. } => *span,
+            Expr::Tuple { span, .. } => *span,
             Expr::Check { span, .. } => *span,
             Expr::Error { span } => *span,
         }

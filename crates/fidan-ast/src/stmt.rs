@@ -5,11 +5,19 @@ use fidan_source::Span;
 /// All statements in the Fidan AST.
 #[derive(Debug, Clone)]
 pub enum Stmt {
-    /// `var name oftype T = expr`
+    /// `var name oftype T = expr`  /  `const var name oftype T = expr`
     VarDecl {
         name: Symbol,
         ty: Option<TypeExpr>,
         init: Option<ExprId>,
+        /// `true` when declared with `const var` — immutable after initialisation.
+        is_const: bool,
+        span: Span,
+    },
+    /// `var (a, b) = expr` — tuple destructure
+    Destructure {
+        bindings: Vec<Symbol>,
+        value: ExprId,
         span: Span,
     },
     /// `set name = expr` / `set name.field = expr`
@@ -127,6 +135,12 @@ pub enum TypeExpr {
         param: Box<TypeExpr>,
         span: Span,
     },
+    /// Tuple type: `(T1, T2, ...)` or bare `tuple`.
+    /// `elements` is empty for the untyped `tuple` keyword.
+    Tuple {
+        elements: Vec<Box<TypeExpr>>,
+        span: Span,
+    },
     Dynamic {
         span: Span,
     },
@@ -141,6 +155,7 @@ impl TypeExpr {
         match self {
             TypeExpr::Named { span, .. } => span.end,
             TypeExpr::Oftype { span, .. } => span.end,
+            TypeExpr::Tuple { span, .. } => span.end,
             TypeExpr::Dynamic { span } => span.end,
             TypeExpr::Nothing { span } => span.end,
         }
@@ -150,6 +165,7 @@ impl TypeExpr {
         match self {
             TypeExpr::Named { span, .. } => *span,
             TypeExpr::Oftype { span, .. } => *span,
+            TypeExpr::Tuple { span, .. } => *span,
             TypeExpr::Dynamic { span } => *span,
             TypeExpr::Nothing { span } => *span,
         }

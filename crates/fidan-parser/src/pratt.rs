@@ -242,10 +242,28 @@ impl<'t> Parser<'t> {
                 self.module.arena.alloc_expr(Expr::Ident { name: sym, span })
             }
             TokenKind::LParen => {
-                self.advance();
-                let inner = self.parse_expr();
-                self.expect_tok(&TokenKind::RParen);
-                inner // transparent parentheses
+                self.advance(); // eat `(`
+                let first = self.parse_expr();
+                // If a comma follows, it's a tuple literal: `(a, b, ...)`.
+                if self.eat(&TokenKind::Comma) {
+                    let mut elements = vec![first];
+                    loop {
+                        self.skip_terminators();
+                        if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) { break; }
+                        elements.push(self.parse_expr());
+                        if !self.eat(&TokenKind::Comma) { break; }
+                    }
+                    let end = self.current_span().end;
+                    self.expect_tok(&TokenKind::RParen);
+                    self.module.arena.alloc_expr(Expr::Tuple {
+                        elements,
+                        span: Span::new(self.module.file, span.start, end),
+                    })
+                } else {
+                    // Single expression — transparent grouping.
+                    self.expect_tok(&TokenKind::RParen);
+                    first
+                }
             }
             TokenKind::LBracket => {
                 self.advance();

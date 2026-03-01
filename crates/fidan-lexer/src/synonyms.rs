@@ -8,6 +8,8 @@ pub fn lookup_keyword(s: &str) -> Option<TokenKind> {
     Some(match s {
         // ── Statement / declaration keywords ─────────────────────────────
         "var" => TokenKind::Var,
+        "const" => TokenKind::Const,
+        "tuple" => TokenKind::Tuple,
         "action" => TokenKind::Action,
         "object" => TokenKind::Object,
         "extends" => TokenKind::Extends,

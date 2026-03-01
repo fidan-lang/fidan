@@ -1,4 +1,4 @@
-use crate::{OwnedRef, SharedRef, FidanObject, FidanList, FidanDict, FidanString};
+use crate::{FidanDict, FidanList, FidanObject, FidanString, OwnedRef, SharedRef};
 
 /// Opaque function identifier — same as fidan-mir's FunctionId but re-exported here
 /// so fidan-runtime doesn't depend on fidan-mir (no circular dep).
@@ -16,45 +16,50 @@ pub struct FunctionId(pub u32);
 /// - `Shared` is the only variant backed by `Arc<Mutex<T>>` — explicit opt-in.
 #[derive(Debug, Clone)]
 pub enum FidanValue {
-    Integer  (i64),
-    Float    (f64),
-    Boolean  (bool),
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
     Nothing,
-    String   (FidanString),
-    List     (OwnedRef<FidanList>),
-    Dict     (OwnedRef<FidanDict>),
-    Object   (OwnedRef<FidanObject>),
+    String(FidanString),
+    List(OwnedRef<FidanList>),
+    Dict(OwnedRef<FidanDict>),
+    Object(OwnedRef<FidanObject>),
     /// `Shared oftype T` — explicit ARC, cross-thread safe.
-    Shared   (SharedRef<FidanValue>),
-    Function (FunctionId),
+    Shared(SharedRef<FidanValue>),
+    Function(FunctionId),
+    /// Tuple: `(v1, v2, ...)`
+    Tuple(Vec<FidanValue>),
 }
 
 impl FidanValue {
     pub fn type_name(&self) -> &'static str {
         match self {
-            FidanValue::Integer(_)  => "integer",
-            FidanValue::Float(_)    => "float",
-            FidanValue::Boolean(_)  => "boolean",
-            FidanValue::Nothing     => "nothing",
-            FidanValue::String(_)   => "string",
-            FidanValue::List(_)     => "list",
-            FidanValue::Dict(_)     => "dict",
-            FidanValue::Object(_)   => "object",
-            FidanValue::Shared(_)   => "Shared",
+            FidanValue::Integer(_) => "integer",
+            FidanValue::Float(_) => "float",
+            FidanValue::Boolean(_) => "boolean",
+            FidanValue::Nothing => "nothing",
+            FidanValue::String(_) => "string",
+            FidanValue::List(_) => "list",
+            FidanValue::Dict(_) => "dict",
+            FidanValue::Object(_) => "object",
+            FidanValue::Shared(_) => "Shared",
             FidanValue::Function(_) => "action",
+            FidanValue::Tuple(_) => "tuple",
         }
     }
 
-    pub fn is_nothing(&self) -> bool { matches!(self, Self::Nothing) }
+    pub fn is_nothing(&self) -> bool {
+        matches!(self, Self::Nothing)
+    }
 
     pub fn truthy(&self) -> bool {
         match self {
-            FidanValue::Boolean(b)  => *b,
-            FidanValue::Nothing     => false,
-            FidanValue::Integer(n)  => *n != 0,
-            FidanValue::Float(f)    => *f != 0.0,
-            FidanValue::String(s)   => !s.is_empty(),
-            _                       => true,
+            FidanValue::Boolean(b) => *b,
+            FidanValue::Nothing => false,
+            FidanValue::Integer(n) => *n != 0,
+            FidanValue::Float(f) => *f != 0.0,
+            FidanValue::String(s) => !s.is_empty(),
+            _ => true,
         }
     }
 }

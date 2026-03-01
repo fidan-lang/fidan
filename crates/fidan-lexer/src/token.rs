@@ -19,6 +19,10 @@ pub enum TokenKind {
 
     // ── Keywords ─────────────────────────────────────────────────────────────
     Var,
+    /// `const` — immutable variable declaration modifier
+    Const,
+    /// `tuple` — generic untyped tuple type keyword
+    Tuple,
     Set, // assignment: canonical form of `set`
     Action,
     Object,
@@ -149,6 +153,8 @@ impl TokenKind {
     pub fn as_keyword_str(&self) -> Option<&'static str> {
         Some(match self {
             TokenKind::Var => "var",
+            TokenKind::Const => "const",
+            TokenKind::Tuple => "tuple",
             TokenKind::Set => "set",
             TokenKind::Action => "action",
             TokenKind::Object => "object",

@@ -115,6 +115,24 @@ that you can redefine variables between experiments.
 "#,
         ),
 
+        "E0103" => Some(
+            r#"An assignment was made to a variable declared with `const var`.  Constants
+cannot be reassigned after their initial declaration.
+
+Erroneous example:
+
+    const var MAX set 100
+    MAX set 200         # error: cannot assign to constant `MAX`
+
+Fix: either change the declaration to `var` if the value needs to change:
+
+    var MAX set 100
+    MAX set 200         # OK
+
+or remove the reassignment.
+"#,
+        ),
+
         // ── Type system ───────────────────────────────────────────────────────
         "E0201" => Some(
             r#"The type of the value being assigned or used as an initialiser does not

@@ -60,6 +60,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "variable already declared in this scope",
         category: "names",
     },
+    DiagnosticCode {
+        code: "E0103",
+        title: "cannot assign to constant",
+        category: "names",
+    },
     // ── Type system ───────────────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0201",

@@ -17,6 +17,8 @@ pub enum FidanType {
     // Composite
     List(Box<FidanType>),
     Dict(Box<FidanType>, Box<FidanType>),
+    /// Tuple: `(T1, T2, ...)`.  Empty vec = untyped/flexible tuple.
+    Tuple(Vec<FidanType>),
     // User types
     Object(Symbol),
     // Concurrency wrappers
@@ -76,6 +78,11 @@ impl FidanType {
             }
             (FidanType::Shared(s), FidanType::Shared(o)) => s.is_assignable_from(o),
             (FidanType::Pending(s), FidanType::Pending(o)) => s.is_assignable_from(o),
+            (FidanType::Tuple(st), FidanType::Tuple(ot)) => {
+                // Empty tuple on either side = untyped — allow assignment.
+                if st.is_empty() || ot.is_empty() { return true; }
+                st.len() == ot.len() && st.iter().zip(ot.iter()).all(|(a, b)| a.is_assignable_from(b))
+            }
             _ => false,
         }
     }
@@ -97,6 +104,14 @@ impl FidanType {
             FidanType::Error    => "<error>".into(),
             FidanType::List(inner)    => format!("list oftype {}",                      inner.display_name(resolve)),
             FidanType::Dict(k, v)     => format!("dict oftype {} oftype {}", k.display_name(resolve), v.display_name(resolve)),
+            FidanType::Tuple(elems)   => {
+                if elems.is_empty() {
+                    "tuple".into()
+                } else {
+                    let inner: Vec<String> = elems.iter().map(|t| t.display_name(resolve)).collect();
+                    format!("({})", inner.join(", "))
+                }
+            }
             FidanType::Shared(inner)  => format!("Shared oftype {}",                   inner.display_name(resolve)),
             FidanType::Pending(inner) => format!("Pending oftype {}",                  inner.display_name(resolve)),
             FidanType::Object(sym)    => resolve(*sym),

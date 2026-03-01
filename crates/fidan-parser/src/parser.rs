@@ -217,9 +217,15 @@ impl<'t> Parser<'t> {
                     None
                 }
             }
-            TokenKind::Var => {
-                // Top-level variable declaration
+            TokenKind::Const => {
+                // `const var name ...` — top-level immutable declaration
                 let start = self.current_span().start;
+                self.advance(); // eat `const`
+                if !matches!(self.peek(), TokenKind::Var) {
+                    let span = self.current_span();
+                    self.error("expected `var` after `const`", span);
+                    return None;
+                }
                 self.advance(); // eat `var`
                 let name = self.expect_ident_sym("expected variable name");
                 let ty   = if self.eat_type_ann() { Some(self.parse_type_expr()) } else { None };
@@ -232,7 +238,52 @@ impl<'t> Parser<'t> {
                 let end = self.current_span().end;
                 self.skip_one_terminator();
                 Some(self.module.arena.alloc_item(Item::VarDecl {
-                    name, ty, init,
+                    name, ty, init, is_const: true,
+                    span: Span::new(self.module.file, start, end),
+                }))
+            }
+            TokenKind::Var => {
+                // Top-level variable declaration (possibly tuple destructure)
+                let start = self.current_span().start;
+                self.advance(); // eat `var`
+                // Tuple destructure: `var (a, b) = expr`
+                if matches!(self.peek(), TokenKind::LParen) {
+                    self.advance(); // eat `(`
+                    let mut bindings = vec![];
+                    loop {
+                        self.skip_terminators();
+                        if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) { break; }
+                        bindings.push(self.expect_ident_sym("expected binding name"));
+                        if !self.eat(&TokenKind::Comma) { break; }
+                    }
+                    self.expect_tok(&TokenKind::RParen);
+                    if !matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
+                        let span = self.current_span();
+                        self.error("expected `=` or `set` after binding list", span);
+                    } else {
+                        self.advance();
+                    }
+                    let value = self.parse_expr();
+                    let end = self.current_span().end;
+                    self.skip_one_terminator();
+                    return Some(self.module.arena.alloc_item(Item::Destructure {
+                        bindings,
+                        value,
+                        span: Span::new(self.module.file, start, end),
+                    }));
+                }
+                let name = self.expect_ident_sym("expected variable name");
+                let ty   = if self.eat_type_ann() { Some(self.parse_type_expr()) } else { None };
+                let init = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
+                    self.advance();
+                    Some(self.parse_expr())
+                } else {
+                    None
+                };
+                let end = self.current_span().end;
+                self.skip_one_terminator();
+                Some(self.module.arena.alloc_item(Item::VarDecl {
+                    name, ty, init, is_const: false,
                     span: Span::new(self.module.file, start, end),
                 }))
             }
@@ -493,6 +544,11 @@ impl<'t> Parser<'t> {
         match self.peek().clone() {
             TokenKind::Dynamic  => { self.advance(); TypeExpr::Dynamic { span } }
             TokenKind::Nothing  => { self.advance(); TypeExpr::Nothing { span } }
+            // `tuple` keyword — untyped tuple, elements unknown
+            TokenKind::Tuple    => {
+                self.advance();
+                TypeExpr::Tuple { elements: vec![], span }
+            }
             TokenKind::Ident(name) => {
                 self.advance();
                 let base = TypeExpr::Named { name, span };
@@ -540,23 +596,21 @@ impl<'t> Parser<'t> {
                 }
             }
             TokenKind::LParen => {
-                // Tuple / pair type: `(K, V)` — e.g. `dict oftype (string, integer)`
+                // Tuple type: `(T1, T2, ...)` — always emits TypeExpr::Tuple.
+                // Single-element `(T)` = 1-tuple (wrapping is not transparent in types).
                 self.advance(); // eat `(`
-                let mut types = vec![];
+                let mut types: Vec<Box<TypeExpr>> = vec![];
                 loop {
                     self.skip_terminators();
                     if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) { break; }
-                    types.push(self.parse_type_expr());
+                    types.push(Box::new(self.parse_type_expr()));
                     if !self.eat(&TokenKind::Comma) { break; }
                 }
                 let end = self.current_span().end;
                 self.eat(&TokenKind::RParen);
-                if types.len() == 1 {
-                    types.remove(0)
-                } else {
-                    // Multi-element tuple: use Named("tuple") as placeholder
-                    let name = self.interner.intern("tuple");
-                    TypeExpr::Named { name, span: Span::new(self.module.file, span.start, end) }
+                TypeExpr::Tuple {
+                    elements: types,
+                    span: Span::new(self.module.file, span.start, end),
                 }
             }
             _ => {
@@ -655,7 +709,8 @@ impl<'t> Parser<'t> {
     pub fn parse_stmt(&mut self) -> Option<StmtId> {
         self.skip_terminators();
         let s = match self.peek().clone() {
-            TokenKind::Var      => self.parse_var_decl_stmt(),
+            TokenKind::Const    => self.parse_var_decl_stmt(true),
+            TokenKind::Var      => self.parse_var_decl_stmt(false),
             TokenKind::Return   => self.parse_return_stmt(),
             TokenKind::Break    => { let sp = self.current_span(); self.advance(); self.skip_one_terminator(); self.module.arena.alloc_stmt(Stmt::Break    { span: sp }) }
             TokenKind::Continue => { let sp = self.current_span(); self.advance(); self.skip_one_terminator(); self.module.arena.alloc_stmt(Stmt::Continue { span: sp }) }
@@ -687,9 +742,42 @@ impl<'t> Parser<'t> {
         Some(s)
     }
 
-    fn parse_var_decl_stmt(&mut self) -> StmtId {
+    fn parse_var_decl_stmt(&mut self, is_const: bool) -> StmtId {
         let start = self.current_span().start;
+        // Eat `const` if present, then eat `var`.
+        if is_const {
+            self.advance(); // eat `const`
+        }
         self.advance(); // eat `var`
+
+        // Tuple destructure: `var (a, b) = expr`
+        if matches!(self.peek(), TokenKind::LParen) {
+            self.advance(); // eat `(`
+            let mut bindings = vec![];
+            loop {
+                self.skip_terminators();
+                if matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) { break; }
+                bindings.push(self.expect_ident_sym("expected binding name"));
+                if !self.eat(&TokenKind::Comma) { break; }
+            }
+            self.expect_tok(&TokenKind::RParen);
+            // Require `=` / `set`
+            if !matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
+                let span = self.current_span();
+                self.error("expected `=` or `set` after binding list", span);
+            } else {
+                self.advance();
+            }
+            let value = self.parse_expr();
+            let end   = self.current_span().end;
+            self.skip_one_terminator();
+            return self.module.arena.alloc_stmt(Stmt::Destructure {
+                bindings,
+                value,
+                span: Span::new(self.module.file, start, end),
+            });
+        }
+
         let name = self.expect_ident_sym("expected variable name");
         let ty   = if self.eat_type_ann() { Some(self.parse_type_expr()) } else { None };
         let init = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
@@ -701,7 +789,7 @@ impl<'t> Parser<'t> {
         let end = self.current_span().end;
         self.skip_one_terminator();
         self.module.arena.alloc_stmt(Stmt::VarDecl {
-            name, ty, init,
+            name, ty, init, is_const,
             span: Span::new(self.module.file, start, end),
         })
     }
