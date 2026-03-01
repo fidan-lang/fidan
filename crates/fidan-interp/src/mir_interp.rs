@@ -125,6 +125,11 @@ pub struct MirMachine {
     program: Arc<MirProgram>,
     interner: Arc<SymbolInterner>,
     classes: std::collections::HashMap<Symbol, Arc<FidanClass>>,
+    /// Names of all currently executing functions, outermost first.
+    call_stack: Vec<String>,
+    /// Call stack snapshot at the point of the first uncaught panic/throw,
+    /// innermost first.  Populated once and never overwritten.
+    panic_trace: Vec<String>,
 }
 
 // SAFETY: All fields are either `Arc<T>` (Send+Sync when T:Send+Sync) or a
@@ -139,6 +144,8 @@ impl MirMachine {
             program,
             interner,
             classes,
+            call_stack: Vec::new(),
+            panic_trace: Vec::new(),
         }
     }
 
@@ -152,6 +159,8 @@ impl MirMachine {
             program: Arc::clone(&self.program),
             interner: Arc::clone(&self.interner),
             classes: self.classes.clone(),
+            call_stack: Vec::new(),
+            panic_trace: Vec::new(),
         }
     }
 
@@ -164,16 +173,18 @@ impl MirMachine {
 
     /// Execute the main (top-level init) function.
     pub fn run(&mut self) -> Result<(), RunError> {
+        self.call_stack.clear();
+        self.panic_trace.clear();
         let entry = FunctionId(0);
         match self.call_function(entry, vec![]) {
             Ok(_) => Ok(()),
             Err(MirSignal::Throw(v)) => Err(RunError {
                 message: format!("unhandled exception: {}", builtins::display(&v)),
-                trace: vec![],
+                trace: std::mem::take(&mut self.panic_trace),
             }),
             Err(MirSignal::Panic(msg)) => Err(RunError {
                 message: msg,
-                trace: vec![],
+                trace: std::mem::take(&mut self.panic_trace),
             }),
         }
     }
@@ -185,7 +196,7 @@ impl MirMachine {
         let fn_name = self.sym_str(func.name).to_string();
         let local_count = func.local_count;
 
-        let mut frame = CallFrame::new(local_count, fn_name);
+        let mut frame = CallFrame::new(local_count, fn_name.clone());
 
         // Bind parameters.
         for (i, param) in func.params.iter().enumerate() {
@@ -193,9 +204,28 @@ impl MirMachine {
             frame.store(param.local, val);
         }
 
+        self.call_stack.push(fn_name);
+
         // Block-level execution starting at entry (BlockId(0)).
-        let return_val = self.run_function(fn_id, &mut frame)?;
-        Ok(return_val.unwrap_or(FidanValue::Nothing))
+        let result = self.run_function(fn_id, &mut frame);
+
+        // Capture the trace at the innermost frame (only once — don't overwrite).
+        // Exclude the module-level entry function (FunctionId(0)) from the trace
+        // since it is not a user-visible named function.
+        if result.is_err() && self.panic_trace.is_empty() {
+            self.panic_trace = self
+                .call_stack
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i > 0) // skip entry function at index 0
+                .map(|(_, s)| s.clone())
+                .rev()
+                .collect();
+        }
+
+        self.call_stack.pop();
+
+        result.map(|v| v.unwrap_or(FidanValue::Nothing))
     }
 
     fn run_function(
@@ -443,15 +473,15 @@ impl MirMachine {
                     match method_name {
                         Some(ref name) => {
                             // Method dispatch: first value is the receiver.
-                            child.dispatch_method(first, name, vals)
+                            child
+                                .dispatch_method(first, name, vals)
                                 .unwrap_or(FidanValue::Nothing)
                         }
                         None => match first {
                             // Dynamic fn-value dispatch.
-                            FidanValue::Function(RuntimeFnId(id)) => {
-                                child.call_function(FunctionId(id), vals)
-                                    .unwrap_or(FidanValue::Nothing)
-                            }
+                            FidanValue::Function(RuntimeFnId(id)) => child
+                                .call_function(FunctionId(id), vals)
+                                .unwrap_or(FidanValue::Nothing),
                             _ => FidanValue::Nothing,
                         },
                     }
