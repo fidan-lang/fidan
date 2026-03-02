@@ -100,7 +100,7 @@ pub static CODES: &[DiagnosticCode] = &[
     // ── Concurrency / safety ──────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0401",
-        title: "non-`Shared` value crossed a thread boundary",
+        title: "data race: module-level variable mutated in concurrent tasks",
         category: "concurrency",
     },
     DiagnosticCode {
@@ -123,6 +123,11 @@ pub static CODES: &[DiagnosticCode] = &[
         code: "W1003",
         title: "action parameter never used",
         category: "unused",
+    },
+    DiagnosticCode {
+        code: "W1004",
+        title: "spawned `Pending` value is never awaited",
+        category: "concurrency",
     },
     // ── Warnings: style ───────────────────────────────────────────────────────
     DiagnosticCode {

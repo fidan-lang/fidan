@@ -373,6 +373,49 @@ fn render_trace_to_stderr(trace: &[fidan_interp::TraceFrame], mode: TraceMode) {
     }
 }
 
+// ── MIR safety analysis ──────────────────────────────────────────────────────────
+
+/// Run the MIR-level safety passes (E0401 parallel races, W1004 unawaited Pending)
+/// and render their diagnostics to stderr.
+///
+/// Returns the number of **errors** found (warnings are rendered but not counted
+/// as blocking errors).
+fn emit_mir_safety_diags(
+    mir: &fidan_mir::MirProgram,
+    interner: &fidan_lexer::SymbolInterner,
+) -> usize {
+    let mut errs = 0;
+
+    // ── E0401: parallel data-race check ──────────────────────────────────────
+    for diag in fidan_passes::check_parallel_races(mir, interner) {
+        render_message_to_stderr(
+            Severity::Error,
+            fidan_diagnostics::diag_code!("E0401"),
+            &format!("data race on `{}`: {}", diag.var_name, diag.context),
+        );
+        errs += 1;
+    }
+
+    // ── W1004: unawaited Pending check ───────────────────────────────────────
+    for diag in fidan_passes::check_unawaited_pending(mir, interner) {
+        let pl = if diag.count == 1 { "" } else { "s" };
+        render_message_to_stderr(
+            Severity::Warning,
+            fidan_diagnostics::diag_code!("W1004"),
+            &format!(
+                "action `{}` contains {} unawaited `spawn` expression{} \
+                 — result{} silently discarded; use `await` or `var _ = spawn \u{2026}` to suppress",
+                diag.fn_name,
+                diag.count,
+                pl,
+                if diag.count == 1 { " is" } else { "s are" },
+            ),
+        );
+    }
+
+    errs
+}
+
 // ── File-import helpers ──────────────────────────────────────────────────────────
 
 /// The single stdlib root prefix.  Every stdlib import starts with `std`
@@ -887,23 +930,28 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     match opts.mode {
         ExecutionMode::Interpret => {
             if error_count == 0 {
-                // ── MIR pipeline (Phase 6) ────────────────────────────────────
-                let result = if let Some(ref hir) = merged_hir {
+                if let Some(ref hir) = merged_hir {
                     let mut mir = fidan_mir::lower_program(hir, &interner);
-                    fidan_passes::run_all(&mut mir);
-                    fidan_interp::run_mir(mir, Arc::clone(&interner), Arc::clone(&source_map))
-                } else {
-                    // Fallback: should never happen since error_count == 0 implies merged_hir.
-                    Ok(())
-                };
-                if let Err(err) = result {
-                    render_message_to_stderr(
-                        Severity::Error,
-                        fidan_diagnostics::diag_code!("R0001"),
-                        &err.message,
-                    );
-                    if !err.trace.is_empty() && opts.trace != TraceMode::None {
-                        render_trace_to_stderr(&err.trace, opts.trace);
+                    // ── MIR safety analysis (E0401, W1004) ───────────────────────
+                    error_count += emit_mir_safety_diags(&mir, &interner);
+                    if error_count == 0 {
+                        // ── Optimisation passes (Phase 6) ─────────────────────
+                        fidan_passes::run_all(&mut mir);
+                        let result = fidan_interp::run_mir(
+                            mir,
+                            Arc::clone(&interner),
+                            Arc::clone(&source_map),
+                        );
+                        if let Err(err) = result {
+                            render_message_to_stderr(
+                                Severity::Error,
+                                fidan_diagnostics::diag_code!("R0001"),
+                                &err.message,
+                            );
+                            if !err.trace.is_empty() && opts.trace != TraceMode::None {
+                                render_trace_to_stderr(&err.trace, opts.trace);
+                            }
+                        }
                     }
                 }
             }
@@ -927,19 +975,26 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
             if error_count == 0 {
                 if let Some(ref hir) = merged_hir {
                     let mut mir = fidan_mir::lower_program(hir, &interner);
-                    fidan_passes::run_all(&mut mir);
-                    match fidan_interp::run_mir(mir, Arc::clone(&interner), Arc::clone(&source_map))
-                    {
-                        Ok(()) => {
-                            eprintln!("\x1b[1;32mtest passed\x1b[0m");
-                        }
-                        Err(err) => {
-                            let msg = err.message.trim_start_matches("assertion failed: ");
-                            eprintln!("\x1b[1;31mtest failed\x1b[0m: {}", msg);
-                            if !err.trace.is_empty() && opts.trace != TraceMode::None {
-                                render_trace_to_stderr(&err.trace, opts.trace);
+                    // ── MIR safety analysis (E0401, W1004) ───────────────────
+                    error_count += emit_mir_safety_diags(&mir, &interner);
+                    if error_count == 0 {
+                        fidan_passes::run_all(&mut mir);
+                        match fidan_interp::run_mir(
+                            mir,
+                            Arc::clone(&interner),
+                            Arc::clone(&source_map),
+                        ) {
+                            Ok(()) => {
+                                eprintln!("\x1b[1;32mtest passed\x1b[0m");
                             }
-                            std::process::exit(1);
+                            Err(err) => {
+                                let msg = err.message.trim_start_matches("assertion failed: ");
+                                eprintln!("\x1b[1;31mtest failed\x1b[0m: {}", msg);
+                                if !err.trace.is_empty() && opts.trace != TraceMode::None {
+                                    render_trace_to_stderr(&err.trace, opts.trace);
+                                }
+                                std::process::exit(1);
+                            }
                         }
                     }
                 }

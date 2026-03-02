@@ -255,26 +255,37 @@ Fix: pass the argument:
 
         // ── Concurrency / safety ──────────────────────────────────────────────
         "E0401" => Some(
-            r#"A value that is not wrapped in `Shared oftype T` was passed across a
-thread boundary (e.g. to a `parallel action` or `spawn` expression).
-Only `Shared` values are guaranteed to be safe to access from multiple
-threads simultaneously.
+            r#"A module-level variable is written by one parallel task and read or 
+written by another task in the same `parallel` or `concurrent` block.
+Because both tasks run on separate OS threads, these accesses are not
+synchronised and constitute a data race.
+
+Fidan detects this at compile time by tracking `StoreGlobal` and
+`LoadGlobal` instructions across the task functions that are joined by
+the same `JoinAll`.
 
 Erroneous example:
 
     var counter = 0
 
-    parallel action increment {
-        counter = counter + 1   # error: `counter` is not Shared
+    parallel {
+        task A { counter = counter + 1 }   # error E0401: writes `counter`
+        task B { counter = counter + 1 }   # error E0401: also writes `counter`
     }
 
-Fix: wrap the value in `Shared`:
+Note: In `parallel for` bodies, each iteration runs concurrently.  A write
+to a captured outer variable inside the body means every iteration races
+to update the same slot.
+
+Fix: wrap the shared variable in `Shared oftype T`:
 
     var counter = Shared(0)
 
-    parallel action increment {
-        # access via Shared semantics
+    parallel {
+        task A { counter.update(x => x + 1) }
+        task B { counter.update(x => x + 1) }
     }
+    print(counter.get())   # 2
 "#,
         ),
 
@@ -341,6 +352,36 @@ Example:
     }
 
 Fix: either use the parameter or remove it from the signature.
+"#,
+        ),
+
+        "W1004" => Some(
+            r#"A `spawn expr` expression produces a `Pending oftype T` handle but the
+handle is never passed to `await`.  The spawned thread continues to run
+but its return value is silently discarded when the handle goes out of scope.
+
+This is almost always a bug: either you intended to await the result
+or the spawn is unnecessary.
+
+Erroneous example:
+
+    spawn heavy_work()   # warning: Pending never awaited
+
+Fix — option A: await the result if you need it:
+
+    var result = await spawn heavy_work()
+    print(result)
+
+Fix — option B: store the handle and await it later:
+
+    var task = spawn heavy_work()
+    # … do other things …
+    var result = await task
+
+Fix — option C: if the side-effect is intentional and the return value
+truly does not matter, assign to `_` to silence the warning:
+
+    var _ = spawn fire_and_forget()
 "#,
         ),
 

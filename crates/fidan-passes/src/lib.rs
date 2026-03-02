@@ -1,8 +1,8 @@
-//! `fidan-passes` — MIR optimisation passes.
+//! `fidan-passes` — MIR optimisation and analysis passes.
 
 use fidan_mir::MirProgram;
 
-/// Common interface for all MIR passes.
+/// Common interface for all MIR mutation passes.
 pub trait Pass {
     fn run(&self, _p: &mut MirProgram) {}
 }
@@ -11,13 +11,33 @@ mod constant_folding;
 mod copy_propagation;
 mod dead_code;
 mod inlining;
+pub mod parallel_check;
+pub mod unawaited_pending;
 mod unreachable_pruning;
 
 pub use constant_folding::ConstantFolding;
 pub use copy_propagation::CopyPropagation;
 pub use dead_code::DeadCodeElimination;
 pub use inlining::Inlining;
+pub use parallel_check::ParallelRaceDiag;
+pub use unawaited_pending::UnawaitedPendingDiag;
 pub use unreachable_pruning::UnreachablePruning;
+
+/// Check for data races in `parallel` / `concurrent` blocks (E0401).
+pub fn check_parallel_races(
+    prog: &MirProgram,
+    interner: &fidan_lexer::SymbolInterner,
+) -> Vec<ParallelRaceDiag> {
+    parallel_check::check(prog, interner)
+}
+
+/// Check for `spawn` expressions whose `Pending` results are never `await`ed (W1004).
+pub fn check_unawaited_pending(
+    prog: &MirProgram,
+    interner: &fidan_lexer::SymbolInterner,
+) -> Vec<UnawaitedPendingDiag> {
+    unawaited_pending::check(prog, interner)
+}
 
 /// Run all optimisation passes in the standard order.
 ///
