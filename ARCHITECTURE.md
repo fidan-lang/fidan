@@ -1185,6 +1185,15 @@ Error[E101]: type mismatch: expected `integer`, found `string`
    │             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 ```
 
+> **Future redesign (no concrete plan yet):** The error/warning output format should be
+> redesigned to use a richer visual style — something inspired by Python Rich's panel/border
+> system, with box-drawing characters framing the diagnostic block, colour-coded severity
+> banners, and possibly a compact "badge" style for inline warnings.  The goal is a more
+> distinctive, immediately scannable layout rather than the standard rustc-style arrow format
+> above.  Defer until after Phase 8 (JIT) so the rendering layer can be replaced in one pass
+> without disrupting active compiler work.
+
+
 ### Rule-Based Fix Suggestions
 
 A `FixEngine` holds a table of `FixRule`s:
