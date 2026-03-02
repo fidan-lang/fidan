@@ -255,6 +255,7 @@ fn fmt_op(op: &Operand) -> String {
         Operand::Const(MirLit::Nothing) => "nothing".to_string(),
         Operand::Const(MirLit::FunctionRef(id)) => format!("fn#{}", id),
         Operand::Const(MirLit::Namespace(m)) => format!("std.{}", m),
+        Operand::Const(MirLit::StdlibFn { module, name }) => format!("std.{}.{}", module, name),
     }
 }
 

@@ -37,6 +37,9 @@ pub enum FidanValue {
     /// A stdlib module namespace (e.g. `io`, `math`).
     /// Method calls on this value are routed to `fidan_stdlib::dispatch_stdlib`.
     Namespace(Arc<str>),
+    /// A first-class reference to a stdlib function (e.g. `use std.io.{readFile}`).
+    /// `StdlibFn(module, name)` — callable via `Callee::Dynamic` or directly displayed.
+    StdlibFn(Arc<str>, Arc<str>),
 }
 
 impl FidanValue {
@@ -55,6 +58,7 @@ impl FidanValue {
             FidanValue::Tuple(_) => "tuple",
             FidanValue::Pending(_) => "pending",
             FidanValue::Namespace(_) => "namespace",
+            FidanValue::StdlibFn(_, _) => "action",
         }
     }
 
@@ -130,6 +134,52 @@ impl FidanValue {
 
             // Namespace is stateless — just clone the Arc<str>.
             FidanValue::Namespace(m) => FidanValue::Namespace(Arc::clone(m)),
+
+            // StdlibFn is stateless — clone both Arc<str> pointers.
+            FidanValue::StdlibFn(module, name) =>
+                FidanValue::StdlibFn(Arc::clone(module), Arc::clone(name)),
         }
+    }
+}
+
+/// Canonical string representation of any `FidanValue`.
+///
+/// This is the single source of truth — `fidan-interp::builtins::display` and
+/// `fidan-stdlib::io::format_val` both delegate here so the output is consistent.
+pub fn display(val: &FidanValue) -> String {
+    match val {
+        FidanValue::Integer(n) => n.to_string(),
+        FidanValue::Float(f) => {
+            if f.fract() == 0.0 { format!("{:.1}", f) } else { f.to_string() }
+        }
+        FidanValue::Boolean(b) => b.to_string(),
+        FidanValue::Nothing => "nothing".to_string(),
+        FidanValue::String(s) => s.as_str().to_string(),
+        FidanValue::List(l) => {
+            let items: Vec<String> = l.borrow().iter().map(display).collect();
+            format!("[{}]", items.join(", "))
+        }
+        FidanValue::Dict(d) => {
+            let pairs: Vec<String> = d.borrow().iter()
+                .map(|(k, v)| format!("{}: {}", k.as_str(), display(v)))
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        }
+        FidanValue::Tuple(items) => {
+            let parts: Vec<String> = items.iter().map(display).collect();
+            format!("({})", parts.join(", "))
+        }
+        FidanValue::Object(o) => {
+            let name = o.borrow().class.name_str.clone();
+            format!("<{}>", name)
+        }
+        FidanValue::Shared(s) => {
+            let inner = s.0.lock().unwrap();
+            format!("Shared({})", display(&inner))
+        }
+        FidanValue::Pending(_) => "<pending>".to_string(),
+        FidanValue::Function(id) => format!("<action#{}>", id.0),
+        FidanValue::Namespace(m) => format!("<module:{}>", m),
+        FidanValue::StdlibFn(module, name) => format!("<action:{}.{}>", module, name),
     }
 }

@@ -1,4 +1,5 @@
 use fidan_runtime::{FidanString, FidanValue, SharedRef};
+use fidan_runtime::display as runtime_display;
 use std::io::BufRead;
 
 /// Try to handle a call to a core language built-in function.
@@ -115,48 +116,11 @@ pub fn call_builtin_constructor(name: &str, args: Vec<FidanValue>) -> Option<Fid
 
 /// Format a `FidanValue` as a human-readable string (used by `print` and
 /// string interpolation).
+///
+/// Delegates to `fidan_runtime::display` — the single source of truth.
+/// Other crates (`fidan-stdlib`) import `fidan_runtime::display` directly.
 pub fn display(val: &FidanValue) -> String {
-    match val {
-        FidanValue::Integer(n) => n.to_string(),
-        FidanValue::Float(f) => {
-            // Show "15.0" for whole floats, "3.14" for fractions.
-            if f.fract() == 0.0 {
-                format!("{:.1}", f)
-            } else {
-                f.to_string()
-            }
-        }
-        FidanValue::Boolean(b) => b.to_string(),
-        FidanValue::Nothing => "nothing".to_string(),
-        FidanValue::String(s) => s.as_str().to_string(),
-        FidanValue::List(l) => {
-            let items: Vec<String> = l.borrow().iter().map(display).collect();
-            format!("[{}]", items.join(", "))
-        }
-        FidanValue::Dict(d) => {
-            let pairs: Vec<String> = d
-                .borrow()
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k.as_str(), display(v)))
-                .collect();
-            format!("{{{}}}", pairs.join(", "))
-        }
-        FidanValue::Tuple(items) => {
-            let parts: Vec<String> = items.iter().map(display).collect();
-            format!("({})", parts.join(", "))
-        }
-        FidanValue::Object(o) => {
-            let name = o.borrow().class.name_str.clone();
-            format!("<{}>", name)
-        }
-        FidanValue::Shared(s) => {
-            let inner = s.0.lock().unwrap();
-            format!("Shared({})", display(&inner))
-        }
-        FidanValue::Pending(_) => "<pending>".to_string(),
-        FidanValue::Function(id) => format!("<action#{}>", id.0),
-        FidanValue::Namespace(m) => format!("<module:{}>", m),
-    }
+    runtime_display(val)
 }
 
 /// Format an object with a resolved class name (used when the interner is available).

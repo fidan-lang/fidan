@@ -7,7 +7,7 @@
 //!   `test.assert(cond)`, `test.assertEq(a, b)`, `test.assertNe(a, b)`,
 //!   `test.assertSome(v)`, `test.fail(msg)`
 
-use fidan_runtime::FidanValue;
+use fidan_runtime::{display as format_val, FidanValue};
 
 /// Result of a single test case.
 #[derive(Debug, Clone)]
@@ -207,46 +207,6 @@ fn cmp_vals(a: Option<&FidanValue>, b: Option<&FidanValue>) -> Option<std::cmp::
         (Some(FidanValue::Integer(x)), Some(FidanValue::Float(y))) => (*x as f64).partial_cmp(y),
         (Some(FidanValue::Float(x)), Some(FidanValue::Integer(y))) => x.partial_cmp(&(*y as f64)),
         _ => None,
-    }
-}
-
-fn format_val(v: &FidanValue) -> String {
-    match v {
-        FidanValue::String(s) => s.as_str().to_string(),
-        FidanValue::Integer(n) => n.to_string(),
-        FidanValue::Float(f) => {
-            if f.fract() == 0.0 {
-                format!("{:.1}", f)
-            } else {
-                f.to_string()
-            }
-        }
-        FidanValue::Boolean(b) => b.to_string(),
-        FidanValue::Nothing => "nothing".to_string(),
-        FidanValue::List(l) => {
-            let items: Vec<String> = l.borrow().iter().map(format_val).collect();
-            format!("[{}]", items.join(", "))
-        }
-        FidanValue::Dict(d) => {
-            let pairs: Vec<String> = d
-                .borrow()
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k.as_str(), format_val(v)))
-                .collect();
-            format!("{{{}}}", pairs.join(", "))
-        }
-        FidanValue::Tuple(items) => {
-            let parts: Vec<String> = items.iter().map(format_val).collect();
-            format!("({})", parts.join(", "))
-        }
-        FidanValue::Object(_) => "[object]".to_string(),
-        FidanValue::Shared(s) => {
-            let inner = s.0.lock().unwrap();
-            format!("Shared({})", format_val(&inner))
-        }
-        FidanValue::Pending(_) => "<pending>".to_string(),
-        FidanValue::Function(id) => format!("<action#{}>", id.0),
-        FidanValue::Namespace(m) => format!("<module:{}>", m),
     }
 }
 

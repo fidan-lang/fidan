@@ -35,13 +35,13 @@ use crate::mir::{
 /// that is alive for the entire duration of `lower_program`.  All accesses happen
 /// within that same call, single-threaded.
 struct PendingParallelFor {
-    fn_id:      FunctionId,
+    fn_id: FunctionId,
     /// Per-iteration binding for `parallel for`; `None` for `concurrent { task {} }` bodies.
-    binding:    Option<(Symbol, MirTy)>,
+    binding: Option<(Symbol, MirTy)>,
     /// Outer-scope variables captured by the body: become extra params after the binding.
     env_params: Vec<(Symbol, MirTy)>,
-    body_ptr:   *const HirStmt,
-    body_len:   usize,
+    body_ptr: *const HirStmt,
+    body_len: usize,
 }
 
 // SAFETY: used only in single-threaded lower_program; raw ptrs into &HirModule.
@@ -58,42 +58,87 @@ fn collect_hir_used_vars(stmts: &[HirStmt]) -> HashSet<Symbol> {
 }
 
 fn hir_walk_stmts(stmts: &[HirStmt], out: &mut HashSet<Symbol>) {
-    for s in stmts { hir_walk_stmt(s, out); }
+    for s in stmts {
+        hir_walk_stmt(s, out);
+    }
 }
 
 fn hir_walk_stmt(s: &HirStmt, out: &mut HashSet<Symbol>) {
     match s {
-        HirStmt::VarDecl { init, .. }       => { if let Some(e) = init { hir_walk_expr(e, out); } }
-        HirStmt::Destructure { value, .. }  => hir_walk_expr(value, out),
-        HirStmt::Assign { target, value, .. } => { hir_walk_expr(target, out); hir_walk_expr(value, out); }
-        HirStmt::Expr(e)                    => hir_walk_expr(e, out),
-        HirStmt::Return { value, .. }       => { if let Some(e) = value { hir_walk_expr(e, out); } }
-        HirStmt::Panic { value, .. }        => hir_walk_expr(value, out),
-        HirStmt::If { condition, then_body, else_ifs, else_body, .. } => {
+        HirStmt::VarDecl { init, .. } => {
+            if let Some(e) = init {
+                hir_walk_expr(e, out);
+            }
+        }
+        HirStmt::Destructure { value, .. } => hir_walk_expr(value, out),
+        HirStmt::Assign { target, value, .. } => {
+            hir_walk_expr(target, out);
+            hir_walk_expr(value, out);
+        }
+        HirStmt::Expr(e) => hir_walk_expr(e, out),
+        HirStmt::Return { value, .. } => {
+            if let Some(e) = value {
+                hir_walk_expr(e, out);
+            }
+        }
+        HirStmt::Panic { value, .. } => hir_walk_expr(value, out),
+        HirStmt::If {
+            condition,
+            then_body,
+            else_ifs,
+            else_body,
+            ..
+        } => {
             hir_walk_expr(condition, out);
             hir_walk_stmts(then_body, out);
-            for ei in else_ifs { hir_walk_expr(&ei.condition, out); hir_walk_stmts(&ei.body, out); }
-            if let Some(eb) = else_body { hir_walk_stmts(eb, out); }
+            for ei in else_ifs {
+                hir_walk_expr(&ei.condition, out);
+                hir_walk_stmts(&ei.body, out);
+            }
+            if let Some(eb) = else_body {
+                hir_walk_stmts(eb, out);
+            }
         }
-        HirStmt::Check { scrutinee, arms, .. } => {
+        HirStmt::Check {
+            scrutinee, arms, ..
+        } => {
             hir_walk_expr(scrutinee, out);
-            for arm in arms { hir_walk_stmts(&arm.body, out); }
+            for arm in arms {
+                hir_walk_stmts(&arm.body, out);
+            }
         }
-        HirStmt::For        { iterable, body, .. }
-        | HirStmt::ParallelFor { iterable, body, .. } => {
-            hir_walk_expr(iterable, out); hir_walk_stmts(body, out);
-        }
-        HirStmt::While { condition, body, .. } => {
-            hir_walk_expr(condition, out); hir_walk_stmts(body, out);
-        }
-        HirStmt::Attempt { body, catches, otherwise, finally, .. } => {
+        HirStmt::For { iterable, body, .. } | HirStmt::ParallelFor { iterable, body, .. } => {
+            hir_walk_expr(iterable, out);
             hir_walk_stmts(body, out);
-            for c in catches { hir_walk_stmts(&c.body, out); }
-            if let Some(ob) = otherwise { hir_walk_stmts(ob, out); }
-            if let Some(fb) = finally   { hir_walk_stmts(fb, out); }
+        }
+        HirStmt::While {
+            condition, body, ..
+        } => {
+            hir_walk_expr(condition, out);
+            hir_walk_stmts(body, out);
+        }
+        HirStmt::Attempt {
+            body,
+            catches,
+            otherwise,
+            finally,
+            ..
+        } => {
+            hir_walk_stmts(body, out);
+            for c in catches {
+                hir_walk_stmts(&c.body, out);
+            }
+            if let Some(ob) = otherwise {
+                hir_walk_stmts(ob, out);
+            }
+            if let Some(fb) = finally {
+                hir_walk_stmts(fb, out);
+            }
         }
         HirStmt::ConcurrentBlock { tasks, .. } => {
-            for t in tasks { hir_walk_stmts(&t.body, out); }
+            for t in tasks {
+                hir_walk_stmts(&t.body, out);
+            }
         }
         HirStmt::Break { .. } | HirStmt::Continue { .. } | HirStmt::Error { .. } => {}
     }
@@ -101,37 +146,81 @@ fn hir_walk_stmt(s: &HirStmt, out: &mut HashSet<Symbol>) {
 
 fn hir_walk_expr(e: &HirExpr, out: &mut HashSet<Symbol>) {
     match &e.kind {
-        HirExprKind::Var(sym)                          => { out.insert(*sym); }
-        HirExprKind::Binary { lhs, rhs, .. }           => { hir_walk_expr(lhs, out); hir_walk_expr(rhs, out); }
-        HirExprKind::Assign { target, value }          => { hir_walk_expr(target, out); hir_walk_expr(value, out); }
-        HirExprKind::Unary  { operand, .. }            => hir_walk_expr(operand, out),
-        HirExprKind::NullCoalesce { lhs, rhs }         => { hir_walk_expr(lhs, out); hir_walk_expr(rhs, out); }
-        HirExprKind::IfExpr { condition, then_val, else_val } => {
-            hir_walk_expr(condition, out); hir_walk_expr(then_val, out); hir_walk_expr(else_val, out);
+        HirExprKind::Var(sym) => {
+            out.insert(*sym);
+        }
+        HirExprKind::Binary { lhs, rhs, .. } => {
+            hir_walk_expr(lhs, out);
+            hir_walk_expr(rhs, out);
+        }
+        HirExprKind::Assign { target, value } => {
+            hir_walk_expr(target, out);
+            hir_walk_expr(value, out);
+        }
+        HirExprKind::Unary { operand, .. } => hir_walk_expr(operand, out),
+        HirExprKind::NullCoalesce { lhs, rhs } => {
+            hir_walk_expr(lhs, out);
+            hir_walk_expr(rhs, out);
+        }
+        HirExprKind::IfExpr {
+            condition,
+            then_val,
+            else_val,
+        } => {
+            hir_walk_expr(condition, out);
+            hir_walk_expr(then_val, out);
+            hir_walk_expr(else_val, out);
         }
         HirExprKind::Call { callee, args } => {
             hir_walk_expr(callee, out);
-            for a in args { hir_walk_expr(&a.value, out); }
+            for a in args {
+                hir_walk_expr(&a.value, out);
+            }
         }
-        HirExprKind::Field { object, .. }              => hir_walk_expr(object, out),
-        HirExprKind::Index { object, index }           => { hir_walk_expr(object, out); hir_walk_expr(index, out); }
-        HirExprKind::List(items)                       => { for e in items { hir_walk_expr(e, out); } }
-        HirExprKind::Dict(pairs)                       => { for (k,v) in pairs { hir_walk_expr(k, out); hir_walk_expr(v, out); } }
-        HirExprKind::Tuple(items)                      => { for e in items { hir_walk_expr(e, out); } }
-        HirExprKind::StringInterp(parts)               => {
-            for p in parts { if let HirInterpPart::Expr(e) = p { hir_walk_expr(e, out); } }
+        HirExprKind::Field { object, .. } => hir_walk_expr(object, out),
+        HirExprKind::Index { object, index } => {
+            hir_walk_expr(object, out);
+            hir_walk_expr(index, out);
+        }
+        HirExprKind::List(items) => {
+            for e in items {
+                hir_walk_expr(e, out);
+            }
+        }
+        HirExprKind::Dict(pairs) => {
+            for (k, v) in pairs {
+                hir_walk_expr(k, out);
+                hir_walk_expr(v, out);
+            }
+        }
+        HirExprKind::Tuple(items) => {
+            for e in items {
+                hir_walk_expr(e, out);
+            }
+        }
+        HirExprKind::StringInterp(parts) => {
+            for p in parts {
+                if let HirInterpPart::Expr(e) = p {
+                    hir_walk_expr(e, out);
+                }
+            }
         }
         HirExprKind::Spawn(e) | HirExprKind::Await(e) => hir_walk_expr(e, out),
-        HirExprKind::CheckExpr { scrutinee, arms }     => {
+        HirExprKind::CheckExpr { scrutinee, arms } => {
             hir_walk_expr(scrutinee, out);
             for arm in arms {
                 hir_walk_expr(&arm.pattern, out);
                 hir_walk_stmts(&arm.body, out);
             }
         }
-        HirExprKind::IntLit(_) | HirExprKind::FloatLit(_) | HirExprKind::StrLit(_)
-        | HirExprKind::BoolLit(_) | HirExprKind::Nothing | HirExprKind::This
-        | HirExprKind::Parent   | HirExprKind::Error => {}
+        HirExprKind::IntLit(_)
+        | HirExprKind::FloatLit(_)
+        | HirExprKind::StrLit(_)
+        | HirExprKind::BoolLit(_)
+        | HirExprKind::Nothing
+        | HirExprKind::This
+        | HirExprKind::Parent
+        | HirExprKind::Error => {}
     }
 }
 
@@ -356,11 +445,14 @@ impl<'p> FnCtx<'p> {
                         });
                         // If the target is an unshadowed global, route writes
                         // through StoreGlobal so other functions see the update.
-                        let is_unshadowed_global = self.global_map.contains_key(name)
-                            && self.lookup_var(*name).is_none();
+                        let is_unshadowed_global =
+                            self.global_map.contains_key(name) && self.lookup_var(*name).is_none();
                         if is_unshadowed_global {
                             let gid = self.global_map[name];
-                            self.emit(Instr::StoreGlobal { global: gid, value: Operand::Local(dest) });
+                            self.emit(Instr::StoreGlobal {
+                                global: gid,
+                                value: Operand::Local(dest),
+                            });
                         } else {
                             self.define_var(*name, dest);
                         }
@@ -701,7 +793,11 @@ impl<'p> FnCtx<'p> {
                                 let arg_ops: Vec<Operand> =
                                     args.iter().map(|a| self.lower_expr(&a.value)).collect();
                                 let dest = self.alloc_local();
-                                self.emit(Instr::SpawnExpr { dest, task_fn: fn_id, args: arg_ops });
+                                self.emit(Instr::SpawnExpr {
+                                    dest,
+                                    task_fn: fn_id,
+                                    args: arg_ops,
+                                });
                                 return Operand::Local(dest);
                             }
                             // Named var that isn't in fn_map → treat as a function-value.
@@ -709,7 +805,11 @@ impl<'p> FnCtx<'p> {
                             let mut spawn_args = vec![fn_op];
                             spawn_args.extend(args.iter().map(|a| self.lower_expr(&a.value)));
                             let dest = self.alloc_local();
-                            self.emit(Instr::SpawnDynamic { dest, method: None, args: spawn_args });
+                            self.emit(Instr::SpawnDynamic {
+                                dest,
+                                method: None,
+                                args: spawn_args,
+                            });
                             return Operand::Local(dest);
                         }
                         // Method call: `spawn obj.method(args)`.
@@ -718,7 +818,11 @@ impl<'p> FnCtx<'p> {
                             let mut spawn_args = vec![recv_op];
                             spawn_args.extend(args.iter().map(|a| self.lower_expr(&a.value)));
                             let dest = self.alloc_local();
-                            self.emit(Instr::SpawnDynamic { dest, method: Some(*field), args: spawn_args });
+                            self.emit(Instr::SpawnDynamic {
+                                dest,
+                                method: Some(*field),
+                                args: spawn_args,
+                            });
                             return Operand::Local(dest);
                         }
                         // Any other callee shape: evaluate and dispatch dynamically.
@@ -727,7 +831,11 @@ impl<'p> FnCtx<'p> {
                             let mut spawn_args = vec![fn_op];
                             spawn_args.extend(args.iter().map(|a| self.lower_expr(&a.value)));
                             let dest = self.alloc_local();
-                            self.emit(Instr::SpawnDynamic { dest, method: None, args: spawn_args });
+                            self.emit(Instr::SpawnDynamic {
+                                dest,
+                                method: None,
+                                args: spawn_args,
+                            });
                             return Operand::Local(dest);
                         }
                     }
@@ -735,7 +843,11 @@ impl<'p> FnCtx<'p> {
                 // Non-call spawn (unusual, e.g. `spawn someExpr`) → synchronous fallback.
                 let op = self.lower_expr(inner);
                 let dest = self.alloc_local();
-                self.emit(Instr::Assign { dest, ty, rhs: Rvalue::Use(op) });
+                self.emit(Instr::Assign {
+                    dest,
+                    ty,
+                    rhs: Rvalue::Use(op),
+                });
                 Operand::Local(dest)
             }
             HirExprKind::Await(inner) => {
@@ -877,7 +989,10 @@ impl<'p> FnCtx<'p> {
                 // always reflect mutations made by called functions.
                 if self.is_init_fn {
                     if let Some(&gid) = self.global_map.get(name) {
-                        self.emit(Instr::StoreGlobal { global: gid, value: Operand::Local(dest) });
+                        self.emit(Instr::StoreGlobal {
+                            global: gid,
+                            value: Operand::Local(dest),
+                        });
                         return; // do NOT define_var — keep globals out of the SSA env
                     }
                 }
@@ -931,11 +1046,14 @@ impl<'p> FnCtx<'p> {
                         // isn’t currently a local variable (i.e. no VarDecl
                         // in this function shadowed the global).  If it IS
                         // a local, just update the SSA env as usual.
-                        let is_unshadowed_global = self.global_map.contains_key(name)
-                            && self.lookup_var(*name).is_none();
+                        let is_unshadowed_global =
+                            self.global_map.contains_key(name) && self.lookup_var(*name).is_none();
                         if is_unshadowed_global {
                             let gid = self.global_map[name];
-                            self.emit(Instr::StoreGlobal { global: gid, value: Operand::Local(dest) });
+                            self.emit(Instr::StoreGlobal {
+                                global: gid,
+                                value: Operand::Local(dest),
+                            });
                             // Do NOT define_var — next read will use LoadGlobal.
                         } else {
                             self.define_var(*name, dest);
@@ -1231,11 +1349,9 @@ impl<'p> FnCtx<'p> {
                 let body_fn_id = FunctionId(self.prog.functions.len() as u32);
                 // The name is purely informational (for dumps/debug).
                 let par_sym = *binding; // reuse the binding symbol as a hint
-                self.prog.functions.push(MirFunction::new(
-                    body_fn_id,
-                    par_sym,
-                    MirTy::Nothing,
-                ));
+                self.prog
+                    .functions
+                    .push(MirFunction::new(body_fn_id, par_sym, MirTy::Nothing));
 
                 // 4. Emit the ParallelIter instruction in the current function.
                 self.emit(Instr::ParallelIter {
@@ -1246,13 +1362,15 @@ impl<'p> FnCtx<'p> {
 
                 // 5. Defer lowering of the body to after the current function
                 //    body finishes (only one &mut MirProgram borrow at a time).
-                self.par_for_pending.borrow_mut().push_back(PendingParallelFor {
-                    fn_id: body_fn_id,
-                    binding: Some((*binding, fidan_ty_to_mir(binding_ty))),
-                    env_params,
-                    body_ptr: body.as_ptr(),
-                    body_len: body.len(),
-                });
+                self.par_for_pending
+                    .borrow_mut()
+                    .push_back(PendingParallelFor {
+                        fn_id: body_fn_id,
+                        binding: Some((*binding, fidan_ty_to_mir(binding_ty))),
+                        env_params,
+                        body_ptr: body.as_ptr(),
+                        body_len: body.len(),
+                    });
             }
 
             // ── Concurrent block ─────────────────────────────────────────────
@@ -1290,13 +1408,15 @@ impl<'p> FnCtx<'p> {
                     handles.push(handle);
 
                     // Defer body lowering via the shared pending queue.
-                    self.par_for_pending.borrow_mut().push_back(PendingParallelFor {
-                        fn_id: task_fn_id,
-                        binding: None, // no per-iteration binding for tasks
-                        env_params,
-                        body_ptr: task.body.as_ptr(),
-                        body_len: task.body.len(),
-                    });
+                    self.par_for_pending
+                        .borrow_mut()
+                        .push_back(PendingParallelFor {
+                            fn_id: task_fn_id,
+                            binding: None, // no per-iteration binding for tasks
+                            env_params,
+                            body_ptr: task.body.as_ptr(),
+                            body_len: task.body.len(),
+                        });
                 }
                 // Wait for all tasks to complete.
                 if !handles.is_empty() {
@@ -2166,7 +2286,10 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
     for stmt in &hir.init_stmts {
         if let HirStmt::VarDecl { name, ty, .. } = stmt {
             let gid = GlobalId(prog.globals.len() as u32);
-            prog.globals.push(MirGlobal { name: *name, ty: fidan_ty_to_mir(ty) });
+            prog.globals.push(MirGlobal {
+                name: *name,
+                ty: fidan_ty_to_mir(ty),
+            });
             global_map.insert(*name, gid);
         }
     }
@@ -2180,17 +2303,41 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             let alias_sym = interner.intern(&ns_alias);
             if !global_map.contains_key(&alias_sym) {
                 let gid = GlobalId(prog.globals.len() as u32);
-                prog.globals.push(MirGlobal { name: alias_sym, ty: MirTy::Dynamic });
+                prog.globals.push(MirGlobal {
+                    name: alias_sym,
+                    ty: MirTy::Dynamic,
+                });
                 global_map.insert(alias_sym, gid);
             }
         } else if decl.module_path.len() == 1 && decl.specific_names.is_none() {
             // User module: `use test2` → module_path = ["test2"].
-            let ns_alias = decl.alias.clone().unwrap_or_else(|| decl.module_path[0].clone());
+            let ns_alias = decl
+                .alias
+                .clone()
+                .unwrap_or_else(|| decl.module_path[0].clone());
             let alias_sym = interner.intern(&ns_alias);
             if !global_map.contains_key(&alias_sym) {
                 let gid = GlobalId(prog.globals.len() as u32);
-                prog.globals.push(MirGlobal { name: alias_sym, ty: MirTy::Dynamic });
+                prog.globals.push(MirGlobal {
+                    name: alias_sym,
+                    ty: MirTy::Dynamic,
+                });
                 global_map.insert(alias_sym, gid);
+            }
+        } else if let Some(ref names) = decl.specific_names {
+            // Specific-name stdlib import: `use std.io.{readFile}` → each name is a global.
+            if decl.module_path.len() >= 2 {
+                for fn_name in names {
+                    let fn_sym = interner.intern(fn_name);
+                    if !global_map.contains_key(&fn_sym) {
+                        let gid = GlobalId(prog.globals.len() as u32);
+                        prog.globals.push(MirGlobal {
+                            name: fn_sym,
+                            ty: MirTy::Dynamic,
+                        });
+                        global_map.insert(fn_sym, gid);
+                    }
+                }
             }
         }
     }
@@ -2355,7 +2502,10 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 });
                 // Store as a global so all functions can read it via LoadGlobal.
                 if let Some(&gid) = ctx.global_map.get(&alias_sym) {
-                    ctx.emit(Instr::StoreGlobal { global: gid, value: Operand::Local(dest) });
+                    ctx.emit(Instr::StoreGlobal {
+                        global: gid,
+                        value: Operand::Local(dest),
+                    });
                 } else {
                     // Grouped-import or other edge case — fall back to SSA local.
                     ctx.define_var(alias_sym, dest);
@@ -2372,9 +2522,38 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                     rhs: Rvalue::Literal(MirLit::Namespace(module)),
                 });
                 if let Some(&gid) = ctx.global_map.get(&alias_sym) {
-                    ctx.emit(Instr::StoreGlobal { global: gid, value: Operand::Local(dest) });
+                    ctx.emit(Instr::StoreGlobal {
+                        global: gid,
+                        value: Operand::Local(dest),
+                    });
                 } else {
                     ctx.define_var(alias_sym, dest);
+                }
+            } else if let Some(ref names) = decl.specific_names {
+                // Specific-name stdlib imports: `use std.io.{readFile, print}` →
+                // each name becomes a `StdlibFn` value stored into a global.
+                if decl.module_path.len() >= 2 {
+                    let module = decl.module_path[1].clone();
+                    for fn_name in names {
+                        let fn_sym = interner.intern(fn_name);
+                        let dest = ctx.alloc_local();
+                        ctx.emit(Instr::Assign {
+                            dest,
+                            ty: MirTy::Dynamic,
+                            rhs: Rvalue::Literal(MirLit::StdlibFn {
+                                module: module.clone(),
+                                name: fn_name.clone(),
+                            }),
+                        });
+                        if let Some(&gid) = ctx.global_map.get(&fn_sym) {
+                            ctx.emit(Instr::StoreGlobal {
+                                global: gid,
+                                value: Operand::Local(dest),
+                            });
+                        } else {
+                            ctx.define_var(fn_sym, dest);
+                        }
+                    }
                 }
             }
         }
@@ -2389,7 +2568,9 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
     // New entries can appear during this loop (nested parallel-for), so we
     // keep processing until the queue is fully drained.
     loop {
-        let Some(pf) = pending_par_fors.borrow_mut().pop_front() else { break };
+        let Some(pf) = pending_par_fors.borrow_mut().pop_front() else {
+            break;
+        };
         // SAFETY: raw ptrs point into HirStmt slices owned by `hir`, which
         // lives for the entire duration of lower_program.
         let body: &[HirStmt] = unsafe { std::slice::from_raw_parts(pf.body_ptr, pf.body_len) };
@@ -2423,15 +2604,19 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             ctx.define_var(binding_sym, binding_local);
             ctx.func_mut().params.push(MirParam {
                 local: binding_local,
-                name:  binding_sym,
-                ty:    binding_ty,
+                name: binding_sym,
+                ty: binding_ty,
             });
         }
         // Subsequent params: captured env variables (parallel for + concurrent tasks).
         for (sym, ty) in pf.env_params {
             let local = ctx.alloc_local();
             ctx.define_var(sym, local);
-            ctx.func_mut().params.push(MirParam { local, name: sym, ty });
+            ctx.func_mut().params.push(MirParam {
+                local,
+                name: sym,
+                ty,
+            });
         }
         ctx.lower_stmts(body);
         if !ctx.terminated {

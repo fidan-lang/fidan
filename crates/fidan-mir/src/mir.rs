@@ -74,6 +74,11 @@ pub enum MirLit {
     FunctionRef(u32),
     /// A stdlib module namespace (e.g. `"io"`, `"math"`).
     Namespace(String),
+    /// A first-class reference to a stdlib free function (e.g. `use std.io.{readFile}`).
+    StdlibFn {
+        module: String,
+        name: String,
+    },
 }
 
 // ── Operands ───────────────────────────────────────────────────────────────────

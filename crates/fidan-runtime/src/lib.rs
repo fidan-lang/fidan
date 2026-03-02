@@ -16,4 +16,4 @@ pub use owned_ref::OwnedRef;
 pub use parallel::{FidanPending, ParallelArgs, ParallelCapture};
 pub use shared_ref::SharedRef;
 pub use string::FidanString;
-pub use value::{FidanValue, FunctionId};
+pub use value::{FidanValue, FunctionId, display};

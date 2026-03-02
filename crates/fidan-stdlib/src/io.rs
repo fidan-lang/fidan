@@ -4,7 +4,7 @@
 //!   `use std.io`  → `io.readFile(path)`, `io.writeFile(path, content)`, `io.readLine()`, etc.
 //!   `use std.io.{readFile, writeFile}` → free names in scope.
 
-use fidan_runtime::{FidanString, FidanValue};
+use fidan_runtime::{display as format_val, FidanString, FidanValue};
 
 fn as_str(v: &FidanValue) -> String {
     match v {
@@ -223,46 +223,6 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             Some(FidanValue::Nothing)
         }
         _ => None,
-    }
-}
-
-fn format_val(v: &FidanValue) -> String {
-    match v {
-        FidanValue::String(s) => s.as_str().to_string(),
-        FidanValue::Integer(n) => n.to_string(),
-        FidanValue::Float(f) => {
-            if f.fract() == 0.0 {
-                format!("{:.1}", f)
-            } else {
-                f.to_string()
-            }
-        }
-        FidanValue::Boolean(b) => b.to_string(),
-        FidanValue::Nothing => "nothing".to_string(),
-        FidanValue::List(l) => {
-            let items: Vec<String> = l.borrow().iter().map(format_val).collect();
-            format!("[{}]", items.join(", "))
-        }
-        FidanValue::Dict(d) => {
-            let pairs: Vec<String> = d
-                .borrow()
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k.as_str(), format_val(v)))
-                .collect();
-            format!("{{{}}}", pairs.join(", "))
-        }
-        FidanValue::Tuple(items) => {
-            let parts: Vec<String> = items.iter().map(format_val).collect();
-            format!("({})", parts.join(", "))
-        }
-        FidanValue::Object(_) => "[object]".to_string(),
-        FidanValue::Shared(s) => {
-            let inner = s.0.lock().unwrap();
-            format!("Shared({})", format_val(&inner))
-        }
-        FidanValue::Pending(_) => "<pending>".to_string(),
-        FidanValue::Function(id) => format!("<action#{}>", id.0),
-        FidanValue::Namespace(m) => format!("<module:{}>", m),
     }
 }
 

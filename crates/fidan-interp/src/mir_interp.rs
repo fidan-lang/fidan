@@ -142,6 +142,9 @@ pub struct MirMachine {
     /// Maps free-imported function names (e.g. `readFile`) to their stdlib module
     /// (e.g. `"io"`).  Populated from `use std.io.{readFile}` declarations.
     stdlib_free_fns: std::collections::HashMap<Arc<str>, Arc<str>>,
+    /// Set of stdlib module names/aliases known in this program (e.g. `"io"`, `"math"`).
+    /// O(1) lookup used by `dispatch_method` to distinguish stdlib vs user namespaces.
+    stdlib_modules: std::collections::HashSet<Arc<str>>,
     /// Maps merged free-function names to their `FunctionId`.
     /// Used for `use mymod` / `test2.add(...)` user-module namespace dispatch.
     user_fn_map: std::collections::HashMap<Symbol, FunctionId>,
@@ -178,6 +181,9 @@ impl MirMachine {
         // Build the free-function import map from `use std.module.{fn}` declarations.
         let mut stdlib_free_fns: std::collections::HashMap<Arc<str>, Arc<str>> =
             std::collections::HashMap::new();
+        // Build the stdlib module set: module names AND aliases, for O(1) is-stdlib lookup.
+        let mut stdlib_modules: std::collections::HashSet<Arc<str>> =
+            std::collections::HashSet::new();
         for decl in &program.use_decls {
             if let Some(ref names) = decl.specific_names {
                 let module: Arc<str> = Arc::from(decl.module.as_str());
@@ -185,6 +191,13 @@ impl MirMachine {
                     let fn_name: Arc<str> = Arc::from(name.as_str());
                     stdlib_free_fns.insert(fn_name, Arc::clone(&module));
                 }
+                stdlib_modules.insert(Arc::clone(&module));
+            } else {
+                // `use std.io` / `use std.io as myIo` — register both canonical name and alias.
+                let module: Arc<str> = Arc::from(decl.module.as_str());
+                let alias: Arc<str> = Arc::from(decl.alias.as_str());
+                stdlib_modules.insert(Arc::clone(&module));
+                stdlib_modules.insert(alias);
             }
         }
 
@@ -200,7 +213,12 @@ impl MirMachine {
                 continue; // skip init fn
             }
             // Skip methods: their first param is always named `this`.
-            if func.params.first().map(|p| p.name == this_sym).unwrap_or(false) {
+            if func
+                .params
+                .first()
+                .map(|p| p.name == this_sym)
+                .unwrap_or(false)
+            {
                 continue;
             }
             user_fn_map.insert(func.name, FunctionId(i as u32));
@@ -215,6 +233,7 @@ impl MirMachine {
             pending_call_span: None,
             panic_trace: Vec::new(),
             stdlib_free_fns,
+            stdlib_modules,
             user_fn_map,
             globals: Arc::new(std::sync::Mutex::new(vec![
                 FidanValue::Nothing;
@@ -239,6 +258,7 @@ impl MirMachine {
             pending_call_span: None,
             panic_trace: Vec::new(),
             stdlib_free_fns: self.stdlib_free_fns.clone(),
+            stdlib_modules: self.stdlib_modules.clone(),
             user_fn_map: self.user_fn_map.clone(),
             globals: Arc::clone(&self.globals),
             test_results: Vec::new(),
@@ -835,6 +855,11 @@ impl MirMachine {
                     FidanValue::Function(RuntimeFnId(id)) => {
                         self.call_function(FunctionId(id), args)
                     }
+                    FidanValue::StdlibFn(ref module, ref name) => {
+                        let m = Arc::clone(module);
+                        let n = Arc::clone(name);
+                        self.dispatch_stdlib_call(&m, &n, args)
+                    }
                     _ => Err(MirSignal::Panic(format!(
                         "cannot call value of type `{}`",
                         v.type_name()
@@ -852,11 +877,8 @@ impl MirMachine {
     ) -> Result<FidanValue, MirSignal> {
         // Stdlib namespace dispatch: `io.readFile(...)`, `math.sin(...)`, etc.
         if let FidanValue::Namespace(ref module) = receiver {
-            // For user-module namespaces (not in stdlib use_decls), dispatch via
-            // the merged free-function table built at startup.
-            let is_stdlib = self.program.use_decls.iter()
-                .any(|d| d.module.as_str() == module.as_ref() || d.alias.as_str() == module.as_ref());
-            if !is_stdlib {
+            // O(1) lookup: is this a stdlib module or a user-defined namespace?
+            if !self.stdlib_modules.contains(module.as_ref()) {
                 let method_sym = self.interner.intern(method);
                 if let Some(&fn_id) = self.user_fn_map.get(&method_sym) {
                     return self.call_function(fn_id, args);
@@ -1115,6 +1137,9 @@ fn mir_lit_to_value(lit: MirLit) -> FidanValue {
         MirLit::Nothing => FidanValue::Nothing,
         MirLit::FunctionRef(id) => FidanValue::Function(RuntimeFnId(id)),
         MirLit::Namespace(m) => FidanValue::Namespace(Arc::from(m.as_str())),
+        MirLit::StdlibFn { module, name } => {
+            FidanValue::StdlibFn(Arc::from(module.as_str()), Arc::from(name.as_str()))
+        }
     }
 }
 
