@@ -318,7 +318,20 @@
 
 ---
 
-## Phase 6 – Optimisation Passes
+## Hot Reloading (`--reload`) — Future Feature 22.8
+
+| Item | Status | Notes |
+|---|---|---|
+| `--reload` flag on `fidan run` | ⬜ | `fidan-driver/src/options.rs` |
+| `notify` crate file-system watcher integration | ⬜ | Cross-platform: `inotify`/FSEvents/ReadDirectoryChangesW |
+| Single-file watch (entry point only) | ⬜ | Schedulable now (Phase 5 complete) |
+| Re-run on change, diff printed to stderr | ⬜ | |
+| Multi-file watch (transitive `use` imports) | ⬜ | Requires Phase 7 (import system) |
+| Incremental MIR reuse on reload | ⬜ | Requires salsa-style demand-driven recompilation — stretch goal |
+
+---
+
+
 
 | Item | Status | Notes |
 |---|---|---|
@@ -365,11 +378,34 @@
 | Item | Status | Notes |
 |---|---|---|
 | Cranelift `JITModule` setup | ⬜ | |
-| JIT compilation on first `@precompile` call | ⬜ | |
-| ABI trampoline | ⬜ | |
-| Hot-path auto-detection (call counter) | ⬜ | |
-| Benchmark JIT vs. interpreter | ⬜ | |
+| JIT compilation on first `@precompile` call (eager path) | ⬜ | Counter pre-set to threshold; compiles on first call |
+| Per-function call counter in `MirMachine` (lazy path) | ⬜ | `u32` counter per `FunctionId`; compile at `JIT_THRESHOLD` (default 500) |
+| ABI trampoline (interpreter ↔ native calling convention) | ⬜ | |
+| `--jit-threshold N` CLI flag | ⬜ | Tunable for benchmarking |
+| Hot-path auto-compilation (counter ≥ threshold → Cranelift) | ⬜ | |
+| Dispatch table replacement (replace `MirMachine` entry with native ptr) | ⬜ | |
 | Precompiled frame debug map (MIR → source span) | ⬜ | Preserves source spans for `@precompile` frames in stack traces; shown as `[precompiled]` |
+| Benchmark JIT vs. interpreter vs. AOT | ⬜ | |
+
+> **Decided:** Lazy JIT with user-directed eager escape hatch (Key Technical Decision #9,
+> recorded in ARCHITECTURE.md). `@precompile` = eager; call-counter threshold = lazy.
+> `--jit-threshold N` tunes the threshold.
+
+---
+
+## Deferred: Bytecode Interpretation Tier
+
+| Item | Status | Notes |
+|---|---|---|
+| Compact linear bytecode IR below MIR | ⬜ | Explicitly deferred; see Key Technical Decision #10 |
+| Bytecode interpreter (`BytecodeMachine`) | ⬜ | Would replace `MirMachine` if scheduled |
+| MIR → bytecode lowering pass | ⬜ | Would include phi-node elimination and operand flattening |
+| Offset → source span mapping table | ⬜ | Needed to preserve stack-trace location info after lowering |
+
+> **Decided:** Do NOT implement until profiling after Phase 9 shows MIR dispatch (not value
+> boxing, not I/O) is >20% of runtime on a representative workload. The current bottleneck
+> is `FidanValue` boxing and Rc/Arc refcounting, not interpreter dispatch speed.
+> Bytecode would add a third IR to maintain without addressing the actual bottleneck.
 
 ---
 

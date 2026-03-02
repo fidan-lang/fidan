@@ -1696,6 +1696,37 @@ The compiled function pointer replaces the interpreter's dispatch entry for that
 Subsequent calls use the native code directly. A safe trampoline handles the ABI boundary
 between the interpreter's `Vec<FidanValue>` argument list and the native calling convention.
 
+#### JIT Compilation Strategy: Lazy by Default, Eager by Annotation
+
+**Decision:** The JIT is **lazy** (compile-on-first-hot-call) by default.  
+`@precompile` is the user-directed **eager** escape hatch that forces compilation at program start.
+
+**Why lazy:**
+- Startup latency: eager JIT compiles every reachable function before any code runs. For
+  programs where only 20% of functions are ever called, 80% of JIT budget is wasted.
+- Dead code is never compiled. Error handlers, rarely-triggered branches, imported-but-unused
+  utility functions all have zero cost.
+- Tiered compilation is only possible when the cold path (interpreter) runs first and
+  generates the call-frequency data needed to decide what to compile.
+- `@precompile` gives back eagerness exactly where the user knows it is needed — the right
+  division of labour between compiler and programmer.
+
+**Call-counter model:**
+```
+Per-function call counter in MirMachine (u32, resets at u32::MAX)
+    │
+    ├── count < JIT_THRESHOLD (default: 500)  →  interpret via MirMachine
+    │
+    └── count >= JIT_THRESHOLD                →  compile with Cranelift JIT
+                                                  store native ptr in dispatch table
+                                                  replace MirMachine dispatch entry
+                                                  subsequent calls → native code directly
+```
+
+`@precompile` pre-sets the counter to `JIT_THRESHOLD` so the function is compiled on its
+very first call, before any interpreter warmup. The threshold is tunable via
+`--jit-threshold N` for benchmarking and experimentation.
+
 ---
 
 ### 14b. `fidan-codegen-llvm` — AOT Only
@@ -2123,6 +2154,42 @@ expressions.
 **Rationale:** Interpolated expressions can be arbitrarily complex. Parsing them in the lexer
 would require the lexer to embed a mini-parser, which is messy and error-prone.
 
+### 9. Lazy JIT with User-Directed Eager Escape Hatch
+
+**Decision:** The Cranelift JIT is **lazy by default**. A function is compiled only when its
+call counter crosses a configurable threshold (default: 500 calls). `@precompile` is the
+explicit annotation that triggers eager compilation on the very first call.  
+**Rationale:**  
+- Lazy JIT avoids wasting compilation budget on cold or dead code paths, keeping startup
+  latency low.  
+- Tiered execution (interpret → JIT) is the proven model used by every production VM
+  (Firefox SpiderMonkey, Java HotSpot, .NET Core RyuJIT). The interpreter is not a weakness;
+  it is the cold-path tier that builds the frequency data needed to decide what to compile.
+- `@precompile` restores eager compilation for the specific hot functions the programmer
+  already knows about — without forcing the entire program to pay JIT compile time upfront.
+- The threshold is tunable (`--jit-threshold N`) so it can be adjusted for short vs.
+  long-running programs and benchmarked against interpreter-only and AOT baselines.
+
+### 10. MIR as the Sole Interpretation Medium (Bytecode Deferred)
+
+**Decision:** The interpreter works directly on MIR (SSA form CFG). A further lowering to
+a compact linear bytecode is explicitly deferred to a future phase and only to be implemented
+if profiling demonstrates a measurable bottleneck in the MIR interpreter itself.  
+**Rationale:**  
+- MIR is already flat, typed, and optimized by the pass manager. A bytecode tier would
+  primarily remove phi-node resolution overhead and improve dispatch-loop cache locality —
+  real but modest gains. Profiling MIR first is mandatory before paying the cost of an
+  additional IR.
+- The current performance bottleneck is `FidanValue` boxing and `Rc`/`Arc` reference counting,
+  not interpreter dispatch speed. Bytecode does not address boxing overhead.
+- Adding bytecode creates a third IR to maintain, breaks span/source-location mapping (needs
+  a separate offset→span table), and duplicates the optimization story.
+- If bytecode is ever added, it becomes **Tier 0.5** between MIR and JIT — MIR is still the
+  canonical form for all three backends (bytecode, Cranelift JIT, LLVM AOT). The MIR
+  interpreter (`MirMachine`) would then be retired in favour of the bytecode interpreter.
+- **The criteria for scheduling bytecode:** profiling after Phase 9 shows that MIR dispatch
+  (not value boxing, not I/O) is >20% of runtime on a representative workload.
+
 ---
 
 ## 20. Implementation Phases (Milestones)
@@ -2285,11 +2352,21 @@ stack root tracking, unwind) before LLVM is introduced. Cranelift AOT is NOT the
 **Goal:** `@precompile` decorator accelerates functions in interpreter mode. This is
 Cranelift's **permanent, final role** in the architecture — it will never be replaced here.
 
+**JIT strategy (decided and recorded — see Key Technical Decision #9):**
+- JIT is **lazy by default**: a per-function call counter in `MirMachine` triggers Cranelift
+  compilation when a function is called `JIT_THRESHOLD` times (default 500).
+- `@precompile` is the **eager escape hatch**: it pre-sets the counter to `JIT_THRESHOLD`,
+  so the function is compiled on its very first call.
+- `--jit-threshold N` flag makes the threshold tunable for benchmarking.
+- Compiled native code replaces the `MirMachine` dispatch entry for that `FunctionId`;
+  subsequent calls bypass the interpreter entirely.
+
 - [ ] Cranelift `JITModule` setup
-- [ ] JIT compilation on first call to `@precompile` function
+- [ ] JIT compilation on first call to `@precompile` function (eager path)
+- [ ] Per-function call counter in `MirMachine`; compile at threshold (lazy path)
 - [ ] ABI trampoline between interpreter stack and native calling convention
-- [ ] Auto-detection of hot paths (call counter threshold)
-- [ ] Benchmark: `@precompile` on a tight loop vs. without
+- [ ] `--jit-threshold N` CLI flag in `fidan-driver`
+- [ ] Benchmark: `@precompile` annotated tight loop vs. without vs. full AOT
 
 ### Phase 10 – CLI Polish & LSP (2–3 weeks)
 **Goal:** Usable development experience.
@@ -2605,14 +2682,64 @@ fidan build app.fdn --strict
 
 ---
 
+---
+
+### 22.8 – Hot Reloading (`--reload`)
+
+**Elevator pitch:** Save a source file; your running program re-executes instantly — no
+restart, no manual refresh. Works for *any* imported file in the dependency graph, not just
+the entry point.
+
+```
+fidan run app.fdn --reload
+```
+
+**What it does:**
+- Starts a file-system watcher (via the `notify` crate) on the entry-point file and
+  every file that was transitively `use`-imported.
+- On any change event (write, rename, or create in the watched set), the watcher signals
+  the driver, which re-runs the full pipeline from lexing through execution.
+- The previous run is cleanly terminated before the new one starts.
+- A compact diff of what changed (`+N lines`, `−M lines`, or `module X reloaded`) is
+  printed to stderr before re-execution.
+
+**Why Fidan can do this cleanly:**
+- The entire pipeline is stateless and re-entrant — `SourceMap`, `TypeChecker`, `MirProgram`
+  are all newly constructed per run. There is no mutable global state to corrupt.
+- Because the MIR interpreter owns all runtime state in one `MirMachine` struct, re-running
+  from scratch on change is a clean and correct model without snapshot-and-patch complexity.
+
+**Implementation notes:**
+- New `--reload` flag on `fidan run` in `fidan-driver/src/options.rs`.
+- `fidan-driver` grows a `watch_and_rerun(opts)` function that wraps `run_pipeline(opts)` in
+  a `notify` watcher loop.
+- The watcher set is populated after the first parse pass by walking `Item::Use` imports and
+  resolving them to `PathBuf`s via the source map.
+- Requires the module import system (Phase 7); before Phase 7, only the single entry-point
+  file is watched.
+- On Windows: uses `ReadDirectoryChangesW` via `notify`. On Linux: `inotify`. On macOS: FSEvents.
+- `Ctrl+C` exits the reload loop cleanly.
+
+**Future enhancement (incremental reload):**  
+Once the MIR pipeline is incremental (salsa-style demand-driven recompilation), only the
+changed function bodies need to be re-lowered and re-optimised, not the whole program.
+The MIR for unchanged functions is reused from the previous run. This is a stretch goal;
+clean full-restart is the v1 semantics.
+
+**Dependency:** Phase 7 for multi-file watching; Phase 5 MIR interpreter for execution.
+
+---
+
 ### Feature → Phase Dependency Map
 
 | Feature | Earliest schedulable after | Estimated effort |
 |---|---|---|
 | 22.7 Strict mode | Phase 3 (typeck) | 1–2 days |
+| 22.8 Hot reloading (single file) | Phase 5 (MIR interpreter) | 2–3 days |
 | 22.5 Compile-time slow hints | Phase 9 (Cranelift JIT) | 1 week |
 | 22.4 Language profiling | Phase 5 (MIR interpreter) | 1–2 weeks |
 | 22.3 Replayable bugs | Phase 5 (MIR interpreter) | 1–2 weeks |
+| 22.8 Hot reloading (multi-file) | Phase 7 (import system) | + 1–2 days on top of single-file |
 | 22.6 Sandboxing | Phase 7 (stdlib) | 2–3 weeks |
 | 22.2 Explain line | Phase 5 (MIR + typeck) | 2–3 weeks |
 | 22.1 Time-travel debug | Phase 9 (JIT tracing hooks) | 3–5 weeks |
