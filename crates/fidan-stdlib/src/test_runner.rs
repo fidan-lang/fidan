@@ -18,11 +18,13 @@ pub enum TestResult {
 }
 
 impl TestResult {
-    pub fn is_pass(&self) -> bool { matches!(self, Self::Passed) }
+    pub fn is_pass(&self) -> bool {
+        matches!(self, Self::Passed)
+    }
 
     pub fn symbol(&self) -> &'static str {
         match self {
-            Self::Passed   => "✅",
+            Self::Passed => "✅",
             Self::Failed(_) => "❌",
             Self::Errored(_) => "💥",
         }
@@ -45,7 +47,10 @@ pub struct TestCase {
 
 impl TestCase {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), result: None }
+        Self {
+            name: name.into(),
+            result: None,
+        }
     }
 
     pub fn passed(&mut self) {
@@ -71,7 +76,10 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<Result<FidanValue, 
             if cond {
                 Some(Ok(FidanValue::Nothing))
             } else {
-                let msg = args.get(1).map(|v| format_val(v)).unwrap_or_else(|| "assertion failed".to_string());
+                let msg = args
+                    .get(1)
+                    .map(|v| format_val(v))
+                    .unwrap_or_else(|| "assertion failed".to_string());
                 Some(Err(msg))
             }
         }
@@ -81,7 +89,11 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<Result<FidanValue, 
             if values_equal(&a, &b) {
                 Some(Ok(FidanValue::Nothing))
             } else {
-                Some(Err(format!("expected `{}` == `{}`", format_val(&a), format_val(&b))))
+                Some(Err(format!(
+                    "expected `{}` == `{}`",
+                    format_val(&a),
+                    format_val(&b)
+                )))
             }
         }
         "assertNe" | "assert_ne" => {
@@ -90,25 +102,35 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<Result<FidanValue, 
             if !values_equal(&a, &b) {
                 Some(Ok(FidanValue::Nothing))
             } else {
-                Some(Err(format!("expected `{}` != `{}`", format_val(&a), format_val(&b))))
+                Some(Err(format!(
+                    "expected `{}` != `{}`",
+                    format_val(&a),
+                    format_val(&b)
+                )))
             }
         }
         "assertGt" | "assert_gt" => {
             let ok = cmp_vals(args.first(), args.get(1)) == Some(std::cmp::Ordering::Greater);
-            if ok { Some(Ok(FidanValue::Nothing)) }
-            else {
-                Some(Err(format!("expected `{}` > `{}`",
+            if ok {
+                Some(Ok(FidanValue::Nothing))
+            } else {
+                Some(Err(format!(
+                    "expected `{}` > `{}`",
                     format_val(args.first().unwrap_or(&FidanValue::Nothing)),
-                    format_val(args.get(1).unwrap_or(&FidanValue::Nothing)))))
+                    format_val(args.get(1).unwrap_or(&FidanValue::Nothing))
+                )))
             }
         }
         "assertLt" | "assert_lt" => {
             let ok = cmp_vals(args.first(), args.get(1)) == Some(std::cmp::Ordering::Less);
-            if ok { Some(Ok(FidanValue::Nothing)) }
-            else {
-                Some(Err(format!("expected `{}` < `{}`",
+            if ok {
+                Some(Ok(FidanValue::Nothing))
+            } else {
+                Some(Err(format!(
+                    "expected `{}` < `{}`",
                     format_val(args.first().unwrap_or(&FidanValue::Nothing)),
-                    format_val(args.get(1).unwrap_or(&FidanValue::Nothing)))))
+                    format_val(args.get(1).unwrap_or(&FidanValue::Nothing))
+                )))
             }
         }
         "assertSome" | "assert_some" => {
@@ -128,8 +150,8 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<Result<FidanValue, 
             }
         }
         "assertType" | "assert_type" => {
-            let val       = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let expected  = match args.get(1) {
+            let val = args.first().cloned().unwrap_or(FidanValue::Nothing);
+            let expected = match args.get(1) {
                 Some(FidanValue::String(s)) => s.as_str().to_string(),
                 _ => return Some(Ok(FidanValue::Nothing)),
             };
@@ -137,17 +159,26 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<Result<FidanValue, 
             if actual == expected {
                 Some(Ok(FidanValue::Nothing))
             } else {
-                Some(Err(format!("expected type `{}`, got `{}`", expected, actual)))
+                Some(Err(format!(
+                    "expected type `{}`, got `{}`",
+                    expected, actual
+                )))
             }
         }
         "fail" => {
-            let msg = args.first().map(|v| format_val(v)).unwrap_or_else(|| "test failed".to_string());
+            let msg = args
+                .first()
+                .map(|v| format_val(v))
+                .unwrap_or_else(|| "test failed".to_string());
             Some(Err(msg))
         }
         "skip" => {
             // Marks the test as skipped — not an error, not a pass.
             // We just print the skip message and return Nothing.
-            let msg = args.first().map(|v| format_val(v)).unwrap_or_else(|| "skipped".to_string());
+            let msg = args
+                .first()
+                .map(|v| format_val(v))
+                .unwrap_or_else(|| "skipped".to_string());
             eprintln!("  ⏭  skip: {msg}");
             Some(Ok(FidanValue::Nothing))
         }
@@ -158,13 +189,13 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<Result<FidanValue, 
 fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
     match (a, b) {
         (FidanValue::Integer(x), FidanValue::Integer(y)) => x == y,
-        (FidanValue::Float(x),   FidanValue::Float(y))   => (x - y).abs() < 1e-12,
+        (FidanValue::Float(x), FidanValue::Float(y)) => (x - y).abs() < 1e-12,
         (FidanValue::Boolean(x), FidanValue::Boolean(y)) => x == y,
-        (FidanValue::String(x),  FidanValue::String(y))  => x.as_str() == y.as_str(),
-        (FidanValue::Nothing,    FidanValue::Nothing)     => true,
+        (FidanValue::String(x), FidanValue::String(y)) => x.as_str() == y.as_str(),
+        (FidanValue::Nothing, FidanValue::Nothing) => true,
         // Float/int cross comparison
-        (FidanValue::Integer(x), FidanValue::Float(y))   => (*x as f64 - y).abs() < 1e-12,
-        (FidanValue::Float(x),   FidanValue::Integer(y)) => (x - *y as f64).abs() < 1e-12,
+        (FidanValue::Integer(x), FidanValue::Float(y)) => (*x as f64 - y).abs() < 1e-12,
+        (FidanValue::Float(x), FidanValue::Integer(y)) => (x - *y as f64).abs() < 1e-12,
         _ => false,
     }
 }
@@ -172,32 +203,71 @@ fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
 fn cmp_vals(a: Option<&FidanValue>, b: Option<&FidanValue>) -> Option<std::cmp::Ordering> {
     match (a, b) {
         (Some(FidanValue::Integer(x)), Some(FidanValue::Integer(y))) => Some(x.cmp(y)),
-        (Some(FidanValue::Float(x)),   Some(FidanValue::Float(y)))   => x.partial_cmp(y),
-        (Some(FidanValue::Integer(x)), Some(FidanValue::Float(y)))   => (*x as f64).partial_cmp(y),
-        (Some(FidanValue::Float(x)),   Some(FidanValue::Integer(y))) => x.partial_cmp(&(*y as f64)),
+        (Some(FidanValue::Float(x)), Some(FidanValue::Float(y))) => x.partial_cmp(y),
+        (Some(FidanValue::Integer(x)), Some(FidanValue::Float(y))) => (*x as f64).partial_cmp(y),
+        (Some(FidanValue::Float(x)), Some(FidanValue::Integer(y))) => x.partial_cmp(&(*y as f64)),
         _ => None,
     }
 }
 
 fn format_val(v: &FidanValue) -> String {
     match v {
-        FidanValue::String(s)  => s.as_str().to_string(),
+        FidanValue::String(s) => s.as_str().to_string(),
         FidanValue::Integer(n) => n.to_string(),
-        FidanValue::Float(f)   => f.to_string(),
+        FidanValue::Float(f) => {
+            if f.fract() == 0.0 {
+                format!("{:.1}", f)
+            } else {
+                f.to_string()
+            }
+        }
         FidanValue::Boolean(b) => b.to_string(),
-        FidanValue::Nothing    => "nothing".to_string(),
-        FidanValue::List(_)    => "[list]".to_string(),
-        FidanValue::Dict(_)    => "{dict}".to_string(),
-        FidanValue::Object(_)  => "[object]".to_string(),
-        _ => "[value]".to_string(),
+        FidanValue::Nothing => "nothing".to_string(),
+        FidanValue::List(l) => {
+            let items: Vec<String> = l.borrow().iter().map(format_val).collect();
+            format!("[{}]", items.join(", "))
+        }
+        FidanValue::Dict(d) => {
+            let pairs: Vec<String> = d
+                .borrow()
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k.as_str(), format_val(v)))
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        }
+        FidanValue::Tuple(items) => {
+            let parts: Vec<String> = items.iter().map(format_val).collect();
+            format!("({})", parts.join(", "))
+        }
+        FidanValue::Object(_) => "[object]".to_string(),
+        FidanValue::Shared(s) => {
+            let inner = s.0.lock().unwrap();
+            format!("Shared({})", format_val(&inner))
+        }
+        FidanValue::Pending(_) => "<pending>".to_string(),
+        FidanValue::Function(id) => format!("<action#{}>", id.0),
+        FidanValue::Namespace(m) => format!("<module:{}>", m),
     }
 }
 
 pub fn exported_names() -> &'static [&'static str] {
     &[
-        "assert", "assertEq", "assert_eq", "assertNe", "assert_ne",
-        "assertGt", "assert_gt", "assertLt", "assert_lt",
-        "assertSome", "assert_some", "assertNothing", "assert_nothing",
-        "assertType", "assert_type", "fail", "skip",
+        "assert",
+        "assertEq",
+        "assert_eq",
+        "assertNe",
+        "assert_ne",
+        "assertGt",
+        "assert_gt",
+        "assertLt",
+        "assert_lt",
+        "assertSome",
+        "assert_some",
+        "assertNothing",
+        "assert_nothing",
+        "assertType",
+        "assert_type",
+        "fail",
+        "skip",
     ]
 }

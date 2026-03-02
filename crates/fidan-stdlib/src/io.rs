@@ -49,7 +49,9 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             stdin.lock().read_line(&mut line).ok()?;
             if line.ends_with('\n') {
                 line.pop();
-                if line.ends_with('\r') { line.pop(); }
+                if line.ends_with('\r') {
+                    line.pop();
+                }
             }
             Some(str_val(&line))
         }
@@ -66,10 +68,10 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             }
         }
         "writeFile" | "write_file" => {
-            let path    = as_str(args.first().unwrap_or(&FidanValue::Nothing));
+            let path = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let content = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             match std::fs::write(&path, content) {
-                Ok(_)  => Some(FidanValue::Boolean(true)),
+                Ok(_) => Some(FidanValue::Boolean(true)),
                 Err(e) => {
                     eprintln!("io.writeFile error: {e}");
                     Some(FidanValue::Boolean(false))
@@ -78,9 +80,13 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "appendFile" | "append_file" => {
             use std::io::Write;
-            let path    = as_str(args.first().unwrap_or(&FidanValue::Nothing));
+            let path = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let content = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
-            match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+            {
                 Ok(mut f) => {
                     let _ = f.write_all(content.as_bytes());
                     Some(FidanValue::Boolean(true))
@@ -125,12 +131,12 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "copyFile" | "copy_file" => {
             let from = as_str(args.first().unwrap_or(&FidanValue::Nothing));
-            let to   = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
+            let to = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             Some(FidanValue::Boolean(std::fs::copy(&from, &to).is_ok()))
         }
         "renameFile" | "rename_file" => {
             let from = as_str(args.first().unwrap_or(&FidanValue::Nothing));
-            let to   = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
+            let to = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             Some(FidanValue::Boolean(std::fs::rename(&from, &to).is_ok()))
         }
 
@@ -145,19 +151,28 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "dirname" | "dir_name" => {
             let path = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let p = std::path::Path::new(&path);
-            let dir = p.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+            let dir = p
+                .parent()
+                .map(|d| d.to_string_lossy().to_string())
+                .unwrap_or_default();
             Some(str_val(&dir))
         }
         "basename" | "base_name" | "fileName" | "file_name" => {
             let path = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let p = std::path::Path::new(&path);
-            let name = p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
             Some(str_val(&name))
         }
         "extension" => {
             let path = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let p = std::path::Path::new(&path);
-            let ext = p.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+            let ext = p
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+                .unwrap_or_default();
             Some(str_val(&ext))
         }
         "cwd" | "currentDir" | "current_dir" => {
@@ -179,7 +194,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             let key = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             match std::env::var(&key) {
                 Ok(val) => Some(str_val(&val)),
-                Err(_)  => Some(FidanValue::Nothing),
+                Err(_) => Some(FidanValue::Nothing),
             }
         }
         "setEnv" | "set_env" => {
@@ -187,7 +202,9 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             let val = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             // SAFETY: single-threaded interpreter; no concurrent env access.
             #[allow(unused_unsafe)]
-            unsafe { std::env::set_var(&key, &val) };
+            unsafe {
+                std::env::set_var(&key, &val)
+            };
             Some(FidanValue::Nothing)
         }
         "args" | "argv" => {
@@ -214,30 +231,97 @@ fn format_val(v: &FidanValue) -> String {
         FidanValue::String(s) => s.as_str().to_string(),
         FidanValue::Integer(n) => n.to_string(),
         FidanValue::Float(f) => {
-            if f.fract() == 0.0 { format!("{:.1}", f) } else { f.to_string() }
+            if f.fract() == 0.0 {
+                format!("{:.1}", f)
+            } else {
+                f.to_string()
+            }
         }
         FidanValue::Boolean(b) => b.to_string(),
         FidanValue::Nothing => "nothing".to_string(),
-        FidanValue::List(_) => "[list]".to_string(),
-        FidanValue::Dict(_) => "{dict}".to_string(),
+        FidanValue::List(l) => {
+            let items: Vec<String> = l.borrow().iter().map(format_val).collect();
+            format!("[{}]", items.join(", "))
+        }
+        FidanValue::Dict(d) => {
+            let pairs: Vec<String> = d
+                .borrow()
+                .iter()
+                .map(|(k, v)| format!("{}: {}", k.as_str(), format_val(v)))
+                .collect();
+            format!("{{{}}}", pairs.join(", "))
+        }
+        FidanValue::Tuple(items) => {
+            let parts: Vec<String> = items.iter().map(format_val).collect();
+            format!("({})", parts.join(", "))
+        }
         FidanValue::Object(_) => "[object]".to_string(),
-        _ => "[value]".to_string(),
+        FidanValue::Shared(s) => {
+            let inner = s.0.lock().unwrap();
+            format!("Shared({})", format_val(&inner))
+        }
+        FidanValue::Pending(_) => "<pending>".to_string(),
+        FidanValue::Function(id) => format!("<action#{}>", id.0),
+        FidanValue::Namespace(m) => format!("<module:{}>", m),
     }
 }
 
 pub fn exported_names() -> &'static [&'static str] {
     &[
-        "print", "println", "eprint", "readLine", "read_line", "readline",
-        "readFile", "read_file", "writeFile", "write_file",
-        "appendFile", "append_file", "deleteFile", "delete_file",
-        "fileExists", "file_exists", "exists", "isFile", "is_file", "isDir", "is_dir",
-        "makeDir", "make_dir", "mkdir",
-        "listDir", "list_dir", "readDir", "read_dir",
-        "copyFile", "copy_file", "renameFile", "rename_file",
-        "join", "joinPath", "join_path", "dirname", "dir_name",
-        "basename", "base_name", "fileName", "file_name", "extension",
-        "cwd", "currentDir", "current_dir", "absolutePath", "absolute_path",
-        "getEnv", "get_env", "env", "setEnv", "set_env", "args", "argv",
+        "print",
+        "println",
+        "eprint",
+        "readLine",
+        "read_line",
+        "readline",
+        "readFile",
+        "read_file",
+        "writeFile",
+        "write_file",
+        "appendFile",
+        "append_file",
+        "deleteFile",
+        "delete_file",
+        "fileExists",
+        "file_exists",
+        "exists",
+        "isFile",
+        "is_file",
+        "isDir",
+        "is_dir",
+        "makeDir",
+        "make_dir",
+        "mkdir",
+        "listDir",
+        "list_dir",
+        "readDir",
+        "read_dir",
+        "copyFile",
+        "copy_file",
+        "renameFile",
+        "rename_file",
+        "join",
+        "joinPath",
+        "join_path",
+        "dirname",
+        "dir_name",
+        "basename",
+        "base_name",
+        "fileName",
+        "file_name",
+        "extension",
+        "cwd",
+        "currentDir",
+        "current_dir",
+        "absolutePath",
+        "absolute_path",
+        "getEnv",
+        "get_env",
+        "env",
+        "setEnv",
+        "set_env",
+        "args",
+        "argv",
         "flush",
     ]
 }
