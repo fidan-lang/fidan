@@ -356,6 +356,10 @@ fn remap_instr(instr: &Instr, param_map: &HashMap<LocalId, Operand>, offset: u32
         },
         Instr::PushCatch(bid) => Instr::PushCatch(*bid),
         Instr::PopCatch => Instr::PopCatch,
+        Instr::RequiredCheck { local, name } => Instr::RequiredCheck {
+            local: d(*local),
+            name: *name,
+        },
         Instr::Nop => Instr::Nop,
     }
 }

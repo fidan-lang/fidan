@@ -14,8 +14,8 @@ use std::rc::Rc;
 
 use fidan_ast::BinOp;
 use fidan_hir::{
-    HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr, HirExprKind, HirFunction,
-    HirInterpPart, HirModule, HirStmt,
+    HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr, HirExprKind,
+    HirFunction, HirInterpPart, HirModule, HirStmt,
 };
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_typeck::FidanType;
@@ -312,6 +312,9 @@ struct FnCtx<'p> {
     /// True only for the top-level init function (FunctionId(0)).  Used to
     /// decide whether a `VarDecl` should also write to the global table.
     is_init_fn: bool,
+    /// Maps FunctionId → explicit-param names in declaration order.  Used at
+    /// call sites to reorder named args before emitting `Instr::Call`.
+    fn_param_names: HashMap<FunctionId, Vec<Symbol>>,
 }
 
 impl<'p> FnCtx<'p> {
@@ -382,6 +385,48 @@ impl<'p> FnCtx<'p> {
             ty,
             operands,
         });
+    }
+
+    // ── Argument sorting ─────────────────────────────────────────────────────
+
+    /// Lower `args` for a call to `fid`, reordering any named args to match
+    /// the callee's parameter declaration order.  Positional args fill slots
+    /// that have no named counterpart, left-to-right.
+    fn sort_args_for_fn(&mut self, fid: FunctionId, args: &[HirArg]) -> Vec<Operand> {
+        // Fast path: no named args → emit in call-site order.
+        if !args.iter().any(|a| a.name.is_some()) {
+            return args.iter().map(|a| self.lower_expr(&a.value)).collect();
+        }
+        let param_names = self.fn_param_names.get(&fid).cloned().unwrap_or_default();
+        // Named args keyed by their label symbol.
+        let named: HashMap<Symbol, &HirExpr> = args
+            .iter()
+            .filter_map(|a| a.name.map(|n| (n, &a.value)))
+            .collect();
+        // Positional args (no label), in call-site order.
+        let positional: Vec<&HirExpr> = args
+            .iter()
+            .filter(|a| a.name.is_none())
+            .map(|a| &a.value)
+            .collect();
+        let mut result: Vec<Operand> = Vec::with_capacity(param_names.len().max(args.len()));
+        let mut pos_idx = 0usize;
+        for &psym in &param_names {
+            if let Some(expr) = named.get(&psym) {
+                result.push(self.lower_expr(expr));
+            } else if pos_idx < positional.len() {
+                result.push(self.lower_expr(positional[pos_idx]));
+                pos_idx += 1;
+            } else {
+                result.push(Operand::Const(MirLit::Nothing));
+            }
+        }
+        // Extra positional args beyond declared params (defensive).
+        while pos_idx < positional.len() {
+            result.push(self.lower_expr(positional[pos_idx]));
+            pos_idx += 1;
+        }
+        result
     }
 
     // ── Expression lowering ──────────────────────────────────────────────────
@@ -601,7 +646,7 @@ impl<'p> FnCtx<'p> {
                             },
                         });
                         let mut arg_ops = vec![Operand::Local(this_local)];
-                        arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                        arg_ops.extend(self.sort_args_for_fn(init_fid, args));
                         self.emit(Instr::Call {
                             dest: None,
                             callee: Callee::Fn(init_fid),
@@ -649,7 +694,7 @@ impl<'p> FnCtx<'p> {
                                         },
                                     });
                                     let mut arg_ops = vec![Operand::Local(this_local)];
-                                    arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                                    arg_ops.extend(self.sort_args_for_fn(init_fid, args));
                                     self.emit(Instr::Call {
                                         dest: None,
                                         callee: Callee::Fn(init_fid),
@@ -672,7 +717,7 @@ impl<'p> FnCtx<'p> {
                             if self.fn_is_extension.contains(name) {
                                 let dest = self.alloc_local();
                                 let mut call_args = vec![Operand::Const(MirLit::Nothing)];
-                                call_args.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                                call_args.extend(self.sort_args_for_fn(fid, args));
                                 self.emit(Instr::Call {
                                     dest: Some(dest),
                                     callee: Callee::Fn(fid),
@@ -694,8 +739,11 @@ impl<'p> FnCtx<'p> {
                         Callee::Dynamic(op)
                     }
                 };
-                let arg_ops: Vec<Operand> =
-                    args.iter().map(|a| self.lower_expr(&a.value)).collect();
+                let arg_ops: Vec<Operand> = if let Callee::Fn(fid) = &callee_op {
+                    self.sort_args_for_fn(*fid, args)
+                } else {
+                    args.iter().map(|a| self.lower_expr(&a.value)).collect()
+                };
                 let dest = self.alloc_local();
                 self.emit(Instr::Call {
                     dest: Some(dest),
@@ -2342,6 +2390,22 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
         }
     }
 
+    // Build FunctionId → param-name-order map for sorting named call args.
+    let mut fn_param_names: HashMap<FunctionId, Vec<Symbol>> = HashMap::new();
+    for func in &hir.functions {
+        if let Some(&fid) = fn_map.get(&func.name) {
+            fn_param_names.insert(fid, func.params.iter().map(|p| p.name).collect());
+        }
+    }
+    for obj in &hir.objects {
+        for method in &obj.methods {
+            if let Some(&fid) = method_ids.get(&(obj.name, method.name)) {
+                // Explicit params only — `this` is always prepended at call sites separately.
+                fn_param_names.insert(fid, method.params.iter().map(|p| p.name).collect());
+            }
+        }
+    }
+
     // ── Closure: lower one HirFunction body into an already-allocated fn ─────
     // `pending_par_fors` is captured by clone (Rc is cheap to clone).
     let lower_hir_fn = |prog: &mut MirProgram,
@@ -2382,6 +2446,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             wildcard_sym,
             par_for_pending: pending,
             is_init_fn: false,
+            fn_param_names: fn_param_names.clone(),
         };
         if owner_class.is_some() {
             let this_local = ctx.alloc_local();
@@ -2390,6 +2455,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 local: this_local,
                 name: this_name,
                 ty: MirTy::Dynamic,
+                required: false,
             });
         }
 
@@ -2401,7 +2467,16 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 local,
                 name: param.name,
                 ty: fidan_ty_to_mir(&param.ty),
+                required: param.required,
             });
+            // Emit a required-param null guard as a real MIR instruction so it
+            // survives inlining without any special-casing in the inliner.
+            if param.required {
+                ctx.emit(Instr::RequiredCheck {
+                    local,
+                    name: param.name,
+                });
+            }
         }
 
         ctx.lower_stmts(&func.body);
@@ -2482,6 +2557,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             wildcard_sym,
             par_for_pending: Rc::clone(&pending_par_fors),
             is_init_fn: true,
+            fn_param_names: fn_param_names.clone(),
         };
 
         // ── Emit namespace variable bindings for `use std.MODULE` / `use usermod` ──
@@ -2597,6 +2673,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             wildcard_sym,
             par_for_pending: Rc::clone(&pending_par_fors),
             is_init_fn: false,
+            fn_param_names: fn_param_names.clone(),
         };
         // First param (parallel for only): the per-iteration loop binding.
         if let Some((binding_sym, binding_ty)) = pf.binding {
@@ -2606,6 +2683,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 local: binding_local,
                 name: binding_sym,
                 ty: binding_ty,
+                required: false,
             });
         }
         // Subsequent params: captured env variables (parallel for + concurrent tasks).
@@ -2616,6 +2694,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 local,
                 name: sym,
                 ty,
+                required: false,
             });
         }
         ctx.lower_stmts(body);

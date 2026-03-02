@@ -639,6 +639,20 @@ impl Interpreter {
                 }
             }
         }
+        // Third pass: enforce required — no required parameter may remain Nothing
+        // after defaults have been applied.
+        for (i, param) in fdef.params.iter().enumerate() {
+            if param.required && matches!(locals[i].1, FidanValue::Nothing) {
+                let pname = self.interner.resolve(param.name).to_string();
+                let trace = self.env.stack_trace();
+                return Err(Signal::Panic {
+                    value: FidanValue::String(FidanString::new(&format!(
+                        "required parameter `{pname}` cannot be nothing"
+                    ))),
+                    trace,
+                });
+            }
+        }
         // Build human-readable label: `name(param = value, ...)` for the trace.
         let frame_label = {
             let args_display: Vec<String> = locals

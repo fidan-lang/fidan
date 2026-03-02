@@ -529,6 +529,14 @@ impl MirMachine {
             Instr::Drop { .. } => {
                 // Values are reference-counted; explicit Drop is a no-op here.
             }
+            Instr::RequiredCheck { local, name } => {
+                if matches!(frame.load(local), FidanValue::Nothing) {
+                    let pname = self.sym_str(name);
+                    return Err(MirSignal::Panic(format!(
+                        "required parameter `{pname}` cannot be nothing"
+                    )));
+                }
+            }
             Instr::Nop => {}
             Instr::PushCatch(catch_bb) => {
                 frame.catch_stack.push(catch_bb);

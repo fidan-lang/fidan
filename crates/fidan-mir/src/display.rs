@@ -191,6 +191,9 @@ fn print_instr(instr: &Instr) {
         Instr::PopCatch => {
             println!("    pop_catch");
         }
+        Instr::RequiredCheck { local, name } => {
+            println!("    required_check _{} ({})", local.0, sym_str(name.0));
+        }
         Instr::LoadGlobal { dest, global } => {
             println!("    _{}: dyn = load_global g{}", dest.0, global.0);
         }

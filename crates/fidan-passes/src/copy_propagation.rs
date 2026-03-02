@@ -167,6 +167,7 @@ fn subst_instr(instr: &mut Instr, resolve: &impl Fn(&Operand) -> Operand) {
         }
         Instr::JoinAll { .. } | Instr::ParallelIter { .. } => {}
         Instr::Drop { .. } | Instr::Nop | Instr::PushCatch(_) | Instr::PopCatch => {}
+        Instr::RequiredCheck { .. } => {} // param locals are never copy-propagated
         Instr::LoadGlobal { .. } => {}
         Instr::StoreGlobal { value, .. } => subst_op(value, resolve),
     }
