@@ -243,9 +243,6 @@ fn run_fix(file: PathBuf, dry_run: bool) -> Result<()> {
 
 fn main() -> Result<()> {
     ensure_utf8_console();
-    // Pre-warm Rayon's global thread pool so the first `parallel for` in
-    // user code pays no OS thread-spawn latency.
-    rayon::ThreadPoolBuilder::new().build_global().ok();
     let cli = Cli::parse();
 
     match cli.command {

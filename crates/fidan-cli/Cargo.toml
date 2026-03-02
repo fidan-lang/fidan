@@ -22,4 +22,3 @@ fidan-interp = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rustyline = { workspace = true }
-rayon = { workspace = true }
