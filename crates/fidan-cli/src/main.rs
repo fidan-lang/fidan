@@ -243,6 +243,9 @@ fn run_fix(file: PathBuf, dry_run: bool) -> Result<()> {
 
 fn main() -> Result<()> {
     ensure_utf8_console();
+    // Pre-warm Rayon's global thread pool so the first `parallel for` in
+    // user code pays no OS thread-spawn latency.
+    rayon::ThreadPoolBuilder::new().build_global().ok();
     let cli = Cli::parse();
 
     match cli.command {
@@ -974,11 +977,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                             Arc::clone(&source_map),
                         );
                         if let Err(err) = result {
-                            render_message_to_stderr(
-                                Severity::Error,
-                                err.code,
-                                &err.message,
-                            );
+                            render_message_to_stderr(Severity::Error, err.code, &err.message);
                             if !err.trace.is_empty() && opts.trace != TraceMode::None {
                                 render_trace_to_stderr(&err.trace, opts.trace);
                             }
@@ -1317,11 +1316,7 @@ fn run_repl(trace_mode: TraceMode) -> Result<()> {
                     Ok(Some(echo)) => println!("{echo}"),
                     Ok(None) => {}
                     Err(e) => {
-                        render_message_to_stderr(
-                            Severity::Error,
-                            e.code,
-                            &e.message,
-                        );
+                        render_message_to_stderr(Severity::Error, e.code, &e.message);
                         render_trace_to_stderr(&e.trace, trace_mode);
                         error_history.push(e.message);
                     }
