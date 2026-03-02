@@ -203,6 +203,8 @@
 | `>>` (`GtGt`) → `BinOp::Shr` | ✅ | Phase 3.5+ |
 | `BinOp::BitXor` in typeck | ✅ | Numeric result same as `Sub`/`Mul`/etc. |
 | `BinOp::BitAnd` / `BitOr` / `Shl` / `Shr` in typeck | ✅ | Same numeric arm |
+| Bit ops in tree-walk interpreter (`eval_binary`) | ✅ | `&` `\|` `^` `<<` `>>` on `Integer`; shift masked to `& 63` |
+| Bit ops in MIR interpreter (`eval_binary`) | ✅ | Same; both paths verified with binary literals (`0b…`) |
 | `List<T>` / `Dict<K,V>` / `Shared<T>` / `Pending<T>` covariant widening | ✅ | `is_assignable_from` recurses into parameterized types |
 | `_` wildcard in check-arm patterns | ✅ | `infer_expr` returns `Dynamic` for `_` instead of E101 |
 | Keywords as field / method names after `.` | ✅ | `expect_field_name()` accepts any keyword token; `TokenKind::as_keyword_str()` |

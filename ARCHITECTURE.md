@@ -2444,6 +2444,26 @@ This phase replaces Cranelift as the AOT backend with LLVM and adds all performa
 
 ---
 
+## Self-Hosting Prerequisites
+
+> Fidan is Turing-complete and can already express recursive algorithms, data structures, and
+> control flow sufficient to write an interpreter in Fidan. A full self-hosted **compiler**
+> (parsing → MIR → native code) requires the following features that are not yet complete:
+
+| Missing capability | Why needed for self-hosting | Planned phase |
+|---|---|---|
+| **Enums / tagged unions** | An AST *is* a sum type. `object` + inheritance works but has no exhaustive match, making visitor dispatch fragile. | Post-Phase 8 |
+| **Generics / parametric types** | Symbol tables, arenas, and IR containers are all generic. Workaroundable with `dynamic` but at a significant performance and safety cost. | Post-Phase 9 (AOT) |
+| **Binary file I/O / byte arrays** | Emitting ELF/COFF/PE object files or LLVM bitcode requires raw byte-level writes. `std.io` currently only handles text. | Phase 10 (stdlib expansion) |
+| **Process spawning (`std.process`)** | A compiler must invoke the linker (`ld`, `lld`, `link.exe`) as a child process. | Phase 10 (stdlib expansion) |
+| **Bit operators (`&`, `\|`, `^`, `<<`, `>>`)** | Required for encoding binary formats and low-level bit manipulation. **Fully implemented** — tokens, AST variants, Pratt parser mapping, tree-walk interpreter, and MIR interpreter all handle all five operators. Binary literals (`0b…`) also supported. | ✅ Done |
+
+**Realistic self-hosting milestone:** After Phase 11 (LLVM AOT) when all of the above can be
+implemented in a performant, type-safe way. Writing a Fidan interpreter in Fidan is achievable
+much sooner (after Phase 10 stdlib gaps are filled) and makes a good intermediate milestone.
+
+---
+
 *This document is the ground truth for the Fidan implementation. It should be updated as
 decisions change. All architectural changes should be reflected here before code is written.*
 
