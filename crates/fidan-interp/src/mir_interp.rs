@@ -280,10 +280,17 @@ impl MirMachine {
         match self.call_function(entry, vec![]) {
             Ok(_) => Ok(()),
             Err(MirSignal::Throw(v)) => Err(RunError {
+                code: fidan_diagnostics::diag_code!("R0001"),
                 message: format!("unhandled exception: {}", builtins::display(&v)),
                 trace: std::mem::take(&mut self.panic_trace),
             }),
             Err(MirSignal::Panic(msg)) => Err(RunError {
+                code: fidan_diagnostics::diag_code!("R0001"),
+                message: msg,
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
+            Err(MirSignal::ParallelFail(msg)) => Err(RunError {
+                code: fidan_diagnostics::diag_code!("R9001"),
                 message: msg,
                 trace: std::mem::take(&mut self.panic_trace),
             }),
@@ -571,15 +578,35 @@ impl MirMachine {
                 task_fn,
                 args,
             } => {
+                // Capture the task name while `self` is still in scope so that
+                // failure messages can include the source-level task name.
+                let task_name = {
+                    let func = self.program.function(task_fn);
+                    self.sym_str(func.name).to_string()
+                };
                 let args_bundle = ParallelArgs::from_captures(
                     args.iter()
                         .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture())),
                 );
                 let mut child = self.clone_for_thread();
-                let pending = FidanPending::spawn_with_args(args_bundle, move |bundle| {
+                let pending = FidanPending::spawn_fallible(args_bundle, move |bundle| {
                     child
                         .call_function(task_fn, bundle.into_vec())
-                        .unwrap_or(FidanValue::Nothing)
+                        .map_err(|sig| match sig {
+                            MirSignal::Panic(m) => {
+                                format!("task `{}` panicked: {}", task_name, m)
+                            }
+                            MirSignal::Throw(v) => {
+                                format!(
+                                    "task `{}` threw an uncaught error: {}",
+                                    task_name,
+                                    crate::builtins::display(&v)
+                                )
+                            }
+                            MirSignal::ParallelFail(m) => {
+                                format!("task `{}` failed: {}", task_name, m)
+                            }
+                        })
                 });
                 frame.store(handle, FidanValue::Pending(pending));
             }
@@ -641,12 +668,20 @@ impl MirMachine {
             Instr::JoinAll { handles } => {
                 // Wait for every handle in declaration order.  Results are
                 // written back into the same local slots (Pending → resolved).
+                // Task failures are collected and reported together as R9001.
+                let mut failures: Vec<String> = Vec::new();
                 let resolved: Vec<(LocalId, FidanValue)> = handles
                     .iter()
                     .map(|&local| {
                         let val = frame.load(local);
                         let result = if let FidanValue::Pending(p) = &val {
-                            p.join()
+                            match p.try_join() {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    failures.push(e);
+                                    FidanValue::Nothing
+                                }
+                            }
                         } else {
                             val // already resolved (sequential fallback)
                         };
@@ -655,6 +690,19 @@ impl MirMachine {
                     .collect();
                 for (local, result) in resolved {
                     frame.store(local, result);
+                }
+                if !failures.is_empty() {
+                    let n = failures.len();
+                    let pl = if n == 1 { "" } else { "s" };
+                    let details = failures
+                        .iter()
+                        .map(|f| format!("  {}", f))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    return Err(MirSignal::ParallelFail(format!(
+                        "{} task{} failed in `parallel` block:\n{}",
+                        n, pl, details
+                    )));
                 }
             }
 
@@ -713,6 +761,7 @@ impl MirMachine {
                                                 crate::builtins::display(&v)
                                             )
                                         }
+                                        MirSignal::ParallelFail(m) => m,
                                     };
                                     let mut slot = err_slot.lock().unwrap();
                                     if slot.is_none() {
@@ -1122,6 +1171,9 @@ enum MirSignal {
     Throw(FidanValue),
     /// Internal panic (interpreter bug or user-initiated panic).
     Panic(String),
+    /// One or more tasks failed inside a `parallel` / `concurrent` block (R9001).
+    /// Not catchable by `attempt / catch` — the parallel block itself fails.
+    ParallelFail(String),
 }
 
 type MirResult = Result<FidanValue, MirSignal>;

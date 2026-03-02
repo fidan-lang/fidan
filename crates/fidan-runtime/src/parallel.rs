@@ -69,7 +69,10 @@ impl ParallelArgs {
     /// **Call as a method** inside spawned closures (see `ParallelCapture`).
     #[inline]
     pub fn into_vec(self) -> Vec<FidanValue> {
-        self.0.into_iter().map(ParallelCapture::into_inner).collect()
+        self.0
+            .into_iter()
+            .map(ParallelCapture::into_inner)
+            .collect()
     }
 }
 
@@ -80,36 +83,72 @@ impl ParallelArgs {
 /// Cheap to clone — all clones share the same `Arc<Mutex<…>>` slot.
 /// The first call to [`FidanPending::join`] consumes the `JoinHandle`; all
 /// subsequent calls return `FidanValue::Nothing`.
+///
+/// The inner `JoinHandle` carries `Result<ParallelCapture, String>` so that
+/// task failures (Fidan panics / throws) can be propagated to the join site
+/// instead of being silently swallowed.  Use [`Self::try_join`] to observe
+/// the error; [`Self::join`] is the backwards-compatible convenience that
+/// maps errors to `FidanValue::Nothing`.
 #[derive(Clone)]
 pub struct FidanPending(
-    pub Arc<Mutex<Option<std::thread::JoinHandle<ParallelCapture>>>>,
+    pub Arc<Mutex<Option<std::thread::JoinHandle<Result<ParallelCapture, String>>>>>,
 );
 
 impl FidanPending {
     /// Spawn a closure on a new OS thread and wrap the result in a `FidanPending`.
     ///
-    /// `f` receives a [`ParallelArgs`] bundle and returns a [`FidanValue`].
-    /// Build `args` via `ParallelArgs::from_captures(…)` before calling this.
+    /// The closure returns a plain `FidanValue`; errors are not observable via
+    /// this constructor — use [`Self::spawn_fallible`] when you need to catch
+    /// Fidan panics / throws from a parallel task.
     pub fn spawn_with_args<F>(args: ParallelArgs, f: F) -> Self
     where
         F: FnOnce(ParallelArgs) -> FidanValue + Send + 'static,
     {
-        let handle = std::thread::spawn(move || ParallelCapture(f(args)));
+        let handle = std::thread::spawn(move || Ok::<_, String>(ParallelCapture(f(args))));
+        FidanPending(Arc::new(Mutex::new(Some(handle))))
+    }
+
+    /// Spawn a fallible closure on a new OS thread.
+    ///
+    /// The closure returns `Result<FidanValue, String>`.  An `Err(msg)` is
+    /// stored in the handle and re-surfaced by [`Self::try_join`].  Use this
+    /// for `SpawnParallel` / `SpawnConcurrent` tasks where a Fidan panic
+    /// inside the task must be reported to the outer `JoinAll` group.
+    pub fn spawn_fallible<F>(args: ParallelArgs, f: F) -> Self
+    where
+        F: FnOnce(ParallelArgs) -> Result<FidanValue, String> + Send + 'static,
+    {
+        let handle = std::thread::spawn(move || f(args).map(ParallelCapture));
         FidanPending(Arc::new(Mutex::new(Some(handle))))
     }
 
     /// Block the calling thread until the spawned computation finishes.
-    /// Returns `FidanValue::Nothing` if the handle was already consumed or
-    /// if the spawned thread panicked.
-    pub fn join(&self) -> FidanValue {
+    ///
+    /// Returns `Ok(value)` on success or `Err(message)` if the task
+    /// panicked / threw an uncaught error.  Returns `Ok(Nothing)` if the
+    /// handle was already consumed (idempotent after the first call).
+    pub fn try_join(&self) -> Result<FidanValue, String> {
         let maybe = {
             let mut guard = self.0.lock().unwrap();
             guard.take()
         };
         match maybe {
-            Some(h) => h.join().map(ParallelCapture::into_inner).unwrap_or(FidanValue::Nothing),
-            None => FidanValue::Nothing,
+            Some(h) => match h.join() {
+                Ok(Ok(cap)) => Ok(cap.into_inner()),
+                Ok(Err(e)) => Err(e),
+                // The Rust thread itself panicked (shouldn't happen in normal
+                // operation, but handle defensively).
+                Err(_) => Err("task thread panicked unexpectedly".to_string()),
+            },
+            None => Ok(FidanValue::Nothing),
         }
+    }
+
+    /// Block the calling thread until the spawned computation finishes.
+    /// Returns `FidanValue::Nothing` if the handle was already consumed or
+    /// if the spawned thread errored (use [`Self::try_join`] to observe errors).
+    pub fn join(&self) -> FidanValue {
+        self.try_join().unwrap_or(FidanValue::Nothing)
     }
 }
 

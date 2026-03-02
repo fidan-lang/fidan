@@ -1,0 +1,100 @@
+# parallel_benchmark.fdn
+#
+# Benchmarks sequential vs. parallel execution of a CPU-bound workload.
+# Each mode computes the sum of square-roots of the first N integers.
+#
+# Three execution modes:
+#   1. Sequential          — a single while-loop.
+#   2. parallel { task }   — 4 named OS-thread tasks, each owns one Shared slot.
+#   3. spawn / await       — 4 spawned background threads, results via await.
+#
+# Usage:
+#   fidan run test/examples/parallel_benchmark.fdn
+
+use std.time
+use std.math
+
+var N     = 800000      # total work items
+var CHUNK = N / 4       # work items per parallel task
+
+# ── Workload ──────────────────────────────────────────────────────────────────
+#
+# Compute  sum(sqrt(i+1))  for i in [from, to).
+# This is IO-free, pure CPU work — ideal for demonstrating parallel speedup.
+action compute_range with (from oftype integer, to oftype integer) returns float {
+    var acc = 0.0
+    var i = from
+    while i < to {
+        acc = acc + math.sqrt(i + 1)
+        i = i + 1
+    }
+    return acc
+}
+
+# ── Sequential baseline ───────────────────────────────────────────────────────
+print("--- Sequential (N = {N}) ---")
+var t0      = time.now()
+var seq_res  = compute_range(0, N)
+var seq_ms  = time.elapsed(t0)
+print("result : {seq_res}")
+print("time   : {seq_ms} ms")
+print("")
+
+# ── parallel { task } — 4 named OS-thread tasks ───────────────────────────────
+# Each task writes ONLY to its own Shared slot (no race, no shared mutation).
+print("--- parallel block (4 named tasks) ---")
+var r1 = Shared(0.0)
+var r2 = Shared(0.0)
+var r3 = Shared(0.0)
+var r4 = Shared(0.0)
+var t1 = time.now()
+parallel {
+    task A { r1.set(compute_range(0,           CHUNK))     }
+    task B { r2.set(compute_range(CHUNK,       CHUNK * 2)) }
+    task C { r3.set(compute_range(CHUNK * 2,   CHUNK * 3)) }
+    task D { r4.set(compute_range(CHUNK * 3,   N))         }
+}
+var ptask_res = r1.get() + r2.get() + r3.get() + r4.get()
+var ptask_ms  = time.elapsed(t1)
+print("result : {ptask_res}")
+print("time   : {ptask_ms} ms")
+print("")
+
+# ── spawn / await — 4 independent background threads ─────────────────────────
+# All four spawns happen BEFORE any await, so all 4 tasks run concurrently.
+# Total wall-clock time ≈ max(task_time) rather than sum(task_time).
+print("--- spawn / await (4 tasks) ---")
+var t2 = time.now()
+var h1 = spawn compute_range(0,           CHUNK)
+var h2 = spawn compute_range(CHUNK,       CHUNK * 2)
+var h3 = spawn compute_range(CHUNK * 2,   CHUNK * 3)
+var h4 = spawn compute_range(CHUNK * 3,   N)
+var s1 = await h1
+var s2 = await h2
+var s3 = await h3
+var s4 = await h4
+var spawn_res = s1 + s2 + s3 + s4
+var spawn_ms  = time.elapsed(t2)
+print("result : {spawn_res}")
+print("time   : {spawn_ms} ms")
+print("")
+
+# ── Summary ───────────────────────────────────────────────────────────────────
+var ok_ptask = math.abs(seq_res - ptask_res) < 0.001
+var ok_spawn = math.abs(seq_res - spawn_res) < 0.001
+print("=== Summary ===")
+print("sequential    : {seq_ms} ms")
+print("parallel task : {ptask_ms} ms  (correct={ok_ptask})")
+print("spawn / await : {spawn_ms} ms  (correct={ok_spawn})")
+print("")
+
+if seq_ms > 0 and ptask_ms > 0 {
+    var sp1 = float(seq_ms) / float(ptask_ms)
+    print("parallel task speedup : {sp1}x")
+}
+if seq_ms > 0 and spawn_ms > 0 {
+    var sp2 = float(seq_ms) / float(spawn_ms)
+    print("spawn/await speedup   : {sp2}x")
+}
+print("(expected: ~2-4x on a 4-core machine)")
+

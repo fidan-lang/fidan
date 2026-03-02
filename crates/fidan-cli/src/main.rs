@@ -976,7 +976,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                         if let Err(err) = result {
                             render_message_to_stderr(
                                 Severity::Error,
-                                fidan_diagnostics::diag_code!("R0001"),
+                                err.code,
                                 &err.message,
                             );
                             if !err.trace.is_empty() && opts.trace != TraceMode::None {
@@ -1319,7 +1319,7 @@ fn run_repl(trace_mode: TraceMode) -> Result<()> {
                     Err(e) => {
                         render_message_to_stderr(
                             Severity::Error,
-                            fidan_diagnostics::diag_code!("R0001"),
+                            e.code,
                             &e.message,
                         );
                         render_trace_to_stderr(&e.trace, trace_mode);

@@ -1395,6 +1395,8 @@ pub struct TraceFrame {
 
 /// Error returned from [`run`] when an uncaught panic propagates to the top level.
 pub struct RunError {
+    /// Diagnostic code used when rendering the error — validated at compile time via [`diag_code!`].
+    pub code: fidan_diagnostics::DiagCode,
     /// Short description of the panic value shown in the error message.
     pub message: String,
     /// Call stack at the moment of the panic, **innermost frame first**.
@@ -1407,6 +1409,7 @@ pub fn run(module: &Module, interner: Arc<SymbolInterner>) -> Result<(), RunErro
     match interp.run_module(module) {
         Ok(()) | Err(Signal::Return(_)) => Ok(()),
         Err(Signal::Panic { value, trace }) => Err(RunError {
+            code: fidan_diagnostics::diag_code!("R0001"),
             message: format!("runtime panic: {}", builtins::display(&value)),
             trace: trace
                 .into_iter()
@@ -1417,10 +1420,12 @@ pub fn run(module: &Module, interner: Arc<SymbolInterner>) -> Result<(), RunErro
                 .collect(),
         }),
         Err(Signal::Break) => Err(RunError {
+            code: fidan_diagnostics::diag_code!("R0001"),
             message: "unexpected `break` outside a loop".to_string(),
             trace: vec![],
         }),
         Err(Signal::Continue) => Err(RunError {
+            code: fidan_diagnostics::diag_code!("R0001"),
             message: "unexpected `continue` outside a loop".to_string(),
             trace: vec![],
         }),
@@ -1511,6 +1516,7 @@ pub fn run_repl_line(state: &mut ReplState, module: Module) -> Result<Option<Str
         }
         Err(Signal::Return(_)) => Ok(None),
         Err(Signal::Panic { value, trace }) => Err(RunError {
+            code: fidan_diagnostics::diag_code!("R0001"),
             message: format!("runtime panic: {}", builtins::display(&value)),
             trace: trace
                 .into_iter()
@@ -1521,10 +1527,12 @@ pub fn run_repl_line(state: &mut ReplState, module: Module) -> Result<Option<Str
                 .collect(),
         }),
         Err(Signal::Break) => Err(RunError {
+            code: fidan_diagnostics::diag_code!("R0001"),
             message: "unexpected `break` outside a loop".to_string(),
             trace: vec![],
         }),
         Err(Signal::Continue) => Err(RunError {
+            code: fidan_diagnostics::diag_code!("R0001"),
             message: "unexpected `continue` outside a loop".to_string(),
             trace: vec![],
         }),

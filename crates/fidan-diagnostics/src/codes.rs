@@ -16,6 +16,7 @@
 //! | R1xxx  | Runtime — execution / control     |
 //! | R2xxx  | Runtime — arithmetic / bounds     |
 //! | R3xxx  | Runtime — I/O                     |
+//! | R9xxx  | Runtime — parallel / concurrency  |
 //!
 //! Use `fidan explain <code>` (Phase 10) for the full HTML/text description of
 //! any code.
@@ -202,6 +203,12 @@ pub static CODES: &[DiagnosticCode] = &[
         code: "R3004",
         title: "permission denied",
         category: "io",
+    },
+    // ── Runtime: parallel / concurrency ──────────────────────────────────────
+    DiagnosticCode {
+        code: "R9001",
+        title: "one or more tasks failed in a `parallel` block",
+        category: "parallel",
     },
 ];
 

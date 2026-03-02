@@ -614,6 +614,38 @@ appropriate privileges.
 "#,
         ),
 
+        // ── Runtime: parallel / concurrency ──────────────────────────────────
+        "R9001" => Some(
+            r#"One or more tasks inside a `parallel` block panicked or threw an
+uncaught error before the block could complete.  The block waits for
+ALL tasks to finish before reporting the combined failure.
+
+Example:
+
+    parallel {
+        task compute { panic("something went wrong") }
+        task store   { var x = 42 }
+    }
+    # runtime error[R9001]: 1 task failed in `parallel` block
+    #   task `compute`: runtime panic: something went wrong
+
+The block itself propagates the first failure as a panic.  Use
+`attempt / catch` around the whole `parallel` block to handle it:
+
+    attempt {
+        parallel {
+            task compute { panic("something went wrong") }
+            task store   { var x = 42 }
+        }
+    } catch err {
+        print("parallel block failed: {err}")
+    }
+
+If multiple tasks fail, all failures are listed in the error message
+so you can diagnose them together.
+"#,
+        ),
+
         _ => None,
     }
 }
