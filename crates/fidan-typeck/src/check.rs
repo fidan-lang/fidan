@@ -470,6 +470,33 @@ impl TypeChecker {
                             initialized: Initialized::Yes,
                         },
                     );
+                } else if !path.is_empty() && path.first() != Some(&std_sym) {
+                    // User module import: `use mymod` / `use mymod.sub`.
+                    // Bind the alias (or the first segment) as `Dynamic` so
+                    // `mymod.fn()` accesses don't produce a false E0101.
+                    let binding_sym = if let Some(&a) = alias.as_ref() {
+                        a
+                    } else {
+                        path[0]
+                    };
+                    // Skip explicit file-path strings (e.g. `use "./utils.fdn"`).
+                    let first_str = self.interner.resolve(path[0]);
+                    if !first_str.starts_with("./")
+                        && !first_str.starts_with("../")
+                        && !first_str.starts_with('/')
+                        && !first_str.ends_with(".fdn")
+                    {
+                        self.table.define(
+                            binding_sym,
+                            SymbolInfo {
+                                kind: SymbolKind::Var,
+                                ty: FidanType::Dynamic,
+                                span: *span,
+                                is_mutable: false,
+                                initialized: Initialized::Yes,
+                            },
+                        );
+                    }
                 }
             }
             Item::ExprStmt(_) | Item::Assign { .. } | Item::Stmt(_) | Item::Destructure { .. } => {}

@@ -678,7 +678,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     .map(|&s| interner.resolve(s).to_string())
                     .collect();
 
-                // Only process `std.*` paths.
+                // Process `std.*` stdlib paths.
                 if parts.first().map(|s| s == "std").unwrap_or(false) && parts.len() >= 2 {
                     let module_name = parts[1].clone();
 
@@ -700,6 +700,27 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                             module_path: vec!["std".into(), module_name],
                             alias: None,
                             specific_names: Some(vec![fn_name]),
+                            re_export,
+                        });
+                    }
+                } else if !parts.is_empty() && parts[0] != "std" {
+                    // User module import: `use mymod` / `use mymod.sub`.
+                    // Skip explicit file-path strings (starting with ./ ../ / or ending .fdn).
+                    if !parts[0].starts_with("./")
+                        && !parts[0].starts_with("../")
+                        && !parts[0].starts_with('/')
+                        && !parts[0].ends_with(".fdn")
+                    {
+                        // Alias defaults to the first (root) segment so `use foo.bar`
+                        // is accessible as `foo.bar_fn()` via the `foo` namespace.
+                        // For single-segment imports like `use test2`, alias = "test2".
+                        let ns_alias = alias
+                            .map(|sym| interner.resolve(sym).to_string())
+                            .unwrap_or_else(|| parts[0].clone());
+                        use_decls.push(HirUseDecl {
+                            module_path: vec![ns_alias.clone()],
+                            alias: Some(ns_alias),
+                            specific_names: None,
                             re_export,
                         });
                     }

@@ -2170,13 +2170,22 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             global_map.insert(*name, gid);
         }
     }
-    // Register `use std.MODULE` namespace aliases as module-level globals.
+    // Register `use std.MODULE` and `use usermod` namespace aliases as module-level globals.
     // This allows named action bodies to read them via `LoadGlobal`, instead
     // of being limited to the init function's SSA-local scope.
     for decl in &hir.use_decls {
         if decl.module_path.len() >= 2 && decl.specific_names.is_none() {
             let module = &decl.module_path[1];
             let ns_alias = decl.alias.clone().unwrap_or_else(|| module.clone());
+            let alias_sym = interner.intern(&ns_alias);
+            if !global_map.contains_key(&alias_sym) {
+                let gid = GlobalId(prog.globals.len() as u32);
+                prog.globals.push(MirGlobal { name: alias_sym, ty: MirTy::Dynamic });
+                global_map.insert(alias_sym, gid);
+            }
+        } else if decl.module_path.len() == 1 && decl.specific_names.is_none() {
+            // User module: `use test2` → module_path = ["test2"].
+            let ns_alias = decl.alias.clone().unwrap_or_else(|| decl.module_path[0].clone());
             let alias_sym = interner.intern(&ns_alias);
             if !global_map.contains_key(&alias_sym) {
                 let gid = GlobalId(prog.globals.len() as u32);
@@ -2328,7 +2337,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             is_init_fn: true,
         };
 
-        // ── Emit namespace variable bindings for `use std.MODULE` imports ──────
+        // ── Emit namespace variable bindings for `use std.MODULE` / `use usermod` ──
         // Initialise each namespace global in the init fn by storing a
         // `MirLit::Namespace` value into the pre-registered GlobalId slot.
         // Named action bodies can then read the namespace via `LoadGlobal`
@@ -2349,6 +2358,22 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                     ctx.emit(Instr::StoreGlobal { global: gid, value: Operand::Local(dest) });
                 } else {
                     // Grouped-import or other edge case — fall back to SSA local.
+                    ctx.define_var(alias_sym, dest);
+                }
+            } else if decl.module_path.len() == 1 && decl.specific_names.is_none() {
+                // User module: `use test2` → module_path = ["test2"].
+                let module = decl.module_path[0].clone();
+                let ns_alias = decl.alias.clone().unwrap_or_else(|| module.clone());
+                let alias_sym = interner.intern(&ns_alias);
+                let dest = ctx.alloc_local();
+                ctx.emit(Instr::Assign {
+                    dest,
+                    ty: MirTy::Dynamic,
+                    rhs: Rvalue::Literal(MirLit::Namespace(module)),
+                });
+                if let Some(&gid) = ctx.global_map.get(&alias_sym) {
+                    ctx.emit(Instr::StoreGlobal { global: gid, value: Operand::Local(dest) });
+                } else {
                     ctx.define_var(alias_sym, dest);
                 }
             }

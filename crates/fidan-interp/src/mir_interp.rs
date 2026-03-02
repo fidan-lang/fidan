@@ -142,6 +142,9 @@ pub struct MirMachine {
     /// Maps free-imported function names (e.g. `readFile`) to their stdlib module
     /// (e.g. `"io"`).  Populated from `use std.io.{readFile}` declarations.
     stdlib_free_fns: std::collections::HashMap<Arc<str>, Arc<str>>,
+    /// Maps merged free-function names to their `FunctionId`.
+    /// Used for `use mymod` / `test2.add(...)` user-module namespace dispatch.
+    user_fn_map: std::collections::HashMap<Symbol, FunctionId>,
     /// Module-level global variables, shared across all threads.
     /// Indexed by `GlobalId` (same index as `MirProgram::globals`).
     globals: Arc<std::sync::Mutex<Vec<FidanValue>>>,
@@ -187,6 +190,22 @@ impl MirMachine {
 
         let globals_count = program.globals.len();
 
+        // Build user-module function name map: all merged free functions (non-init,
+        // non-method). Methods have `this` as their first param; we detect that.
+        let this_sym = interner.intern("this");
+        let mut user_fn_map: std::collections::HashMap<Symbol, FunctionId> =
+            std::collections::HashMap::new();
+        for (i, func) in program.functions.iter().enumerate() {
+            if i == 0 {
+                continue; // skip init fn
+            }
+            // Skip methods: their first param is always named `this`.
+            if func.params.first().map(|p| p.name == this_sym).unwrap_or(false) {
+                continue;
+            }
+            user_fn_map.insert(func.name, FunctionId(i as u32));
+        }
+
         Self {
             program,
             interner,
@@ -196,6 +215,7 @@ impl MirMachine {
             pending_call_span: None,
             panic_trace: Vec::new(),
             stdlib_free_fns,
+            user_fn_map,
             globals: Arc::new(std::sync::Mutex::new(vec![
                 FidanValue::Nothing;
                 globals_count
@@ -219,6 +239,7 @@ impl MirMachine {
             pending_call_span: None,
             panic_trace: Vec::new(),
             stdlib_free_fns: self.stdlib_free_fns.clone(),
+            user_fn_map: self.user_fn_map.clone(),
             globals: Arc::clone(&self.globals),
             test_results: Vec::new(),
         }
@@ -831,6 +852,20 @@ impl MirMachine {
     ) -> Result<FidanValue, MirSignal> {
         // Stdlib namespace dispatch: `io.readFile(...)`, `math.sin(...)`, etc.
         if let FidanValue::Namespace(ref module) = receiver {
+            // For user-module namespaces (not in stdlib use_decls), dispatch via
+            // the merged free-function table built at startup.
+            let is_stdlib = self.program.use_decls.iter()
+                .any(|d| d.module.as_str() == module.as_ref() || d.alias.as_str() == module.as_ref());
+            if !is_stdlib {
+                let method_sym = self.interner.intern(method);
+                if let Some(&fn_id) = self.user_fn_map.get(&method_sym) {
+                    return self.call_function(fn_id, args);
+                }
+                return Err(MirSignal::Panic(format!(
+                    "no function `{}` in user module `{}`",
+                    method, module
+                )));
+            }
             return self.dispatch_stdlib_call(module, method, args);
         }
         // Shared<T> built-in methods.
