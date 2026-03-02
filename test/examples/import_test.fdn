@@ -1,0 +1,8 @@
+# import_test.fdn — tests cross-file imports via `use "./utils.fdn"`
+
+use "./utils.fdn"
+
+print(greet("Fidan"))
+print("4 squared = " + string(square(4)))
+print("PI from import = " + string(PI))
+print("circle area r=2 = " + string(circle_area(PI, 2.0)))

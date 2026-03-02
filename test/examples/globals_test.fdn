@@ -1,0 +1,26 @@
+## Test: module-level globals accessible inside function bodies
+
+const var PI = 3.14159
+const var GREETING = "Hello"
+var counter = 0
+
+action circle_area with (required radius oftype float) returns float {
+    return PI * radius * radius
+}
+
+action greet with (required name oftype string) {
+    print("{GREETING}, {name}!")
+}
+
+action increment {
+    counter = counter + 1
+}
+
+print("PI = {PI}")
+print("area(2.0) = {circle_area(2.0)}")
+greet("World")
+print("counter before = {counter}")
+increment()
+increment()
+increment()
+print("counter after 3 increments = {counter}")
