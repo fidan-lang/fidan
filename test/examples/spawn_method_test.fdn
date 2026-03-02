@@ -3,11 +3,11 @@
 object Worker {
     var id oftype integer = 0
 
-    new with (required id oftype integer) {
+    new with (certain id oftype integer) {
         this.id = id
     }
 
-    action compute with (required x oftype integer) returns integer {
+    action compute with (certain x oftype integer) returns integer {
         return this.id * 100 + x
     }
 }

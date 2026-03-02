@@ -543,7 +543,8 @@ fn pre_register_hir_into_tc(tc: &mut fidan_typeck::TypeChecker, hir: &fidan_hir:
                 .map(|p| ParamInfo {
                     name: p.name,
                     ty: p.ty.clone(),
-                    required: p.required,
+                    certain: p.certain,
+                    optional: p.optional,
                     has_default: p.default.is_some(),
                 })
                 .collect(),
@@ -567,7 +568,8 @@ fn pre_register_hir_into_tc(tc: &mut fidan_typeck::TypeChecker, hir: &fidan_hir:
                         .map(|p| ParamInfo {
                             name: p.name,
                             ty: p.ty.clone(),
-                            required: p.required,
+                            certain: p.certain,
+                            optional: p.optional,
                             has_default: p.default.is_some(),
                         })
                         .collect(),

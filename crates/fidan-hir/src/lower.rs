@@ -392,7 +392,8 @@ impl<'a> Ctx<'a> {
                 HirParam {
                     name: p.name,
                     ty,
-                    required: p.required,
+                    certain: p.certain,
+                    optional: p.optional,
                     default: p.default.map(|e| self.lower_expr(e)),
                     span: p.span,
                 }
@@ -504,7 +505,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                         HirField {
                             name: f.name,
                             ty,
-                            required: f.required,
+                            certain: f.certain,
                             default: f.default.map(|e| ctx.lower_expr(e)),
                             span: f.span,
                         }

@@ -4,11 +4,11 @@ const var PI = 3.14159
 const var GREETING = "Hello"
 var counter = 0
 
-action circle_area with (required radius oftype float) returns float {
+action circle_area with (certain radius oftype float) returns float {
     return PI * radius * radius
 }
 
-action greet with (required name oftype string) {
+action greet with (certain name oftype string) {
     print("{GREETING}, {name}!")
 }
 

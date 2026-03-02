@@ -45,7 +45,7 @@ pub enum TokenKind {
     Export, // `export use`
     As,
     Oftype, // type annotation (`->` is also accepted in the parser)
-    Required,
+    Certain,
     Optional,
     Dynamic, // surface keyword: `flexible` (alias: `dynamic`)
     Parallel,
@@ -177,7 +177,7 @@ impl TokenKind {
             TokenKind::Export => "export",
             TokenKind::As => "as",
             TokenKind::Oftype => "oftype",
-            TokenKind::Required => "required",
+            TokenKind::Certain => "certain",
             TokenKind::Optional => "optional",
             TokenKind::Dynamic => "dynamic",
             TokenKind::Parallel => "parallel",

@@ -588,7 +588,7 @@ impl<'t> Parser<'t> {
         FieldDecl {
             name,
             ty,
-            required: false,
+            certain: false,
             default,
             span: Span::new(self.module.file, start, end),
         }
@@ -655,7 +655,7 @@ impl<'t> Parser<'t> {
     // ── Parameter list ────────────────────────────────────────────────────────
     //
     // Fidan params may be mixed: grouped in parens and ungrouped after `also`/Comma.
-    // E.g.: `action init with (required name oftype string) also optional age oftype integer = 18`
+// E.g.: `action init with (certain name oftype string) also optional age oftype integer = 18`
 
     pub(crate) fn parse_params(&mut self) -> Vec<Param> {
         let mut params = vec![];
@@ -687,7 +687,7 @@ impl<'t> Parser<'t> {
                     }
                     self.eat(&TokenKind::RParen);
                 }
-                TokenKind::Required | TokenKind::Optional | TokenKind::Ident(_) => {
+                TokenKind::Certain | TokenKind::Optional | TokenKind::Ident(_) => {
                     params.push(self.parse_single_param());
                 }
                 _ => break,
@@ -698,8 +698,8 @@ impl<'t> Parser<'t> {
 
     fn parse_single_param(&mut self) -> Param {
         let start = self.current_span().start;
-        let required = self.eat(&TokenKind::Required);
-        let _optional = !required && self.eat(&TokenKind::Optional);
+        let certain = self.eat(&TokenKind::Certain);
+        let optional = !certain && self.eat(&TokenKind::Optional);
         let name = self.expect_ident_sym("expected parameter name");
         let ty = if self.eat_type_ann() {
             self.parse_type_expr()
@@ -721,7 +721,8 @@ impl<'t> Parser<'t> {
         Param {
             name,
             ty,
-            required,
+            certain,
+            optional,
             default,
             span: Span::new(self.module.file, start, end),
         }

@@ -32,7 +32,7 @@ pub fn lookup_keyword(s: &str) -> Option<TokenKind> {
         "check" => TokenKind::Check,
         "as" => TokenKind::As,
         "oftype" => TokenKind::Oftype,
-        "required" => TokenKind::Required,
+        "certain" => TokenKind::Certain,
         "optional" => TokenKind::Optional,
         "dynamic" | "flexible" => TokenKind::Dynamic,
         "parallel" => TokenKind::Parallel,

@@ -73,7 +73,7 @@ pub enum Item {
 pub struct FieldDecl {
     pub name: Symbol,
     pub ty: TypeExpr,
-    pub required: bool,
+    pub certain: bool,
     pub default: Option<crate::ExprId>,
     pub span: Span,
 }
@@ -82,7 +82,9 @@ pub struct FieldDecl {
 pub struct Param {
     pub name: Symbol,
     pub ty: TypeExpr,
-    pub required: bool,
+    pub certain: bool,
+    /// `true` when the `optional` keyword was written — the param may be omitted at the call site.
+    pub optional: bool,
     pub default: Option<crate::ExprId>,
     pub span: Span,
 }

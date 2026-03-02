@@ -40,7 +40,7 @@ struct ClassDef {
     /// Symbol name of the parent class (if any).
     parent_name: Option<Symbol>,
     /// Own field declarations (not including inherited).
-    own_fields: Vec<(Symbol, bool)>, // (name, required)
+    own_fields: Vec<(Symbol, bool)>, // (name, certain)
     /// Methods defined inside `object { action ... }`.
     methods: HashMap<Symbol, FuncDef>,
 }
@@ -122,7 +122,7 @@ impl Interpreter {
                     ..
                 } => {
                     let own_fields: Vec<(Symbol, bool)> =
-                        fields.iter().map(|f| (f.name, f.required)).collect();
+                        fields.iter().map(|f| (f.name, f.certain)).collect();
 
                     let mut mmap: HashMap<Symbol, FuncDef> = HashMap::new();
                     for &mid in methods {
@@ -639,15 +639,15 @@ impl Interpreter {
                 }
             }
         }
-        // Third pass: enforce required — no required parameter may remain Nothing
+        // Third pass: enforce certain — no certain parameter may remain Nothing
         // after defaults have been applied.
         for (i, param) in fdef.params.iter().enumerate() {
-            if param.required && matches!(locals[i].1, FidanValue::Nothing) {
+            if param.certain && matches!(locals[i].1, FidanValue::Nothing) {
                 let pname = self.interner.resolve(param.name).to_string();
                 let trace = self.env.stack_trace();
                 return Err(Signal::Panic {
                     value: FidanValue::String(FidanString::new(&format!(
-                        "required parameter `{pname}` cannot be nothing"
+                        "certain parameter `{pname}` cannot be nothing"
                     ))),
                     trace,
                 });

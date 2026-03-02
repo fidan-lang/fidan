@@ -226,12 +226,12 @@ object Animal {
 object Dog extends Animal {
     var name oftype string
 
-    new with (required name oftype string) {
+    new with (certain name oftype string) {
         this.name = name
         parent(species set "Dog", sound set "Woof")
     }
 
-    action fetch with (required item oftype string) returns string {
+    action fetch with (certain item oftype string) returns string {
         return "{this.name} fetched the {item}!"
     }
 }
@@ -240,7 +240,7 @@ object Dog extends Animal {
 object GuideDog extends Dog {
     var owner oftype string = "Nobody"
 
-    new with (required name oftype string, optional owner oftype string = "Nobody") {
+    new with (certain name oftype string, optional owner oftype string = "Nobody") {
         parent(name set name)
         this.owner = owner
     }
@@ -263,8 +263,8 @@ action greetUser with (username oftype string) {
     print("Welcome, {username}!")
 }
 
-# Required param (enforces nonnull)
-action greetUser with (required username oftype string) {
+# Required `certain` param (enforces nonnull)
+action greetUser with (certain username oftype string) {
     print("Welcome, {username}!")
 }
 
@@ -280,17 +280,17 @@ action greetDefault with (optional username oftype string = "world") {
 }
 
 # Return type annotation
-action add with (required x -> integer also required y -> integer) returns integer { # `also` is an alias for `,`
+action add with (certain x -> integer also certain y -> integer) returns integer { # `also` is an alias for `,`
     return x + y
 }
 
-# Mixed params — required first, then optional; `also` = `,`
-action createUser with (required uname oftype string) also (optional age oftype integer = 0) also (optional email oftype string) returns string {
+# Mixed params — required/`certain` first, then optional; `also` = `,`
+action createUser with (certain uname oftype string) also (optional age oftype integer = 0) also (optional email oftype string) returns string {
     return "User: {uname}, age {age}"
 }
 
 # Parallel action — returns Pending oftype T automatically, runs on thread pool
-parallel action fetchData with (required url oftype string) returns string {
+parallel action fetchData with (certain url oftype string) returns string {
     # ... I/O work here
     return "data from {url}"
 }
@@ -307,7 +307,7 @@ action greet extends Dog with (optional guest oftype Dog) {
 # ── 9. DECORATORS ────────────────────────────────────────────────────────────
 
 @precompile
-action hotPath with (required n oftype integer) returns integer {
+action hotPath with (certain n oftype integer) returns integer {
     var result = 0
     for i in 1..n {
         result = result + i

@@ -2,16 +2,16 @@
 
 const var PI = 3.14159
 
-action greet with (required name oftype string) returns string {
+action greet with (certain name oftype string) returns string {
     return "Hello from utils, " + name + "!"
 }
 
-action square with (required n oftype integer) returns integer {
+action square with (certain n oftype integer) returns integer {
     return n * n
 }
 
 # Note: PI is a module-level const; passing it as a parameter demonstrates
 # the cross-file import mechanism cleanly until module-global scoping lands.
-action circle_area with (required pi oftype float, required radius oftype float) returns float {
+action circle_area with (certain pi oftype float, certain radius oftype float) returns float {
     return pi * radius * radius
 }

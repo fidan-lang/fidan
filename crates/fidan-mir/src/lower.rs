@@ -2455,7 +2455,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 local: this_local,
                 name: this_name,
                 ty: MirTy::Dynamic,
-                required: false,
+                certain: false,
             });
         }
 
@@ -2467,13 +2467,13 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 local,
                 name: param.name,
                 ty: fidan_ty_to_mir(&param.ty),
-                required: param.required,
+                certain: param.certain,
             });
-            // Emit a required-param null guard as a real MIR instruction so it
+            // Emit a certain-param null guard as a real MIR instruction so it
             // survives inlining without any special-casing in the inliner.
-            if param.required {
-                ctx.emit(Instr::RequiredCheck {
-                    local,
+            if param.certain {
+                ctx.emit(Instr::CertainCheck {
+                    operand: Operand::Local(local),
                     name: param.name,
                 });
             }
@@ -2683,7 +2683,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 local: binding_local,
                 name: binding_sym,
                 ty: binding_ty,
-                required: false,
+                certain: false,
             });
         }
         // Subsequent params: captured env variables (parallel for + concurrent tasks).
@@ -2694,7 +2694,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 local,
                 name: sym,
                 ty,
-                required: false,
+                certain: false,
             });
         }
         ctx.lower_stmts(body);

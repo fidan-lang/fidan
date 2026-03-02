@@ -83,7 +83,7 @@ pub struct HirObject {
 pub struct HirField {
     pub name: Symbol,
     pub ty: FidanType,
-    pub required: bool,
+    pub certain: bool,
     pub default: Option<HirExpr>,
     pub span: Span,
 }
@@ -106,7 +106,9 @@ pub struct HirFunction {
 pub struct HirParam {
     pub name: Symbol,
     pub ty: FidanType,
-    pub required: bool,
+    pub certain: bool,
+    /// `true` when the `optional` keyword was written — the param may be omitted at the call site.
+    pub optional: bool,
     pub default: Option<HirExpr>,
     pub span: Span,
 }

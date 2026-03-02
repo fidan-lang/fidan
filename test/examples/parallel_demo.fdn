@@ -4,10 +4,10 @@ use std.time
 
 # §1 spawn / await
 print("§1 spawn / await:")
-action double with (required x) {
+action double with (certain x) {
     return x * 2
 }
-action add_ten with (required x) {
+action add_ten with (certain x) {
     return x + 10
 }
 

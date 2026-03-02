@@ -108,7 +108,7 @@
 | Implicit-subject ternary `x if is not nothing else y` | ✅ | Fidan-specific shorthand |
 | `is not` → `NotEq` normalization | ✅ | Two-token lookahead in Pratt loop |
 | Named argument call parsing | ✅ | `name set value` and `name = value` |
-| `required` / `optional` parameter modifiers | ✅ | |
+| `certain` / `optional` parameter modifiers | ✅ | |
 | Mixed grouped/ungrouped param lists | ✅ | `(p1) also p2` style |
 | `default` / `=` param defaults | ✅ | Contextual keyword |
 | `with` param keyword | ✅ | Contextual keyword (interned at parse-init) |
@@ -164,7 +164,7 @@
 | `this` and `parent` binding | ✅ | Injected into object + extension-action scopes |
 | Extension action dual-registration | ✅ | Free function + method on target object |
 | Named / positional argument checking | ✅ | E301 missing required param (constructor calls) |
-| `required` / `optional` parameter checking | ✅ | Required params checked at call sites |
+| `certain` / `optional` parameter checking | ✅ | Certain params checked at call sites |
 | Null safety flow analysis (warnings) | ⬜ | Deferred — needs control-flow graph (Phase 5) |
 | Decorator validation (`@precompile`, etc.) | ⬜ | Deferred to Phase 4 |
 | `parallel action` → `Pending oftype T` inference | ✅ | `Spawn` expr infers `Pending<T>`; `Await` unwraps it |

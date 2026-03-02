@@ -190,7 +190,7 @@ pub enum TokenKind {
     // ── Keywords ─────────────────────────────────────────────
     Var, Action, Object, Extends, Returns,
     With, This, Parent,
-    Required, Optional, Default,
+    Certain, Optional, Default,
     Oftype,
 
     // ── Control Flow ─────────────────────────────────────────
@@ -338,9 +338,9 @@ The parser treats `Newline` and `Semicolon` identically as statement separators.
 > **Parentheses in Fidan mean exactly one thing: wrapping a list of items or grouping a
 > sub-expression. They are NEVER written around control-flow conditions or `for` bindings.**
 
-| Position | Parens required? | Example |
+| Position | Parens certain? | Example |
 |---|---|---|
-| Action parameter list | **Yes** | `action foo with (required x -> integer)` |
+| Action parameter list | **Yes** | `action foo with (certain x -> integer)` |
 | Lambda parameter list | **Yes** | `(x -> integer) returns integer => x * 2` |
 | Call / constructor argument list | **Yes** | `add(1, 2)`, `Dog("Rex")` |
 | Grouping inside an expression | **Yes** | `(a + b) * c` |
@@ -468,7 +468,7 @@ pub struct Param<'ast> {
     pub name:       Symbol,
     pub ty:         Option<TypeRef<'ast>>,
     pub default:    Option<ExprRef<'ast>>,      // `= expr` or `default expr`
-    pub required:   bool,                        // `required` keyword
+    pub certain:   bool,                        // `certain` keyword
     pub optional:   bool,                        // `optional` keyword
     pub span:       Span,
 }
@@ -907,7 +907,8 @@ evaluates to `this` (the receiver). This is clean and consistent.
 ### Argument Checking
 
 - Positional-before-named: detect any named arg that precedes a positional arg → error.
-- `required` params: error if not supplied at call site.
+- regular parameters: must be supplied exactly once (either positionally or named).
+- `certain` params: error if `Nothing` at call site. Must provide a value that is definitely not `Nothing`.
 - `optional` params: default to `Nothing` if not supplied.
 - Default values: evaluated at call site (not at definition time, unlike Python's default trap).
 
@@ -2256,7 +2257,7 @@ if profiling demonstrates a measurable bottleneck in the MIR interpreter itself.
 - [ ] `this` and `parent` binding
 - [ ] Extension action dual-registration
 - [ ] Named/positional argument order enforcement
-- [ ] `required` / `optional` parameter checking
+- [ ] `certain` / `optional` parameter checking
 - [ ] Null safety analysis (flow-sensitive, as warnings)
 - [ ] Decorator validation (`@precompile`, etc.)
 - [ ] `parallel action` type registration (`T` vs `Pending oftype T` depending on call form)
@@ -2284,7 +2285,7 @@ HIR lowering begins. Adding syntax after HIR exists means patching the lowering 
       (before HIR); no backend changes required.
 - [ ] **`->` as `oftype` alias** — `Arrow` is already a separate token. In the parser,
       every position that consumes `Oftype` must also accept `Arrow`. This covers
-      variable declarations (`var x -> integer`), action params (`required n -> integer`),
+      variable declarations (`var x -> integer`), action params (`certain n -> integer`),
       nested composite types (`list -> list -> integer`), and return annotations.
       Do NOT emit `Oftype` from the lexer for `->` — keep `Arrow` distinct so it can
       later serve as a closure/lambda arrow (`(x) -> x + 1`) without ambiguity.

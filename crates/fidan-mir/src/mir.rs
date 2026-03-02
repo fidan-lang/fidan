@@ -242,9 +242,9 @@ pub enum Instr {
         closure_args: Vec<Operand>,
     },
 
-    /// Check that a required parameter is not `nothing`.
+    /// Check that a `certain` parameter is not `nothing`.
     /// Emitted at function entry so the check survives inlining unchanged.
-    RequiredCheck { local: LocalId, name: Symbol },
+    CertainCheck { operand: Operand, name: Symbol },
 
     /// No-op (used as a placeholder during construction / optimisation).
     Nop,
@@ -333,7 +333,7 @@ pub struct MirParam {
     pub name: Symbol,
     pub ty: MirTy,
     /// If `true` the caller must not pass `nothing` for this parameter.
-    pub required: bool,
+    pub certain: bool,
 }
 
 #[derive(Debug)]

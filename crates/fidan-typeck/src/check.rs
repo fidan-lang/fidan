@@ -14,7 +14,9 @@ use std::sync::Arc;
 pub struct ParamInfo {
     pub name: Symbol,
     pub ty: FidanType,
-    pub required: bool,
+    pub certain: bool,
+    /// `true` when the `optional` keyword was written — the param may be omitted at the call site.
+    pub optional: bool,
     pub has_default: bool,
 }
 
@@ -698,7 +700,7 @@ impl TypeChecker {
                     ty: param_ty,
                     span: param.span,
                     is_mutable: false,
-                    initialized: if param.required {
+                    initialized: if param.certain {
                         Initialized::Yes
                     } else {
                         Initialized::Maybe
@@ -1394,7 +1396,10 @@ impl TypeChecker {
                         return FidanType::Object(name);
                     }
                     Some(_) => {
-                        // Action, Var holding a function, etc. — valid call, return type unknown.
+                        // User action — check that all non-optional params are provided.
+                        if let Some(info) = self.actions.get(&name).cloned() {
+                            self.check_params_provided(&info.params, args, span);
+                        }
                         return FidanType::Dynamic;
                     }
                     None => {
@@ -1458,35 +1463,60 @@ impl TypeChecker {
         FidanType::Dynamic
     }
 
-    /// Check that all `required` params of `initialize` for `obj_sym` are supplied.
+    /// Check that all non-optional params of `initialize` for `obj_sym` are supplied.
     fn check_required_params(
         &mut self,
         obj_sym: Symbol,
         args: &[(Option<Symbol>, ExprId)],
         span: Span,
     ) {
-        // Intern "initialize" before borrowing self.objects
         let init_sym = self.interner.intern("initialize");
+        let new_sym = self.interner.intern("new");
         let params: Option<Vec<ParamInfo>> = self
             .objects
             .get(&obj_sym)
-            .and_then(|o| o.methods.get(&init_sym))
+            .and_then(|o| o.methods.get(&init_sym).or_else(|| o.methods.get(&new_sym)))
             .map(|m| m.params.clone());
 
         if let Some(params) = params {
-            let has_positional = args.iter().any(|(n, _)| n.is_none());
-            for p in &params {
-                if p.required {
-                    let named_ok = args.iter().any(|(n, _)| *n == Some(p.name));
-                    if !named_ok && !has_positional {
-                        let pname = self.interner.resolve(p.name).to_string();
-                        self.emit_error(
-                            fidan_diagnostics::diag_code!("E0301"),
-                            format!("required parameter `{pname}` not provided"),
-                            span,
-                        );
-                    }
-                }
+            self.check_params_provided(&params, args, span);
+        }
+    }
+
+    /// Core check: every non-optional param must be covered by a named or positional arg.
+    fn check_params_provided(
+        &mut self,
+        params: &[ParamInfo],
+        args: &[(Option<Symbol>, ExprId)],
+        span: Span,
+    ) {
+        // Named args supplied at this call site.
+        let named: std::collections::HashSet<Symbol> =
+            args.iter().filter_map(|(n, _)| *n).collect();
+        let positional_count = args.iter().filter(|(n, _)| n.is_none()).count();
+
+        // Walk params in declaration order, assigning positional slots to those
+        // not covered by a name.  Any non-optional param left uncovered is an error.
+        let mut pos_used = 0usize;
+        for p in params {
+            if named.contains(&p.name) {
+                continue; // covered by a named arg
+            }
+            if pos_used < positional_count {
+                pos_used += 1;
+                continue; // covered by the next positional arg
+            }
+            // Not covered.
+            if !p.optional {
+                let pname = self.interner.resolve(p.name).to_string();
+                let msg = if p.certain {
+                    format!("certain parameter `{pname}` not provided")
+                } else {
+                    format!(
+                        "parameter `{pname}` must be provided (use `optional` to make it omittable)"
+                    )
+                };
+                self.emit_error(fidan_diagnostics::diag_code!("E0301"), msg, span);
             }
         }
     }
@@ -1695,7 +1725,8 @@ impl TypeChecker {
                 ParamInfo {
                     name: p.name,
                     ty,
-                    required: p.required,
+                    certain: p.certain,
+                    optional: p.optional,
                     has_default: p.default.is_some(),
                 }
             })

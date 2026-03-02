@@ -13,8 +13,8 @@
 // clean up the resulting literals and dead temporaries.
 
 use fidan_mir::{
-    Callee, FunctionId, Instr, LocalId, MirFunction, MirProgram, MirStringPart, MirTy,
-    Operand, Rvalue, Terminator,
+    Callee, FunctionId, Instr, LocalId, MirFunction, MirProgram, MirStringPart, MirTy, Operand,
+    Rvalue, Terminator,
 };
 use std::collections::HashMap;
 
@@ -49,11 +49,7 @@ impl crate::Pass for Inlining {
         }
 
         // Process in descending (bb_idx, instr_idx) so indices stay valid.
-        sites.sort_by(|a, b| {
-            b.0.cmp(&a.0)
-                .then(b.1.cmp(&a.1))
-                .then(b.2.cmp(&a.2))
-        });
+        sites.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)).then(b.2.cmp(&a.2)));
 
         for (caller_idx, bb_idx, instr_idx, callee_fid) in sites {
             // Skip self-recursion (shouldn't happen — is_inlinable filters it — but be safe).
@@ -65,15 +61,16 @@ impl crate::Pass for Inlining {
             let callee_data = extract_callee(&prog.functions[callee_fid.0 as usize]);
 
             // Extract call args and dest from the caller's instruction.
-            let (dest_local, args) = match &prog.functions[caller_idx].blocks[bb_idx].instructions[instr_idx] {
-                Instr::Assign {
-                    dest,
-                    rhs: Rvalue::Call { args, .. },
-                    ..
-                } => (Some(*dest), args.clone()),
-                Instr::Call { dest, args, .. } => (*dest, args.clone()),
-                _ => continue,
-            };
+            let (dest_local, args) =
+                match &prog.functions[caller_idx].blocks[bb_idx].instructions[instr_idx] {
+                    Instr::Assign {
+                        dest,
+                        rhs: Rvalue::Call { args, .. },
+                        ..
+                    } => (Some(*dest), args.clone()),
+                    Instr::Call { dest, args, .. } => (*dest, args.clone()),
+                    _ => continue,
+                };
 
             do_inline(
                 &mut prog.functions[caller_idx],
@@ -112,10 +109,11 @@ fn is_inlinable(func: &MirFunction, self_id: FunctionId) -> bool {
                 ..
             } if *id == self_id => return false,
             Instr::Assign {
-                rhs: Rvalue::Call {
-                    callee: Callee::Fn(id),
-                    ..
-                },
+                rhs:
+                    Rvalue::Call {
+                        callee: Callee::Fn(id),
+                        ..
+                    },
                 ..
             } if *id == self_id => return false,
             Instr::SpawnParallel { .. }
@@ -134,10 +132,11 @@ fn is_inlinable(func: &MirFunction, self_id: FunctionId) -> bool {
 fn call_target(instr: &Instr) -> Option<FunctionId> {
     match instr {
         Instr::Assign {
-            rhs: Rvalue::Call {
-                callee: Callee::Fn(fid),
-                ..
-            },
+            rhs:
+                Rvalue::Call {
+                    callee: Callee::Fn(fid),
+                    ..
+                },
             ..
         } => Some(*fid),
         Instr::Call {
@@ -216,18 +215,21 @@ fn do_inline(
 
     // Insert remapped body at the same position.
     for (i, instr) in remapped.into_iter().enumerate() {
-        caller.blocks[bb_idx].instructions.insert(instr_idx + i, instr);
+        caller.blocks[bb_idx]
+            .instructions
+            .insert(instr_idx + i, instr);
     }
 
     // If there's a dest and a return value, append an assignment.
     if let (Some(dest), Some(ret_op)) = (dest_local, return_op) {
-        caller.blocks[bb_idx]
-            .instructions
-            .insert(instr_idx + n_body, Instr::Assign {
+        caller.blocks[bb_idx].instructions.insert(
+            instr_idx + n_body,
+            Instr::Assign {
                 dest,
                 ty: callee.return_ty,
                 rhs: Rvalue::Use(ret_op),
-            });
+            },
+        );
     }
 }
 
@@ -322,17 +324,29 @@ fn remap_instr(instr: &Instr, param_map: &HashMap<LocalId, Operand>, offset: u32
             handle: r(handle),
         },
         // Spawn / concurrent: should not appear (screened by is_inlinable), but remap safely.
-        Instr::SpawnConcurrent { handle, task_fn, args } => Instr::SpawnConcurrent {
+        Instr::SpawnConcurrent {
+            handle,
+            task_fn,
+            args,
+        } => Instr::SpawnConcurrent {
             handle: d(*handle),
             task_fn: *task_fn,
             args: args.iter().map(|a| r(a)).collect(),
         },
-        Instr::SpawnParallel { handle, task_fn, args } => Instr::SpawnParallel {
+        Instr::SpawnParallel {
+            handle,
+            task_fn,
+            args,
+        } => Instr::SpawnParallel {
             handle: d(*handle),
             task_fn: *task_fn,
             args: args.iter().map(|a| r(a)).collect(),
         },
-        Instr::SpawnExpr { dest, task_fn, args } => Instr::SpawnExpr {
+        Instr::SpawnExpr {
+            dest,
+            task_fn,
+            args,
+        } => Instr::SpawnExpr {
             dest: d(*dest),
             task_fn: *task_fn,
             args: args.iter().map(|a| r(a)).collect(),
@@ -356,8 +370,8 @@ fn remap_instr(instr: &Instr, param_map: &HashMap<LocalId, Operand>, offset: u32
         },
         Instr::PushCatch(bid) => Instr::PushCatch(*bid),
         Instr::PopCatch => Instr::PopCatch,
-        Instr::RequiredCheck { local, name } => Instr::RequiredCheck {
-            local: d(*local),
+        Instr::CertainCheck { operand, name } => Instr::CertainCheck {
+            operand: r(operand),
             name: *name,
         },
         Instr::Nop => Instr::Nop,
@@ -389,9 +403,7 @@ fn remap_rvalue(rv: &Rvalue, r: &impl Fn(&Operand) -> Operand) -> Rvalue {
             fields: fields.iter().map(|(f, v)| (*f, r(v))).collect(),
         },
         Rvalue::List(elems) => Rvalue::List(elems.iter().map(|e| r(e)).collect()),
-        Rvalue::Dict(pairs) => {
-            Rvalue::Dict(pairs.iter().map(|(k, v)| (r(k), r(v))).collect())
-        }
+        Rvalue::Dict(pairs) => Rvalue::Dict(pairs.iter().map(|(k, v)| (r(k), r(v))).collect()),
         Rvalue::Tuple(elems) => Rvalue::Tuple(elems.iter().map(|e| r(e)).collect()),
         Rvalue::StringInterp(parts) => Rvalue::StringInterp(
             parts

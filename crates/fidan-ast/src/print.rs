@@ -94,7 +94,13 @@ impl<'a> Printer<'a> {
     fn print_item(&self, item: &Item, depth: usize) {
         let p = Self::pad(depth);
         match item {
-            Item::VarDecl { name, ty, init, is_const, .. } => {
+            Item::VarDecl {
+                name,
+                ty,
+                init,
+                is_const,
+                ..
+            } => {
                 let kw = if *is_const { "const var" } else { "var" };
                 let ty_s = ty
                     .as_ref()
@@ -111,11 +117,21 @@ impl<'a> Printer<'a> {
             }
 
             Item::Assign { target, value, .. } => {
-                println!("{p}Assign  {} = {}", self.expr_hint(*target), self.expr_hint(*value));
+                println!(
+                    "{p}Assign  {} = {}",
+                    self.expr_hint(*target),
+                    self.expr_hint(*value)
+                );
             }
-            Item::Destructure { bindings, value, .. } => {
+            Item::Destructure {
+                bindings, value, ..
+            } => {
                 let names: Vec<String> = bindings.iter().map(|s| self.sym(*s)).collect();
-                println!("{p}Destructure  ({}) = {}", names.join(", "), self.expr_hint(*value));
+                println!(
+                    "{p}Destructure  ({}) = {}",
+                    names.join(", "),
+                    self.expr_hint(*value)
+                );
             }
             Item::Stmt(sid) => {
                 self.print_stmt(*sid, depth);
@@ -150,7 +166,7 @@ impl<'a> Printer<'a> {
                     .unwrap_or_default();
                 println!("{p}ObjectDecl  {}{parent_s}", self.sym(*name));
                 for f in fields {
-                    let req = if f.required { "  required" } else { "" };
+                    let req = if f.certain { "  certain" } else { "" };
                     println!("{p}  field  {}: {}{req}", self.sym(f.name), self.ty(&f.ty));
                 }
                 for &mid in methods {
@@ -170,7 +186,7 @@ impl<'a> Printer<'a> {
                 let params_s = params
                     .iter()
                     .map(|p| {
-                        let req = if p.required { "" } else { "?" };
+                        let req = if p.certain { "" } else { "?" };
                         format!("{}{}: {}", self.sym(p.name), req, self.ty(&p.ty))
                     })
                     .collect::<Vec<_>>()
@@ -224,7 +240,13 @@ impl<'a> Printer<'a> {
         let p = Self::pad(depth);
         let s = self.arena.get_stmt(sid);
         match s {
-            Stmt::VarDecl { name, ty, init, is_const, .. } => {
+            Stmt::VarDecl {
+                name,
+                ty,
+                init,
+                is_const,
+                ..
+            } => {
                 let kw = if *is_const { "const var" } else { "var" };
                 let ty_s = ty
                     .as_ref()
@@ -240,9 +262,15 @@ impl<'a> Printer<'a> {
                 self.expr_hint(*target),
                 self.expr_hint(*value)
             ),
-            Stmt::Destructure { bindings, value, .. } => {
+            Stmt::Destructure {
+                bindings, value, ..
+            } => {
                 let names: Vec<String> = bindings.iter().map(|s| self.sym(*s)).collect();
-                println!("{p}destructure  ({}) = {}", names.join(", "), self.expr_hint(*value));
+                println!(
+                    "{p}destructure  ({}) = {}",
+                    names.join(", "),
+                    self.expr_hint(*value)
+                );
             }
             Stmt::Expr { expr, .. } => println!("{p}expr  {}", self.expr_hint(*expr)),
             Stmt::Return { value, .. } => {

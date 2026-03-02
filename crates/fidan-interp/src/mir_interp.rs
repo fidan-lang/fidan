@@ -529,11 +529,11 @@ impl MirMachine {
             Instr::Drop { .. } => {
                 // Values are reference-counted; explicit Drop is a no-op here.
             }
-            Instr::RequiredCheck { local, name } => {
-                if matches!(frame.load(local), FidanValue::Nothing) {
+            Instr::CertainCheck { operand, name } => {
+                if matches!(self.eval_operand(&operand, frame), FidanValue::Nothing) {
                     let pname = self.sym_str(name);
                     return Err(MirSignal::Panic(format!(
-                        "required parameter `{pname}` cannot be nothing"
+                        "certain parameter `{pname}` cannot be nothing"
                     )));
                 }
             }

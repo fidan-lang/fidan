@@ -121,7 +121,7 @@ fn count_instr_reads(instr: &Instr, add: &mut impl FnMut(&Operand)) {
             }
         }
         Instr::Nop | Instr::PushCatch(_) | Instr::PopCatch => {}
-        Instr::RequiredCheck { local, .. } => add(&Operand::Local(*local)),
+        Instr::CertainCheck { operand, .. } => add(operand),
         Instr::LoadGlobal { .. } => {}
         Instr::StoreGlobal { value, .. } => add(value),
     }

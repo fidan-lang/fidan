@@ -1,8 +1,8 @@
-action inner with (required msg -> string) {
+action inner with (certain msg -> string) {
     panic("something went wrong: {msg}")
 }
 
-action middle with (required count -> integer) {
+action middle with (certain count -> integer) {
     inner("iteration {count}")
 }
 
