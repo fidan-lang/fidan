@@ -119,6 +119,77 @@ impl TypeChecker {
         }
     }
 
+    // ── Pre-registration (for cross-file imports) ─────────────────────────
+
+    /// Pre-register a top-level action from an already-lowered imported file.
+    ///
+    /// Must be called before `check_module` so the main file's type-checker
+    /// sees the imported function as a known binding.
+    pub fn pre_register_action(&mut self, name: Symbol, info: ActionInfo) {
+        let dummy = self.dummy_span();
+        self.actions.insert(name, info);
+        self.table.define(
+            name,
+            SymbolInfo {
+                kind: SymbolKind::Action,
+                ty: FidanType::Function,
+                span: dummy,
+                is_mutable: false,
+                initialized: Initialized::Yes,
+            },
+        );
+    }
+
+    /// Pre-register an object type from an already-lowered imported file.
+    pub fn pre_register_object(&mut self, name: Symbol, info: ObjectInfo) {
+        let dummy = self.dummy_span();
+        self.objects.insert(name, info);
+        self.table.define(
+            name,
+            SymbolInfo {
+                kind: SymbolKind::Object,
+                ty: FidanType::Object(name),
+                span: dummy,
+                is_mutable: false,
+                initialized: Initialized::Yes,
+            },
+        );
+    }
+
+    /// Pre-register an object from raw field/method iterators (avoids requiring
+    /// `FxHashMap` in the caller).
+    pub fn pre_register_object_data(
+        &mut self,
+        name: Symbol,
+        parent: Option<Symbol>,
+        span: Span,
+        fields: impl IntoIterator<Item = (Symbol, FidanType)>,
+        methods: impl IntoIterator<Item = (Symbol, ActionInfo)>,
+    ) {
+        let info = ObjectInfo {
+            fields: fields.into_iter().collect(),
+            methods: methods.into_iter().collect(),
+            parent,
+            span,
+        };
+        self.pre_register_object(name, info);
+    }
+
+    /// Pre-register a module-level global variable from an already-lowered imported file.
+    pub fn pre_register_global(&mut self, name: Symbol, ty: FidanType, is_const: bool) {
+        let dummy = self.dummy_span();
+        self.table.define(
+            name,
+            SymbolInfo {
+                kind: SymbolKind::Var,
+                ty,
+                span: dummy,
+                is_mutable: !is_const,
+                initialized: Initialized::Yes,
+            },
+        );
+    }
+
     // ── Public entry point ────────────────────────────────────────────────
 
     /// Run the full type checker over `module`.  Returns all diagnostics.

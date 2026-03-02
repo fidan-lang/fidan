@@ -121,6 +121,8 @@ fn count_instr_reads(instr: &Instr, add: &mut impl FnMut(&Operand)) {
             }
         }
         Instr::Nop | Instr::PushCatch(_) | Instr::PopCatch => {}
+        Instr::LoadGlobal { .. } => {}
+        Instr::StoreGlobal { value, .. } => add(value),
     }
 }
 

@@ -804,6 +804,31 @@ impl<'t> Parser<'t> {
     fn parse_use_decl(&mut self, re_export: bool) -> ItemId {
         let start = self.current_span().start;
         self.advance(); // eat `use`
+
+        // ── File-path import: `use "./other.fdn"` or `use "../lib/utils.fdn"` ─
+        let file_path = if let TokenKind::LitString(s) = self.peek() {
+            Some(s.clone())
+        } else {
+            None
+        };
+        if let Some(raw) = file_path {
+            self.advance(); // eat the string literal
+            let end = self.current_span().end;
+            let alias = if self.eat(&TokenKind::As) {
+                Some(self.expect_ident_sym("expected alias"))
+            } else {
+                None
+            };
+            self.skip_one_terminator();
+            let sym = self.interner.intern(&raw);
+            return self.module.arena.alloc_item(Item::Use {
+                path: vec![sym],
+                alias,
+                re_export,
+                span: Span::new(self.module.file, start, end),
+            });
+        }
+
         let mut path = vec![self.expect_ident_sym("expected module name")];
 
         // Grouped import flag: `use std.io.{print, readFile, writeFile}`

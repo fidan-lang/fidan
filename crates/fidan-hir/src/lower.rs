@@ -709,3 +709,20 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
         use_decls,
     }
 }
+
+/// Merge `imported` into `base`, prepending the imported module's definitions
+/// and statements so they are available (and run first) when the base module executes.
+///
+/// Used by the CLI multi-file pipeline to combine separately-lowered files
+/// before MIR compilation.
+pub fn merge_module(base: HirModule, imported: HirModule) -> HirModule {
+    let mut merged = imported;
+    merged.objects.extend(base.objects);
+    merged.functions.extend(base.functions);
+    merged.globals.extend(base.globals);
+    merged.init_stmts.extend(base.init_stmts);
+    // Don't carry file-import use_decls into the merged module — those were
+    // already resolved.  Keep only stdlib use_decls from both sides.
+    merged.use_decls.extend(base.use_decls);
+    merged
+}

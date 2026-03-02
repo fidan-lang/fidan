@@ -350,6 +350,7 @@
 | Item | Status | Notes |
 |---|---|---|
 | Module import system (`use std.io`) | ✅ | HIR `HirUseDecl` → MIR `MirUseDecl` / `MirLit::Namespace` → `FidanValue::Namespace`; typeck registers namespace imports as `FidanType::Dynamic` |
+| User file imports (`use "./other.fdn"`) | ✅ | Parser accepts string-literal `use` paths; CLI loads + pipelines imported files (lex → parse → typeck → HIR lower) before main file; `merge_module` in HIR; `pre_register_hir_into_tc` prevents false "undefined" errors; transitive imports + cycle detection via `HashSet<PathBuf>`. **Known limit:** module-level `const var` not visible inside function bodies from imported files (same pre-existing limitation for single-file globals). |
 | `std.io` | ✅ | `fidan-stdlib/src/io.rs` — print, println, eprint, readLine, readFile, writeFile, appendFile, deleteFile, fileExists, listDir, getEnv, setEnv, args, cwd, etc. |
 | `std.string` | ✅ | `fidan-stdlib/src/string.rs` — toUpper, toLower, trim, split, join, replace, startsWith, endsWith, contains, len, repeat, pad, etc. |
 | `std.math` | ✅ | `fidan-stdlib/src/math.rs` — sqrt, abs, floor, ceil, round, pow, log, log2, log10, sin/cos/tan, min, max, clamp, PI, E, etc. |
@@ -360,24 +361,14 @@
 
 ---
 
-## Phase 8 – Cranelift AOT (correctness baseline)
+## Phase 8 – Cranelift JIT / `@precompile`
+
+> **Note:** Cranelift is used exclusively for JIT compilation in Fidan.
+> Static AOT compilation (object files, system linker) is handled by LLVM in Phase 11.
 
 | Item | Status | Notes |
 |---|---|---|
-| Cranelift `ObjectModule` setup | ⬜ | |
-| MIR → Cranelift IR (all instructions) | ⬜ | |
-| `fidan-runtime` as static `.a` | ⬜ | |
-| System linker invocation | ⬜ | |
-| Stack root tracking (unwind maps) | ⬜ | |
-| DWARF / SEH unwind info | ⬜ | |
-| Binary output matches interpreter output | ⬜ | |
-
----
-
-## Phase 9 – Cranelift JIT / `@precompile`
-
-| Item | Status | Notes |
-|---|---|---|
+| MIR → Cranelift IR (all instructions) | ⬜ | Shared foundation for JIT emission |
 | Cranelift `JITModule` setup | ⬜ | |
 | JIT compilation on first `@precompile` call (eager path) | ⬜ | Counter pre-set to threshold; compiles on first call |
 | Per-function call counter in `MirMachine` (lazy path) | ⬜ | `u32` counter per `FunctionId`; compile at `JIT_THRESHOLD` (default 500) |
@@ -386,7 +377,7 @@
 | Hot-path auto-compilation (counter ≥ threshold → Cranelift) | ⬜ | |
 | Dispatch table replacement (replace `MirMachine` entry with native ptr) | ⬜ | |
 | Precompiled frame debug map (MIR → source span) | ⬜ | Preserves source spans for `@precompile` frames in stack traces; shown as `[precompiled]` |
-| Benchmark JIT vs. interpreter vs. AOT | ⬜ | |
+| Benchmark JIT vs. interpreter | ⬜ | |
 
 > **Decided:** Lazy JIT with user-directed eager escape hatch (Key Technical Decision #9,
 > recorded in ARCHITECTURE.md). `@precompile` = eager; call-counter threshold = lazy.
@@ -431,10 +422,18 @@
 
 ## Phase 11 – LLVM AOT + Performance
 
+> **Note:** All static AOT compilation lives here (LLVM `ObjectModule`, system linker, `.a` file).
+> Cranelift handles JIT only (Phase 8).
+
 | Item | Status | Notes |
 |---|---|---|
 | `fidan-codegen-llvm` crate (`inkwell`) | ⬜ | |
 | MIR → LLVM IR (all instructions) | ⬜ | |
+| `fidan-runtime` as static `.a` | ⬜ | Linked into every AOT binary |
+| System linker invocation | ⬜ | `cc` / `lld` depending on platform |
+| Stack root tracking (unwind maps) | ⬜ | |
+| DWARF / SEH unwind info | ⬜ | |
+| Binary output matches interpreter output | ⬜ | Golden-file correctness suite |
 | LLVM `-O2` / `-O3` pass pipeline | ⬜ | |
 | Auto-vectorisation | ⬜ | |
 | LTO | ⬜ | |
@@ -442,7 +441,7 @@
 | Specialised function emission | ⬜ | |
 | Escape analysis MIR pass | ⬜ | |
 | PGO instrumentation mode | ⬜ | |
-| All Phase 8 correctness tests pass | ⬜ | |
+| All Phase 8 JIT correctness tests pass under AOT | ⬜ | |
 | C++ benchmark comparison | ⬜ | |
 
 ---
@@ -477,6 +476,7 @@ _None._
 | 2026-03-03 | False E0202 "return type mismatch" on unannotated actions | `check_action_body`: use `None` (unconstrained) when `return_ty` is absent instead of defaulting to `Nothing` |
 | 2026-03-03 | `new` constructor body never executed at runtime | `sym_initialize` was interned as `"initialize"` but parser stores constructor name as `"new"` — fixed to intern `"new"` in both `Interpreter::new()` and `new_repl_state()` |
 | 2026-03-03 | `return someValue` inside `new` constructor silently accepted | `check_action_body` now receives implicit `Nothing` return type for `new`-named actions inside object scope — `return value` now gives E0202 |
+| 2026-03-04 | Module-level `const var`/`var` not accessible inside function bodies | Added MIR-level globals infrastructure: `GlobalId`, `MirGlobal`, `Instr::LoadGlobal`, `Instr::StoreGlobal`; pre-pass scans `init_stmts` for top-level `VarDecl`s; init fn writes each global via `StoreGlobal` without adding to SSA env (so reads always use `LoadGlobal` for freshness); named functions read globals via `LoadGlobal`; unshadowed-global writes emit `StoreGlobal`; `MirMachine` gains `Arc<Mutex<Vec<FidanValue>>>` globals table shared across parallel threads |
 
 ---
 

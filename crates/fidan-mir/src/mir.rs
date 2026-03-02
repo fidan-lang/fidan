@@ -27,6 +27,10 @@ pub struct LocalId(pub u32);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FunctionId(pub u32);
 
+/// A module-level global variable slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GlobalId(pub u32);
+
 // ── MIR Type ───────────────────────────────────────────────────────────────────
 
 /// The type of a MIR local or operand.
@@ -243,6 +247,12 @@ pub enum Instr {
     PushCatch(BlockId),
     /// Pop the innermost exception handler installed by `PushCatch`.
     PopCatch,
+
+    // ── Globals ───────────────────────────────────────────────────────────────
+    /// Load the value of a module-level global into a local SSA register.
+    LoadGlobal { dest: LocalId, global: GlobalId },
+    /// Write a value into a module-level global.
+    StoreGlobal { global: GlobalId, value: Operand },
 }
 
 // ── Terminators ────────────────────────────────────────────────────────────────
@@ -377,6 +387,17 @@ pub struct MirObjectInfo {
     pub init_fn: Option<FunctionId>,
 }
 
+// ── Global variable metadata ─────────────────────────────────────────────────
+
+/// A module-level variable or constant registered in `MirProgram::globals`.
+///
+/// The interpreter maintains a parallel `Vec<FidanValue>` indexed by `GlobalId`.
+#[derive(Debug, Clone)]
+pub struct MirGlobal {
+    pub name: Symbol,
+    pub ty: MirTy,
+}
+
 // ── Program ───────────────────────────────────────────────────────────────────
 
 /// An import declaration propagated from HIR into the MIR program.
@@ -403,6 +424,8 @@ pub struct MirProgram {
     pub objects: Vec<MirObjectInfo>,
     /// Import declarations from `use std.*` statements.
     pub use_decls: Vec<MirUseDecl>,
+    /// Module-level global variables.  Indexed by `GlobalId`.
+    pub globals: Vec<MirGlobal>,
 }
 
 impl MirProgram {

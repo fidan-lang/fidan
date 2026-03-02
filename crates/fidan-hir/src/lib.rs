@@ -8,4 +8,4 @@ pub use hir::{
     HirField, HirFunction, HirGlobal, HirInterpPart, HirModule, HirObject, HirParam, HirStmt,
     HirTask, HirUseDecl,
 };
-pub use lower::lower_module;
+pub use lower::{lower_module, merge_module};

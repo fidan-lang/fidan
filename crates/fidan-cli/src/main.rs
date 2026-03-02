@@ -373,6 +373,99 @@ fn render_trace_to_stderr(trace: &[fidan_interp::TraceFrame], mode: TraceMode) {
     }
 }
 
+// ── File-import helpers ──────────────────────────────────────────────────────────
+
+/// Returns resolved `PathBuf`s for all `use "./..."` file-path imports in `module`.
+fn collect_file_import_paths(
+    module: &fidan_ast::Module,
+    interner: &fidan_lexer::SymbolInterner,
+    base_dir: &std::path::Path,
+) -> std::collections::VecDeque<std::path::PathBuf> {
+    let mut paths = std::collections::VecDeque::new();
+    for &item_id in &module.items {
+        let item = module.arena.get_item(item_id);
+        if let fidan_ast::Item::Use { path, .. } = item {
+            if path.len() == 1 {
+                let s = interner.resolve(path[0]);
+                if s.starts_with("./")
+                    || s.starts_with("../")
+                    || s.starts_with('/')
+                    || s.ends_with(".fdn")
+                {
+                    paths.push_back(base_dir.join(&*s));
+                }
+            }
+        }
+    }
+    paths
+}
+
+/// Pre-register functions, objects, and globals from `hir` into `tc` so the
+/// main file's type-checker sees imported symbols as known bindings.
+fn pre_register_hir_into_tc(tc: &mut fidan_typeck::TypeChecker, hir: &fidan_hir::HirModule) {
+    use fidan_typeck::{ActionInfo, ParamInfo};
+
+    for func in &hir.functions {
+        let info = ActionInfo {
+            params: func
+                .params
+                .iter()
+                .map(|p| ParamInfo {
+                    name: p.name,
+                    ty: p.ty.clone(),
+                    required: p.required,
+                    has_default: p.default.is_some(),
+                })
+                .collect(),
+            return_ty: func.return_ty.clone(),
+            span: func.span,
+        };
+        tc.pre_register_action(func.name, info);
+    }
+
+    for obj in &hir.objects {
+        tc.pre_register_object_data(
+            obj.name,
+            obj.parent,
+            obj.span,
+            obj.fields.iter().map(|f| (f.name, f.ty.clone())),
+            obj.methods.iter().map(|m| {
+                let ai = ActionInfo {
+                    params: m
+                        .params
+                        .iter()
+                        .map(|p| ParamInfo {
+                            name: p.name,
+                            ty: p.ty.clone(),
+                            required: p.required,
+                            has_default: p.default.is_some(),
+                        })
+                        .collect(),
+                    return_ty: m.return_ty.clone(),
+                    span: m.span,
+                };
+                (m.name, ai)
+            }),
+        );
+    }
+
+    for glob in &hir.globals {
+        tc.pre_register_global(glob.name, glob.ty.clone(), glob.is_const);
+    }
+
+    // Top-level variable declarations live in init_stmts (HirGlobal is unused by the
+    // current HIR lowerer — all top-level vars, including `const var`, become VarDecl
+    // init statements).  Scan the first level to pre-register any such declarations.
+    for stmt in &hir.init_stmts {
+        if let fidan_hir::HirStmt::VarDecl {
+            name, ty, is_const, ..
+        } = stmt
+        {
+            tc.pre_register_global(*name, ty.clone(), *is_const);
+        }
+    }
+}
+
 fn run_pipeline(opts: CompileOptions) -> Result<()> {
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
@@ -454,9 +547,116 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
             .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
             .count();
 
+    // ── File-path import loading ───────────────────────────────────────────────
+    //
+    // Before type-checking the main file, collect `use "./other.fdn"` imports,
+    // run them through the full pipeline (lex → parse → typeck → HIR lower), and
+    // pre-register their exported symbols into the main file's TypeChecker so
+    // the main file's checker sees imported functions/objects/globals as known.
+    let base_dir: std::path::PathBuf = if is_stdin {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    } else {
+        opts.input
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    };
+
+    let imported_hirs: Vec<fidan_hir::HirModule> = {
+        use fidan_lexer::Lexer;
+        use std::collections::{HashSet, VecDeque};
+
+        let mut hirs: Vec<fidan_hir::HirModule> = Vec::new();
+        let mut queue: VecDeque<std::path::PathBuf> =
+            collect_file_import_paths(&module, &interner, &base_dir);
+
+        // Track canonical paths to break cycles.
+        let mut loaded: HashSet<std::path::PathBuf> = HashSet::new();
+        if !is_stdin {
+            if let Ok(canon) = opts.input.canonicalize() {
+                loaded.insert(canon);
+            }
+        }
+
+        while let Some(import_path) = queue.pop_front() {
+            let canon = import_path
+                .canonicalize()
+                .unwrap_or_else(|_| import_path.clone());
+            if !loaded.insert(canon) {
+                continue; // already loaded or cycle detected
+            }
+
+            match std::fs::read_to_string(&import_path) {
+                Ok(imp_src) => {
+                    let imp_name = import_path.display().to_string();
+                    let imp_file = source_map.add_file(imp_name.as_str(), imp_src.as_str());
+                    let (imp_tokens, imp_lex_diags) =
+                        Lexer::new(&imp_file, Arc::clone(&interner)).tokenise();
+                    for d in &imp_lex_diags {
+                        fidan_diagnostics::render_to_stderr(d, &source_map);
+                    }
+                    let (imp_module, imp_parse_diags) =
+                        fidan_parser::parse(&imp_tokens, imp_file.id, Arc::clone(&interner));
+                    for d in &imp_parse_diags {
+                        fidan_diagnostics::render_to_stderr(d, &source_map);
+                    }
+                    let imp_lex_err = imp_lex_diags
+                        .iter()
+                        .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
+                        .count();
+                    let imp_parse_err = imp_parse_diags
+                        .iter()
+                        .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
+                        .count();
+                    error_count += imp_lex_err + imp_parse_err;
+
+                    // Enqueue transitive imports from this imported file.
+                    let imp_base = import_path
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| std::path::PathBuf::from("."));
+                    for sub in collect_file_import_paths(&imp_module, &interner, &imp_base) {
+                        queue.push_back(sub);
+                    }
+
+                    // Typeck + HIR-lower the imported module (only if lex/parse clean).
+                    if imp_lex_err == 0 && imp_parse_err == 0 {
+                        let imp_tm =
+                            fidan_typeck::typecheck_full(&imp_module, Arc::clone(&interner));
+                        for d in &imp_tm.diagnostics {
+                            fidan_diagnostics::render_to_stderr(d, &source_map);
+                        }
+                        let imp_tc_err = imp_tm
+                            .diagnostics
+                            .iter()
+                            .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
+                            .count();
+                        error_count += imp_tc_err;
+                        if imp_tc_err == 0 {
+                            let imp_hir = fidan_hir::lower_module(&imp_module, &imp_tm, &interner);
+                            hirs.push(imp_hir);
+                        }
+                    }
+                }
+                Err(e) => {
+                    error_count += 1;
+                    eprintln!("error: cannot load import `{}`: {e}", import_path.display());
+                }
+            }
+        }
+        hirs
+    };
+
     // Always run the full typed path so HIR/MIR emit has type information.
+    // Pre-register imported symbols before checking the main file so the checker
+    // does not emit false "undefined identifier" errors for cross-file references.
     let typed_module = if lex_diags.is_empty() && parse_diags.is_empty() {
-        let tm = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+        let mut tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), file.id);
+        for hir in &imported_hirs {
+            pre_register_hir_into_tc(&mut tc, hir);
+        }
+        tc.check_module(&module);
+        let tm = tc.finish_typed();
         for diag in &tm.diagnostics {
             fidan_diagnostics::render_to_stderr(diag, &source_map);
         }
@@ -470,10 +670,20 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
         None
     };
 
+    // ── Merge HIR: base module + all imported HIR modules ─────────────────────
+    //
+    // Compute once; all --emit and run blocks share the merged result without
+    // re-calling lower_module.
+    let merged_hir: Option<fidan_hir::HirModule> = typed_module.as_ref().map(|tm| {
+        let base = fidan_hir::lower_module(&module, tm, &interner);
+        imported_hirs
+            .into_iter()
+            .fold(base, |acc, imp| fidan_hir::merge_module(acc, imp))
+    });
+
     // ── --emit hir ─────────────────────────────────────────────────────────────
     if opts.emit.contains(&EmitKind::Hir) {
-        if let Some(ref tm) = typed_module {
-            let hir = fidan_hir::lower_module(&module, tm, &interner);
+        if let Some(ref hir) = merged_hir {
             println!("=== hir: {source_name} ===");
             println!("  objects:    {}", hir.objects.len());
             println!("  functions:  {}", hir.functions.len());
@@ -530,9 +740,8 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
 
     // ── --emit mir ─────────────────────────────────────────────────────────────
     if opts.emit.contains(&EmitKind::Mir) {
-        if let Some(ref tm) = typed_module {
-            let hir = fidan_hir::lower_module(&module, tm, &interner);
-            let mir = fidan_mir::lower_program(&hir, &interner);
+        if let Some(ref hir) = merged_hir {
+            let mir = fidan_mir::lower_program(hir, &interner);
             println!("=== mir: {source_name} ===");
             println!("  functions: {}", mir.functions.len());
             fidan_mir::print_program(&mir);
@@ -562,13 +771,12 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
         ExecutionMode::Interpret => {
             if error_count == 0 {
                 // ── MIR pipeline (Phase 6) ────────────────────────────────────
-                let result = if let Some(ref tm) = typed_module {
-                    let hir = fidan_hir::lower_module(&module, tm, &interner);
-                    let mut mir = fidan_mir::lower_program(&hir, &interner);
+                let result = if let Some(ref hir) = merged_hir {
+                    let mut mir = fidan_mir::lower_program(hir, &interner);
                     fidan_passes::run_all(&mut mir);
                     fidan_interp::run_mir(mir, Arc::clone(&interner), Arc::clone(&source_map))
                 } else {
-                    // Fallback: should never happen since error_count == 0 implies typed_module.
+                    // Fallback: should never happen since error_count == 0 implies merged_hir.
                     Ok(())
                 };
                 if let Err(err) = result {
@@ -594,17 +802,17 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                 render_message_to_stderr(
                     Severity::Note,
                     "unimplemented",
-                    "AOT backend not yet implemented (Phase 8/11)",
+                    "AOT backend not yet implemented (Phase 11 – LLVM)",
                 );
             }
         }
         ExecutionMode::Test => {
             if error_count == 0 {
-                if let Some(ref tm) = typed_module {
-                    let hir = fidan_hir::lower_module(&module, tm, &interner);
-                    let mut mir = fidan_mir::lower_program(&hir, &interner);
+                if let Some(ref hir) = merged_hir {
+                    let mut mir = fidan_mir::lower_program(hir, &interner);
                     fidan_passes::run_all(&mut mir);
-                    match fidan_interp::run_mir(mir, Arc::clone(&interner), Arc::clone(&source_map)) {
+                    match fidan_interp::run_mir(mir, Arc::clone(&interner), Arc::clone(&source_map))
+                    {
                         Ok(()) => {
                             eprintln!("\x1b[1;32mtest passed\x1b[0m");
                         }

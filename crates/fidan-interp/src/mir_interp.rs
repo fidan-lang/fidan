@@ -12,8 +12,8 @@ use std::sync::Arc;
 use fidan_ast::{BinOp, UnOp};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_mir::{
-    BlockId, Callee, FunctionId, Instr, LocalId, MirLit, MirObjectInfo, MirProgram, MirStringPart,
-    Operand, Rvalue, Terminator,
+    BlockId, Callee, FunctionId, Instr, LocalId, MirLit, MirObjectInfo, MirProgram,
+    MirStringPart, Operand, Rvalue, Terminator,
 };
 use fidan_runtime::{
     FidanClass, FidanDict, FidanList, FidanObject, FidanPending, FidanString, FidanValue, FieldDef,
@@ -142,6 +142,9 @@ pub struct MirMachine {
     /// Maps free-imported function names (e.g. `readFile`) to their stdlib module
     /// (e.g. `"io"`).  Populated from `use std.io.{readFile}` declarations.
     stdlib_free_fns: std::collections::HashMap<Arc<str>, Arc<str>>,
+    /// Module-level global variables, shared across all threads.
+    /// Indexed by `GlobalId` (same index as `MirProgram::globals`).
+    globals: Arc<std::sync::Mutex<Vec<FidanValue>>>,
     /// Accumulated test results when running in `fidan test` mode.
     #[allow(dead_code)]
     pub test_results: Vec<TestResult>,
@@ -182,6 +185,8 @@ impl MirMachine {
             }
         }
 
+        let globals_count = program.globals.len();
+
         Self {
             program,
             interner,
@@ -191,6 +196,9 @@ impl MirMachine {
             pending_call_span: None,
             panic_trace: Vec::new(),
             stdlib_free_fns,
+            globals: Arc::new(std::sync::Mutex::new(
+                vec![FidanValue::Nothing; globals_count],
+            )),
             test_results: Vec::new(),
         }
     }
@@ -210,6 +218,7 @@ impl MirMachine {
             pending_call_span: None,
             panic_trace: Vec::new(),
             stdlib_free_fns: self.stdlib_free_fns.clone(),
+            globals: Arc::clone(&self.globals),
             test_results: Vec::new(),
         }
     }
@@ -477,6 +486,20 @@ impl MirMachine {
             }
             Instr::PopCatch => {
                 frame.catch_stack.pop();
+            }
+            // ── Module-level globals ──────────────────────────────────────────
+            Instr::LoadGlobal { dest, global } => {
+                let val = self.globals.lock().unwrap()
+                    .get(global.0 as usize)
+                    .cloned()
+                    .unwrap_or(FidanValue::Nothing);
+                frame.store(dest, val);
+            }
+            Instr::StoreGlobal { global, value } => {
+                let val = self.eval_operand(&value, frame);
+                if let Some(slot) = self.globals.lock().unwrap().get_mut(global.0 as usize) {
+                    *slot = val;
+                }
             }
             // ── Concurrency / Parallelism ─────────────────────────────────────
             //

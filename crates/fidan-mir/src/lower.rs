@@ -21,8 +21,9 @@ use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_typeck::FidanType;
 
 use crate::mir::{
-    BlockId, Callee, FunctionId, Instr, LocalId, MirFunction, MirLit, MirObjectInfo, MirParam,
-    MirProgram, MirStringPart, MirTy, MirUseDecl, Operand, PhiNode, Rvalue, Terminator,
+    BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirFunction, MirGlobal, MirLit,
+    MirObjectInfo, MirParam, MirProgram, MirStringPart, MirTy, MirUseDecl, Operand, PhiNode,
+    Rvalue, Terminator,
 };
 
 // ── Parallel-for deferred body ───────────────────────────────────────────────
@@ -183,6 +184,8 @@ struct FnCtx<'p> {
     cur_bb: BlockId,
     /// Current variable→local mapping (the "SSA current-def" table).
     env: VarEnv,
+    /// Maps module-level global names → `GlobalId` (for `LoadGlobal`/`StoreGlobal`).
+    global_map: HashMap<Symbol, GlobalId>,
     /// Maps function name → `FunctionId` (populated by pre-pass; top-level fns only).
     fn_map: HashMap<Symbol, FunctionId>,
     /// Maps class name → `FunctionId` of its `new` constructor (for `ClassName(args)` calls).
@@ -217,6 +220,9 @@ struct FnCtx<'p> {
     continue_sites: HashMap<BlockId, Vec<(BlockId, HashMap<Symbol, LocalId>)>>,
     /// Symbol for `"_"` — the wildcard pattern in `check` arms.
     wildcard_sym: Symbol,
+    /// True only for the top-level init function (FunctionId(0)).  Used to
+    /// decide whether a `VarDecl` should also write to the global table.
+    is_init_fn: bool,
 }
 
 impl<'p> FnCtx<'p> {
@@ -309,6 +315,11 @@ impl<'p> FnCtx<'p> {
                 } else if let Some(fid) = self.fn_map.get(name).copied() {
                     // Function/action referenced as a first-class value.
                     Operand::Const(MirLit::FunctionRef(fid.0))
+                } else if let Some(&gid) = self.global_map.get(name) {
+                    // Module-level global: load from the globals table.
+                    let dest = self.alloc_local();
+                    self.emit(Instr::LoadGlobal { dest, global: gid });
+                    Operand::Local(dest)
                 } else {
                     // Unknown/builtin — represent as Nothing for now.
                     Operand::Const(MirLit::Nothing)
@@ -343,7 +354,16 @@ impl<'p> FnCtx<'p> {
                             ty: fidan_ty_to_mir(&target.ty),
                             rhs: Rvalue::Use(val.clone()),
                         });
-                        self.define_var(*name, dest);
+                        // If the target is an unshadowed global, route writes
+                        // through StoreGlobal so other functions see the update.
+                        let is_unshadowed_global = self.global_map.contains_key(name)
+                            && self.lookup_var(*name).is_none();
+                        if is_unshadowed_global {
+                            let gid = self.global_map[name];
+                            self.emit(Instr::StoreGlobal { global: gid, value: Operand::Local(dest) });
+                        } else {
+                            self.define_var(*name, dest);
+                        }
                     }
                     HirExprKind::Field { object, field } => {
                         let recv = self.lower_expr(object);
@@ -850,6 +870,17 @@ impl<'p> FnCtx<'p> {
                         rhs: Rvalue::Literal(MirLit::Nothing),
                     });
                 }
+                // In the top-level init function a `VarDecl` IS the global
+                // initialisation.  Write to the globals table but do NOT add
+                // the name to the local SSA `env`; this forces all subsequent
+                // reads in `init_stmts` to go through `LoadGlobal`, so they
+                // always reflect mutations made by called functions.
+                if self.is_init_fn {
+                    if let Some(&gid) = self.global_map.get(name) {
+                        self.emit(Instr::StoreGlobal { global: gid, value: Operand::Local(dest) });
+                        return; // do NOT define_var — keep globals out of the SSA env
+                    }
+                }
                 self.define_var(*name, dest);
             }
 
@@ -896,7 +927,19 @@ impl<'p> FnCtx<'p> {
                             ty: fidan_ty_to_mir(&target.ty),
                             rhs: Rvalue::Use(val),
                         });
-                        self.define_var(*name, dest);
+                        // Only route through the global store when the name
+                        // isn’t currently a local variable (i.e. no VarDecl
+                        // in this function shadowed the global).  If it IS
+                        // a local, just update the SSA env as usual.
+                        let is_unshadowed_global = self.global_map.contains_key(name)
+                            && self.lookup_var(*name).is_none();
+                        if is_unshadowed_global {
+                            let gid = self.global_map[name];
+                            self.emit(Instr::StoreGlobal { global: gid, value: Operand::Local(dest) });
+                            // Do NOT define_var — next read will use LoadGlobal.
+                        } else {
+                            self.define_var(*name, dest);
+                        }
                     }
                     HirExprKind::Field { object, field } => {
                         let recv = self.lower_expr(object);
@@ -2112,6 +2155,22 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
     let pending_par_fors: Rc<RefCell<VecDeque<PendingParallelFor>>> =
         Rc::new(RefCell::new(VecDeque::new()));
 
+    // ── Pre-pass ④: register module-level globals ─────────────────────────────────
+    // Module-level `const var` / `var` declarations.  Each one gets a
+    // `GlobalId` slot so that named functions can read/write them via
+    // `LoadGlobal`/`StoreGlobal` without needing access to the init fn’s
+    // local SSA environment.
+    // Note: the HIR lowerer puts top-level VarDecls into `init_stmts`, not
+    // `globals` (which is always empty); we scan `init_stmts` directly.
+    let mut global_map: HashMap<Symbol, GlobalId> = HashMap::new();
+    for stmt in &hir.init_stmts {
+        if let HirStmt::VarDecl { name, ty, .. } = stmt {
+            let gid = GlobalId(prog.globals.len() as u32);
+            prog.globals.push(MirGlobal { name: *name, ty: fidan_ty_to_mir(ty) });
+            global_map.insert(*name, gid);
+        }
+    }
+
     // ── Closure: lower one HirFunction body into an already-allocated fn ─────
     // `pending_par_fors` is captured by clone (Rc is cheap to clone).
     let lower_hir_fn = |prog: &mut MirProgram,
@@ -2124,6 +2183,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                         len_sym: Symbol,
                         type_sym: Symbol,
                         wildcard_sym: Symbol,
+                        global_map: &HashMap<Symbol, GlobalId>,
                         func: &HirFunction,
                         fn_id: FunctionId,
                         owner_class: Option<Symbol>,
@@ -2134,6 +2194,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             fn_id,
             cur_bb: entry_bb,
             env: VarEnv::new(),
+            global_map: global_map.clone(),
             fn_map: fn_map.clone(),
             obj_map: obj_map.clone(),
             terminated: false,
@@ -2149,9 +2210,8 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             continue_sites: HashMap::new(),
             wildcard_sym,
             par_for_pending: pending,
+            is_init_fn: false,
         };
-
-        // For methods (and extension actions): implicit `this` as param 0.
         if owner_class.is_some() {
             let this_local = ctx.alloc_local();
             ctx.this_reg = Some(this_local);
@@ -2194,6 +2254,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             len_sym,
             type_sym,
             wildcard_sym,
+            &global_map,
             func,
             fn_id,
             owner_class,
@@ -2215,6 +2276,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 len_sym,
                 type_sym,
                 wildcard_sym,
+                &global_map,
                 method,
                 fn_id,
                 Some(obj.name),
@@ -2232,6 +2294,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             fn_id,
             cur_bb: entry_bb,
             env: VarEnv::new(),
+            global_map: global_map.clone(),
             fn_map: fn_map.clone(),
             obj_map: obj_map.clone(),
             terminated: false,
@@ -2247,6 +2310,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             continue_sites: HashMap::new(),
             wildcard_sym,
             par_for_pending: Rc::clone(&pending_par_fors),
+            is_init_fn: true,
         };
 
         // ── Emit namespace variable bindings for `use std.MODULE` imports ──────
@@ -2265,26 +2329,6 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 });
                 ctx.define_var(alias_sym, dest);
             }
-        }
-
-        for g in &hir.globals {
-            let mir_ty = fidan_ty_to_mir(&g.ty);
-            let dest = ctx.alloc_local();
-            if let Some(init) = &g.init {
-                let val = ctx.lower_expr(init);
-                ctx.emit(Instr::Assign {
-                    dest,
-                    ty: mir_ty,
-                    rhs: Rvalue::Use(val),
-                });
-            } else {
-                ctx.emit(Instr::Assign {
-                    dest,
-                    ty: mir_ty,
-                    rhs: Rvalue::Literal(MirLit::Nothing),
-                });
-            }
-            ctx.define_var(g.name, dest);
         }
 
         ctx.lower_stmts(&hir.init_stmts);
@@ -2307,6 +2351,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             fn_id: pf.fn_id,
             cur_bb: entry_bb,
             env: VarEnv::new(),
+            global_map: global_map.clone(),
             fn_map: fn_map.clone(),
             obj_map: obj_map.clone(),
             terminated: false,
@@ -2322,6 +2367,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             continue_sites: HashMap::new(),
             wildcard_sym,
             par_for_pending: Rc::clone(&pending_par_fors),
+            is_init_fn: false,
         };
         // First param (parallel for only): the per-iteration loop binding.
         if let Some((binding_sym, binding_ty)) = pf.binding {
