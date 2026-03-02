@@ -6,10 +6,14 @@ cargo test -q 2>&1
 
 for /R ".\test" %%F in (*.fdn) do (
     if /I "%%~nxF"=="trace_demo.fdn" (
-        echo Running %%F with trace
+        echo(
+        echo === Running %%F with full trace ===
+        echo(
         .\target\debug\fidan run "%%F" --trace full
     ) else (
-        echo Running %%F
+        echo(
+        echo === Running %%F ===
+        echo(
         .\target\debug\fidan run "%%F"
     )
 )
