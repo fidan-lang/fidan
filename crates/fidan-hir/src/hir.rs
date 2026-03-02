@@ -30,6 +30,26 @@ pub struct HirModule {
     pub globals: Vec<HirGlobal>,
     /// Top-level executable statements (printed / run in order).
     pub init_stmts: Vec<HirStmt>,
+    /// Import declarations (`use std.io`, `use std.math.{sin}`, …).
+    pub use_decls: Vec<HirUseDecl>,
+}
+
+// ── Use declarations ───────────────────────────────────────────────────────────
+
+/// A single `use` import in the HIR.
+///
+/// Examples:
+/// - `use std.io`                  → `module_path=["std","io"]`, `alias=None`, `specific_names=None`
+/// - `use std.io as myio`          → `alias=Some("myio")`
+/// - `use std.io.{readFile,print}` → `specific_names=Some(["readFile","print"])`
+#[derive(Debug, Clone)]
+pub struct HirUseDecl {
+    /// Full module path segments, e.g. `["std", "io"]`.
+    pub module_path: Vec<String>,
+    /// Optional alias for the module namespace.
+    pub alias: Option<String>,
+    /// If `Some`, only these specific names are imported (destructured import).
+    pub specific_names: Option<Vec<String>>,
 }
 
 // ── Globals ────────────────────────────────────────────────────────────────────

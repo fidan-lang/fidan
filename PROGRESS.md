@@ -310,7 +310,7 @@
 | `SpawnExpr` + `AwaitPending` | ✅ | `spawn expr` → `std::thread::spawn` → `FidanValue::Pending(JoinHandle)`; `await` calls `.join()` |
 | `Shared oftype T` runtime type | ✅ | `Arc<Mutex<FidanValue>>` in `fidan-runtime`; `.get()` / `.update()` / `.withLock()` interpreter builtins |
 | `SpawnDynamic` — spawn on method/dynamic calls | ✅ | New MIR instruction; `spawn obj.method(args)` → `dispatch_method` in thread; `spawn fnVar(args)` → dynamic `call_function` in thread |
-| `std.parallel` module | ⬜ | Phase 7 — `parallelMap`, `parallelFilter`, `Shared`, `Pending` as stdlib exports |
+| `std.parallel` module | ✅ | Phase 7 — `fidan-stdlib/src/parallel.rs`; `NeedsCallbackDispatch` protocol; serial in MIR interp, true parallel in Phase 8/9 |
 | `parallel_check.rs` E4xx errors | ⬜ | Compile-time data-race detection; needs dedicated MIR analysis pass |
 | W3xx: unawaited `Pending` dropped | ⬜ | Runtime warning when `Pending oftype T` is dropped without `await` |
 | Parallel task failure display | ⬜ | `runtime error[R9001]: N tasks failed in 'parallel' block` + per-task failure list |
@@ -349,13 +349,14 @@
 
 | Item | Status | Notes |
 |---|---|---|
-| Module import system (`use std.io`) | ⬜ | |
-| `std.io` | ⬜ | |
-| `std.string` | ⬜ | |
-| `std.math` | ⬜ | |
-| `std.collections` | ⬜ | |
-| `std.test` | ⬜ | |
-| `fidan test` command | ⬜ | |
+| Module import system (`use std.io`) | ✅ | HIR `HirUseDecl` → MIR `MirUseDecl` / `MirLit::Namespace` → `FidanValue::Namespace`; typeck registers namespace imports as `FidanType::Dynamic` |
+| `std.io` | ✅ | `fidan-stdlib/src/io.rs` — print, println, eprint, readLine, readFile, writeFile, appendFile, deleteFile, fileExists, listDir, getEnv, setEnv, args, cwd, etc. |
+| `std.string` | ✅ | `fidan-stdlib/src/string.rs` — toUpper, toLower, trim, split, join, replace, startsWith, endsWith, contains, len, repeat, pad, etc. |
+| `std.math` | ✅ | `fidan-stdlib/src/math.rs` — sqrt, abs, floor, ceil, round, pow, log, log2, log10, sin/cos/tan, min, max, clamp, PI, E, etc. |
+| `std.collections` | ✅ | `fidan-stdlib/src/collections.rs` — Queue, Stack, Set, OrderedDict; enqueue/dequeue, push/pop, setAdd/setRemove/setContains, etc. |
+| `std.test` | ✅ | `fidan-stdlib/src/test_runner.rs` — assertEqual, assertNotEqual, assertTrue, assertFalse, assertSome, assertNone, assertContains, assertGt/Lt/Ge/Le, fail; returns `__test_fail__:` sentinel on failure |
+| `std.parallel` | ✅ | `fidan-stdlib/src/parallel.rs` — parallelMap, parallelFilter, parallelForEach, parallelReduce; `NeedsCallbackDispatch` protocol wired in `MirMachine::exec_parallel_op` (serial in MIR phase; true parallelism in Phase 8/9) |
+| `fidan test` command | ✅ | `ExecutionMode::Test` in `fidan-cli`; runs full pipeline, reports pass/fail with coloured output and exit code |
 
 ---
 

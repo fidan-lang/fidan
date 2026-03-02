@@ -34,6 +34,9 @@ pub enum FidanValue {
     Tuple(Vec<FidanValue>),
     /// A value being computed on a background thread (`spawn` expression).
     Pending(FidanPending),
+    /// A stdlib module namespace (e.g. `io`, `math`).
+    /// Method calls on this value are routed to `fidan_stdlib::dispatch_stdlib`.
+    Namespace(Arc<str>),
 }
 
 impl FidanValue {
@@ -51,6 +54,7 @@ impl FidanValue {
             FidanValue::Function(_) => "action",
             FidanValue::Tuple(_) => "tuple",
             FidanValue::Pending(_) => "pending",
+            FidanValue::Namespace(_) => "namespace",
         }
     }
 
@@ -123,6 +127,9 @@ impl FidanValue {
             FidanValue::Tuple(elems) => {
                 FidanValue::Tuple(elems.iter().map(|e| e.parallel_capture()).collect())
             }
+
+            // Namespace is stateless — just clone the Arc<str>.
+            FidanValue::Namespace(m) => FidanValue::Namespace(Arc::clone(m)),
         }
     }
 }

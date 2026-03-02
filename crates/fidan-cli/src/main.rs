@@ -599,11 +599,26 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
             }
         }
         ExecutionMode::Test => {
-            render_message_to_stderr(
-                Severity::Note,
-                "unimplemented",
-                "test runner not yet implemented (Phase 7)",
-            );
+            if error_count == 0 {
+                if let Some(ref tm) = typed_module {
+                    let hir = fidan_hir::lower_module(&module, tm, &interner);
+                    let mut mir = fidan_mir::lower_program(&hir, &interner);
+                    fidan_passes::run_all(&mut mir);
+                    match fidan_interp::run_mir(mir, Arc::clone(&interner), Arc::clone(&source_map)) {
+                        Ok(()) => {
+                            eprintln!("\x1b[1;32mtest passed\x1b[0m");
+                        }
+                        Err(err) => {
+                            let msg = err.message.trim_start_matches("assertion failed: ");
+                            eprintln!("\x1b[1;31mtest failed\x1b[0m: {}", msg);
+                            if !err.trace.is_empty() && opts.trace != TraceMode::None {
+                                render_trace_to_stderr(&err.trace, opts.trace);
+                            }
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -360,9 +360,36 @@ impl TypeChecker {
                     },
                 );
             }
+            // Register stdlib namespace / free-function imports so the type
+            // checker doesn't emit E0101 for `use std.io` → `io` usage.
+            Item::Use { path, alias, span, .. } => {
+                let std_sym = self.interner.intern("std");
+                if path.first() == Some(&std_sym) && path.len() >= 2 {
+                    // Determine which symbol to bind in the user's scope:
+                    //   `use std.io`          → bind `io`  (namespace)
+                    //   `use std.io.readFile`  → bind `readFile` (free fn)
+                    //   `use std.io as myIo`  → bind `myIo`
+                    let binding_sym = if let Some(&a) = alias.as_ref() {
+                        a
+                    } else if path.len() == 2 {
+                        path[1]
+                    } else {
+                        *path.last().unwrap()
+                    };
+                    self.table.define(
+                        binding_sym,
+                        SymbolInfo {
+                            kind: SymbolKind::Var,
+                            ty: FidanType::Dynamic,
+                            span: *span,
+                            is_mutable: false,
+                            initialized: Initialized::Yes,
+                        },
+                    );
+                }
+            }
             Item::ExprStmt(_)
             | Item::Assign { .. }
-            | Item::Use { .. }
             | Item::Stmt(_)
             | Item::Destructure { .. } => {}
         }

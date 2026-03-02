@@ -14,7 +14,7 @@ use fidan_typeck::{FidanType, TypedModule};
 use crate::hir::{
     HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr, HirExprKind,
     HirField, HirFunction, HirGlobal, HirInterpPart, HirModule, HirObject, HirParam, HirStmt,
-    HirTask,
+    HirTask, HirUseDecl,
 };
 
 // ── Context ────────────────────────────────────────────────────────────────────
@@ -481,6 +481,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
     let mut functions: Vec<HirFunction> = vec![];
     let globals: Vec<HirGlobal> = vec![];
     let mut init_stmts: Vec<HirStmt> = vec![];
+    let mut use_decls: Vec<HirUseDecl> = vec![];
 
     for &item_id in &module.items {
         match ctx.arena.get_item(item_id).clone() {
@@ -664,8 +665,39 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 init_stmts.push(ctx.lower_stmt(stmt_id));
             }
 
-            // Module imports: not yet wired up — skip silently.
-            Item::Use { .. } => {}
+            // Module imports: capture stdlib imports and propagate to the interpreter.
+            Item::Use { path, alias, .. } => {
+                // Resolve all path symbols to strings.
+                let parts: Vec<String> = path
+                    .iter()
+                    .map(|&s| interner.resolve(s).to_string())
+                    .collect();
+
+                // Only process `std.*` paths.
+                if parts.first().map(|s| s == "std").unwrap_or(false) && parts.len() >= 2 {
+                    let module_name = parts[1].clone();
+
+                    if parts.len() == 2 {
+                        // `use std.MODULE` — namespace import: alias defaults to module name.
+                        let ns_alias = alias
+                            .map(|sym| interner.resolve(sym).to_string())
+                            .unwrap_or_else(|| module_name.clone());
+                        use_decls.push(HirUseDecl {
+                            module_path: vec!["std".into(), module_name],
+                            alias: Some(ns_alias),
+                            specific_names: None,
+                        });
+                    } else {
+                        // `use std.MODULE.name` — specific name import.
+                        let fn_name = parts[parts.len() - 1].clone();
+                        use_decls.push(HirUseDecl {
+                            module_path: vec!["std".into(), module_name],
+                            alias: None,
+                            specific_names: Some(vec![fn_name]),
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -674,5 +706,6 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
         functions,
         globals,
         init_stmts,
+        use_decls,
     }
 }

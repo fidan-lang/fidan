@@ -6,6 +6,8 @@
    ─────────────────────────────────────────────────────────────────────────────
 /#
 
+use std.math.{abs, sqrt, floor, ceil, round, max, min}
+
 # ── §1  Variables, constants, types ──────────────────────────────────────────
 var a oftype integer = 10
 var b = 20

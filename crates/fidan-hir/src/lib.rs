@@ -6,6 +6,6 @@ mod lower;
 pub use hir::{
     HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr, HirExprKind,
     HirField, HirFunction, HirGlobal, HirInterpPart, HirModule, HirObject, HirParam, HirStmt,
-    HirTask,
+    HirTask, HirUseDecl,
 };
 pub use lower::lower_module;

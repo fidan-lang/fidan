@@ -68,6 +68,8 @@ pub enum MirLit {
     Nothing,
     /// A reference to a known function/action, used to pass actions as values.
     FunctionRef(u32),
+    /// A stdlib module namespace (e.g. `"io"`, `"math"`).
+    Namespace(String),
 }
 
 // ── Operands ───────────────────────────────────────────────────────────────────
@@ -377,6 +379,20 @@ pub struct MirObjectInfo {
 
 // ── Program ───────────────────────────────────────────────────────────────────
 
+/// An import declaration propagated from HIR into the MIR program.
+///
+/// The interpreter uses these at startup to register stdlib namespaces
+/// and free-function aliases.
+#[derive(Debug, Clone)]
+pub struct MirUseDecl {
+    /// Module name, e.g. `"io"`, `"math"`.
+    pub module: String,
+    /// Namespace alias (used when `specific_names` is `None`), e.g. `"io"`.
+    pub alias: String,
+    /// If `Some`, only these specific function names are imported flat.
+    pub specific_names: Option<Vec<String>>,
+}
+
 /// The entire program as a collection of MIR functions.
 ///
 /// `functions[0]` is conventionally the top-level initialisation function.
@@ -385,6 +401,8 @@ pub struct MirProgram {
     pub functions: Vec<MirFunction>,
     /// Object class metadata.  Empty if no objects are defined.
     pub objects: Vec<MirObjectInfo>,
+    /// Import declarations from `use std.*` statements.
+    pub use_decls: Vec<MirUseDecl>,
 }
 
 impl MirProgram {

@@ -20,6 +20,7 @@ use fidan_runtime::{
     FunctionId as RuntimeFnId, OwnedRef, ParallelArgs, ParallelCapture,
 };
 use fidan_source::{SourceMap, Span};
+use fidan_stdlib::{StdlibResult, parallel::ParallelOp};
 
 use crate::builtins;
 use crate::interp::{RunError, TraceFrame};
@@ -138,6 +139,21 @@ pub struct MirMachine {
     /// Call stack snapshot at the point of the first uncaught panic/throw,
     /// innermost first.  Populated once and never overwritten.
     panic_trace: Vec<TraceFrame>,
+    /// Maps free-imported function names (e.g. `readFile`) to their stdlib module
+    /// (e.g. `"io"`).  Populated from `use std.io.{readFile}` declarations.
+    stdlib_free_fns: std::collections::HashMap<Arc<str>, Arc<str>>,
+    /// Accumulated test results when running in `fidan test` mode.
+    #[allow(dead_code)]
+    pub test_results: Vec<TestResult>,
+}
+
+/// A single test result recorded during `fidan test`.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct TestResult {
+    pub name: String,
+    pub passed: bool,
+    pub message: Option<String>,
 }
 
 // SAFETY: All fields are either `Arc<T>` (Send+Sync when T:Send+Sync) or a
@@ -152,6 +168,20 @@ impl MirMachine {
         source_map: Arc<SourceMap>,
     ) -> Self {
         let classes = build_class_table(&program.objects, &interner);
+
+        // Build the free-function import map from `use std.module.{fn}` declarations.
+        let mut stdlib_free_fns: std::collections::HashMap<Arc<str>, Arc<str>> =
+            std::collections::HashMap::new();
+        for decl in &program.use_decls {
+            if let Some(ref names) = decl.specific_names {
+                let module: Arc<str> = Arc::from(decl.module.as_str());
+                for name in names {
+                    let fn_name: Arc<str> = Arc::from(name.as_str());
+                    stdlib_free_fns.insert(fn_name, Arc::clone(&module));
+                }
+            }
+        }
+
         Self {
             program,
             interner,
@@ -160,6 +190,8 @@ impl MirMachine {
             call_stack: Vec::new(),
             pending_call_span: None,
             panic_trace: Vec::new(),
+            stdlib_free_fns,
+            test_results: Vec::new(),
         }
     }
 
@@ -177,6 +209,8 @@ impl MirMachine {
             call_stack: Vec::new(),
             pending_call_span: None,
             panic_trace: Vec::new(),
+            stdlib_free_fns: self.stdlib_free_fns.clone(),
+            test_results: Vec::new(),
         }
     }
 
@@ -706,6 +740,10 @@ impl MirMachine {
             Callee::Fn(fn_id) => self.call_function(*fn_id, args),
             Callee::Builtin(sym) => {
                 let name: Arc<str> = self.sym_str(*sym);
+                // Check if this is a free-imported stdlib function (e.g. `use std.io.{readFile}`).
+                if let Some(module) = self.stdlib_free_fns.get(&name).cloned() {
+                    return self.dispatch_stdlib_call(&module, &name, args);
+                }
                 // Constructor builtins (e.g. `Shared(val)`) take priority; then
                 // true language builtins (print, input, len, type conversions, math).
                 // String/list/dict receiver methods are NOT free functions and must
@@ -740,6 +778,10 @@ impl MirMachine {
         method: &str,
         args: Vec<FidanValue>,
     ) -> Result<FidanValue, MirSignal> {
+        // Stdlib namespace dispatch: `io.readFile(...)`, `math.sin(...)`, etc.
+        if let FidanValue::Namespace(ref module) = receiver {
+            return self.dispatch_stdlib_call(module, method, args);
+        }
         // Shared<T> built-in methods.
         if let FidanValue::Shared(ref sr) = receiver {
             match method {
@@ -765,6 +807,74 @@ impl MirMachine {
         // Fall through: bootstrap stdlib methods (pre-Phase 7 stdlib).
         crate::bootstrap::call_bootstrap_method(receiver, method, args)
             .ok_or_else(|| MirSignal::Panic(format!("no method `{}` found", method)))
+    }
+
+    // ── Stdlib dispatch ───────────────────────────────────────────────────────
+
+    fn dispatch_stdlib_call(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: Vec<FidanValue>,
+    ) -> Result<FidanValue, MirSignal> {
+        match fidan_stdlib::dispatch_stdlib(module, name, args) {
+            Some(StdlibResult::Value(v)) => {
+                // Check for test assertion failures encoded as `__test_fail__: msg`.
+                if let FidanValue::String(ref s) = v {
+                    let s_str = s.as_str();
+                    if let Some(msg) = s_str.strip_prefix("__test_fail__: ") {
+                        return Err(MirSignal::Panic(format!("assertion failed: {}", msg)));
+                    }
+                }
+                Ok(v)
+            }
+            Some(StdlibResult::NeedsCallbackDispatch(op)) => {
+                self.exec_parallel_op(op)
+            }
+            None => Err(MirSignal::Panic(format!(
+                "no function `{}` in stdlib module `{}`",
+                name, module
+            ))),
+        }
+    }
+
+    /// Execute a `ParallelOp` — iterate through the list serially (the MIR
+    /// interpreter is single-threaded; true parallelism requires the Cranelift
+    /// or LLVM backend).
+    fn exec_parallel_op(&mut self, op: ParallelOp) -> Result<FidanValue, MirSignal> {
+        match op {
+            ParallelOp::Map { list, fn_id } => {
+                let mut out = fidan_runtime::FidanList::new();
+                for elem in list {
+                    let v = self.call_function(FunctionId(fn_id.0), vec![elem])?;
+                    out.append(v);
+                }
+                Ok(FidanValue::List(OwnedRef::new(out)))
+            }
+            ParallelOp::Filter { list, fn_id } => {
+                let mut out = fidan_runtime::FidanList::new();
+                for elem in list {
+                    let keep = self.call_function(FunctionId(fn_id.0), vec![elem.clone()])?;
+                    if keep.truthy() {
+                        out.append(elem);
+                    }
+                }
+                Ok(FidanValue::List(OwnedRef::new(out)))
+            }
+            ParallelOp::ForEach { list, fn_id } => {
+                for elem in list {
+                    self.call_function(FunctionId(fn_id.0), vec![elem])?;
+                }
+                Ok(FidanValue::Nothing)
+            }
+            ParallelOp::Reduce { list, init, fn_id } => {
+                let mut acc = init;
+                for elem in list {
+                    acc = self.call_function(FunctionId(fn_id.0), vec![acc, elem])?;
+                }
+                Ok(acc)
+            }
+        }
     }
 
     // ── Object construction ───────────────────────────────────────────────────
@@ -920,6 +1030,7 @@ fn mir_lit_to_value(lit: MirLit) -> FidanValue {
         MirLit::Str(s) => FidanValue::String(FidanString::new(&s)),
         MirLit::Nothing => FidanValue::Nothing,
         MirLit::FunctionRef(id) => FidanValue::Function(RuntimeFnId(id)),
+        MirLit::Namespace(m) => FidanValue::Namespace(Arc::from(m.as_str())),
     }
 }
 

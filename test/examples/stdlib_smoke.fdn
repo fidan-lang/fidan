@@ -1,0 +1,22 @@
+use std.math
+use std.string
+use std.io
+
+# Math module
+io.print(math.sqrt(16.0))           # 4.0
+io.print(math.abs(-7))              # 7
+io.print(math.max(3, 9))            # 9
+io.print(math.min(3, 9))            # 3
+io.print(math.floor(3.9))           # 3
+io.print(math.ceil(3.1))            # 4
+
+# String module
+io.print(string.toUpper("hello"))   # HELLO
+io.print(string.toLower("WORLD"))   # world
+io.print(string.trim("  hi  "))     # hi
+io.print(string.len("abc"))         # 3
+io.print(string.contains("foobar", "oba"))  # true
+
+# IO module
+io.println("io.println works")
+io.print("done")

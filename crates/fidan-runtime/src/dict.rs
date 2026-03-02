@@ -15,6 +15,9 @@ impl FidanDict {
     pub fn insert(&mut self, key: FidanString, value: FidanValue) {
         Arc::make_mut(&mut self.inner).insert(key, value);
     }
+    pub fn remove(&mut self, key: &FidanString) {
+        Arc::make_mut(&mut self.inner).remove(key);
+    }
     pub fn len(&self) -> usize { self.inner.len() }
     pub fn is_empty(&self) -> bool { self.inner.is_empty() }
 

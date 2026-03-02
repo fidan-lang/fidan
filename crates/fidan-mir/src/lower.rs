@@ -22,7 +22,7 @@ use fidan_typeck::FidanType;
 
 use crate::mir::{
     BlockId, Callee, FunctionId, Instr, LocalId, MirFunction, MirLit, MirObjectInfo, MirParam,
-    MirProgram, MirStringPart, MirTy, Operand, PhiNode, Rvalue, Terminator,
+    MirProgram, MirStringPart, MirTy, MirUseDecl, Operand, PhiNode, Rvalue, Terminator,
 };
 
 // ── Parallel-for deferred body ───────────────────────────────────────────────
@@ -2249,6 +2249,24 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             par_for_pending: Rc::clone(&pending_par_fors),
         };
 
+        // ── Emit namespace variable bindings for `use std.MODULE` imports ──────
+        // Namespace vars are injected as the very first locals in the init fn
+        // so they are available throughout the entire top-level scope.
+        for decl in &hir.use_decls {
+            if decl.module_path.len() >= 2 && decl.specific_names.is_none() {
+                let module = decl.module_path[1].clone();
+                let ns_alias = decl.alias.clone().unwrap_or_else(|| module.clone());
+                let alias_sym = interner.intern(&ns_alias);
+                let dest = ctx.alloc_local();
+                ctx.emit(Instr::Assign {
+                    dest,
+                    ty: MirTy::Dynamic,
+                    rhs: Rvalue::Literal(MirLit::Namespace(module)),
+                });
+                ctx.define_var(alias_sym, dest);
+            }
+        }
+
         for g in &hir.globals {
             let mir_ty = fidan_ty_to_mir(&g.ty);
             let dest = ctx.alloc_local();
@@ -2324,6 +2342,19 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
         ctx.lower_stmts(body);
         if !ctx.terminated {
             ctx.set_terminator(Terminator::Return(None));
+        }
+    }
+
+    // ── Propagate use_decls from HIR ──────────────────────────────────────────
+    for decl in &hir.use_decls {
+        if decl.module_path.len() >= 2 {
+            let module = decl.module_path[1].clone();
+            let alias = decl.alias.clone().unwrap_or_else(|| module.clone());
+            prog.use_decls.push(MirUseDecl {
+                module,
+                alias,
+                specific_names: decl.specific_names.clone(),
+            });
         }
     }
 

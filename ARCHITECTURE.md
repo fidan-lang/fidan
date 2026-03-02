@@ -2332,7 +2332,20 @@ HIR lowering begins. Adding syntax after HIR exists means patching the lowering 
 
 - [ ] Module import system (`use std.io`)
 - [ ] All listed stdlib modules (Rust implementation, Fidan-callable via FFI)
-- [ ] `fidan test` command works, runs test blocks
+- [ ] `fidan test` command works — runs the file, catches `std.test` assertion failures, reports pass/fail
+
+> **Note (future work):** Native `test { ... }` block syntax is **not** implemented in Phase 7.
+> The plan for a later phase (likely Phase 7.5 or Phase 9) is:
+> - Add `test` as a keyword to the lexer (`TokenKind::Test`).
+> - Parse top-level `test { "name" => { body } }` blocks in the parser.
+> - Lower each arm to a synthetic zero-argument function prefixed `__test$<name>__`.
+> - `fidan test` discovers all `__test$` functions in the MIR, runs each in isolation
+>   (catching panics), and prints a coloured pass/fail summary with counts.
+> - Assertion helpers in `std.test` (`assertEq`, `assertNe`, `assert`, …) signal
+>   failure via `Signal::Panic`, so a single assertion error stops only the current
+>   test arm, not the whole suite.
+> Until this is done, test code is written as normal Fidan functions that call
+> `std.test.assert*` directly.
 
 ### Phase 8 – Cranelift AOT (correctness baseline) (2–3 weeks)
 **Goal:** `fidan build test.fdn -o test` produces a correct working binary using Cranelift.
