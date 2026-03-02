@@ -472,16 +472,26 @@ fn find_relative(base_dir: &std::path::Path, segments: &[String]) -> Option<std:
 /// imported file's symbols should be re-exposed to the grandparent importer.
 ///
 /// Stdlib names (`io`, `math`, etc.) are skipped — the MIR lowerer handles those.
+///
+/// Returns `(resolved, unresolved)` where `unresolved` holds `(dotted_name, span)`
+/// for every user import whose file could not be found on disk.
 fn collect_file_import_paths(
     module: &fidan_ast::Module,
     interner: &fidan_lexer::SymbolInterner,
     base_dir: &std::path::Path,
-) -> std::collections::VecDeque<(std::path::PathBuf, bool)> {
+) -> (
+    std::collections::VecDeque<(std::path::PathBuf, bool)>,
+    Vec<(String, fidan_source::Span)>,
+) {
     let mut paths = std::collections::VecDeque::new();
+    let mut unresolved: Vec<(String, fidan_source::Span)> = Vec::new();
     for &item_id in &module.items {
         let item = module.arena.get_item(item_id);
         if let fidan_ast::Item::Use {
-            path, re_export, ..
+            path,
+            re_export,
+            span,
+            ..
         } = item
         {
             if path.is_empty() {
@@ -512,10 +522,12 @@ fn collect_file_import_paths(
                 .collect();
             if let Some(resolved) = find_relative(base_dir, &segments) {
                 paths.push_back((resolved, *re_export));
+            } else {
+                unresolved.push((segments.join("."), *span));
             }
         }
     }
-    paths
+    (paths, unresolved)
 }
 
 /// Pre-register functions, objects, and globals from `hir` into `tc` so the
@@ -714,11 +726,21 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
         //   • Direct imports of `main` are always exposed (expose = true).
         //   • Transitive sub-imports inherit exposure only when the parent used
         //     `export use`; plain `use` keeps them private to that file.
-        let mut queue: VecDeque<(std::path::PathBuf, bool)> =
-            collect_file_import_paths(&module, &interner, &base_dir)
-                .into_iter()
-                .map(|(p, _)| (p, true)) // direct imports of main are always exposed
-                .collect();
+        let (main_paths, main_unresolved) =
+            collect_file_import_paths(&module, &interner, &base_dir);
+        for (name, span) in main_unresolved {
+            error_count += 1;
+            let diag = fidan_diagnostics::Diagnostic::error(
+                fidan_diagnostics::diag_code!("E0106"),
+                format!("module `{name}` not found"),
+                span,
+            );
+            fidan_diagnostics::render_to_stderr(&diag, &source_map);
+        }
+        let mut queue: VecDeque<(std::path::PathBuf, bool)> = main_paths
+            .into_iter()
+            .map(|(p, _)| (p, true)) // direct imports of main are always exposed
+            .collect();
 
         // Track canonical paths to break cycles.
         let mut loaded: HashSet<std::path::PathBuf> = HashSet::new();
@@ -768,9 +790,18 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                         .parent()
                         .map(|p| p.to_path_buf())
                         .unwrap_or_else(|| std::path::PathBuf::from("."));
-                    for (sub, sub_re_export) in
-                        collect_file_import_paths(&imp_module, &interner, &imp_base)
-                    {
+                    let (sub_paths, sub_unresolved) =
+                        collect_file_import_paths(&imp_module, &interner, &imp_base);
+                    for (name, span) in sub_unresolved {
+                        error_count += 1;
+                        let diag = fidan_diagnostics::Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0106"),
+                            format!("module `{name}` not found"),
+                            span,
+                        );
+                        fidan_diagnostics::render_to_stderr(&diag, &source_map);
+                    }
+                    for (sub, sub_re_export) in sub_paths {
                         queue.push_back((sub, expose && sub_re_export));
                     }
 

@@ -147,6 +147,28 @@ Fix: provide an initial value:
 "#,
         ),
 
+        "E0106" => Some(
+            r#"A `use` statement refers to a module that cannot be found on the file system.
+Fidan resolves user modules relative to the importing file, mirroring Python's
+package layout:
+
+    use mymod           →  {dir}/mymod.fdn  or  {dir}/mymod/init.fdn
+    use mymod.utils     →  {dir}/mymod/utils.fdn  or  {dir}/mymod/utils/init.fdn
+
+Stdlib modules (e.g. `use std.io`) are handled separately and do not require
+an on-disk file.
+
+Erroneous example:
+
+    use helpers         # error: no `helpers.fdn` or `helpers/init.fdn` found
+
+Fix options:
+  1. Create the missing file at the expected path.
+  2. Correct the module name if it is a typo.
+  3. Use a path string for explicit locations: `use "./helpers.fdn"`
+"#,
+        ),
+
         "E0105" => Some(
             r#"A type annotation refers to a name that is not a built-in type and has
 not been declared as an `object` in the current scope.  This usually

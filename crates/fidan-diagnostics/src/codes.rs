@@ -75,6 +75,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "undefined type name",
         category: "names",
     },
+    DiagnosticCode {
+        code: "E0106",
+        title: "module not found",
+        category: "imports",
+    },
     // ── Type system ───────────────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0201",
