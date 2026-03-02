@@ -101,16 +101,6 @@ impl TypeChecker {
             ("integer", SymbolKind::BuiltinAction),
             ("float", SymbolKind::BuiltinAction),
             ("boolean", SymbolKind::BuiltinAction),
-            // Math free-functions
-            ("abs", SymbolKind::BuiltinAction),
-            ("sqrt", SymbolKind::BuiltinAction),
-            ("floor", SymbolKind::BuiltinAction),
-            ("ceil", SymbolKind::BuiltinAction),
-            ("round", SymbolKind::BuiltinAction),
-            ("max", SymbolKind::BuiltinAction),
-            ("min", SymbolKind::BuiltinAction),
-            // Concurrency helpers
-            ("wait", SymbolKind::BuiltinAction),
             // Type constructors
             ("Shared", SymbolKind::BuiltinAction),
         ];
@@ -362,7 +352,9 @@ impl TypeChecker {
             }
             // Register stdlib namespace / free-function imports so the type
             // checker doesn't emit E0101 for `use std.io` → `io` usage.
-            Item::Use { path, alias, span, .. } => {
+            Item::Use {
+                path, alias, span, ..
+            } => {
                 let std_sym = self.interner.intern("std");
                 if path.first() == Some(&std_sym) && path.len() >= 2 {
                     // Determine which symbol to bind in the user's scope:
@@ -388,10 +380,7 @@ impl TypeChecker {
                     );
                 }
             }
-            Item::ExprStmt(_)
-            | Item::Assign { .. }
-            | Item::Stmt(_)
-            | Item::Destructure { .. } => {}
+            Item::ExprStmt(_) | Item::Assign { .. } | Item::Stmt(_) | Item::Destructure { .. } => {}
         }
     }
 

@@ -1,5 +1,7 @@
 # Phase 8 parallel / concurrent demo
 
+use std.time
+
 # §1 spawn / await
 print("§1 spawn / await:")
 action double with (required x) {
@@ -20,8 +22,7 @@ print("  add_ten(32)=" + string(r2))
 print("§2 parallel for:")
 parallel for n in [10, 20, 30] {
     if n == 10 {
-        # For now, this is a builtin. Later, it will be part of std.time
-        wait(1000) ## Wait (sleep) for 1 second to demonstrate that the iterations run in parallel
+        time.sleep(1000) # Sleep 1 s to demonstrate iterations run in parallel
     }
     print("  n=" + string(n) + " sq=" + string(n * n))
 }

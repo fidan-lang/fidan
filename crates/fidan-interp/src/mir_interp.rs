@@ -617,6 +617,12 @@ impl MirMachine {
                     // Snapshot the list before spawning (immutable during iter).
                     let items: Vec<FidanValue> = list_ref.borrow().iter().cloned().collect();
 
+                    // Collect the first error from any iteration.
+                    // All threads are joined when the scope exits, so it is safe
+                    // to read this slot immediately after the scope.
+                    let first_err: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+                        std::sync::Arc::new(std::sync::Mutex::new(None));
+
                     std::thread::scope(|s| {
                         for item in &items {
                             // Build per-thread bundle using whole-struct captures.
@@ -628,14 +634,32 @@ impl MirMachine {
                             );
                             let bundle = ParallelArgs::from_captures(caps);
                             let mut child = self.clone_for_thread();
-                            // Closures capture `bundle: ParallelArgs` (Send) and
-                            // `child: MirMachine` (unsafe Send) — not FidanValue.
+                            let err_slot = std::sync::Arc::clone(&first_err);
                             s.spawn(move || {
-                                child.call_function(body_fn, bundle.into_vec()).ok();
+                                if let Err(sig) = child.call_function(body_fn, bundle.into_vec()) {
+                                    let msg = match sig {
+                                        MirSignal::Panic(m) => m,
+                                        MirSignal::Throw(v) => {
+                                            format!(
+                                                "uncaught throw in parallel iteration: {}",
+                                                crate::builtins::display(&v)
+                                            )
+                                        }
+                                    };
+                                    let mut slot = err_slot.lock().unwrap();
+                                    if slot.is_none() {
+                                        *slot = Some(msg);
+                                    }
+                                }
                             });
                         }
                         // Scope joins all threads implicitly on drop.
                     });
+
+                    // Propagate the first iteration error (if any).
+                    if let Some(msg) = first_err.lock().unwrap().take() {
+                        return Err(MirSignal::Panic(msg));
+                    }
                 }
             }
         }
@@ -828,9 +852,7 @@ impl MirMachine {
                 }
                 Ok(v)
             }
-            Some(StdlibResult::NeedsCallbackDispatch(op)) => {
-                self.exec_parallel_op(op)
-            }
+            Some(StdlibResult::NeedsCallbackDispatch(op)) => self.exec_parallel_op(op),
             None => Err(MirSignal::Panic(format!(
                 "no function `{}` in stdlib module `{}`",
                 name, module

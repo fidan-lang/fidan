@@ -20,6 +20,7 @@ pub mod math;
 pub mod parallel;
 pub mod string;
 pub mod test_runner;
+pub mod time;
 
 /// A dispatched stdlib call result.
 pub enum StdlibResult {
@@ -69,6 +70,7 @@ pub fn dispatch_stdlib(
                 fidan_runtime::FidanString::new(&format!("__error__: {msg}")),
             ))),
         }),
+        "time" => time::dispatch(name, args).map(StdlibResult::Value),
         _ => None,
     }
 }
@@ -77,7 +79,7 @@ pub fn dispatch_stdlib(
 pub fn is_stdlib_module(module: &str) -> bool {
     matches!(
         module,
-        "io" | "math" | "string" | "collections" | "test" | "parallel"
+        "io" | "math" | "string" | "collections" | "test" | "parallel" | "time"
     )
 }
 
@@ -91,6 +93,7 @@ pub fn module_exports(module: &str) -> &'static [&'static str] {
         "collections" => collections::exported_names(),
         "test" => test_runner::exported_names(),
         "parallel" => parallel::exported_names(),
+        "time" => time::exported_names(),
         _ => &[],
     }
 }

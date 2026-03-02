@@ -5,11 +5,10 @@ use std::io::BufRead;
 ///
 /// These are **always** available without any `use` statement:
 /// `print`, `eprint`, `input`, `string`, `integer`, `float`, `boolean`,
-/// `len`, `type`, `wait`, `Shared`.
+/// `len`, `type`, `Shared`.
 ///
-/// Math functions (`abs`, `sqrt`, `floor`, `ceil`, `round`, `max`, `min`)
-/// are provided by `std.math` and require `use std.math` (or destructured
-/// `use std.math.{abs}`).
+/// All other functions (`abs`, `sqrt`, `floor`, `ceil`, `round`, `max`, `min`,
+/// time utilities, etc.) require the appropriate `use std.*` import.
 ///
 /// Returns `Some(value)` if handled, `None` if the name is not a built-in.
 pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
@@ -97,17 +96,6 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "type" => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Some(FidanValue::String(FidanString::new(v.type_name())))
-        }
-
-        // ── Concurrency helpers ───────────────────────────────────────────────
-        "wait" => {
-            let ms = match args.into_iter().next().unwrap_or(FidanValue::Nothing) {
-                FidanValue::Integer(n) => n.max(0) as u64,
-                FidanValue::Float(f) => f.max(0.0) as u64,
-                _ => 0,
-            };
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            Some(FidanValue::Nothing)
         }
 
         _ => None,
