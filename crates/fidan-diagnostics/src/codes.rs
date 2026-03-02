@@ -272,3 +272,115 @@ pub fn lookup(code: &str) -> Option<&'static DiagnosticCode> {
 pub fn title(code: &str) -> &'static str {
     lookup(code).map(|c| c.title).unwrap_or("")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{diag_code, explanations::explain};
+
+    // ── diag_code! macro validates at compile time ────────────────────────────
+    // These `const` assertions fail to compile if the code is removed from CODES.
+
+    const _R0001: DiagCode = diag_code!("R0001");
+    const _R9001: DiagCode = diag_code!("R9001");
+    const _E0000: DiagCode = diag_code!("E0000");
+    const _E0401: DiagCode = diag_code!("E0401");
+    const _W1004: DiagCode = diag_code!("W1004");
+
+    // ── lookup() ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lookup_known_codes() {
+        assert!(lookup("E0000").is_some());
+        assert!(lookup("E0401").is_some());
+        assert!(lookup("W1004").is_some());
+        assert!(lookup("R0001").is_some());
+        assert!(lookup("R9001").is_some());
+    }
+
+    #[test]
+    fn lookup_unknown_code_returns_none() {
+        assert!(lookup("XXXXX").is_none());
+        assert!(lookup("").is_none());
+        assert!(lookup("E9999").is_none());
+    }
+
+    #[test]
+    fn lookup_titles_are_nonempty() {
+        for entry in CODES {
+            assert!(
+                !entry.title.is_empty(),
+                "code {} has an empty title",
+                entry.code
+            );
+        }
+    }
+
+    #[test]
+    fn lookup_categories_are_nonempty() {
+        for entry in CODES {
+            assert!(
+                !entry.category.is_empty(),
+                "code {} has an empty category",
+                entry.category
+            );
+        }
+    }
+
+    #[test]
+    fn all_codes_are_five_characters() {
+        for entry in CODES {
+            assert_eq!(
+                entry.code.len(),
+                5,
+                "code '{}' is not 5 characters",
+                entry.code
+            );
+        }
+    }
+
+    // ── explain() ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn explain_key_codes_have_text() {
+        // These are the codes users are most likely to look up — they must
+        // have long-form explanations registered in explanations.rs.
+        let must_have = ["E0000", "E0401", "W1004", "R0001", "R9001"];
+        for code_str in must_have {
+            let code = DiagCode(code_str);
+            assert!(
+                explain(code).is_some(),
+                "explain({code_str}) returned None — add an explanation in explanations.rs"
+            );
+        }
+    }
+
+    #[test]
+    fn explain_returns_nonempty_text() {
+        let must_have = ["E0000", "E0401", "W1004", "R0001", "R9001"];
+        for code_str in must_have {
+            let code = DiagCode(code_str);
+            if let Some(text) = explain(code) {
+                assert!(
+                    !text.trim().is_empty(),
+                    "explain({code_str}) returned empty text"
+                );
+            }
+        }
+    }
+
+    // ── DiagCode Display ─────────────────────────────────────────────────────
+
+    #[test]
+    fn diag_code_display() {
+        let c = diag_code!("E0401");
+        assert_eq!(format!("{c}"), "E0401");
+    }
+
+    #[test]
+    fn diag_code_equality() {
+        let a = diag_code!("R9001");
+        let b = DiagCode("R9001");
+        assert_eq!(a, b);
+    }
+}

@@ -26,3 +26,224 @@ pub fn parse(
     p.parse_module();
     p.finish()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fidan_diagnostics::Severity;
+    use fidan_lexer::{Lexer, SymbolInterner};
+    use fidan_source::{FileId, SourceFile};
+    use std::sync::Arc;
+
+    /// Lex `src` then parse it. Returns (module, error_diagnostics).
+    fn parse_src(src: &str) -> (Module, Vec<Diagnostic>) {
+        let file = SourceFile::new(FileId(0), "<test>", src);
+        let interner = Arc::new(SymbolInterner::new());
+        let (tokens, _lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        parse(&tokens, FileId(0), interner)
+    }
+
+    fn errors(diags: &[Diagnostic]) -> Vec<&str> {
+        diags
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .map(|d| d.message.as_str())
+            .collect()
+    }
+
+    // ── Variable declarations ─────────────────────────────────────────────────
+
+    #[test]
+    fn var_integer() {
+        let (_, diags) = parse_src("var x = 42");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn var_with_type_annotation() {
+        let (_, diags) = parse_src("var x oftype integer = 10");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn var_nothing() {
+        let (_, diags) = parse_src("var x = nothing");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    // ── Action declarations ───────────────────────────────────────────────────
+
+    #[test]
+    fn action_no_params() {
+        let (_, diags) = parse_src("action greet { print(\"hello\") }");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn action_with_params_and_return() {
+        let (_, diags) = parse_src(
+            r#"action add with (a oftype integer, b oftype integer) returns integer {
+                return a + b
+            }"#,
+        );
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn parallel_action() {
+        let (_, diags) = parse_src(
+            r#"parallel action fetch returns string {
+                return "data"
+            }"#,
+        );
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    // ── Object declarations ───────────────────────────────────────────────────
+
+    #[test]
+    fn object_simple() {
+        let (_, diags) = parse_src(
+            r#"object Point {
+                var x oftype float
+                var y oftype float
+            }"#,
+        );
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn object_extends() {
+        let (_, diags) = parse_src(
+            r#"object Animal { var name oftype string }
+            object Dog extends Animal { var breed oftype string }"#,
+        );
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    // ── Control flow ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn if_otherwise_else() {
+        let (_, diags) = parse_src(
+            r#"if x > 0 {
+                print("positive")
+            } otherwise when x < 0 {
+                print("negative")
+            } otherwise {
+                print("zero")
+            }"#,
+        );
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn while_loop() {
+        let (_, diags) = parse_src(
+            r#"var i = 0
+            while i < 10 {
+                i = i + 1
+            }"#,
+        );
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn for_loop() {
+        let (_, diags) = parse_src("for item in items { print(item) }");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn attempt_catch() {
+        let (_, diags) = parse_src(
+            r#"attempt {
+                panic("oops")
+            } catch e {
+                print(e)
+            }"#,
+        );
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    // ── Expressions ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn arithmetic_precedence() {
+        let (_, diags) = parse_src("var r = 1 + 2 * 3 - 4 / 2");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn null_coalesce() {
+        let (_, diags) = parse_src("var r = nothing ?? 42");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn ternary_expression() {
+        let (_, diags) = parse_src("var r = 1 if x > 0 else 0");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn list_literal() {
+        let (_, diags) = parse_src("var xs = [1, 2, 3]");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn string_interpolation() {
+        let (_, diags) = parse_src(r#"var msg = "hello {name}!""#);
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    // ── Concurrency syntax ────────────────────────────────────────────────────
+
+    #[test]
+    fn spawn_await() {
+        let (_, diags) = parse_src(
+            r#"var h = spawn compute()
+            var r = await h"#,
+        );
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn parallel_block() {
+        let (_, diags) = parse_src(
+            r#"parallel {
+                task A { print("a") }
+                task B { print("b") }
+            }"#,
+        );
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn concurrent_block() {
+        let (_, diags) = parse_src(
+            r#"concurrent {
+                task X { print("x") }
+            }"#,
+        );
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    // ── Error recovery ────────────────────────────────────────────────────────
+
+    #[test]
+    fn error_recovery_does_not_panic() {
+        // Malformed input — must produce diagnostics but never panic.
+        let (_, diags) = parse_src("var 123");
+        assert!(!diags.is_empty(), "expected at least one diagnostic");
+    }
+
+    #[test]
+    fn error_recovery_continues_after_bad_token() {
+        // Second declaration should still be parsed despite the first being broken.
+        let (module, _diags) = parse_src("var @@@ = 1\nvar y = 2");
+        // At least one item should have been recovered.
+        assert!(!module.items.is_empty());
+    }
+}

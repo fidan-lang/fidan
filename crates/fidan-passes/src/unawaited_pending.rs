@@ -16,7 +16,7 @@
 // when the await references the SSA alias `%h` rather than `%d` directly.
 
 use fidan_lexer::SymbolInterner;
-use fidan_mir::{Instr, LocalId, MirProgram, Operand, Rvalue};
+use fidan_mir::{GlobalId, Instr, LocalId, MirProgram, Operand, Rvalue};
 use std::collections::HashMap;
 use std::collections::HashSet;
 
@@ -38,18 +38,39 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<UnawaitedPendi
     for func in &prog.functions {
         // ── Build a shallow copy-alias map ────────────────────────────────────
         // For `Assign { dest: %d, rhs: Use(Local(%src)) }`, record %d → %src.
-        // This lets us trace `var h = spawn ...` (which creates a copy) back
-        // to the original SpawnExpr dest when we encounter `await h`.
+        // Also extend through globals: `store_global g = %l` followed by
+        // `%d = load_global g` is treated as `%d` being a copy of %l.
+        // This handles the common pattern `var h = spawn foo()` where `h` is a
+        // module-level global — the spawn result goes through a StoreGlobal /
+        // LoadGlobal pair before reaching the AwaitPending instruction.
         let mut copy_of: HashMap<LocalId, LocalId> = HashMap::new();
+        let mut global_origin: HashMap<GlobalId, LocalId> = HashMap::new();
+
         for block in &func.blocks {
             for instr in &block.instructions {
-                if let Instr::Assign {
-                    dest,
-                    rhs: Rvalue::Use(Operand::Local(src)),
-                    ..
-                } = instr
-                {
-                    copy_of.insert(*dest, *src);
+                match instr {
+                    Instr::Assign {
+                        dest,
+                        rhs: Rvalue::Use(Operand::Local(src)),
+                        ..
+                    } => {
+                        copy_of.insert(*dest, *src);
+                    }
+                    // Track which local's value is stored in each global,
+                    // chasing any existing copy aliases first.
+                    Instr::StoreGlobal {
+                        global,
+                        value: Operand::Local(l),
+                    } => {
+                        global_origin.insert(*global, chase(*l, &copy_of));
+                    }
+                    // A load of a global with a known origin extends the copy chain.
+                    Instr::LoadGlobal { dest, global } => {
+                        if let Some(&origin) = global_origin.get(global) {
+                            copy_of.insert(*dest, origin);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }

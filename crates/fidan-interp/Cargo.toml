@@ -11,3 +11,9 @@ fidan-lexer = { workspace = true }
 fidan-mir = { workspace = true }
 fidan-runtime = { workspace = true }
 fidan-stdlib = { workspace = true }
+
+[dev-dependencies]
+fidan-parser = { workspace = true }
+fidan-typeck = { workspace = true }
+fidan-hir = { workspace = true }
+fidan-passes = { workspace = true }
