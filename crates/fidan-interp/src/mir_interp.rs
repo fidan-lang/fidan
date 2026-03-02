@@ -12,8 +12,8 @@ use std::sync::Arc;
 use fidan_ast::{BinOp, UnOp};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_mir::{
-    BlockId, Callee, FunctionId, Instr, LocalId, MirLit, MirObjectInfo, MirProgram,
-    MirStringPart, Operand, Rvalue, Terminator,
+    BlockId, Callee, FunctionId, Instr, LocalId, MirLit, MirObjectInfo, MirProgram, MirStringPart,
+    Operand, Rvalue, Terminator,
 };
 use fidan_runtime::{
     FidanClass, FidanDict, FidanList, FidanObject, FidanPending, FidanString, FidanValue, FieldDef,
@@ -196,9 +196,10 @@ impl MirMachine {
             pending_call_span: None,
             panic_trace: Vec::new(),
             stdlib_free_fns,
-            globals: Arc::new(std::sync::Mutex::new(
-                vec![FidanValue::Nothing; globals_count],
-            )),
+            globals: Arc::new(std::sync::Mutex::new(vec![
+                FidanValue::Nothing;
+                globals_count
+            ])),
             test_results: Vec::new(),
         }
     }
@@ -489,7 +490,10 @@ impl MirMachine {
             }
             // ── Module-level globals ──────────────────────────────────────────
             Instr::LoadGlobal { dest, global } => {
-                let val = self.globals.lock().unwrap()
+                let val = self
+                    .globals
+                    .lock()
+                    .unwrap()
                     .get(global.0 as usize)
                     .cloned()
                     .unwrap_or(FidanValue::Nothing);
@@ -1191,6 +1195,7 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
 fn eval_unary(op: UnOp, v: FidanValue) -> Result<FidanValue, MirSignal> {
     use FidanValue::*;
     Ok(match (op, v) {
+        (UnOp::Pos, v) => v,
         (UnOp::Neg, Integer(n)) => Integer(-n),
         (UnOp::Neg, Float(f)) => Float(-f),
         (UnOp::Not, Boolean(b)) => Boolean(!b),

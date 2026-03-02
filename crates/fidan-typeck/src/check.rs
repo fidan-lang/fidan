@@ -1155,6 +1155,7 @@ impl TypeChecker {
             Expr::Unary { op, operand, .. } => {
                 let inner = self.infer_expr(operand, module);
                 match op {
+                    UnOp::Pos => inner,
                     UnOp::Neg => inner,
                     UnOp::Not => FidanType::Boolean,
                 }

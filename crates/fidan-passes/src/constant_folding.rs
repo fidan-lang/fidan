@@ -91,6 +91,8 @@ fn fold_binary(op: BinOp, l: &MirLit, r: &MirLit) -> Option<MirLit> {
 fn fold_unary(op: UnOp, val: &MirLit) -> Option<MirLit> {
     use MirLit::*;
     Some(match (op, val) {
+        (UnOp::Pos, Int(a)) => Int(*a),
+        (UnOp::Pos, Float(a)) => Float(*a),
         (UnOp::Neg, Int(a)) => Int(-a),
         (UnOp::Neg, Float(a)) => Float(-a),
         (UnOp::Not, Bool(a)) => Bool(!a),

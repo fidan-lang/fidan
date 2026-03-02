@@ -381,6 +381,18 @@ impl<'t> Parser<'t> {
                 let expr = self.parse_expr();
                 // `x = rhs` or `x set rhs` at module / REPL scope
                 if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
+                    let is_valid_lval = matches!(
+                        self.module.arena.get_expr(expr),
+                        Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
+                    );
+                    if !is_valid_lval {
+                        let span = self.module.arena.get_expr(expr).span();
+                        self.error("invalid assignment target", span);
+                        self.advance(); // eat `=` / `set`
+                        self.parse_expr(); // consume RHS
+                        self.skip_one_terminator();
+                        return None;
+                    }
                     self.advance(); // eat `=` / `set`
                     let value = self.parse_expr();
                     let end = self.current_span().end;
@@ -1372,6 +1384,21 @@ impl<'t> Parser<'t> {
         let expr_id = self.parse_expr();
         // Assignment: `lhs = rhs` or `lhs set rhs`
         if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
+            // Reject non-lvalue targets (e.g. `x+y = 1`, `+x = 1`) before they
+            // produce confusing type-mismatch errors in the typechecker.
+            let is_valid_lval = matches!(
+                self.module.arena.get_expr(expr_id),
+                Expr::Ident { .. } | Expr::Field { .. } | Expr::Index { .. }
+            );
+            if !is_valid_lval {
+                let span = self.module.arena.get_expr(expr_id).span();
+                self.error("invalid assignment target", span);
+                self.advance(); // eat `=` / `set`
+                self.parse_expr(); // consume RHS so parsing can continue
+                let end = self.current_span().end;
+                self.skip_one_terminator();
+                return self.error_stmt(Span::new(self.module.file, start, end));
+            }
             self.advance();
             let value = self.parse_expr();
             let end = self.current_span().end;

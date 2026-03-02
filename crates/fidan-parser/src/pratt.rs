@@ -221,10 +221,16 @@ impl<'t> Parser<'t> {
                     span: Span::new(self.module.file, span.start, end),
                 })
             }
-            // Unary plus — no semantic effect, just parse the operand
+            // Unary plus — wrap in Unary so it is not a transparent lvalue
             TokenKind::Plus => {
                 self.advance();
-                self.parse_expr_bp(15)
+                let operand = self.parse_expr_bp(15);
+                let end = self.module.arena.get_expr(operand).span().end;
+                self.module.arena.alloc_expr(Expr::Unary {
+                    op: UnOp::Pos,
+                    operand,
+                    span: Span::new(self.module.file, span.start, end),
+                })
             }
             TokenKind::Not => {
                 self.advance();
