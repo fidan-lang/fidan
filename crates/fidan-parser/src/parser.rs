@@ -255,7 +255,14 @@ impl<'t> Parser<'t> {
                 }
                 self.advance(); // eat `var`
                 let name = self.expect_ident_sym("expected variable name");
-                let ty = if self.eat_type_ann() {
+                let ty = if matches!(self.peek(), TokenKind::Minus)
+                    && matches!(self.peek_nth(1), TokenKind::Ident(_))
+                {
+                    let span = self.current_span();
+                    self.error("invalid type annotation syntax: did you mean `->`?", span);
+                    self.advance(); // eat the erroneous `-`
+                    Some(self.parse_type_expr())
+                } else if self.eat_type_ann() {
                     Some(self.parse_type_expr())
                 } else {
                     None
@@ -340,7 +347,14 @@ impl<'t> Parser<'t> {
                     }));
                 }
                 let name = self.expect_ident_sym("expected variable name");
-                let ty = if self.eat_type_ann() {
+                let ty = if matches!(self.peek(), TokenKind::Minus)
+                    && matches!(self.peek_nth(1), TokenKind::Ident(_))
+                {
+                    let span = self.current_span();
+                    self.error("invalid type annotation syntax: did you mean `->`?", span);
+                    self.advance(); // eat the erroneous `-`
+                    Some(self.parse_type_expr())
+                } else if self.eat_type_ann() {
                     Some(self.parse_type_expr())
                 } else {
                     None
@@ -1018,7 +1032,16 @@ impl<'t> Parser<'t> {
         }
 
         let name = self.expect_ident_sym("expected variable name");
-        let ty = if self.eat_type_ann() {
+        let ty = if matches!(self.peek(), TokenKind::Minus)
+            && matches!(self.peek_nth(1), TokenKind::Ident(_))
+        {
+            // Catch the common typo `var x-integer` (missing `>` in `->`)
+            // before it silently produces a confusing type-mismatch later.
+            let span = self.current_span();
+            self.error("invalid type annotation syntax: did you mean `->`?", span);
+            self.advance(); // eat the erroneous `-`
+            Some(self.parse_type_expr())
+        } else if self.eat_type_ann() {
             Some(self.parse_type_expr())
         } else {
             None
