@@ -2772,6 +2772,106 @@ clean full-restart is the v1 semantics.
 
 ---
 
+### 22.9 – `@extern` FFI Decorator (C / C++ / Rust interop)
+
+**Elevator pitch:** Call into any C-ABI library — PyTorch, NumPy (via CPython C-API), OpenCV,
+BLAS, system APIs — directly from Fidan code, with no boilerplate wrapper crate needed.
+
+```fidan
+@extern("libpytorch_c.so")
+action torch_add(a: integer, b: integer) -> integer
+
+@extern("path/to/mylib.so", symbol: "my_rust_fn")
+action callRustFn(x: float) -> float
+```
+
+**Why this is a force multiplier:**
+Instead of reimplementing NumPy, PyTorch, BLAS, OpenCV, etc. from scratch in Fidan (years of
+work), `@extern` lets Fidan immediately access every battle-tested C/C++/Rust library in
+existence. The Fidan stdlib can stay small and focused while users tap into the entire
+native ecosystem on day one.
+
+**Implementation layers:**
+
+| Layer | Mechanism |
+|---|---|
+| **Syntax** | `@extern("lib", symbol?: "name")` decorator on `action` declaration |
+| **Type checker** | Validates that parameter/return types are FFI-safe (`integer`, `float`, `boolean`, `nothing`; pointer types need `@unsafe` annotation) |
+| **MIR** | `FunctionDef` gains `extern_lib: Option<String>` + `extern_symbol: Option<String>` fields |
+| **Interpreter dispatch** | On first call, `dlopen` the shared library, `dlsym` the symbol, cache the function pointer; marshal `FidanValue` ↔ C types |
+| **JIT / AOT** | Cranelift/LLVM emit a direct `call` to the resolved symbol — zero overhead, same as a C function call |
+| **Windows** | `LoadLibrary` + `GetProcAddress` instead of `dlopen`/`dlsym` |
+
+**`@extern(rust)`** — special form for Rust crates already linked into `fidan-stdlib`:
+```fidan
+@extern(rust, crate: "fidan_stdlib", fn: "torch_dispatch")
+action _torchDispatch(op: string, args: list) -> dynamic
+```
+This is already used implicitly by the stdlib (`fidan_stdlib::dispatch_stdlib`) — `@extern(rust)`
+just exposes that mechanism to user code.
+
+**FFI safety model:**
+- FFI-safe types (`integer`/`float`/`boolean`/`nothing`) are callable without annotation.
+- Pointer-passing requires `@unsafe` — same philosophy as Rust's `unsafe` blocks.
+- `--sandbox` mode (22.6) disables all `@extern` calls entirely.
+
+**Dependency:** Phase 11 (LLVM AOT) for zero-overhead AOT calls; Phase 5 (MIR interpreter)
+for interpreted `dlopen`-based calls. The interpreter path can land much earlier.
+
+---
+
+### 22.10 – Native GPU Execution (CUDA / SPIR-V)
+
+**Elevator pitch:** `parallel for` on a GPU — annotate a loop or action with `@gpu` and
+Fidan compiles it to CUDA PTX or SPIR-V, uploads data, runs it, and brings results back.
+No CUDA C++ headers, no external runtime library required from the user.
+
+```fidan
+@gpu
+action vectorAdd(a: list, b: list) -> list {
+    parallel for i in 0..a.len {
+        return a[i] + b[i]
+    }
+}
+```
+
+**Why "no external libs" is achievable:**
+- **PTX emission:** LLVM's NVPTX backend already emits PTX assembly directly from LLVM IR —
+  the same IR that `fidan-codegen-llvm` (Phase 11) produces. No CUDA SDK headers needed.
+- **CUDA driver API** (not runtime API): `libcuda.so` / `nvcuda.dll` is present on any
+  machine with a GPU driver. Fidan calls it via `@extern` (22.9) or direct `dlopen` —
+  no CUDA toolkit installation required from the user.
+- **SPIR-V / Vulkan Compute:** Alternative GPU path for AMD/Intel. LLVM emits SPIR-V via
+  its SPIR-V backend. Same MIR → LLVM IR → SPIR-V pipeline.
+
+**Implementation layers:**
+
+| Layer | Mechanism |
+|---|---|
+| **`@gpu` decorator** | Marks an `action` for GPU compilation; parsed same as `@precompile` |
+| **Type checker** | Validates that the body uses only FFI-safe scalar types and `list` (maps to device array) |
+| **MIR annotation** | `FunctionDef` gains `gpu: bool` flag |
+| **Codegen** | MIR → LLVM IR → NVPTX backend → PTX string |
+| **Runtime dispatch** | `cuModuleLoadData(ptx)` + `cuLaunchKernel` via driver API; or `vkCreateShaderModule` + `vkCmdDispatch` for Vulkan |
+| **Memory model** | `list oftype float` / `list oftype integer` ↔ device buffer; marshalled automatically at call boundary |
+| **CPU fallback** | If no GPU is detected at runtime, `@gpu` falls back to `parallel for` on the CPU Rayon pool, transparently |
+
+**Key constraints:**
+- Only pure, side-effect-free `action`s can be `@gpu` (no `print`, no global writes, no `spawn`).
+- Type checker enforces this statically.
+- Phase dependency: requires Phase 11 (LLVM AOT) for the NVPTX emission path.
+  A prototype using PTX templates (pre-written PTX for common patterns) could land earlier.
+
+**Why this differentiates Fidan from every mainstream language:**
+Python needs CUDA C extensions or CuPy. Rust needs `rust-cuda` (experimental). C++ needs
+the full CUDA toolkit. Fidan would be the first language where GPU parallelism is a
+**first-class decorator** on ordinary code, with zero SDK installation ceremony.
+
+**Dependency:** Phase 11 (LLVM AOT + NVPTX backend); 22.9 (`@extern` for driver API calls).
+Estimated effort: 4–8 weeks after Phase 11.
+
+---
+
 ### Feature → Phase Dependency Map
 
 | Feature | Earliest schedulable after | Estimated effort |
@@ -2784,4 +2884,7 @@ clean full-restart is the v1 semantics.
 | 22.8 Hot reloading (multi-file) | Phase 7 (import system) | + 1–2 days on top of single-file |
 | 22.6 Sandboxing | Phase 7 (stdlib) | 2–3 weeks |
 | 22.2 Explain line | Phase 5 (MIR + typeck) | 2–3 weeks |
+| 22.9 `@extern` FFI (interpreter path) | Phase 5 (MIR interpreter) | 2–4 weeks |
 | 22.1 Time-travel debug | Phase 9 (JIT tracing hooks) | 3–5 weeks |
+| 22.9 `@extern` FFI (zero-overhead AOT) | Phase 11 (LLVM AOT) | + 1 week on top of interpreter path |
+| 22.10 Native GPU / CUDA (`@gpu`) | Phase 11 (LLVM AOT + NVPTX) | 4–8 weeks after Phase 11 |
