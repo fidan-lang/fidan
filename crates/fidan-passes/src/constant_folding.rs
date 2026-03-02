@@ -1,7 +1,8 @@
 // fidan-passes/src/constant_folding.rs
 //
-// Constant folding: replace `Binary(Const(a), Const(b))` and `Unary(Const(a))`
-// rvalues with their statically-computed result.
+// Constant folding + strength reduction:
+//   - `Binary(Const, Const)` and `Unary(Const)` → computed literal
+//   - `x + 0`, `x * 1`, `x ** 0`, `x && true`, etc. → simpler rvalue
 
 use fidan_ast::{BinOp, UnOp};
 use fidan_mir::{Instr, MirLit, Operand, Rvalue};
@@ -14,8 +15,8 @@ impl crate::Pass for ConstantFolding {
             for bb in &mut func.blocks {
                 for instr in &mut bb.instructions {
                     if let Instr::Assign { rhs, .. } = instr {
-                        if let Some(folded) = try_fold(rhs) {
-                            *rhs = Rvalue::Literal(folded);
+                        if let Some(reduced) = try_reduce(rhs) {
+                            *rhs = reduced;
                         }
                     }
                 }
@@ -24,17 +25,81 @@ impl crate::Pass for ConstantFolding {
     }
 }
 
-fn try_fold(rhs: &Rvalue) -> Option<MirLit> {
+/// Returns a simplified `Rvalue` if any folding or strength reduction applies,
+/// or `None` if the expression should be left unchanged.
+fn try_reduce(rhs: &Rvalue) -> Option<Rvalue> {
     match rhs {
+        // ── Full constant fold ─────────────────────────────────────────────
         Rvalue::Binary {
             op,
             lhs: Operand::Const(a),
             rhs: Operand::Const(b),
-        } => fold_binary(*op, a, b),
+        } => fold_binary(*op, a, b).map(Rvalue::Literal),
+
         Rvalue::Unary {
             op,
             operand: Operand::Const(a),
-        } => fold_unary(*op, a),
+        } => fold_unary(*op, a).map(Rvalue::Literal),
+
+        // ── Strength reduction: Binary with one constant operand ───────────
+        Rvalue::Binary { op, lhs, rhs } => strength_reduce(*op, lhs, rhs),
+
+        // ── Identity unary : +x → x ────────────────────────────────────────
+        Rvalue::Unary {
+            op: UnOp::Pos,
+            operand,
+        } => Some(Rvalue::Use(operand.clone())),
+
+        _ => None,
+    }
+}
+
+/// Strength-reduce one binary operand being a known constant.
+fn strength_reduce(op: BinOp, lhs: &Operand, rhs: &Operand) -> Option<Rvalue> {
+    use MirLit::*;
+    // Helper: is operand a specific integer?
+    let is_int = |op: &Operand, n: i64| matches!(op, Operand::Const(Int(v)) if *v == n);
+    let is_float = |op: &Operand, v: f64| matches!(op, Operand::Const(Float(f)) if *f == v);
+    let is_bool = |op: &Operand, b: bool| matches!(op, Operand::Const(Bool(v)) if *v == b);
+
+    match op {
+        // x + 0  or  0 + x  →  x
+        BinOp::Add if is_int(rhs, 0) || is_float(rhs, 0.0) => Some(Rvalue::Use(lhs.clone())),
+        BinOp::Add if is_int(lhs, 0) || is_float(lhs, 0.0) => Some(Rvalue::Use(rhs.clone())),
+
+        // x - 0  →  x
+        BinOp::Sub if is_int(rhs, 0) || is_float(rhs, 0.0) => Some(Rvalue::Use(lhs.clone())),
+
+        // x * 1  or  1 * x  →  x
+        BinOp::Mul if is_int(rhs, 1) || is_float(rhs, 1.0) => Some(Rvalue::Use(lhs.clone())),
+        BinOp::Mul if is_int(lhs, 1) || is_float(lhs, 1.0) => Some(Rvalue::Use(rhs.clone())),
+
+        // x * 0  or  0 * x  →  0  (integers only; floats have -0.0/NaN edge cases)
+        BinOp::Mul if is_int(rhs, 0) => Some(Rvalue::Literal(Int(0))),
+        BinOp::Mul if is_int(lhs, 0) => Some(Rvalue::Literal(Int(0))),
+
+        // x / 1  →  x
+        BinOp::Div if is_int(rhs, 1) || is_float(rhs, 1.0) => Some(Rvalue::Use(lhs.clone())),
+
+        // x ** 0  →  1  (integer base only)
+        BinOp::Pow if is_int(rhs, 0) => Some(Rvalue::Literal(Int(1))),
+        // x ** 1  →  x
+        BinOp::Pow if is_int(rhs, 1) => Some(Rvalue::Use(lhs.clone())),
+
+        // x && true  or  true && x  →  x
+        BinOp::And if is_bool(rhs, true) => Some(Rvalue::Use(lhs.clone())),
+        BinOp::And if is_bool(lhs, true) => Some(Rvalue::Use(rhs.clone())),
+        // x && false  or  false && x  →  false
+        BinOp::And if is_bool(rhs, false) || is_bool(lhs, false) => {
+            Some(Rvalue::Literal(Bool(false)))
+        }
+
+        // x || false  or  false || x  →  x
+        BinOp::Or if is_bool(rhs, false) => Some(Rvalue::Use(lhs.clone())),
+        BinOp::Or if is_bool(lhs, false) => Some(Rvalue::Use(rhs.clone())),
+        // x || true  or  true || x  →  true
+        BinOp::Or if is_bool(rhs, true) || is_bool(lhs, true) => Some(Rvalue::Literal(Bool(true))),
+
         _ => None,
     }
 }

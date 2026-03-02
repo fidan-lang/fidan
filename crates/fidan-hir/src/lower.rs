@@ -666,7 +666,12 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
             }
 
             // Module imports: capture stdlib imports and propagate to the interpreter.
-            Item::Use { path, alias, .. } => {
+            Item::Use {
+                path,
+                alias,
+                re_export,
+                ..
+            } => {
                 // Resolve all path symbols to strings.
                 let parts: Vec<String> = path
                     .iter()
@@ -686,6 +691,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                             module_path: vec!["std".into(), module_name],
                             alias: Some(ns_alias),
                             specific_names: None,
+                            re_export,
                         });
                     } else {
                         // `use std.MODULE.name` — specific name import.
@@ -694,6 +700,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                             module_path: vec!["std".into(), module_name],
                             alias: None,
                             specific_names: Some(vec![fn_name]),
+                            re_export,
                         });
                     }
                 }
@@ -721,8 +728,10 @@ pub fn merge_module(base: HirModule, imported: HirModule) -> HirModule {
     merged.functions.extend(base.functions);
     merged.globals.extend(base.globals);
     merged.init_stmts.extend(base.init_stmts);
-    // Don't carry file-import use_decls into the merged module — those were
-    // already resolved.  Keep only stdlib use_decls from both sides.
+    // All use_decls from the imported side are kept so the imported file's own
+    // functions still have access to the stdlib namespaces they declared.
+    // Isolation is enforced at the type-checking layer: `pre_register_hir_into_tc`
+    // only exposes `re_export = true` use_decls to the importing file's typechecker.
     merged.use_decls.extend(base.use_decls);
     merged
 }

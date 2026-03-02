@@ -375,25 +375,100 @@ fn render_trace_to_stderr(trace: &[fidan_interp::TraceFrame], mode: TraceMode) {
 
 // ── File-import helpers ──────────────────────────────────────────────────────────
 
-/// Returns resolved `PathBuf`s for all `use "./..."` file-path imports in `module`.
+/// The single stdlib root prefix.  Every stdlib import starts with `std`
+/// (`use std.io`, `use std.math`, …), so only that one token needs to be
+/// excluded from file-based resolution.  If a user writes bare `use math`,
+/// `find_relative` will simply find nothing — no magic silent swallow.
+const STDLIB_MODULES: &[&str] = &["std"];
+
+/// Resolve a dot-path user import relative to `base_dir` (the directory of
+/// the importing file), mirroring Python's package layout:
+///
+/// ```text
+/// use mymod            →  {base_dir}/mymod.fdn
+///                      OR {base_dir}/mymod/init.fdn
+///
+/// use mymod.utils      →  {base_dir}/mymod/utils.fdn
+///                      OR {base_dir}/mymod/utils/init.fdn
+/// ```
+///
+/// The user chooses the folder name — no magic directory is required.
+fn find_relative(base_dir: &std::path::Path, segments: &[String]) -> Option<std::path::PathBuf> {
+    // Build the directory prefix from all but the last segment.
+    // e.g. ["mymod", "utils"] → prefix = base_dir/mymod, leaf = "utils"
+    // e.g. ["mymod"]          → prefix = base_dir,        leaf = "mymod"
+    let (dir_parts, leaf) = segments.split_at(segments.len().saturating_sub(1));
+
+    let mut dir = base_dir.to_path_buf();
+    for part in dir_parts {
+        dir.push(part);
+    }
+
+    let leaf = leaf.first().map(|s| s.as_str()).unwrap_or("");
+
+    // Try `{dir}/{leaf}.fdn`
+    let flat = dir.join(format!("{leaf}.fdn"));
+    if flat.exists() {
+        return Some(flat);
+    }
+    // Try `{dir}/{leaf}/init.fdn`
+    let init = dir.join(leaf).join("init.fdn");
+    if init.exists() {
+        return Some(init);
+    }
+    None
+}
+
+/// Returns `(resolved_path, re_export)` pairs for every file-import in `module`.
+///
+/// - `use "./path"` / `use "../path"` / `use "/abs/path"` — explicit file path
+/// - `use mymod` / `use mymod.sub` — resolved relative to the importing file's
+///   directory (Python-style): `mymod.fdn` or `mymod/init.fdn`
+///
+/// The `re_export` flag mirrors the `export use` keyword: when `true` the
+/// imported file's symbols should be re-exposed to the grandparent importer.
+///
+/// Stdlib names (`io`, `math`, etc.) are skipped — the MIR lowerer handles those.
 fn collect_file_import_paths(
     module: &fidan_ast::Module,
     interner: &fidan_lexer::SymbolInterner,
     base_dir: &std::path::Path,
-) -> std::collections::VecDeque<std::path::PathBuf> {
+) -> std::collections::VecDeque<(std::path::PathBuf, bool)> {
     let mut paths = std::collections::VecDeque::new();
     for &item_id in &module.items {
         let item = module.arena.get_item(item_id);
-        if let fidan_ast::Item::Use { path, .. } = item {
-            if path.len() == 1 {
-                let s = interner.resolve(path[0]);
-                if s.starts_with("./")
-                    || s.starts_with("../")
-                    || s.starts_with('/')
-                    || s.ends_with(".fdn")
-                {
-                    paths.push_back(base_dir.join(&*s));
-                }
+        if let fidan_ast::Item::Use {
+            path, re_export, ..
+        } = item
+        {
+            if path.is_empty() {
+                continue;
+            }
+            let first = interner.resolve(path[0]);
+
+            // ── Explicit file-path import (string with ./ ../ / or .fdn) ───
+            if path.len() == 1
+                && (first.starts_with("./")
+                    || first.starts_with("../")
+                    || first.starts_with('/')
+                    || first.ends_with(".fdn"))
+            {
+                paths.push_back((base_dir.join(&*first), *re_export));
+                continue;
+            }
+
+            // ── Stdlib import — handled by MIR lowerer, skip ───────────────
+            if STDLIB_MODULES.contains(&&*first) {
+                continue;
+            }
+
+            // ── User package import — resolve relative to base_dir ─────────
+            let segments: Vec<String> = path
+                .iter()
+                .map(|&s| interner.resolve(s).to_string())
+                .collect();
+            if let Some(resolved) = find_relative(base_dir, &segments) {
+                paths.push_back((resolved, *re_export));
             }
         }
     }
@@ -462,6 +537,30 @@ fn pre_register_hir_into_tc(tc: &mut fidan_typeck::TypeChecker, hir: &fidan_hir:
         } = stmt
         {
             tc.pre_register_global(*name, ty.clone(), *is_const);
+        }
+    }
+
+    // Re-exported stdlib namespaces: if the imported file declared `export use
+    // std.X`, expose the binding in the caller's type-checker so accesses like
+    // `X.fn()` don't produce false E0101 errors.
+    for decl in &hir.use_decls {
+        if !decl.re_export {
+            continue;
+        }
+        if decl.module_path.len() >= 2 {
+            if let Some(names) = &decl.specific_names {
+                // `export use std.io.readFile` — register the free-function name.
+                for name in names {
+                    tc.pre_register_namespace(name);
+                }
+            } else {
+                // `export use std.io` — register the namespace alias.
+                let alias = decl
+                    .alias
+                    .as_deref()
+                    .unwrap_or(decl.module_path[1].as_str());
+                tc.pre_register_namespace(alias);
+            }
         }
     }
 }
@@ -567,8 +666,16 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
         use std::collections::{HashSet, VecDeque};
 
         let mut hirs: Vec<fidan_hir::HirModule> = Vec::new();
-        let mut queue: VecDeque<std::path::PathBuf> =
-            collect_file_import_paths(&module, &interner, &base_dir);
+        // Queue carries `(path, expose)` where `expose = true` means the file's
+        // symbols are visible in the top-level program:
+        //   • Direct imports of `main` are always exposed (expose = true).
+        //   • Transitive sub-imports inherit exposure only when the parent used
+        //     `export use`; plain `use` keeps them private to that file.
+        let mut queue: VecDeque<(std::path::PathBuf, bool)> =
+            collect_file_import_paths(&module, &interner, &base_dir)
+                .into_iter()
+                .map(|(p, _)| (p, true)) // direct imports of main are always exposed
+                .collect();
 
         // Track canonical paths to break cycles.
         let mut loaded: HashSet<std::path::PathBuf> = HashSet::new();
@@ -578,7 +685,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
             }
         }
 
-        while let Some(import_path) = queue.pop_front() {
+        while let Some((import_path, expose)) = queue.pop_front() {
             let canon = import_path
                 .canonicalize()
                 .unwrap_or_else(|_| import_path.clone());
@@ -611,12 +718,17 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                     error_count += imp_lex_err + imp_parse_err;
 
                     // Enqueue transitive imports from this imported file.
+                    // A sub-import is exposed to the top-level program only if the
+                    // current file is itself exposed AND the sub-import was declared
+                    // with `export use`.  Plain `use` keeps sub-imports private.
                     let imp_base = import_path
                         .parent()
                         .map(|p| p.to_path_buf())
                         .unwrap_or_else(|| std::path::PathBuf::from("."));
-                    for sub in collect_file_import_paths(&imp_module, &interner, &imp_base) {
-                        queue.push_back(sub);
+                    for (sub, sub_re_export) in
+                        collect_file_import_paths(&imp_module, &interner, &imp_base)
+                    {
+                        queue.push_back((sub, expose && sub_re_export));
                     }
 
                     // Typeck + HIR-lower the imported module (only if lex/parse clean).
@@ -634,7 +746,12 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                         error_count += imp_tc_err;
                         if imp_tc_err == 0 {
                             let imp_hir = fidan_hir::lower_module(&imp_module, &imp_tm, &interner);
-                            hirs.push(imp_hir);
+                            // Only merge into the program if this import is exposed.
+                            // Private imports (plain `use` in a library file) are compiled
+                            // for correctness checking but their symbols stay local.
+                            if expose {
+                                hirs.push(imp_hir);
+                            }
                         }
                     }
                 }

@@ -412,6 +412,8 @@ pub struct MirUseDecl {
     pub alias: String,
     /// If `Some`, only these specific function names are imported flat.
     pub specific_names: Option<Vec<String>>,
+    /// Mirrors `HirUseDecl::re_export` — true when declared as `export use`.
+    pub re_export: bool,
 }
 
 /// The entire program as a collection of MIR functions.

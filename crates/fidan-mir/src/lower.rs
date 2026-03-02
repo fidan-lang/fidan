@@ -2400,6 +2400,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 module,
                 alias,
                 specific_names: decl.specific_names.clone(),
+                re_export: decl.re_export,
             });
         }
     }

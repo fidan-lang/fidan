@@ -42,6 +42,7 @@ pub struct HirModule {
 /// - `use std.io`                  → `module_path=["std","io"]`, `alias=None`, `specific_names=None`
 /// - `use std.io as myio`          → `alias=Some("myio")`
 /// - `use std.io.{readFile,print}` → `specific_names=Some(["readFile","print"])`
+/// - `export use std.io`           → same as above but `re_export=true`
 #[derive(Debug, Clone)]
 pub struct HirUseDecl {
     /// Full module path segments, e.g. `["std", "io"]`.
@@ -50,6 +51,9 @@ pub struct HirUseDecl {
     pub alias: Option<String>,
     /// If `Some`, only these specific names are imported (destructured import).
     pub specific_names: Option<Vec<String>>,
+    /// `true` when declared as `export use` — the import is re-published to any
+    /// file that imports this module, so its stdlib namespace becomes visible there.
+    pub re_export: bool,
 }
 
 // ── Globals ────────────────────────────────────────────────────────────────────

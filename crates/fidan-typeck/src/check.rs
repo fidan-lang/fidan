@@ -190,6 +190,27 @@ impl TypeChecker {
         );
     }
 
+    /// Pre-register a stdlib namespace or free-function binding coming from an
+    /// `export use std.X` declaration in an imported file.
+    ///
+    /// This is the cross-file equivalent of the `Item::Use` branch in
+    /// `register_top_level` — it binds the alias symbol as `Dynamic` so the
+    /// main file's typechecker doesn't emit E0101 for accesses like `math.sqrt`.
+    pub fn pre_register_namespace(&mut self, alias: &str) {
+        let sym = self.interner.intern(alias);
+        let dummy = self.dummy_span();
+        self.table.define(
+            sym,
+            SymbolInfo {
+                kind: SymbolKind::Var,
+                ty: FidanType::Dynamic,
+                span: dummy,
+                is_mutable: false,
+                initialized: Initialized::Yes,
+            },
+        );
+    }
+
     // ── Public entry point ────────────────────────────────────────────────
 
     /// Run the full type checker over `module`.  Returns all diagnostics.
