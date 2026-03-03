@@ -63,6 +63,11 @@ pub enum Item {
         path: Vec<Symbol>,
         alias: Option<Symbol>,
         re_export: bool,
+        /// `true` when the import was written with curly braces, e.g. `use mod.{name}`.
+        /// This indicates a *flat* import where `name` is accessible directly.
+        /// `false` means a *namespace* import, e.g. `use mod` or `use mod.submod`,
+        /// where the last path segment becomes a namespace variable.
+        grouped: bool,
         span: Span,
     },
     /// A top-level statement (for, while, if, check, attempt, etc.)

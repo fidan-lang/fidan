@@ -185,6 +185,13 @@ impl MirMachine {
         let mut stdlib_modules: std::collections::HashSet<Arc<str>> =
             std::collections::HashSet::new();
         for decl in &program.use_decls {
+            // User-module re-export entries (`is_stdlib = false`) only exist to support
+            // `get_field` chaining (e.g. `lib.math.sqrt`).  They must NOT be added to
+            // `stdlib_modules` — doing so would mis-route dispatch through the stdlib
+            // path instead of `user_fn_map`.
+            if !decl.is_stdlib {
+                continue;
+            }
             if let Some(ref names) = decl.specific_names {
                 let module: Arc<str> = Arc::from(decl.module.as_str());
                 for name in names {
@@ -1087,6 +1094,24 @@ impl MirMachine {
                 .get_field(field)
                 .cloned()
                 .unwrap_or(FidanValue::Nothing),
+            // User namespace field access: e.g. `test2.math` where `test2` is a
+            // user module namespace.  Resolve the field to a stdlib namespace value
+            // only when the field name is a re-exported namespace (i.e. the imported
+            // file contains `export use std.X`).  If it is NOT re-exported, returns
+            // Nothing so the caller gets a proper "no method found" error.
+            FidanValue::Namespace(module) if !self.stdlib_modules.contains(module.as_ref()) => {
+                let field_name = self.sym_str(field);
+                // A re-exported namespace use_decl: re_export=true, specific_names=None,
+                // alias matching the field name.
+                let is_reexported = self.program.use_decls.iter().any(|d| {
+                    d.re_export && d.specific_names.is_none() && d.alias == field_name.as_ref()
+                });
+                if is_reexported {
+                    FidanValue::Namespace(field_name)
+                } else {
+                    FidanValue::Nothing
+                }
+            }
             _ => FidanValue::Nothing,
         }
     }

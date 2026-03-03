@@ -473,21 +473,40 @@ impl TypeChecker {
                         },
                     );
                 } else if !path.is_empty() && path.first() != Some(&std_sym) {
-                    // User module import: `use mymod` / `use mymod.sub`.
-                    // Bind the alias (or the first segment) as `Dynamic` so
-                    // `mymod.fn()` accesses don't produce a false E0101.
+                    // User module import: `use mymod` / `use mymod.sub` /
+                    // `use mymod.{name}` (grouped, folded into path by parser).
+                    // Bind the alias, or the last segment for multi-segment paths
+                    // (mirrors stdlib: `use std.io.print` binds `print`), or the
+                    // sole segment for single-segment paths.
                     let binding_sym = if let Some(&a) = alias.as_ref() {
                         a
+                    } else if path.len() >= 2 {
+                        *path.last().unwrap()
                     } else {
                         path[0]
                     };
-                    // Skip explicit file-path strings (e.g. `use "./utils.fdn"`).
                     let first_str = self.interner.resolve(path[0]);
-                    if !first_str.starts_with("./")
-                        && !first_str.starts_with("../")
-                        && !first_str.starts_with('/')
-                        && !first_str.ends_with(".fdn")
-                    {
+                    let is_file_path = first_str.starts_with("./")
+                        || first_str.starts_with("../")
+                        || first_str.starts_with('/')
+                        || first_str.ends_with(".fdn");
+                    if is_file_path {
+                        // File-path import: only bind if an explicit alias was given.
+                        // `use "./utils.fdn" as utils` → bind `utils` as Dynamic.
+                        // Plain `use "./utils.fdn"` exposes everything flat — no binding.
+                        if let Some(&a) = alias.as_ref() {
+                            self.table.define(
+                                a,
+                                SymbolInfo {
+                                    kind: SymbolKind::Var,
+                                    ty: FidanType::Dynamic,
+                                    span: *span,
+                                    is_mutable: false,
+                                    initialized: Initialized::Yes,
+                                },
+                            );
+                        }
+                    } else {
                         self.table.define(
                             binding_sym,
                             SymbolInfo {

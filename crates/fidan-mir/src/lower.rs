@@ -2706,6 +2706,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
     // ── Propagate use_decls from HIR ──────────────────────────────────────────
     for decl in &hir.use_decls {
         if decl.module_path.len() >= 2 {
+            // Stdlib use_decl: `use std.io` / `use std.io.{fn}`.
             let module = decl.module_path[1].clone();
             let alias = decl.alias.clone().unwrap_or_else(|| module.clone());
             prog.use_decls.push(MirUseDecl {
@@ -2713,6 +2714,24 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 alias,
                 specific_names: decl.specific_names.clone(),
                 re_export: decl.re_export,
+                is_stdlib: true,
+            });
+        } else if decl.module_path.len() == 1
+            && decl.specific_names.is_none()
+            && decl.re_export
+        {
+            // User-module re-export: `export use mymod`.
+            // Stored so re-export chaining (`lib.mymod.fn()`) resolves in `get_field`.
+            // `is_stdlib: false` prevents the alias from entering `stdlib_modules`,
+            // keeping dispatch routed through `user_fn_map`.
+            let module = decl.module_path[0].clone();
+            let alias = decl.alias.clone().unwrap_or_else(|| module.clone());
+            prog.use_decls.push(MirUseDecl {
+                module,
+                alias,
+                specific_names: None,
+                re_export: true,
+                is_stdlib: false,
             });
         }
     }

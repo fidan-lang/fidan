@@ -1,0 +1,9 @@
+# utils_flat.fdn — used via `use utils_flat.{sub_ints, negate_int}` (user module flat/grouped)
+
+action sub_ints with (certain a oftype integer, certain b oftype integer) returns integer {
+    return a - b
+}
+
+action negate_int with (certain n oftype integer) returns integer {
+    return 0 - n
+}

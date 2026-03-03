@@ -425,6 +425,11 @@ pub struct MirUseDecl {
     pub specific_names: Option<Vec<String>>,
     /// Mirrors `HirUseDecl::re_export` — true when declared as `export use`.
     pub re_export: bool,
+    /// `true` for stdlib imports (`use std.*`); `false` for user-module re-exports
+    /// (`export use mymod`).  Controls whether the entry populates `stdlib_modules`
+    /// in `MirMachine::new` — user namespaces must NOT appear there so dispatch
+    /// routes through `user_fn_map` instead of `dispatch_stdlib_call`.
+    pub is_stdlib: bool,
 }
 
 /// The entire program as a collection of MIR functions.

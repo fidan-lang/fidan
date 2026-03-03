@@ -655,7 +655,7 @@ impl<'t> Parser<'t> {
     // ── Parameter list ────────────────────────────────────────────────────────
     //
     // Fidan params may be mixed: grouped in parens and ungrouped after `also`/Comma.
-// E.g.: `action init with (certain name oftype string) also optional age oftype integer = 18`
+    // E.g.: `action init with (certain name oftype string) also optional age oftype integer = 18`
 
     pub(crate) fn parse_params(&mut self) -> Vec<Param> {
         let mut params = vec![];
@@ -852,6 +852,7 @@ impl<'t> Parser<'t> {
                 path: vec![sym],
                 alias,
                 re_export,
+                grouped: false,
                 span: Span::new(self.module.file, start, end),
             });
         }
@@ -899,6 +900,7 @@ impl<'t> Parser<'t> {
                     path: full_path,
                     alias: None,
                     re_export,
+                    grouped: true,
                     span: Span::new(self.module.file, start, end),
                 });
                 if first_id.is_none() {
@@ -913,6 +915,7 @@ impl<'t> Parser<'t> {
                     path,
                     alias: None,
                     re_export,
+                    grouped: false,
                     span: Span::new(self.module.file, start, end),
                 })
             })
@@ -926,6 +929,7 @@ impl<'t> Parser<'t> {
                 path,
                 alias,
                 re_export,
+                grouped: false,
                 span: Span::new(self.module.file, start, end),
             })
         }

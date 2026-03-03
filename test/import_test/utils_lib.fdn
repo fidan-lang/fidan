@@ -1,0 +1,9 @@
+# utils_lib.fdn — used via `use utils_lib` (user module namespace) and re-exported by import_bundle.fdn
+
+action add_ints with (certain a oftype integer, certain b oftype integer) returns integer {
+    return a + b
+}
+
+action multiply_ints with (certain a oftype integer, certain b oftype integer) returns integer {
+    return a * b
+}

@@ -1,0 +1,7 @@
+# import_bundle.fdn — used via `use "./import_bundle.fdn" as bundle` (re-export chain)
+# Re-exports both a stdlib namespace and a user module so the importer can chain:
+#   bundle.math.sqrt(...)        (stdlib via re-export)
+#   bundle.utils_lib.add_ints(...)  (user module via re-export)
+
+export use std.math
+export use utils_lib

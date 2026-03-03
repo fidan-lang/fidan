@@ -671,6 +671,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 path,
                 alias,
                 re_export,
+                grouped,
                 ..
             } => {
                 // Resolve all path symbols to strings.
@@ -705,19 +706,33 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                         });
                     }
                 } else if !parts.is_empty() && parts[0] != "std" {
-                    // User module import: `use mymod` / `use mymod.sub`.
-                    // Skip explicit file-path strings (starting with ./ ../ / or ending .fdn).
-                    if !parts[0].starts_with("./")
-                        && !parts[0].starts_with("../")
-                        && !parts[0].starts_with('/')
-                        && !parts[0].ends_with(".fdn")
-                    {
-                        // Alias defaults to the first (root) segment so `use foo.bar`
-                        // is accessible as `foo.bar_fn()` via the `foo` namespace.
-                        // For single-segment imports like `use test2`, alias = "test2".
+                    let is_file_path = parts[0].starts_with("./")
+                        || parts[0].starts_with("../")
+                        || parts[0].starts_with('/')
+                        || parts[0].ends_with(".fdn");
+                    if is_file_path {
+                        // File-path import with alias: `use "./utils.fdn" as utils`
+                        // → emit a user-namespace HirUseDecl so the MIR lowerer stores
+                        //   `Namespace("utils")` as a global; `utils.fn()` dispatches
+                        //   through `user_fn_map` automatically.
+                        if let Some(alias_str) = alias.map(|sym| interner.resolve(sym).to_string())
+                        {
+                            use_decls.push(HirUseDecl {
+                                module_path: vec![alias_str.clone()],
+                                alias: Some(alias_str),
+                                specific_names: None,
+                                re_export,
+                            });
+                        }
+                    } else if !grouped {
+                        // Namespace user import: `use mymod` / `use mymod.submod`.
+                        // Flat/grouped imports don't create a namespace HirUseDecl.
+                        // Alias defaults to the last path segment:
+                        //   `use test2`        → alias = "test2"
+                        //   `use test2.submod` → alias = "submod"
                         let ns_alias = alias
                             .map(|sym| interner.resolve(sym).to_string())
-                            .unwrap_or_else(|| parts[0].clone());
+                            .unwrap_or_else(|| parts.last().unwrap_or(&parts[0]).clone());
                         use_decls.push(HirUseDecl {
                             module_path: vec![ns_alias.clone()],
                             alias: Some(ns_alias),

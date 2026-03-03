@@ -480,16 +480,82 @@ fn collect_file_import_paths(
     interner: &fidan_lexer::SymbolInterner,
     base_dir: &std::path::Path,
 ) -> (
-    std::collections::VecDeque<(std::path::PathBuf, bool)>,
+    std::collections::VecDeque<(
+        std::path::PathBuf,
+        bool,
+        Option<std::collections::HashSet<String>>,
+    )>,
     Vec<(String, fidan_source::Span)>,
 ) {
-    let mut paths = std::collections::VecDeque::new();
+    // Three import modes, encoded in `Option<HashSet<String>>`:
+    //
+    //   None               = Namespace  (`use mod` / `use mod.sub`): HirModule is merged into
+    //                         MIR for dispatch, but nothing is registered flat in typeck.
+    //                         Call as `mod.fn()` only.
+    //
+    //   Some(empty set)    = Wildcard   (file-path imports: `use "./utils.fdn"`): everything
+    //                         from the module is registered flat in typeck.  Backward-compat.
+    //
+    //   Some(non-empty)    = Flat       (`use mod.{name}`): only the listed names are registered
+    //                         flat in typeck; HIR is filtered before merging into MIR.
+    //
+    // Priority when the same path is imported multiple times: Wildcard > Namespace > Flat.
+
+    // Enum used only inside this function to compute the filter before writing to path_map.
+    enum Mode {
+        Wildcard,
+        Namespace,
+        Flat(String),
+    }
+
+    let mut path_map: Vec<(
+        std::path::PathBuf,
+        bool,
+        Option<std::collections::HashSet<String>>,
+    )> = Vec::new();
     let mut unresolved: Vec<(String, fidan_source::Span)> = Vec::new();
+
+    let mut add = |resolved: std::path::PathBuf, re_export: bool, mode: Mode| {
+        if let Some(entry) = path_map.iter_mut().find(|(p, _, _)| *p == resolved) {
+            entry.1 |= re_export;
+            // If already a wildcard (Some(empty)), it can never be downgraded.
+            if entry.2.as_ref().map_or(false, |s| s.is_empty()) {
+                return;
+            }
+            match mode {
+                // Upgrade to wildcard.
+                Mode::Wildcard => entry.2 = Some(std::collections::HashSet::new()),
+                // Namespace wins over existing flat (Some(names) → None).
+                Mode::Namespace => entry.2 = None,
+                // Accumulate flat name — but only if currently flat (Some).
+                // If currently namespace (None), do nothing (namespace wins).
+                Mode::Flat(name) => {
+                    if let Some(ref mut set) = entry.2 {
+                        set.insert(name);
+                    }
+                }
+            }
+        } else {
+            let filter = match mode {
+                Mode::Wildcard => Some(std::collections::HashSet::new()),
+                Mode::Namespace => None,
+                Mode::Flat(name) => {
+                    let mut s = std::collections::HashSet::new();
+                    s.insert(name);
+                    Some(s)
+                }
+            };
+            path_map.push((resolved, re_export, filter));
+        }
+    };
+
     for &item_id in &module.items {
         let item = module.arena.get_item(item_id);
         if let fidan_ast::Item::Use {
             path,
+            alias: item_alias,
             re_export,
+            grouped,
             span,
             ..
         } = item
@@ -500,13 +566,20 @@ fn collect_file_import_paths(
             let first = interner.resolve(path[0]);
 
             // ── Explicit file-path import (string with ./ ../ / or .fdn) ───
+            // Wildcard when no alias (all symbols exposed flat).
+            // Namespace when alias given: `use "./f.fdn" as ns` → `ns.fn()` only.
             if path.len() == 1
                 && (first.starts_with("./")
                     || first.starts_with("../")
                     || first.starts_with('/')
                     || first.ends_with(".fdn"))
             {
-                paths.push_back((base_dir.join(&*first), *re_export));
+                let mode = if item_alias.is_some() {
+                    Mode::Namespace
+                } else {
+                    Mode::Wildcard
+                };
+                add(base_dir.join(&*first), *re_export, mode);
                 continue;
             }
 
@@ -520,22 +593,75 @@ fn collect_file_import_paths(
                 .iter()
                 .map(|&s| interner.resolve(s).to_string())
                 .collect();
-            if let Some(resolved) = find_relative(base_dir, &segments) {
-                paths.push_back((resolved, *re_export));
+
+            if *grouped {
+                // Flat import: `use mod.{name}` — the last path segment is a
+                // specific name to import flat.  Resolve the prefix as the file.
+                if segments.len() >= 2 {
+                    let prefix = &segments[..segments.len() - 1];
+                    let specific_name = segments.last().unwrap().clone();
+                    if let Some(resolved) = find_relative(base_dir, prefix) {
+                        add(resolved, *re_export, Mode::Flat(specific_name));
+                    } else if let Some(resolved) = find_relative(base_dir, &segments) {
+                        // Edge: the full path happens to be a file — namespace.
+                        add(resolved, *re_export, Mode::Namespace);
+                    } else {
+                        unresolved.push((segments.join("."), *span));
+                    }
+                } else {
+                    // Single-segment grouped edge case — treat as namespace.
+                    if let Some(resolved) = find_relative(base_dir, &segments) {
+                        add(resolved, *re_export, Mode::Namespace);
+                    } else {
+                        unresolved.push((segments.join("."), *span));
+                    }
+                }
             } else {
-                unresolved.push((segments.join("."), *span));
+                // Namespace import: `use mod` / `use mod.submod` — resolve the
+                // full path; the last segment becomes the namespace alias.
+                if let Some(resolved) = find_relative(base_dir, &segments) {
+                    add(resolved, *re_export, Mode::Namespace);
+                } else {
+                    unresolved.push((segments.join("."), *span));
+                }
             }
         }
     }
-    (paths, unresolved)
+
+    (path_map.into_iter().collect(), unresolved)
 }
 
 /// Pre-register functions, objects, and globals from `hir` into `tc` so the
 /// main file's type-checker sees imported symbols as known bindings.
-fn pre_register_hir_into_tc(tc: &mut fidan_typeck::TypeChecker, hir: &fidan_hir::HirModule) {
+///
+/// `filter` — when `Some`, only names in the set are registered (flat/grouped
+/// import, e.g. `use mod.{name}`).  When `None` (namespace import, e.g.
+/// `use mod`), nothing is registered flat — the namespace variable itself is
+/// already bound by `check_item` so calls like `mod.fn()` type-check correctly
+/// via dynamic dispatch on `FidanType::Dynamic`.
+fn pre_register_hir_into_tc(
+    tc: &mut fidan_typeck::TypeChecker,
+    hir: &fidan_hir::HirModule,
+    filter: Option<&std::collections::HashSet<String>>,
+    interner: &fidan_lexer::SymbolInterner,
+) {
     use fidan_typeck::{ActionInfo, ParamInfo};
 
+    let visible = |sym: fidan_lexer::Symbol| -> bool {
+        // None              → namespace import: nothing registered flat.
+        // Some(empty set)   → wildcard (file-path): everything registered flat.
+        // Some(non-empty)   → flat import: only listed names registered.
+        match filter {
+            None => false,
+            Some(f) if f.is_empty() => true,
+            Some(f) => f.contains(interner.resolve(sym).as_ref()),
+        }
+    };
+
     for func in &hir.functions {
+        if !visible(func.name) {
+            continue;
+        }
         let info = ActionInfo {
             params: func
                 .params
@@ -555,6 +681,9 @@ fn pre_register_hir_into_tc(tc: &mut fidan_typeck::TypeChecker, hir: &fidan_hir:
     }
 
     for obj in &hir.objects {
+        if !visible(obj.name) {
+            continue;
+        }
         tc.pre_register_object_data(
             obj.name,
             obj.parent,
@@ -582,6 +711,9 @@ fn pre_register_hir_into_tc(tc: &mut fidan_typeck::TypeChecker, hir: &fidan_hir:
     }
 
     for glob in &hir.globals {
+        if !visible(glob.name) {
+            continue;
+        }
         tc.pre_register_global(glob.name, glob.ty.clone(), glob.is_const);
     }
 
@@ -593,7 +725,9 @@ fn pre_register_hir_into_tc(tc: &mut fidan_typeck::TypeChecker, hir: &fidan_hir:
             name, ty, is_const, ..
         } = stmt
         {
-            tc.pre_register_global(*name, ty.clone(), *is_const);
+            if visible(*name) {
+                tc.pre_register_global(*name, ty.clone(), *is_const);
+            }
         }
     }
 
@@ -618,8 +752,38 @@ fn pre_register_hir_into_tc(tc: &mut fidan_typeck::TypeChecker, hir: &fidan_hir:
                     .unwrap_or(decl.module_path[1].as_str());
                 tc.pre_register_namespace(alias);
             }
+        } else if decl.module_path.len() == 1 && decl.specific_names.is_none() {
+            // `export use mymod` — user-module re-export.  Register the namespace
+            // alias so the importer's typechecker allows `mymod.fn()` calls.
+            let alias = decl
+                .alias
+                .as_deref()
+                .unwrap_or(decl.module_path[0].as_str());
+            tc.pre_register_namespace(alias);
         }
     }
+}
+
+/// Filter a HIR module to only the named functions, objects, and globals.
+///
+/// Used for flat/grouped imports (`use mod.{name}`) so that only the requested
+/// symbols end up in the merged MIR — preventing unnamed symbols from being
+/// callable without a namespace prefix.
+/// Top-level init statements (side-effects) and use_decls are kept intact.
+fn filter_hir_module(
+    mut hir: fidan_hir::HirModule,
+    names: &std::collections::HashSet<String>,
+    interner: &fidan_lexer::SymbolInterner,
+) -> fidan_hir::HirModule {
+    hir.functions
+        .retain(|f| names.contains(interner.resolve(f.name).as_ref()));
+    hir.objects
+        .retain(|o| names.contains(interner.resolve(o.name).as_ref()));
+    hir.globals
+        .retain(|g| names.contains(interner.resolve(g.name).as_ref()));
+    // Keep init_stmts as-is: top-level side-effects (e.g. print("IMPORTED"))
+    // should execute even for selective imports, matching Python semantics.
+    hir
 }
 
 fn run_pipeline(opts: CompileOptions) -> Result<()> {
@@ -718,16 +882,25 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     };
 
-    let imported_hirs: Vec<fidan_hir::HirModule> = {
+    let imported_hirs: Vec<(
+        fidan_hir::HirModule,
+        Option<std::collections::HashSet<String>>,
+        bool, // expose_to_typeck
+    )> = {
         use fidan_lexer::Lexer;
         use std::collections::{HashSet, VecDeque};
 
-        let mut hirs: Vec<fidan_hir::HirModule> = Vec::new();
-        // Queue carries `(path, expose)` where `expose = true` means the file's
-        // symbols are visible in the top-level program:
-        //   • Direct imports of `main` are always exposed (expose = true).
-        //   • Transitive sub-imports inherit exposure only when the parent used
-        //     `export use`; plain `use` keeps them private to that file.
+        //   expose_to_typeck = true  → symbols visible in the top-level program
+        //   filter = None             → namespace import: call as `mod.fn()` only
+        //   filter = Some(empty)      → wildcard: everything flat
+        //   filter = Some(names)      → flat import: only listed names flat
+        type QueueItem = (std::path::PathBuf, bool, Option<HashSet<String>>);
+
+        let mut hirs: Vec<(
+            fidan_hir::HirModule,
+            Option<HashSet<String>>,
+            bool, // expose_to_typeck
+        )> = Vec::new();
         let (main_paths, main_unresolved) =
             collect_file_import_paths(&module, &interner, &base_dir);
         for (name, span) in main_unresolved {
@@ -739,12 +912,12 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
             );
             fidan_diagnostics::render_to_stderr(&diag, &source_map);
         }
-        let mut queue: VecDeque<(std::path::PathBuf, bool)> = main_paths
+        let mut queue: VecDeque<QueueItem> = main_paths
             .into_iter()
-            .map(|(p, _)| (p, true)) // direct imports of main are always exposed
+            .map(|(p, _, filter)| (p, true, filter)) // direct imports always exposed
             .collect();
 
-        // Track canonical paths to break cycles.
+        // Track canonical paths to break import cycles.
         let mut loaded: HashSet<std::path::PathBuf> = HashSet::new();
         if !is_stdin {
             if let Ok(canon) = opts.input.canonicalize() {
@@ -752,7 +925,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
             }
         }
 
-        while let Some((import_path, expose)) = queue.pop_front() {
+        while let Some((import_path, expose, filter)) = queue.pop_front() {
             let canon = import_path
                 .canonicalize()
                 .unwrap_or_else(|_| import_path.clone());
@@ -784,10 +957,8 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                         .count();
                     error_count += imp_lex_err + imp_parse_err;
 
-                    // Enqueue transitive imports from this imported file.
-                    // A sub-import is exposed to the top-level program only if the
-                    // current file is itself exposed AND the sub-import was declared
-                    // with `export use`.  Plain `use` keeps sub-imports private.
+                    // Enqueue transitive imports (they use their own internal resolution,
+                    // no name filter needed — the filter only applies at the call site).
                     let imp_base = import_path
                         .parent()
                         .map(|p| p.to_path_buf())
@@ -803,8 +974,8 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                         );
                         fidan_diagnostics::render_to_stderr(&diag, &source_map);
                     }
-                    for (sub, sub_re_export) in sub_paths {
-                        queue.push_back((sub, expose && sub_re_export));
+                    for (sub, sub_re_export, sub_filter) in sub_paths {
+                        queue.push_back((sub, expose && sub_re_export, sub_filter));
                     }
 
                     // Typeck + HIR-lower the imported module (only if lex/parse clean).
@@ -822,12 +993,10 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                         error_count += imp_tc_err;
                         if imp_tc_err == 0 {
                             let imp_hir = fidan_hir::lower_module(&imp_module, &imp_tm, &interner);
-                            // Only merge into the program if this import is exposed.
-                            // Private imports (plain `use` in a library file) are compiled
-                            // for correctness checking but their symbols stay local.
-                            if expose {
-                                hirs.push(imp_hir);
-                            }
+                            // Always push so private transitive deps are compiled into MIR
+                            // (their functions may be called by the importing module).
+                            // `expose` only controls whether names appear in the outer typeck.
+                            hirs.push((imp_hir, filter, expose));
                         }
                     }
                 }
@@ -845,8 +1014,10 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     // does not emit false "undefined identifier" errors for cross-file references.
     let typed_module = if lex_diags.is_empty() && parse_diags.is_empty() {
         let mut tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), file.id);
-        for hir in &imported_hirs {
-            pre_register_hir_into_tc(&mut tc, hir);
+        for (hir, filter, expose_tc) in &imported_hirs {
+            if *expose_tc {
+                pre_register_hir_into_tc(&mut tc, hir, filter.as_ref(), &interner);
+            }
         }
         tc.check_module(&module);
         let tm = tc.finish_typed();
@@ -871,7 +1042,17 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
         let base = fidan_hir::lower_module(&module, tm, &interner);
         imported_hirs
             .into_iter()
-            .fold(base, |acc, imp| fidan_hir::merge_module(acc, imp))
+            .fold(base, |acc, (imp, filter, _expose_tc)| {
+                // None (namespace) or Some(empty) (wildcard): merge the full HIR so that
+                // all functions exist in MIR (namespace dispatch / flat exposure).
+                // Some(non-empty names): flat import — strip everything except those names.
+                let filtered = if let Some(names) = filter.as_ref().filter(|f| !f.is_empty()) {
+                    filter_hir_module(imp, names, &interner)
+                } else {
+                    imp
+                };
+                fidan_hir::merge_module(acc, filtered)
+            })
     });
 
     // ── --emit hir ─────────────────────────────────────────────────────────────

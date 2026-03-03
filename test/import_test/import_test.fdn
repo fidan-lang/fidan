@@ -1,0 +1,80 @@
+# import_test.fdn — exhaustive test of ALL import combinations
+#
+# Mode matrix:
+#   1. use "./file.fdn"              wildcard file-path   — everything flat
+#   2. use "./file.fdn" as ns        file-path alias      — ns.fn() only
+#   3. use std.mod                   stdlib namespace     — mod.fn()
+#   4. use std.mod.{a, b}            stdlib flat          — a(), b() directly
+#   5. use std.mod as alias          stdlib alias         — alias.fn()
+#   6. use usermod                   user module namespace — usermod.fn()
+#   7. use usermod.{a, b}            user module flat     — a(), b() directly
+#   8. use "./bundle.fdn" as bundle  re-export chain      — bundle.mod.fn() / bundle.ns.fn()
+
+# ── 1. Wildcard file-path ─────────────────────────────────────────────────────
+use "./utils.fdn"
+
+# ── 2. File-path alias ────────────────────────────────────────────────────────
+use "./utils_alias.fdn" as ua
+
+# ── 3. Stdlib namespace ───────────────────────────────────────────────────────
+use std.math
+
+# ── 4. Stdlib flat (grouped) ──────────────────────────────────────────────────
+use std.string.{toUpper, toLower}
+
+# ── 5. Stdlib alias ───────────────────────────────────────────────────────────
+use std.math as m
+
+# ── 6. User module namespace ──────────────────────────────────────────────────
+use utils_lib
+
+# ── 7. User module flat (grouped) ─────────────────────────────────────────────
+use utils_flat.{sub_ints, negate_int}
+
+# ── 8. Re-export chain ────────────────────────────────────────────────────────
+# import_bundle.fdn contains `export use std.math` and `export use utils_lib`
+use "./import_bundle.fdn" as bundle
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 1. Wildcard — greet, square, PI, circle_area all in flat scope
+print("--- 1. wildcard file-path ---")
+print(greet("Fidan"))
+print("square(4) = " + string(square(4)))
+print("PI = " + string(PI))
+print("circle_area(PI, 2.0) = " + string(circle_area(PI, 2.0)))
+
+# 2. File-path alias — ua.greet_alias / ua.double_int
+print("--- 2. file-path alias ---")
+print(ua.greet_alias("world"))
+print("ua.double_int(21) = " + string(ua.double_int(21)))
+
+# 3. Stdlib namespace — math.sqrt / math.abs
+print("--- 3. stdlib namespace ---")
+print("math.sqrt(16.0) = " + string(math.sqrt(16.0)))
+print("math.abs(-5) = " + string(math.abs(-5)))
+
+# 4. Stdlib flat — toUpper / toLower directly
+print("--- 4. stdlib flat ---")
+print(toUpper("hello"))
+print(toLower("WORLD"))
+
+# 5. Stdlib alias — m is an alias for math
+print("--- 5. stdlib alias ---")
+print("m.floor(3.9) = " + string(m.floor(3.9)))
+print("m.ceil(2.1) = " + string(m.ceil(2.1)))
+
+# 6. User module namespace — utils_lib.add_ints / utils_lib.multiply_ints
+print("--- 6. user module namespace ---")
+print("utils_lib.add_ints(10, 5) = " + string(utils_lib.add_ints(10, 5)))
+print("utils_lib.multiply_ints(3, 7) = " + string(utils_lib.multiply_ints(3, 7)))
+
+# 7. User module flat — sub_ints / negate_int directly
+print("--- 7. user module flat ---")
+print("sub_ints(10, 3) = " + string(sub_ints(10, 3)))
+print("negate_int(5) = " + string(negate_int(5)))
+
+# 8. Re-export chain — bundle.math.sqrt (stdlib) and bundle.utils_lib.add_ints (user)
+print("--- 8. re-export chain ---")
+print("bundle.math.sqrt(9.0) = " + string(bundle.math.sqrt(9.0)))
+print("bundle.utils_lib.add_ints(2, 3) = " + string(bundle.utils_lib.add_ints(2, 3)))

@@ -1,0 +1,9 @@
+# utils_alias.fdn — used via `use "./utils_alias.fdn" as ua` (file-path alias)
+
+action greet_alias with (certain name oftype string) returns string {
+    return "Hi from alias, " + name + "!"
+}
+
+action double_int with (certain n oftype integer) returns integer {
+    return n * 2
+}
