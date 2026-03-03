@@ -450,6 +450,16 @@
 
 ---
 
+## Future Language Features
+
+| Feature | Status | Notes |
+|---|---|---|
+| Slicing syntax (`list[1..3]`, `str[0..5]`, `list[::2]`) | ⬜ | Requires parser (`BinOp::Range` already exists; need slice AST node), HIR/MIR lowering (`Rvalue::Slice`), and bootstrap/stdlib dispatch. Step / stride syntax (`list[start..end..step]`) is a stretch. |
+| List comprehension (`[x * 2 for x in items if x > 0]`) | ⬜ | New parser production; desugar in HIR to a `for` loop that appends into a fresh list local. `if` guard maps to a conditional append. Nested comprehensions need scoped temporaries. |
+| Dict comprehension (`{k: v for k, v in pairs}`) | ⬜ | Same desugaring as list comprehension but emits `Dict` insert calls. Requires destructuring iteration over list-of-tuples or dict entries. |
+
+---
+
 ## Test Coverage
 
 | Suite | Status | Notes |

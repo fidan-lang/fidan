@@ -113,6 +113,12 @@ pub fn dispatch(s: FidanString, method: &str, args: Vec<FidanValue>) -> Option<F
                 Some(FidanValue::Nothing)
             }
         }
+        // Returns a new string with characters in reversed order.
+        // Strings are immutable so this always produces a fresh value.
+        "reverse" | "reversed" => {
+            let rev: String = s.as_str().chars().rev().collect();
+            Some(FidanValue::String(FidanString::new(&rev)))
+        }
         _ => None,
     }
 }

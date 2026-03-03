@@ -14,11 +14,7 @@ fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
     }
 }
 
-pub fn dispatch(
-    r: OwnedRef<FidanList>,
-    method: &str,
-    args: Vec<FidanValue>,
-) -> Option<FidanValue> {
+pub fn dispatch(r: OwnedRef<FidanList>, method: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
     match method {
         "append" | "push" | "add" => {
             for arg in args {
@@ -29,7 +25,12 @@ pub fn dispatch(
         "len" | "length" => Some(FidanValue::Integer(r.borrow().len() as i64)),
         "get" => {
             if let Some(FidanValue::Integer(i)) = args.first() {
-                Some(r.borrow().get(*i as usize).cloned().unwrap_or(FidanValue::Nothing))
+                Some(
+                    r.borrow()
+                        .get(*i as usize)
+                        .cloned()
+                        .unwrap_or(FidanValue::Nothing),
+                )
             } else {
                 Some(FidanValue::Nothing)
             }
@@ -37,7 +38,11 @@ pub fn dispatch(
         "pop" => {
             let len = r.borrow().len();
             if len > 0 {
-                let val = r.borrow().get(len - 1).cloned().unwrap_or(FidanValue::Nothing);
+                let val = r
+                    .borrow()
+                    .get(len - 1)
+                    .cloned()
+                    .unwrap_or(FidanValue::Nothing);
                 let items: Vec<FidanValue> = r.borrow().iter().take(len - 1).cloned().collect();
                 let mut new_list = FidanList::new();
                 for item in items {
@@ -148,6 +153,16 @@ pub fn dispatch(
                 .map(|i| FidanValue::Integer(i as i64))
                 .unwrap_or(FidanValue::Integer(-1));
             Some(pos)
+        }
+        // Returns a new reversed list without mutating the original.
+        // Complements the in-place `reverse()` for functional-style use.
+        "reversed" => {
+            let items: Vec<FidanValue> = r.borrow().iter().cloned().collect();
+            let mut new_list = FidanList::new();
+            for v in items.into_iter().rev() {
+                new_list.append(v);
+            }
+            Some(FidanValue::List(OwnedRef::new(new_list)))
         }
         _ => None,
     }
