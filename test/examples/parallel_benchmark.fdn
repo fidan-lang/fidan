@@ -14,7 +14,7 @@
 use std.time
 use std.math
 
-var N     = 800000      # total work items
+var N     = 800_000_000      # total work items
 var CHUNK = N / 4       # work items per parallel task
 
 # ── Workload ──────────────────────────────────────────────────────────────────
