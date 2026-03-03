@@ -2266,6 +2266,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             func.name,
             fidan_ty_to_mir(&func.return_ty),
         ));
+        prog.functions.last_mut().unwrap().precompile = func.precompile;
         if let Some(cls) = func.extends {
             ext_fn_map.insert(func.name, cls);
         }
@@ -2299,6 +2300,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 method.name,
                 fidan_ty_to_mir(&method.return_ty),
             ));
+            prog.functions.last_mut().unwrap().precompile = method.precompile;
             obj_info.methods.insert(method.name, id);
             if method.name == new_sym {
                 obj_info.init_fn = Some(id);

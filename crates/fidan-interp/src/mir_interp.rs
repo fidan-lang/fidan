@@ -8,6 +8,7 @@
 // instructions emitted by the MIR lowerer.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use fidan_ast::{BinOp, UnOp};
 use fidan_lexer::{Symbol, SymbolInterner};
@@ -25,6 +26,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::builtins;
 use crate::interp::{RunError, TraceFrame};
+use fidan_codegen_cranelift::{JitCompiler, JitFnEntry, call_jit_fn};
 
 // ── Object class table ────────────────────────────────────────────────────────
 
@@ -166,6 +168,17 @@ pub struct MirMachine {
     /// Accumulated test results when running in `fidan test` mode.
     #[allow(dead_code)]
     pub test_results: Vec<TestResult>,
+    /// Per-function call counters (indexed by `FunctionId`).
+    /// Incremented atomically on every call; shared across threads.
+    call_counters: Arc<Vec<AtomicU32>>,
+    /// JIT-compiled function entries, one slot per function.
+    /// `None` → not yet compiled; `Some(entry)` → ready to use.
+    jit_fns: Arc<std::sync::RwLock<Vec<Option<JitFnEntry>>>>,
+    /// `true` per slot once the JIT has successfully compiled that function.
+    /// Checked with a bare `Acquire` load — no lock needed for the fast path.
+    jit_flags: Arc<Vec<AtomicBool>>,
+    /// Number of calls after which the JIT kicks in (0 = disabled).
+    jit_threshold: u32,
 }
 
 /// A single test result recorded during `fidan test`.
@@ -255,6 +268,23 @@ impl MirMachine {
         // never contends on the RwLock inside SymbolInterner.
         let str_table: Arc<[Arc<str>]> = Arc::from(interner.snapshot().into_boxed_slice());
 
+        // Build JIT counter infrastructure — must happen BEFORE `program` is moved.
+        let fn_count = program.functions.len();
+        let call_counters: Arc<Vec<AtomicU32>> = {
+            let counters: Vec<AtomicU32> = (0..fn_count).map(|_| AtomicU32::new(0)).collect();
+            // Pre-warm @precompile functions so they JIT on first call.
+            for (i, f) in program.functions.iter().enumerate() {
+                if f.precompile {
+                    counters[i].store(499, Ordering::Relaxed);
+                }
+            }
+            Arc::new(counters)
+        };
+        let jit_fns: Arc<std::sync::RwLock<Vec<Option<JitFnEntry>>>> =
+            Arc::new(std::sync::RwLock::new(vec![None; fn_count]));
+        let jit_flags: Arc<Vec<AtomicBool>> =
+            Arc::new((0..fn_count).map(|_| AtomicBool::new(false)).collect());
+
         Self {
             program,
             interner,
@@ -273,6 +303,10 @@ impl MirMachine {
             ])),
             str_table,
             test_results: Vec::new(),
+            call_counters,
+            jit_fns,
+            jit_flags,
+            jit_threshold: 500,
         }
     }
 
@@ -298,6 +332,10 @@ impl MirMachine {
             // One atomic bump on the outer Arc; all Arc<str> entries are shared.
             str_table: Arc::clone(&self.str_table),
             test_results: Vec::new(),
+            call_counters: Arc::clone(&self.call_counters),
+            jit_fns: Arc::clone(&self.jit_fns),
+            jit_flags: Arc::clone(&self.jit_flags),
+            jit_threshold: self.jit_threshold,
         }
     }
 
@@ -307,6 +345,21 @@ impl MirMachine {
     /// `Arc::clone`, NO `RwLock` acquisition.  All symbols are stable by
     /// the time the interpreter runs (parsing is complete).
     #[inline]
+    /// Override the JIT call-count threshold.
+    /// Pass `0` to disable the JIT entirely.
+    pub fn set_jit_threshold(&mut self, threshold: u32) {
+        self.jit_threshold = threshold;
+        // Re-pre-warm precompile functions based on the new threshold.
+        if threshold > 0 {
+            let pre_warm = threshold.saturating_sub(1);
+            for (i, f) in self.program.functions.iter().enumerate() {
+                if f.precompile {
+                    self.call_counters[i].store(pre_warm, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
     fn sym_str(&self, sym: Symbol) -> Arc<str> {
         Arc::clone(&self.str_table[sym.0 as usize])
     }
@@ -342,6 +395,42 @@ impl MirMachine {
 
     fn call_function(&mut self, fn_id: FunctionId, args: Vec<FidanValue>) -> MirResult {
         let func = self.program.function(fn_id);
+
+        // ── JIT hot-path check ────────────────────────────────────────────────
+        if self.jit_threshold > 0 {
+            let idx = fn_id.0 as usize;
+            // Fast-path: single atomic load — no lock acquired when not compiled.
+            if self.jit_flags[idx].load(Ordering::Acquire) {
+                let guard = self.jit_fns.read().unwrap();
+                if let Some(ref entry) = guard[idx] {
+                    return Ok(call_jit_fn(entry, &args));
+                }
+            } else {
+                let prev = self.call_counters[idx].fetch_add(1, Ordering::Relaxed);
+                if prev + 1 == self.jit_threshold {
+                    // Threshold reached — attempt JIT compilation.
+                    let mut compiler = JitCompiler::new();
+                    if let Some(entry) = compiler.compile_function(
+                        func,
+                        &self.program,
+                        &self.interner,
+                    ) {
+                        self.jit_fns.write().unwrap()[idx] = Some(entry);
+                        // Publish the compiled flag AFTER the function is stored.
+                        self.jit_flags[idx].store(true, Ordering::Release);
+                        // Dispatch immediately — including this very (compilation-trigger) call.
+                        let guard = self.jit_fns.read().unwrap();
+                        if let Some(ref e) = guard[idx] {
+                            return Ok(call_jit_fn(e, &args));
+                        }
+                    } else {
+                        // Non-eligible: saturate so we never attempt again.
+                        self.call_counters[idx].store(u32::MAX, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+
         let fn_name = self.sym_str(func.name).to_string();
         let local_count = func.local_count;
 
@@ -1415,12 +1504,26 @@ fn eval_unary(op: UnOp, v: FidanValue) -> Result<FidanValue, MirSignal> {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Run a `MirProgram` from its entry function.
+/// Run a `MirProgram` from its entry function with a configurable JIT threshold.
+///
+/// `jit_threshold = 0`   → JIT disabled.
+/// `jit_threshold > 0`   → compile a function after this many interpreter calls.
+pub fn run_mir_with_jit(
+    program: MirProgram,
+    interner: Arc<SymbolInterner>,
+    source_map: Arc<SourceMap>,
+    jit_threshold: u32,
+) -> Result<(), RunError> {
+    let mut machine = MirMachine::new(Arc::new(program), interner, source_map);
+    machine.set_jit_threshold(jit_threshold);
+    machine.run()
+}
+
+/// Run a `MirProgram` from its entry function (default JIT threshold: 500).
 pub fn run_mir(
     program: MirProgram,
     interner: Arc<SymbolInterner>,
     source_map: Arc<SourceMap>,
 ) -> Result<(), RunError> {
-    let mut machine = MirMachine::new(Arc::new(program), interner, source_map);
-    machine.run()
+    run_mir_with_jit(program, interner, source_map, 500)
 }

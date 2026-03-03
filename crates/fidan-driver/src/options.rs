@@ -24,6 +24,8 @@ pub struct CompileOptions {
     pub trace: TraceMode,
     /// Stop reporting errors after this many (None = no limit).
     pub max_errors: Option<usize>,
+    /// Call-count threshold before the JIT compiles a hot function (0 = off).
+    pub jit_threshold: u32,
 }
 
 impl Default for CompileOptions {
@@ -35,6 +37,7 @@ impl Default for CompileOptions {
             emit: vec![],
             trace: TraceMode::None,
             max_errors: None,
+            jit_threshold: 500,
         }
     }
 }

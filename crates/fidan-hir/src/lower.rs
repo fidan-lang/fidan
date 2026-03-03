@@ -11,6 +11,10 @@ use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::Span;
 use fidan_typeck::{FidanType, TypedModule};
 
+/// Decorator name for JIT pre-compilation.  Used in three places during lowering;
+/// a single constant prevents typo-divergence.
+const DECORATOR_PRECOMPILE: &str = "precompile";
+
 use crate::hir::{
     HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr, HirExprKind,
     HirField, HirFunction, HirGlobal, HirInterpPart, HirModule, HirObject, HirParam, HirStmt,
@@ -409,6 +413,7 @@ impl<'a> Ctx<'a> {
         return_ty: FidanType,
         body: &[StmtId],
         is_parallel: bool,
+        precompile: bool,
         span: Span,
     ) -> HirFunction {
         HirFunction {
@@ -418,6 +423,7 @@ impl<'a> Ctx<'a> {
             return_ty,
             body: self.lower_stmts(body),
             is_parallel,
+            precompile,
             span,
         }
     }
@@ -521,6 +527,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                             return_ty: _,
                             body,
                             is_parallel,
+                            decorators,
                             span: mspan,
                             ..
                         } = ctx.arena.get_item(mid).clone()
@@ -532,6 +539,9 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                                 .and_then(|o| o.methods.get(&mname))
                                 .map(|a| a.return_ty.clone())
                                 .unwrap_or(FidanType::Nothing);
+                            let precompile = decorators.iter().any(|d| {
+                                ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE
+                            });
                             Some(ctx.lower_function(
                                 mname,
                                 None,
@@ -539,6 +549,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                                 ret,
                                 &body,
                                 is_parallel,
+                                precompile,
                                 mspan,
                             ))
                         } else {
@@ -562,6 +573,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 return_ty: _,
                 body,
                 is_parallel,
+                decorators,
                 span,
                 ..
             } => {
@@ -570,6 +582,9 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     .get(&name)
                     .map(|a| a.return_ty.clone())
                     .unwrap_or(FidanType::Nothing);
+                let precompile = decorators
+                    .iter()
+                    .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
                 functions.push(ctx.lower_function(
                     name,
                     None,
@@ -577,6 +592,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     ret,
                     &body,
                     is_parallel,
+                    precompile,
                     span,
                 ));
             }
@@ -588,6 +604,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 return_ty: _,
                 body,
                 is_parallel,
+                decorators,
                 span,
                 ..
             } => {
@@ -597,6 +614,9 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     .and_then(|o| o.methods.get(&name))
                     .map(|a| a.return_ty.clone())
                     .unwrap_or(FidanType::Nothing);
+                let precompile = decorators
+                    .iter()
+                    .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
                 functions.push(ctx.lower_function(
                     name,
                     Some(extends),
@@ -604,6 +624,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     ret,
                     &body,
                     is_parallel,
+                    precompile,
                     span,
                 ));
             }

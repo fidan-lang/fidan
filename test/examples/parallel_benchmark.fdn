@@ -21,6 +21,7 @@ var CHUNK = N / 4       # work items per parallel task
 #
 # Compute  sum(sqrt(i+1))  for i in [from, to).
 # This is IO-free, pure CPU work — ideal for demonstrating parallel speedup.
+@precompile
 action compute_range with (from oftype integer, to oftype integer) returns float {
     var acc = 0.0
     var i = from

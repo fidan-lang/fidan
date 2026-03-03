@@ -51,6 +51,9 @@ enum Command {
         /// Stop after this many errors (0 = no limit)
         #[arg(long, default_value = "0")]
         max_errors: usize,
+        /// JIT compilation threshold: compile a function after this many calls (0 = off)
+        #[arg(long, default_value = "500")]
+        jit_threshold: u32,
     },
     /// Compile a Fidan source file to a native binary
     Build {
@@ -254,6 +257,7 @@ fn main() -> Result<()> {
             emit,
             trace,
             max_errors,
+            jit_threshold,
         } => {
             let emit_kinds = parse_emit(&emit)?;
             let trace_mode = parse_trace(&trace)?;
@@ -268,6 +272,7 @@ fn main() -> Result<()> {
                 } else {
                     Some(max_errors)
                 },
+                jit_threshold,
             };
             run_pipeline(opts)
         }
@@ -1154,10 +1159,11 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                     if error_count == 0 {
                         // ── Optimisation passes (Phase 6) ─────────────────────
                         fidan_passes::run_all(&mut mir);
-                        let result = fidan_interp::run_mir(
+                        let result = fidan_interp::run_mir_with_jit(
                             mir,
                             Arc::clone(&interner),
                             Arc::clone(&source_map),
+                            opts.jit_threshold,
                         );
                         if let Err(err) = result {
                             render_message_to_stderr(Severity::Error, err.code, &err.message);
@@ -1192,10 +1198,11 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                     error_count += emit_mir_safety_diags(&mir, &interner);
                     if error_count == 0 {
                         fidan_passes::run_all(&mut mir);
-                        match fidan_interp::run_mir(
+                        match fidan_interp::run_mir_with_jit(
                             mir,
                             Arc::clone(&interner),
                             Arc::clone(&source_map),
+                            opts.jit_threshold,
                         ) {
                             Ok(()) => {
                                 eprintln!("\x1b[1;32mtest passed\x1b[0m");

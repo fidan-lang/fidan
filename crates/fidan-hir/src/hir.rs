@@ -99,6 +99,9 @@ pub struct HirFunction {
     pub return_ty: FidanType,
     pub body: Vec<HirStmt>,
     pub is_parallel: bool,
+    /// `true` when the `@precompile` decorator was applied — the JIT should
+    /// compile this function eagerly before the first call.
+    pub precompile: bool,
     pub span: Span,
 }
 

@@ -452,6 +452,47 @@ Fix: call the action with parentheses (and any required arguments):
 "#,
         ),
 
+        "W2004" => Some(
+            r#"A decorator name was applied to an action but is not recognised by
+the Fidan compiler.  Recognised decorators are:
+
+    @precompile   — eagerly JIT-compile the action before the first call
+    @deprecated   — mark the action as deprecated; callers receive W2005
+    @extern       — (reserved, not yet implemented)
+    @gpu          — (reserved, not yet implemented)
+
+The unrecognised decorator is silently ignored at runtime, but it is
+likely a typo or refers to a decorator that has not yet been implemented.
+
+Erroneous example:
+
+    @optimize    # warning: unknown decorator
+    action heavy_compute { ... }
+
+Fix: either correct the spelling or remove the unknown decorator:
+
+    @precompile
+    action heavy_compute { ... }
+"#,
+        ),
+
+        "W2005" => Some(
+            r#"An action that has been marked `@deprecated` was called.  Deprecated
+actions are scheduled for removal in a future version of the codebase
+and callers should be migrated to a replacement.
+
+Erroneous example:
+
+    @deprecated
+    action old_api() { ... }
+
+    old_api()   # warning: `old_api` is marked @deprecated
+
+Fix: replace the call with the recommended replacement, then remove the
+`@deprecated` decorator from the action once all callers are migrated.
+"#,
+        ),
+
         // ── Runtime ───────────────────────────────────────────────────────────
         "R0001" => Some(
             r#"An unhandled runtime error propagated to the top level.  This

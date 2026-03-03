@@ -151,6 +151,16 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "bare action reference has no effect",
         category: "lint",
     },
+    DiagnosticCode {
+        code: "W2004",
+        title: "unknown decorator",
+        category: "lint",
+    },
+    DiagnosticCode {
+        code: "W2005",
+        title: "deprecated symbol",
+        category: "lint",
+    },
     // ── Runtime: control flow ─────────────────────────────────────────────────
     DiagnosticCode {
         code: "R0001",

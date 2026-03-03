@@ -4,4 +4,4 @@
 
 mod jit;
 
-pub use jit::JitCompiler;
+pub use jit::{JitCompiler, JitFnEntry, call_jit_fn};

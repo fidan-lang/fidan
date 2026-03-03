@@ -228,11 +228,11 @@ impl<'t> Parser<'t> {
     }
 
     fn parse_top_level(&mut self) -> Option<ItemId> {
-        let _decs = self.parse_decorators();
+        let decs = self.parse_decorators();
         self.skip_terminators(); // skip any newlines between decorator and declaration
         match self.peek().clone() {
             TokenKind::Object => Some(self.parse_object_decl()),
-            TokenKind::Action => Some(self.parse_action_decl(false)),
+            TokenKind::Action => Some(self.parse_action_decl(false, decs)),
             TokenKind::Use => Some(self.parse_use_decl(false)),
             TokenKind::Export => {
                 self.advance(); // eat `export`
@@ -305,7 +305,7 @@ impl<'t> Parser<'t> {
                 let _ = span;
                 if matches!(self.peek_nth(1), TokenKind::Action) {
                     self.advance(); // eat `parallel`
-                    return Some(self.parse_action_decl(true));
+                    return Some(self.parse_action_decl(true, decs));
                 } else if let Some(sid) = self.parse_stmt() {
                     return Some(self.module.arena.alloc_item(Item::Stmt(sid)));
                 } else {
@@ -487,6 +487,11 @@ impl<'t> Parser<'t> {
 
         loop {
             self.skip_terminators();
+            // Parse any decorators before the next item in the object body.
+            let method_decs = self.parse_decorators();
+            if !method_decs.is_empty() {
+                self.skip_terminators();
+            }
             match self.peek().clone() {
                 TokenKind::RBrace | TokenKind::Eof => break,
                 TokenKind::Var => {
@@ -499,7 +504,7 @@ impl<'t> Parser<'t> {
                     } else {
                         false
                     };
-                    methods.push(self.parse_action_decl(is_par));
+                    methods.push(self.parse_action_decl(is_par, method_decs));
                 }
                 TokenKind::New => {
                     // Constructor block: `new with (params) { body }`
@@ -596,7 +601,11 @@ impl<'t> Parser<'t> {
 
     // ── Action declaration ────────────────────────────────────────────────────
 
-    pub(crate) fn parse_action_decl(&mut self, is_parallel: bool) -> ItemId {
+    pub(crate) fn parse_action_decl(
+        &mut self,
+        is_parallel: bool,
+        decorators: Vec<fidan_ast::Decorator>,
+    ) -> ItemId {
         let start = self.current_span().start;
         self.advance(); // eat `action`
         let name = self.expect_ident_sym("expected action name");
@@ -635,7 +644,7 @@ impl<'t> Parser<'t> {
                 params,
                 return_ty,
                 body,
-                decorators: vec![],
+                decorators,
                 is_parallel,
                 span: Span::new(self.module.file, start, end),
             })
@@ -645,7 +654,7 @@ impl<'t> Parser<'t> {
                 params,
                 return_ty,
                 body,
-                decorators: vec![],
+                decorators,
                 is_parallel,
                 span: Span::new(self.module.file, start, end),
             })

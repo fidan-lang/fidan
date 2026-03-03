@@ -345,6 +345,8 @@ pub struct MirFunction {
     pub blocks: Vec<BasicBlock>,
     /// Total number of SSA locals allocated (used to size `locals` array at runtime).
     pub local_count: u32,
+    /// `true` when `@precompile` was applied — JIT should compile eagerly.
+    pub precompile: bool,
 }
 
 impl MirFunction {
@@ -356,6 +358,7 @@ impl MirFunction {
             return_ty,
             blocks: vec![],
             local_count: 0,
+            precompile: false,
         }
     }
 

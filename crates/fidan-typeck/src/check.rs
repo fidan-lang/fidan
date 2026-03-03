@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 use crate::scope::{Initialized, ScopeKind, SymbolInfo, SymbolKind, SymbolTable};
 use crate::types::FidanType;
-use fidan_ast::{AstArena, BinOp, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp};
+use fidan_ast::{
+    AstArena, BinOp, Decorator, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp,
+};
 use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::{FileId, Span};
@@ -61,6 +63,9 @@ pub struct TypeChecker {
     pub(crate) expr_types: FxHashMap<ExprId, FidanType>,
     /// Top-level action signatures (name → ActionInfo).  Populated during Pass 1.
     pub(crate) actions: FxHashMap<Symbol, ActionInfo>,
+    /// Set of action names decorated with `@deprecated`.
+    /// Used by `infer_call` to emit W2005 at call sites.
+    deprecated_actions: rustc_hash::FxHashSet<Symbol>,
 }
 
 impl TypeChecker {
@@ -77,6 +82,7 @@ impl TypeChecker {
             registering: false,
             expr_types: FxHashMap::default(),
             actions: FxHashMap::default(),
+            deprecated_actions: rustc_hash::FxHashSet::default(),
         };
         tc.register_builtins();
         tc
@@ -217,6 +223,10 @@ impl TypeChecker {
 
     /// Run the full type checker over `module`.  Returns all diagnostics.
     pub fn check_module(&mut self, module: &Module) {
+        // Clear per-module state so that multi-module programs don't bleed
+        // @deprecated registrations from one module into another.
+        self.deprecated_actions.clear();
+
         // Pass 1: register every top-level declaration so forward references work.
         // Suppress E0105 diagnostics here — Pass 2 re-resolves and emits them.
         self.registering = true;
@@ -568,8 +578,17 @@ impl TypeChecker {
                 params,
                 return_ty,
                 body,
+                decorators,
                 ..
             } => {
+                self.check_decorators(decorators);
+                // Track @deprecated actions for call-site warnings (W2005).
+                if decorators
+                    .iter()
+                    .any(|d| self.interner.resolve(d.name).as_ref() == "deprecated")
+                {
+                    self.deprecated_actions.insert(*name);
+                }
                 // A `new` constructor inside an object always returns nothing — the
                 // runtime constructs the object itself and discards any return value.
                 let sym_new = self.interner.intern("new");
@@ -584,12 +603,22 @@ impl TypeChecker {
             }
 
             Item::ExtensionAction {
+                name,
                 extends,
                 params,
                 return_ty,
                 body,
+                decorators,
                 ..
             } => {
+                self.check_decorators(decorators);
+                // Track @deprecated extension actions.
+                if decorators
+                    .iter()
+                    .any(|d| self.interner.resolve(d.name).as_ref() == "deprecated")
+                {
+                    self.deprecated_actions.insert(*name);
+                }
                 let ext_ty = FidanType::Object(*extends);
                 let prev_this = self.this_ty.replace(ext_ty.clone());
                 self.check_action_body(params, return_ty, body, Some(ext_ty), None, module);
@@ -1419,6 +1448,15 @@ impl TypeChecker {
                         if let Some(info) = self.actions.get(&name).cloned() {
                             self.check_params_provided(&info.params, args, span);
                         }
+                        // Emit W2005 if the action is marked @deprecated.
+                        if self.deprecated_actions.contains(&name) {
+                            let n = self.interner.resolve(name).to_string();
+                            self.emit_warning(
+                                fidan_diagnostics::diag_code!("W2005"),
+                                format!("`{n}` is marked `@deprecated` and may be removed in a future version"),
+                                callee_span,
+                            );
+                        }
                         return FidanType::Dynamic;
                     }
                     None => {
@@ -1823,6 +1861,24 @@ impl TypeChecker {
         span: Span,
     ) {
         self.diags.push(Diagnostic::warning(code, message, span));
+    }
+
+    /// Validate a list of decorators, emitting W2004 for any that are not
+    /// recognised by the compiler.
+    ///
+    /// Recognised decorators: `precompile`, `deprecated`.
+    fn check_decorators(&mut self, decorators: &[Decorator]) {
+        const KNOWN: &[&str] = &["precompile", "deprecated"];
+        for dec in decorators {
+            let name = self.interner.resolve(dec.name);
+            if !KNOWN.contains(&name.as_ref()) {
+                self.emit_warning(
+                    fidan_diagnostics::diag_code!("W2004"),
+                    format!("unknown decorator `@{name}` — will be ignored at runtime"),
+                    dec.span,
+                );
+            }
+        }
     }
 
     /// Emit W2002 if `expr_id` is a bare literal with no side effects.

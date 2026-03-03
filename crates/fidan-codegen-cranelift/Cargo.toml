@@ -5,5 +5,12 @@ edition.workspace = true
 
 [dependencies]
 fidan-source = { workspace = true }
+fidan-ast = { workspace = true }
 fidan-mir = { workspace = true }
 fidan-runtime = { workspace = true }
+fidan-lexer = { workspace = true }
+cranelift-jit = { workspace = true }
+cranelift-codegen = { workspace = true }
+cranelift-frontend = { workspace = true }
+cranelift-native = { workspace = true }
+cranelift-module = { workspace = true }
