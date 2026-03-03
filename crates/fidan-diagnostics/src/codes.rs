@@ -161,6 +161,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "deprecated symbol",
         category: "lint",
     },
+    DiagnosticCode {
+        code: "W2006",
+        title: "possibly-nothing value used in non-null context",
+        category: "null-safety",
+    },
     // ── Runtime: control flow ─────────────────────────────────────────────────
     DiagnosticCode {
         code: "R0001",

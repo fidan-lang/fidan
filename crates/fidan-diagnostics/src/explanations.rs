@@ -493,6 +493,52 @@ Fix: replace the call with the recommended replacement, then remove the
 "#,
         ),
 
+        "W2006" => Some(
+            r#"A local variable that is statically known to hold `nothing` was used
+in a context that requires a real value — arithmetic, a method call,
+field or index access, or a function parameter marked `required`.
+
+Because `nothing` is not a number, object, or container, these
+operations will raise a runtime panic when the program is executed.
+
+Erroneous example:
+
+    var count           # never assigned — always `nothing`
+    print(count + 1)    # warning W2006: `count` is nothing; `+` will panic
+
+Another common pattern:
+
+    action find with (required haystack -> list) returns dynamic {
+        # ... search that may return nothing ...
+    }
+
+    var result = find(items)
+    print(result.name)      # warning W2006: `result` may be nothing; `.name` will panic
+
+Fix — option A: provide an initial value:
+
+    var count = 0
+    print(count + 1)    # OK
+
+Fix — option B: guard with a nil-check before use:
+
+    var result = find(items)
+    if result is not nothing {
+        print(result.name)
+    }
+
+Fix — option C: use the null-coalescing operator `??`:
+
+    print((result ?? default_item).name)
+
+Note: this pass is flow-insensitive — it tracks `nothing` assignments
+through SSA copies but does not reason about branch conditions.  Some
+warnings may be false positives if the code is guarded by a condition
+that the pass cannot see.  Use `--strict` to promote these warnings to
+hard errors in safety-critical code.
+"#,
+        ),
+
         // ── Runtime ───────────────────────────────────────────────────────────
         "R0001" => Some(
             r#"An unhandled runtime error propagated to the top level.  This

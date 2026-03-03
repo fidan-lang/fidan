@@ -11,6 +11,7 @@ mod constant_folding;
 mod copy_propagation;
 mod dead_code;
 mod inlining;
+pub mod null_safety;
 pub mod parallel_check;
 pub mod unawaited_pending;
 mod unreachable_pruning;
@@ -19,6 +20,7 @@ pub use constant_folding::ConstantFolding;
 pub use copy_propagation::CopyPropagation;
 pub use dead_code::DeadCodeElimination;
 pub use inlining::Inlining;
+pub use null_safety::NullSafetyDiag;
 pub use parallel_check::ParallelRaceDiag;
 pub use unawaited_pending::UnawaitedPendingDiag;
 pub use unreachable_pruning::UnreachablePruning;
@@ -37,6 +39,14 @@ pub fn check_unawaited_pending(
     interner: &fidan_lexer::SymbolInterner,
 ) -> Vec<UnawaitedPendingDiag> {
     unawaited_pending::check(prog, interner)
+}
+
+/// Check for definitely-nothing values used in non-null-safe contexts (W2006).
+pub fn check_null_safety(
+    prog: &MirProgram,
+    interner: &fidan_lexer::SymbolInterner,
+) -> Vec<NullSafetyDiag> {
+    null_safety::check(prog, interner)
 }
 
 /// Run all optimisation passes in the standard order.

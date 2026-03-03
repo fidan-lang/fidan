@@ -26,6 +26,9 @@ pub struct CompileOptions {
     pub max_errors: Option<usize>,
     /// Call-count threshold before the JIT compiles a hot function (0 = off).
     pub jit_threshold: u32,
+    /// Treat select warnings (unused vars, null safety, deprecated, unknown
+    /// decorator) as hard errors.  Mirrors `-Werror` in C compilers.
+    pub strict_mode: bool,
 }
 
 impl Default for CompileOptions {
@@ -38,6 +41,7 @@ impl Default for CompileOptions {
             trace: TraceMode::None,
             max_errors: None,
             jit_threshold: 500,
+            strict_mode: false,
         }
     }
 }

@@ -54,6 +54,9 @@ enum Command {
         /// JIT compilation threshold: compile a function after this many calls (0 = off)
         #[arg(long, default_value = "500")]
         jit_threshold: u32,
+        /// Treat select warnings (W1001–W1003, W2004–W2006) as errors
+        #[arg(long)]
+        strict: bool,
     },
     /// Compile a Fidan source file to a native binary
     Build {
@@ -86,6 +89,9 @@ enum Command {
         /// Stop after this many errors (0 = no limit)
         #[arg(long, default_value = "0")]
         max_errors: usize,
+        /// Treat select warnings (W1001–W1003, W2004–W2006) as errors
+        #[arg(long)]
+        strict: bool,
     },
     /// Apply high-confidence fix suggestions to a Fidan source file
     Fix {
@@ -258,6 +264,7 @@ fn main() -> Result<()> {
             trace,
             max_errors,
             jit_threshold,
+            strict,
         } => {
             let emit_kinds = parse_emit(&emit)?;
             let trace_mode = parse_trace(&trace)?;
@@ -273,6 +280,7 @@ fn main() -> Result<()> {
                     Some(max_errors)
                 },
                 jit_threshold,
+                strict_mode: strict,
             };
             run_pipeline(opts)
         }
@@ -297,7 +305,11 @@ fn main() -> Result<()> {
             };
             run_pipeline(opts)
         }
-        Command::Check { file, max_errors } => {
+        Command::Check {
+            file,
+            max_errors,
+            strict,
+        } => {
             let opts = CompileOptions {
                 input: file,
                 mode: ExecutionMode::Check,
@@ -306,6 +318,7 @@ fn main() -> Result<()> {
                 } else {
                     Some(max_errors)
                 },
+                strict_mode: strict,
                 ..Default::default()
             };
             run_pipeline(opts)
@@ -388,9 +401,18 @@ fn render_trace_to_stderr(trace: &[fidan_interp::TraceFrame], mode: TraceMode) {
 ///
 /// Returns the number of **errors** found (warnings are rendered but not counted
 /// as blocking errors).
+/// Returns `true` for warning codes that `--strict` escalates to hard errors.
+fn is_strict_escalated(code: &str) -> bool {
+    matches!(
+        code,
+        "W1001" | "W1002" | "W1003" | "W2004" | "W2005" | "W2006"
+    )
+}
+
 fn emit_mir_safety_diags(
     mir: &fidan_mir::MirProgram,
     interner: &fidan_lexer::SymbolInterner,
+    strict_mode: bool,
 ) -> usize {
     let mut errs = 0;
 
@@ -419,6 +441,26 @@ fn emit_mir_safety_diags(
                 if diag.count == 1 { " is" } else { "s are" },
             ),
         );
+    }
+
+    // ── W2006: null-safety check ──────────────────────────────────────────────
+    for diag in fidan_passes::check_null_safety(mir, interner) {
+        let sev = if strict_mode {
+            Severity::Error
+        } else {
+            Severity::Warning
+        };
+        render_message_to_stderr(
+            sev,
+            fidan_diagnostics::diag_code!("W2006"),
+            &format!(
+                "in `{}`: {} — this will panic at runtime",
+                diag.fn_name, diag.context
+            ),
+        );
+        if strict_mode {
+            errs += 1;
+        }
     }
 
     errs
@@ -1030,13 +1072,19 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
         tc.check_module(&module);
         let tm = tc.finish_typed();
         for diag in &tm.diagnostics {
-            fidan_diagnostics::render_to_stderr(diag, &source_map);
+            if opts.strict_mode
+                && diag.severity == fidan_diagnostics::Severity::Warning
+                && is_strict_escalated(&diag.code)
+            {
+                render_message_to_stderr(Severity::Error, diag.code.as_str(), &diag.message);
+                error_count += 1;
+            } else {
+                fidan_diagnostics::render_to_stderr(diag, &source_map);
+                if diag.severity == fidan_diagnostics::Severity::Error {
+                    error_count += 1;
+                }
+            }
         }
-        error_count += tm
-            .diagnostics
-            .iter()
-            .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
-            .count();
         Some(tm)
     } else {
         None
@@ -1155,7 +1203,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                 if let Some(ref hir) = merged_hir {
                     let mut mir = fidan_mir::lower_program(hir, &interner);
                     // ── MIR safety analysis (E0401, W1004) ───────────────────────
-                    error_count += emit_mir_safety_diags(&mir, &interner);
+                    error_count += emit_mir_safety_diags(&mir, &interner, opts.strict_mode);
                     if error_count == 0 {
                         // ── Optimisation passes (Phase 6) ─────────────────────
                         fidan_passes::run_all(&mut mir);
@@ -1195,7 +1243,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                 if let Some(ref hir) = merged_hir {
                     let mut mir = fidan_mir::lower_program(hir, &interner);
                     // ── MIR safety analysis (E0401, W1004) ───────────────────
-                    error_count += emit_mir_safety_diags(&mir, &interner);
+                    error_count += emit_mir_safety_diags(&mir, &interner, opts.strict_mode);
                     if error_count == 0 {
                         fidan_passes::run_all(&mut mir);
                         match fidan_interp::run_mir_with_jit(
@@ -1551,6 +1599,8 @@ fn run_repl(trace_mode: TraceMode) -> Result<()> {
         // ── HIR → MIR → optimisation passes ───────────────────────────────
         let hir = fidan_hir::lower_module(&full_module, &typed, &interner);
         let mut mir = fidan_mir::lower_program(&hir, &interner);
+        // Run MIR safety diagnostics (W2006 null-safety, W1004 unawaited, etc.).
+        emit_mir_safety_diags(&mir, &interner, false);
         fidan_passes::run_all(&mut mir);
 
         // ── Execute the new delta on the MIR machine ───────────────────────
