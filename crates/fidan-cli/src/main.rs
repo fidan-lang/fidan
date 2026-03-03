@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use fidan_diagnostics::{Severity, render_message_to_stderr};

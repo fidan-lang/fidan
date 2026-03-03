@@ -58,6 +58,7 @@ indexmap = "2"
 smol_str = "0.3"
 strsim = "0.11"
 rustyline = "17"
+mimalloc = { version = "0.1", default-features = false }
 
 [profile.dev]
 opt-level = 1 # faster builds in dev without being fully unoptimised
