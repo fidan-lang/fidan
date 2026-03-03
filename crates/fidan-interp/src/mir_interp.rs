@@ -21,6 +21,7 @@ use fidan_runtime::{
 };
 use fidan_source::{SourceMap, Span};
 use fidan_stdlib::{StdlibResult, parallel::ParallelOp};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::builtins;
 use crate::interp::{RunError, TraceFrame};
@@ -32,26 +33,26 @@ use crate::interp::{RunError, TraceFrame};
 fn build_class_table(
     objects: &[MirObjectInfo],
     interner: &SymbolInterner,
-) -> std::collections::HashMap<fidan_lexer::Symbol, Arc<FidanClass>> {
-    use std::collections::HashMap;
-    let mut table: HashMap<fidan_lexer::Symbol, Arc<FidanClass>> = HashMap::new();
+) -> FxHashMap<fidan_lexer::Symbol, Arc<FidanClass>> {
+    let mut table: FxHashMap<fidan_lexer::Symbol, Arc<FidanClass>> = FxHashMap::default();
 
     // Build in the order objects appear (HIR outputs parents before children).
     for obj in objects {
         // Collect inherited fields from parent chain first, then own fields.
+        // Use a HashSet for O(1) dedup instead of Vec::contains (which is O(n) per check).
+        let mut seen: FxHashSet<fidan_lexer::Symbol> = FxHashSet::default();
         let mut all_field_names: Vec<fidan_lexer::Symbol> = Vec::new();
         if let Some(parent_sym) = obj.parent {
             if let Some(parent_class) = table.get(&parent_sym) {
-                // Add parent fields (in their original order).
                 for fd in &parent_class.fields {
-                    if !all_field_names.contains(&fd.name) {
+                    if seen.insert(fd.name) {
                         all_field_names.push(fd.name);
                     }
                 }
             }
         }
         for &f in &obj.field_names {
-            if !all_field_names.contains(&f) {
+            if seen.insert(f) {
                 all_field_names.push(f);
             }
         }
@@ -126,13 +127,15 @@ impl CallFrame {
 pub struct MirMachine {
     program: Arc<MirProgram>,
     interner: Arc<SymbolInterner>,
-    classes: std::collections::HashMap<Symbol, Arc<FidanClass>>,
+    classes: FxHashMap<Symbol, Arc<FidanClass>>,
     /// Source map for resolving spans to file/line/col in stack traces.
     source_map: Arc<SourceMap>,
     /// Names + call-site spans of all currently executing functions, outermost first.
     /// Each entry is `(full_label, call_site_span)` where the span is where *this*
     /// function was called from (i.e. the `Instr::Call` span in the caller).
-    call_stack: Vec<(String, Option<Span>)>,
+    /// Each entry is `(fn_id, call_site_span, raw_args)`.  The label string is
+    /// built lazily — only when a panic trace is actually needed (error path).
+    call_stack: Vec<(FunctionId, Option<Span>, Vec<FidanValue>)>,
     /// Span of the `Instr::Call` currently being dispatched — consumed by the
     /// next `call_function` invocation to annotate its stack frame.
     pending_call_span: Option<Span>,
@@ -141,16 +144,21 @@ pub struct MirMachine {
     panic_trace: Vec<TraceFrame>,
     /// Maps free-imported function names (e.g. `readFile`) to their stdlib module
     /// (e.g. `"io"`).  Populated from `use std.io.{readFile}` declarations.
-    stdlib_free_fns: std::collections::HashMap<Arc<str>, Arc<str>>,
+    stdlib_free_fns: FxHashMap<Arc<str>, Arc<str>>,
     /// Set of stdlib module names/aliases known in this program (e.g. `"io"`, `"math"`).
     /// O(1) lookup used by `dispatch_method` to distinguish stdlib vs user namespaces.
-    stdlib_modules: std::collections::HashSet<Arc<str>>,
+    stdlib_modules: FxHashSet<Arc<str>>,
+    /// Set of namespace aliases that were re-exported (`export use mod`) — used by
+    /// `get_field` for O(1) chaining lookup (e.g. `lib.math.sqrt`).
+    reexported_namespaces: FxHashSet<Arc<str>>,
     /// Maps merged free-function names to their `FunctionId`.
     /// Used for `use mymod` / `test2.add(...)` user-module namespace dispatch.
-    user_fn_map: std::collections::HashMap<Symbol, FunctionId>,
+    user_fn_map: FxHashMap<Symbol, FunctionId>,
     /// Module-level global variables, shared across all threads.
-    /// Indexed by `GlobalId` (same index as `MirProgram::globals`).
-    globals: Arc<std::sync::Mutex<Vec<FidanValue>>>,
+    /// Init function writes (single-threaded); all other accesses are reads unless
+    /// the user program explicitly mutates a global at runtime.  `RwLock` allows
+    /// concurrent reads (parallel tasks) while still supporting write access.
+    globals: Arc<std::sync::RwLock<Vec<FidanValue>>>,
     /// Accumulated test results when running in `fidan test` mode.
     #[allow(dead_code)]
     pub test_results: Vec<TestResult>,
@@ -179,11 +187,11 @@ impl MirMachine {
         let classes = build_class_table(&program.objects, &interner);
 
         // Build the free-function import map from `use std.module.{fn}` declarations.
-        let mut stdlib_free_fns: std::collections::HashMap<Arc<str>, Arc<str>> =
-            std::collections::HashMap::new();
+        let mut stdlib_free_fns: FxHashMap<Arc<str>, Arc<str>> = FxHashMap::default();
         // Build the stdlib module set: module names AND aliases, for O(1) is-stdlib lookup.
-        let mut stdlib_modules: std::collections::HashSet<Arc<str>> =
-            std::collections::HashSet::new();
+        let mut stdlib_modules: FxHashSet<Arc<str>> = FxHashSet::default();
+        // Build the re-exported namespace set for O(1) get_field chaining lookup.
+        let mut reexported_namespaces: FxHashSet<Arc<str>> = FxHashSet::default();
         for decl in &program.use_decls {
             // User-module re-export entries (`is_stdlib = false`) only exist to support
             // `get_field` chaining (e.g. `lib.math.sqrt`).  They must NOT be added to
@@ -208,13 +216,20 @@ impl MirMachine {
             }
         }
 
+        // Populate reexported_namespaces: every use_decl with re_export=true
+        // and no specific names becomes a re-exported namespace alias.
+        for decl in &program.use_decls {
+            if decl.re_export && decl.specific_names.is_none() {
+                reexported_namespaces.insert(Arc::from(decl.alias.as_str()));
+            }
+        }
+
         let globals_count = program.globals.len();
 
         // Build user-module function name map: all merged free functions (non-init,
         // non-method). Methods have `this` as their first param; we detect that.
         let this_sym = interner.intern("this");
-        let mut user_fn_map: std::collections::HashMap<Symbol, FunctionId> =
-            std::collections::HashMap::new();
+        let mut user_fn_map: FxHashMap<Symbol, FunctionId> = FxHashMap::default();
         for (i, func) in program.functions.iter().enumerate() {
             if i == 0 {
                 continue; // skip init fn
@@ -241,8 +256,9 @@ impl MirMachine {
             panic_trace: Vec::new(),
             stdlib_free_fns,
             stdlib_modules,
+            reexported_namespaces,
             user_fn_map,
-            globals: Arc::new(std::sync::Mutex::new(vec![
+            globals: Arc::new(std::sync::RwLock::new(vec![
                 FidanValue::Nothing;
                 globals_count
             ])),
@@ -266,6 +282,7 @@ impl MirMachine {
             panic_trace: Vec::new(),
             stdlib_free_fns: self.stdlib_free_fns.clone(),
             stdlib_modules: self.stdlib_modules.clone(),
+            reexported_namespaces: self.reexported_namespaces.clone(),
             user_fn_map: self.user_fn_map.clone(),
             globals: Arc::clone(&self.globals),
             test_results: Vec::new(),
@@ -311,31 +328,20 @@ impl MirMachine {
         let fn_name = self.sym_str(func.name).to_string();
         let local_count = func.local_count;
 
-        let mut frame = CallFrame::new(local_count, fn_name.clone());
+        let mut frame = CallFrame::new(local_count, fn_name);
 
-        // Bind parameters and build a rich call-site label: `name(param = val, ...)`.
-        let mut arg_parts: Vec<String> = Vec::new();
+        // Bind parameters — defer all string formatting to the error path only.
+        // On the happy path we do ZERO formatting/allocation per argument.
         for (i, param) in func.params.iter().enumerate() {
             let val = args.get(i).cloned().unwrap_or(FidanValue::Nothing);
-            let pname = self.sym_str(param.name).to_string();
-            let vdisplay = match &val {
-                fidan_runtime::FidanValue::String(_) => {
-                    format!("{:?}", builtins::display(&val))
-                }
-                _ => builtins::display(&val),
-            };
-            arg_parts.push(format!("{pname} = {vdisplay}"));
             frame.store(param.local, val);
         }
-        let full_label = if arg_parts.is_empty() {
-            format!("{fn_name}()")
-        } else {
-            format!("{fn_name}({})", arg_parts.join(", "))
-        };
 
         // Consume the call-site span set by exec_instr just before calling us.
+        // Push raw fn_id + args into the call stack — the label is built lazily
+        // only when a panic/throw actually fires and we need the trace.
         let call_site_span = self.pending_call_span.take();
-        self.call_stack.push((full_label, call_site_span));
+        self.call_stack.push((fn_id, call_site_span, args));
 
         // Block-level execution starting at entry (BlockId(0)).
         let result = self.run_function(fn_id, &mut frame);
@@ -343,6 +349,7 @@ impl MirMachine {
         // Capture the trace at the innermost frame (only once — don't overwrite).
         // Exclude the module-level entry function (FunctionId(0)) from the trace
         // since it is not a user-visible named function.
+        // Labels are formatted HERE — only on the error path.
         if result.is_err() && self.panic_trace.is_empty() {
             self.panic_trace = self
                 .call_stack
@@ -350,16 +357,35 @@ impl MirMachine {
                 .enumerate()
                 .filter(|(i, _)| *i > 0) // skip entry function at index 0
                 .rev()
-                .map(|(_, (label, span))| {
+                .map(|(_, (call_fn_id, span, call_args))| {
+                    let func = self.program.function(*call_fn_id);
+                    let fn_name = self.sym_str(func.name).to_string();
+                    let arg_parts: Vec<String> = func
+                        .params
+                        .iter()
+                        .zip(call_args.iter())
+                        .map(|(p, v)| {
+                            let pname = self.sym_str(p.name);
+                            let vdisplay = match v {
+                                fidan_runtime::FidanValue::String(_) => {
+                                    format!("{:?}", builtins::display(v))
+                                }
+                                _ => builtins::display(v),
+                            };
+                            format!("{pname} = {vdisplay}")
+                        })
+                        .collect();
+                    let label = if arg_parts.is_empty() {
+                        format!("{fn_name}()")
+                    } else {
+                        format!("{fn_name}({})", arg_parts.join(", "))
+                    };
                     let location = span.map(|s| {
                         let file = self.source_map.get(s.file);
                         let (line, col) = file.line_col(s.start);
                         format!("{}:{}:{}", file.name, line, col)
                     });
-                    TraceFrame {
-                        label: label.clone(),
-                        location,
-                    }
+                    TraceFrame { label, location }
                 })
                 .collect();
         }
@@ -379,27 +405,31 @@ impl MirMachine {
 
         'outer: loop {
             // Evaluate phi-nodes using `prev_bb`.
-            let phis: Vec<(LocalId, FidanValue)> = {
+            // Most blocks have no phi nodes — skip the Vec allocation entirely.
+            {
                 let func = self.program.function(fn_id);
                 let bb = func.block(bb_id);
-                bb.phis
-                    .iter()
-                    .map(|phi| {
-                        let val = if let Some(p) = prev_bb {
-                            phi.operands
-                                .iter()
-                                .find(|(src, _)| *src == p)
-                                .map(|(_, op)| self.eval_operand(op, frame))
-                                .unwrap_or(FidanValue::Nothing)
-                        } else {
-                            FidanValue::Nothing
-                        };
-                        (phi.result, val)
-                    })
-                    .collect()
-            };
-            for (dest, val) in phis {
-                frame.store(dest, val);
+                if !bb.phis.is_empty() {
+                    let phis: Vec<(LocalId, FidanValue)> = bb
+                        .phis
+                        .iter()
+                        .map(|phi| {
+                            let val = if let Some(p) = prev_bb {
+                                phi.operands
+                                    .iter()
+                                    .find(|(src, _)| *src == p)
+                                    .map(|(_, op)| self.eval_operand(op, frame))
+                                    .unwrap_or(FidanValue::Nothing)
+                            } else {
+                                FidanValue::Nothing
+                            };
+                            (phi.result, val)
+                        })
+                        .collect();
+                    for (dest, val) in phis {
+                        frame.store(dest, val);
+                    }
+                }
             }
 
             // Execute instructions.
@@ -555,7 +585,7 @@ impl MirMachine {
             Instr::LoadGlobal { dest, global } => {
                 let val = self
                     .globals
-                    .lock()
+                    .read()
                     .unwrap()
                     .get(global.0 as usize)
                     .cloned()
@@ -564,7 +594,7 @@ impl MirMachine {
             }
             Instr::StoreGlobal { global, value } => {
                 let val = self.eval_operand(&value, frame);
-                if let Some(slot) = self.globals.lock().unwrap().get_mut(global.0 as usize) {
+                if let Some(slot) = self.globals.write().unwrap().get_mut(global.0 as usize) {
                     *slot = val;
                 }
             }
@@ -1101,12 +1131,9 @@ impl MirMachine {
             // Nothing so the caller gets a proper "no method found" error.
             FidanValue::Namespace(module) if !self.stdlib_modules.contains(module.as_ref()) => {
                 let field_name = self.sym_str(field);
-                // A re-exported namespace use_decl: re_export=true, specific_names=None,
-                // alias matching the field name.
-                let is_reexported = self.program.use_decls.iter().any(|d| {
-                    d.re_export && d.specific_names.is_none() && d.alias == field_name.as_ref()
-                });
-                if is_reexported {
+                // O(1) lookup: was this namespace re-exported by the imported module?
+                // `reexported_namespaces` is built once at MirMachine::new().
+                if self.reexported_namespaces.contains(field_name.as_ref()) {
                     FidanValue::Namespace(field_name)
                 } else {
                     FidanValue::Nothing
