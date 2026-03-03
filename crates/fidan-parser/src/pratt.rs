@@ -118,6 +118,25 @@ impl<'t> Parser<'t> {
         let mut lhs = self.parse_prefix();
 
         loop {
+            // ── Line continuation ─────────────────────────────────────────────
+            // If the current token is a Newline and the *next* token is an infix
+            // operator with sufficient binding power, treat the newline as
+            // whitespace so that multi-line expressions like:
+            //
+            //   var x = a + b
+            //         + c + d
+            //
+            // work correctly.  We only consume the Newline when we are certain
+            // the operator that follows will be accepted (l_bp >= min_bp), so
+            // the parser state is never corrupted.
+            if matches!(self.peek(), TokenKind::Newline) {
+                if let Some((l_bp, _)) = self.infix_bp(self.peek_nth(1)) {
+                    if l_bp >= min_bp {
+                        self.advance(); // eat the Newline; next peek is the operator
+                    }
+                }
+            }
+
             // `is not` → NotEq normalization (special two-token sequence)
             if matches!(self.peek(), TokenKind::Is) && matches!(self.peek_nth(1), TokenKind::Not) {
                 if 7 < min_bp {
