@@ -159,6 +159,10 @@ pub struct MirMachine {
     /// the user program explicitly mutates a global at runtime.  `RwLock` allows
     /// concurrent reads (parallel tasks) while still supporting write access.
     globals: Arc<std::sync::RwLock<Vec<FidanValue>>>,
+    /// Snapshot of all interned strings taken once after parsing.
+    /// Allows O(1) symbol → &str resolution with a single `Arc::clone` and
+    /// NO `RwLock` acquisition — critical for the hot method-dispatch path.
+    str_table: Arc<[Arc<str>]>,
     /// Accumulated test results when running in `fidan test` mode.
     #[allow(dead_code)]
     pub test_results: Vec<TestResult>,
@@ -246,6 +250,11 @@ impl MirMachine {
             user_fn_map.insert(func.name, FunctionId(i as u32));
         }
 
+        // Snapshot all interned strings into an Arc-backed slice.
+        // After parsing every symbol is already interned; indexing by sym.0
+        // never contends on the RwLock inside SymbolInterner.
+        let str_table: Arc<[Arc<str>]> = Arc::from(interner.snapshot().into_boxed_slice());
+
         Self {
             program,
             interner,
@@ -262,6 +271,7 @@ impl MirMachine {
                 FidanValue::Nothing;
                 globals_count
             ])),
+            str_table,
             test_results: Vec::new(),
         }
     }
@@ -285,13 +295,20 @@ impl MirMachine {
             reexported_namespaces: self.reexported_namespaces.clone(),
             user_fn_map: self.user_fn_map.clone(),
             globals: Arc::clone(&self.globals),
+            // One atomic bump on the outer Arc; all Arc<str> entries are shared.
+            str_table: Arc::clone(&self.str_table),
             test_results: Vec::new(),
         }
     }
 
     /// Resolve a `Symbol` to its string.
+    ///
+    /// Uses the pre-snapshotted `str_table` — O(1) array index + single
+    /// `Arc::clone`, NO `RwLock` acquisition.  All symbols are stable by
+    /// the time the interpreter runs (parsing is complete).
+    #[inline]
     fn sym_str(&self, sym: Symbol) -> Arc<str> {
-        self.interner.resolve(sym)
+        Arc::clone(&self.str_table[sym.0 as usize])
     }
 
     // ── Entry point ──────────────────────────────────────────────────────────
@@ -400,6 +417,9 @@ impl MirMachine {
         fn_id: FunctionId,
         frame: &mut CallFrame,
     ) -> Result<Option<FidanValue>, MirSignal> {
+        // Clone the Arc so we can hold &instr borrows while still calling
+        // &mut self methods.  Arc::clone = one atomic increment, near-free.
+        let program = Arc::clone(&self.program);
         let mut bb_id = BlockId(0);
         let mut prev_bb: Option<BlockId> = None;
 
@@ -407,8 +427,7 @@ impl MirMachine {
             // Evaluate phi-nodes using `prev_bb`.
             // Most blocks have no phi nodes — skip the Vec allocation entirely.
             {
-                let func = self.program.function(fn_id);
-                let bb = func.block(bb_id);
+                let bb = program.function(fn_id).block(bb_id);
                 if !bb.phis.is_empty() {
                     let phis: Vec<(LocalId, FidanValue)> = bb
                         .phis
@@ -432,11 +451,14 @@ impl MirMachine {
                 }
             }
 
-            // Execute instructions.
-            let instr_count = { self.program.function(fn_id).block(bb_id).instructions.len() };
+            // Execute instructions — borrow &Instr from the Arc-backed program.
+            // This eliminates the Instr::clone() that was previously required to
+            // satisfy the borrow checker, removing Vec<Operand> heap allocations
+            // from the hot dispatch path (critical for parallel scaling).
+            let instr_count = program.function(fn_id).block(bb_id).instructions.len();
 
             for i in 0..instr_count {
-                let instr = self.program.function(fn_id).block(bb_id).instructions[i].clone();
+                let instr = &program.function(fn_id).block(bb_id).instructions[i];
                 match self.exec_instr(instr, frame) {
                     Ok(Some(ret)) => return Ok(Some(ret)),
                     Ok(None) => {}
@@ -456,7 +478,8 @@ impl MirMachine {
             }
 
             // Handle terminator.
-            let term = self.program.function(fn_id).block(bb_id).terminator.clone();
+            // Terminator has no Vec fields — clone is a cheap stack copy.
+            let term = program.function(fn_id).block(bb_id).terminator.clone();
             match term {
                 Terminator::Return(op) => {
                     let val = op.as_ref().map(|o| self.eval_operand(o, frame));
@@ -496,15 +519,19 @@ impl MirMachine {
 
     /// Returns `Some(FidanValue)` only if the instruction causes an early return
     /// (which only happens inside `Instr::Call` to a user function that returns).
+    /// Takes `&Instr` — no clone of Vec<Operand> fields in Instr::Call etc.
     fn exec_instr(
         &mut self,
-        instr: Instr,
+        instr: &Instr,
         frame: &mut CallFrame,
     ) -> Result<Option<FidanValue>, MirSignal> {
         match instr {
             Instr::Assign { dest, rhs, .. } => {
-                let val = self.eval_rvalue(rhs, frame)?;
-                frame.store(dest, val);
+                // Clone only the Rvalue, not the encompassing Instr.
+                // For BinOp / Use (the hot cases) Rvalue::clone is a stack
+                // copy with no heap allocation.
+                let val = self.eval_rvalue(rhs.clone(), frame)?;
+                frame.store(*dest, val);
             }
             Instr::Call {
                 dest,
@@ -513,12 +540,13 @@ impl MirMachine {
                 span,
             } => {
                 // Record the call-site span so call_function can attach it to the frame.
-                self.pending_call_span = Some(span);
+                self.pending_call_span = Some(*span);
+                // `args` is `&Vec<Operand>` — .iter() already used, no Vec clone.
                 let arg_vals: Vec<FidanValue> =
                     args.iter().map(|a| self.eval_operand(a, frame)).collect();
-                let result = self.dispatch_call(&callee, arg_vals, frame)?;
+                let result = self.dispatch_call(callee, arg_vals, frame)?;
                 if let Some(d) = dest {
-                    frame.store(d, result);
+                    frame.store(*d, result);
                 }
             }
             Instr::SetField {
@@ -526,12 +554,12 @@ impl MirMachine {
                 field,
                 value,
             } => {
-                let mut obj_val = self.eval_operand(&object, frame);
-                let val = self.eval_operand(&value, frame);
-                self.set_field(&mut obj_val, field, val);
+                let mut obj_val = self.eval_operand(object, frame);
+                let val = self.eval_operand(value, frame);
+                self.set_field(&mut obj_val, *field, val);
                 // Write back — the object operand should be a local.
                 if let Operand::Local(l) = object {
-                    frame.store(l, obj_val);
+                    frame.store(*l, obj_val);
                 }
             }
             Instr::GetField {
@@ -539,36 +567,36 @@ impl MirMachine {
                 object,
                 field,
             } => {
-                let obj_val = self.eval_operand(&object, frame);
-                let val = self.get_field(&obj_val, field);
-                frame.store(dest, val);
+                let obj_val = self.eval_operand(object, frame);
+                let val = self.get_field(&obj_val, *field);
+                frame.store(*dest, val);
             }
             Instr::GetIndex {
                 dest,
                 object,
                 index,
             } => {
-                let obj_val = self.eval_operand(&object, frame);
-                let idx_val = self.eval_operand(&index, frame);
+                let obj_val = self.eval_operand(object, frame);
+                let idx_val = self.eval_operand(index, frame);
                 let val = self.index_get(obj_val, idx_val)?;
-                frame.store(dest, val);
+                frame.store(*dest, val);
             }
             Instr::SetIndex {
                 object,
                 index,
                 value,
             } => {
-                let obj_val = self.eval_operand(&object, frame);
-                let idx_val = self.eval_operand(&index, frame);
-                let val = self.eval_operand(&value, frame);
+                let obj_val = self.eval_operand(object, frame);
+                let idx_val = self.eval_operand(index, frame);
+                let val = self.eval_operand(value, frame);
                 self.index_set(obj_val, idx_val, val)?;
             }
             Instr::Drop { .. } => {
                 // Values are reference-counted; explicit Drop is a no-op here.
             }
             Instr::CertainCheck { operand, name } => {
-                if matches!(self.eval_operand(&operand, frame), FidanValue::Nothing) {
-                    let pname = self.sym_str(name);
+                if matches!(self.eval_operand(operand, frame), FidanValue::Nothing) {
+                    let pname = self.sym_str(*name);
                     return Err(MirSignal::Panic(format!(
                         "certain parameter `{pname}` cannot be nothing"
                     )));
@@ -576,7 +604,7 @@ impl MirMachine {
             }
             Instr::Nop => {}
             Instr::PushCatch(catch_bb) => {
-                frame.catch_stack.push(catch_bb);
+                frame.catch_stack.push(*catch_bb);
             }
             Instr::PopCatch => {
                 frame.catch_stack.pop();
@@ -590,10 +618,10 @@ impl MirMachine {
                     .get(global.0 as usize)
                     .cloned()
                     .unwrap_or(FidanValue::Nothing);
-                frame.store(dest, val);
+                frame.store(*dest, val);
             }
             Instr::StoreGlobal { global, value } => {
-                let val = self.eval_operand(&value, frame);
+                let val = self.eval_operand(value, frame);
                 if let Some(slot) = self.globals.write().unwrap().get_mut(global.0 as usize) {
                     *slot = val;
                 }
@@ -625,6 +653,7 @@ impl MirMachine {
             } => {
                 // Capture the task name while `self` is still in scope so that
                 // failure messages can include the source-level task name.
+                let task_fn = *task_fn; // Copy — capture by value into the spawn closure
                 let task_name = {
                     let func = self.program.function(task_fn);
                     self.sym_str(func.name).to_string()
@@ -653,7 +682,7 @@ impl MirMachine {
                             }
                         })
                 });
-                frame.store(handle, FidanValue::Pending(pending));
+                frame.store(*handle, FidanValue::Pending(pending));
             }
 
             Instr::SpawnExpr {
@@ -661,6 +690,7 @@ impl MirMachine {
                 task_fn,
                 args,
             } => {
+                let task_fn = *task_fn; // Copy
                 let args_bundle = ParallelArgs::from_captures(
                     args.iter()
                         .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture())),
@@ -671,7 +701,7 @@ impl MirMachine {
                         .call_function(task_fn, bundle.into_vec())
                         .unwrap_or(FidanValue::Nothing)
                 });
-                frame.store(dest, FidanValue::Pending(pending));
+                frame.store(*dest, FidanValue::Pending(pending));
             }
 
             Instr::SpawnDynamic { dest, method, args } => {
@@ -682,7 +712,7 @@ impl MirMachine {
                     .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture()))
                     .collect();
                 // Look up the method name before moving `self` into the closure.
-                let method_name: Option<Arc<str>> = method.map(|sym| self.sym_str(sym));
+                let method_name: Option<Arc<str>> = (*method).map(|sym| self.sym_str(sym));
                 let bundle = ParallelArgs::from_captures(caps);
                 let mut child = self.clone_for_thread();
                 let pending = FidanPending::spawn_with_args(bundle, move |bundle| {
@@ -707,7 +737,7 @@ impl MirMachine {
                         },
                     }
                 });
-                frame.store(dest, FidanValue::Pending(pending));
+                frame.store(*dest, FidanValue::Pending(pending));
             }
 
             Instr::JoinAll { handles } => {
@@ -752,13 +782,13 @@ impl MirMachine {
             }
 
             Instr::AwaitPending { dest, handle } => {
-                let val = self.eval_operand(&handle, frame);
+                let val = self.eval_operand(handle, frame);
                 let resolved = if let FidanValue::Pending(p) = &val {
                     p.join()
                 } else {
                     val
                 };
-                frame.store(dest, resolved);
+                frame.store(*dest, resolved);
             }
 
             Instr::ParallelIter {
@@ -766,7 +796,8 @@ impl MirMachine {
                 body_fn,
                 closure_args,
             } => {
-                let coll = self.eval_operand(&collection, frame);
+                let body_fn = *body_fn; // Copy
+                let coll = self.eval_operand(collection, frame);
                 // Capture the shared "environment" args once; per-item bundles
                 // below each include a capture-clone of these.
                 let env_caps: Vec<ParallelCapture> = closure_args
@@ -798,6 +829,7 @@ impl MirMachine {
                             let err_slot = std::sync::Arc::clone(&first_err);
                             s.spawn(move || {
                                 if let Err(sig) = child.call_function(body_fn, bundle.into_vec()) {
+                                    // body_fn is Copy
                                     let msg = match sig {
                                         MirSignal::Panic(m) => m,
                                         MirSignal::Throw(v) => {

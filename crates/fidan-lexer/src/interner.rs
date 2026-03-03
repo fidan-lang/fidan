@@ -1,6 +1,6 @@
+use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
-use rustc_hash::FxHashMap;
 
 /// An interned identifier. Equality and hashing are O(1) (`u32` compare).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -12,9 +12,9 @@ pub struct Symbol(pub u32);
 /// shared across threads without wrapping in an extra `Arc`.
 #[derive(Debug, Default)]
 pub struct SymbolInterner {
-    next_id:    AtomicU32,
-    str_to_id:  RwLock<FxHashMap<Arc<str>, Symbol>>,
-    id_to_str:  RwLock<Vec<Arc<str>>>,
+    next_id: AtomicU32,
+    str_to_id: RwLock<FxHashMap<Arc<str>, Symbol>>,
+    id_to_str: RwLock<Vec<Arc<str>>>,
 }
 
 impl SymbolInterner {
@@ -52,5 +52,16 @@ impl SymbolInterner {
     pub fn resolve(&self, sym: Symbol) -> Arc<str> {
         let strings = self.id_to_str.read().unwrap();
         Arc::clone(&strings[sym.0 as usize])
+    }
+
+    /// Snapshot all currently-interned strings into an owned `Vec<Arc<str>>`.
+    ///
+    /// Call this **once after parsing** (all symbols are stable by then).
+    /// The returned slice can be stored in `MirMachine` and indexed as
+    /// `table[sym.0 as usize]` — O(1), no locking, no per-call Arc bump
+    /// (just a single `Arc::clone` on the entry, which is far cheaper than
+    /// acquiring the `RwLock` on every hot-path symbol resolution).
+    pub fn snapshot(&self) -> Vec<Arc<str>> {
+        self.id_to_str.read().unwrap().clone()
     }
 }
