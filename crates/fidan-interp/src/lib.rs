@@ -1,15 +1,13 @@
-//! `fidan-interp` — AST-walking interpreter (Phase 5 bootstrap).
+//! `fidan-interp` — MIR interpreter (Phase 6).
 //!
-//! Evaluates a parsed, type-checked `Module` directly.
-//! When HIR/MIR lowering is complete (Phase 6+), this will be replaced by
-//! a proper SSA/MIR walker.
+//! Executes a compiled `MirProgram` by walking its SSA/CFG representation.
+//! The former AST-walking bootstrap interpreter (Phase 5) has been removed;
+//! all execution paths now go through the MIR machine.
 
 mod bootstrap;
 mod builtins;
-mod env;
-mod frame;
-mod interp;
 mod mir_interp;
 
-pub use interp::{ReplState, RunError, TraceFrame, new_repl_state, run, run_repl_line};
-pub use mir_interp::{run_mir, run_mir_with_jit};
+pub use mir_interp::{
+    MirMachine, MirReplState, RunError, TraceFrame, run_mir, run_mir_repl_line, run_mir_with_jit,
+};

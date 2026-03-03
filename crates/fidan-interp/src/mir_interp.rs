@@ -25,8 +25,30 @@ use fidan_stdlib::{StdlibResult, parallel::ParallelOp};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::builtins;
-use crate::interp::{RunError, TraceFrame};
 use fidan_codegen_cranelift::{JitCompiler, JitFnEntry, call_jit_fn};
+
+// ── Public error types ────────────────────────────────────────────────────────
+
+/// A single frame in a stack trace.
+#[derive(Clone, Debug)]
+pub struct TraceFrame {
+    /// Function name with argument values: `inner(msg = "iteration 42")`
+    pub label: String,
+    /// Source location of the call site (`"file.fdn:2:5"`), if known.
+    pub location: Option<String>,
+}
+
+/// Error returned from [`MirMachine::run`] when an uncaught panic propagates to
+/// the top level.
+pub struct RunError {
+    /// Diagnostic code used when rendering the error.
+    pub code: fidan_diagnostics::DiagCode,
+    /// Short description of the panic value shown in the error message.
+    pub message: String,
+    /// Call stack at the moment of the panic, **innermost frame first**.
+    /// Empty when the panic originated outside any named function.
+    pub trace: Vec<TraceFrame>,
+}
 
 // ── Object class table ────────────────────────────────────────────────────────
 
@@ -410,11 +432,9 @@ impl MirMachine {
                 if prev + 1 == self.jit_threshold {
                     // Threshold reached — attempt JIT compilation.
                     let mut compiler = JitCompiler::new();
-                    if let Some(entry) = compiler.compile_function(
-                        func,
-                        &self.program,
-                        &self.interner,
-                    ) {
+                    if let Some(entry) =
+                        compiler.compile_function(func, &self.program, &self.interner)
+                    {
                         self.jit_fns.write().unwrap()[idx] = Some(entry);
                         // Publish the compiled flag AFTER the function is stored.
                         self.jit_flags[idx].store(true, Ordering::Release);
@@ -1503,6 +1523,254 @@ fn eval_unary(op: UnOp, v: FidanValue) -> Result<FidanValue, MirSignal> {
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
+
+/// Persistent state for the MIR-backed REPL.
+///
+/// Each input line recompiles the **entire accumulated source** from scratch
+/// but only executes the **new** instructions (those beyond `init_bb0_cursor`
+/// in the init function's entry block).  Invariants:
+///
+/// - Module-level variables are always stored via `StoreGlobal`/`LoadGlobal`,
+///   so skipping old init instructions is safe — their effects live in `globals`.
+/// - `globals_snapshot` preserves computed values across recompile boundaries.
+/// - Appending new source to `accumulated_source` deterministically extends the
+///   init function's `bb0`; new control-flow BBs are reachable only from the
+///   new tail of `bb0`, so the branch-following logic is still correct.
+pub struct MirReplState {
+    /// All source text entered so far (grows with each successful input).
+    pub accumulated_source: String,
+    /// Number of instructions already executed in `blocks[0]` of FunctionId(0).
+    /// On every run we skip the first `init_bb0_cursor` instructions.
+    pub init_bb0_cursor: usize,
+    /// Global values after the last successful execution.
+    /// Pre-filled into each new `MirMachine` before running the delta.
+    pub globals_snapshot: Vec<FidanValue>,
+}
+
+impl MirReplState {
+    pub fn new() -> Self {
+        Self {
+            accumulated_source: String::new(),
+            init_bb0_cursor: 0,
+            globals_snapshot: Vec::new(),
+        }
+    }
+}
+
+impl Default for MirReplState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MirMachine {
+    // ── REPL helpers ─────────────────────────────────────────────────────────
+
+    /// Count instructions in `blocks[0]` of the init function (FunctionId 0).
+    /// Used as the REPL cursor: after execution, advance by this amount so the
+    /// next run only dispatches newly added instructions.
+    pub fn count_init_bb0_instrs(&self) -> usize {
+        self.program
+            .function(FunctionId(0))
+            .block(BlockId(0))
+            .instructions
+            .len()
+    }
+
+    /// Snapshot all global values (used to preserve state between REPL lines).
+    pub fn snapshot_globals(&self) -> Vec<FidanValue> {
+        self.globals.read().unwrap().clone()
+    }
+
+    /// Pre-fill globals from `snapshot`.
+    /// Slots that were added by new declarations (beyond the snapshot length)
+    /// keep their default `Nothing` value.
+    pub fn restore_globals(&mut self, snapshot: &[FidanValue]) {
+        let mut g = self.globals.write().unwrap();
+        for (i, v) in snapshot.iter().enumerate() {
+            if i < g.len() {
+                g[i] = v.clone();
+            }
+        }
+    }
+
+    /// Run the init function (FunctionId 0) starting at instruction
+    /// `start_offset` within `blocks[0]`, skipping all earlier instructions.
+    ///
+    /// This is the core of the MIR REPL delta-execution: recompile the full
+    /// accumulated source, pre-fill globals, then only *execute* the new part.
+    pub fn run_init_delta(&mut self, start_offset: usize) -> Result<(), RunError> {
+        self.call_stack.clear();
+        self.panic_trace.clear();
+        let entry = FunctionId(0);
+        let func = self.program.function(entry);
+        let local_count = func.local_count;
+        let fn_name = self.sym_str(func.name).to_string();
+        let mut frame = CallFrame::new(local_count, fn_name);
+        self.call_stack.push((entry, None, vec![]));
+        let result = self.run_init_from_offset(&mut frame, start_offset);
+        self.call_stack.pop();
+        match result {
+            Ok(_) => Ok(()),
+            Err(MirSignal::Throw(v)) => Err(RunError {
+                code: fidan_diagnostics::diag_code!("R0001"),
+                message: format!("unhandled exception: {}", builtins::display(&v)),
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
+            Err(MirSignal::Panic(msg)) => Err(RunError {
+                code: fidan_diagnostics::diag_code!("R0001"),
+                message: msg,
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
+            Err(MirSignal::ParallelFail(msg)) => Err(RunError {
+                code: fidan_diagnostics::diag_code!("R9001"),
+                message: msg,
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
+        }
+    }
+
+    /// Execute the init function starting at instruction `start_offset` in
+    /// `blocks[0]`.  All subsequent blocks execute normally (no offset).
+    fn run_init_from_offset(
+        &mut self,
+        frame: &mut CallFrame,
+        start_offset: usize,
+    ) -> Result<Option<FidanValue>, MirSignal> {
+        let fn_id = FunctionId(0);
+        let program = Arc::clone(&self.program);
+        let mut bb_id = BlockId(0);
+        let mut prev_bb: Option<BlockId> = None;
+        let mut is_first_block = true;
+
+        'outer: loop {
+            // Phi-node resolution (same as in run_function).
+            {
+                let bb = program.function(fn_id).block(bb_id);
+                if !bb.phis.is_empty() {
+                    let phis: Vec<(LocalId, FidanValue)> = bb
+                        .phis
+                        .iter()
+                        .map(|phi| {
+                            let val = if let Some(p) = prev_bb {
+                                phi.operands
+                                    .iter()
+                                    .find(|(src, _)| *src == p)
+                                    .map(|(_, op)| self.eval_operand(op, frame))
+                                    .unwrap_or(FidanValue::Nothing)
+                            } else {
+                                FidanValue::Nothing
+                            };
+                            (phi.result, val)
+                        })
+                        .collect();
+                    for (dest, val) in phis {
+                        frame.store(dest, val);
+                    }
+                }
+            }
+
+            let instr_count = program.function(fn_id).block(bb_id).instructions.len();
+            // On the entry block only, skip the already-executed prefix.
+            let instr_start = if is_first_block {
+                is_first_block = false;
+                start_offset.min(instr_count)
+            } else {
+                0
+            };
+
+            for i in instr_start..instr_count {
+                let instr = &program.function(fn_id).block(bb_id).instructions[i];
+                match self.exec_instr(instr, frame) {
+                    Ok(Some(ret)) => return Ok(Some(ret)),
+                    Ok(None) => {}
+                    Err(MirSignal::Throw(v)) => {
+                        if let Some(catch_bb) = frame.catch_stack.pop() {
+                            frame.current_exception = Some(v);
+                            prev_bb = Some(bb_id);
+                            bb_id = catch_bb;
+                            is_first_block = false;
+                            continue 'outer;
+                        } else {
+                            return Err(MirSignal::Throw(v));
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            let term = program.function(fn_id).block(bb_id).terminator.clone();
+            match term {
+                Terminator::Return(op) => {
+                    let val = op.as_ref().map(|o| self.eval_operand(o, frame));
+                    return Ok(val);
+                }
+                Terminator::Goto(target) => {
+                    prev_bb = Some(bb_id);
+                    bb_id = target;
+                }
+                Terminator::Branch {
+                    cond,
+                    then_bb,
+                    else_bb,
+                } => {
+                    let cv = self.eval_operand(&cond, frame);
+                    prev_bb = Some(bb_id);
+                    bb_id = if cv.truthy() { then_bb } else { else_bb };
+                }
+                Terminator::Throw { value } => {
+                    let v = self.eval_operand(&value, frame);
+                    if let Some(catch_bb) = frame.catch_stack.pop() {
+                        frame.current_exception = Some(v);
+                        prev_bb = Some(bb_id);
+                        bb_id = catch_bb;
+                    } else {
+                        return Err(MirSignal::Throw(v));
+                    }
+                }
+                Terminator::Unreachable => {
+                    return Err(MirSignal::Panic(
+                        "reached unreachable block in init function".into(),
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Execute one REPL line using the MIR interpreter.
+///
+/// The caller provides an already-lowered and optimised `MirProgram` built from
+/// the **full** accumulated source (all prior lines + the new one).  This
+/// function:
+///
+/// 1. Creates a fresh `MirMachine` from the program.
+/// 2. Pre-fills globals from `state.globals_snapshot` (preserves prior values).
+/// 3. Runs the init function starting from `state.init_bb0_cursor` (skips
+///    already-executed instructions).
+/// 4. Updates `state.init_bb0_cursor` and `state.globals_snapshot` for the next call.
+///
+/// Returns `Ok(None)` on success (expression echo is not yet implemented in the
+/// MIR path — that can be added later via a designated echo-global).
+pub fn run_mir_repl_line(
+    state: &mut MirReplState,
+    program: MirProgram,
+    interner: Arc<SymbolInterner>,
+    source_map: Arc<SourceMap>,
+    jit_threshold: u32,
+) -> Result<Option<String>, RunError> {
+    let mut machine = MirMachine::new(Arc::new(program), interner, source_map);
+    machine.set_jit_threshold(jit_threshold);
+    // Pre-fill globals from the previous snapshot so all previously-defined
+    // variables have their correct values when the new delta executes.
+    machine.restore_globals(&state.globals_snapshot);
+    let cursor = state.init_bb0_cursor;
+    machine.run_init_delta(cursor)?;
+    // Commit updated cursor + globals for the next line.
+    state.init_bb0_cursor = machine.count_init_bb0_instrs();
+    state.globals_snapshot = machine.snapshot_globals();
+    Ok(None)
+}
 
 /// Run a `MirProgram` from its entry function with a configurable JIT threshold.
 ///

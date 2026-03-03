@@ -1302,48 +1302,51 @@ fn run_repl(trace_mode: TraceMode) -> Result<()> {
     println!();
 
     // ── rustyline editor ───────────────────────────────────────────────────
-    // Using Editor<ReplHelper> so the Highlighter colours the prompt while
-    // rustyline measures cursor position from the plain string only.
     let mut rl = rustyline::Editor::<ReplHelper, rustyline::history::DefaultHistory>::new()?;
     rl.set_helper(Some(ReplHelper));
-    // Ctrl+L is bound to ClearScreen by rustyline's default Emacs keymap.
 
-    // Plain string — no escape codes.  ReplHelper::highlight_prompt wraps it
-    // in colour for display; rustyline uses this for all width arithmetic.
-    let prompt = "ƒ>  ";
+    let prompt_main = "ƒ>  ";
+    let prompt_cont = "...  ";
 
     // Persist the interner so symbol IDs are stable across REPL lines.
     let interner = Arc::new(SymbolInterner::new());
 
-    // A stable boot file gives the TypeChecker a FileId for its internal
-    // dummy spans (built-in registrations).  Because each per-line SourceMap
-    // also starts its counter at 0, all spans always resolve correctly.
     let boot_map = Arc::new(SourceMap::new());
     let boot_file = boot_map.add_file("<repl>", "");
     let boot_fid = boot_file.id;
 
-    // ONE persistent TypeChecker for the whole session.  Symbol definitions
-    // accumulate across lines, so `greeting` defined on line 1 is visible on
-    // line 2 — exactly how a real REPL should behave.  :reset replaces it.
+    // Persistent TypeChecker kept in sync after each successful line.
+    // Used exclusively for :type queries — not for compilation.
     let mut tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
     tc.set_repl(true);
 
-    // ONE persistent interpreter state, same rationale: variables and actions
-    // defined on earlier lines must be visible on later lines.
-    let mut repl_state = fidan_interp::new_repl_state(Arc::clone(&interner));
+    // MIR-backed REPL state: accumulated source, global snapshot, and init cursor.
+    let mut mir_repl_state = fidan_interp::MirReplState::new();
+
+    // ── Multiline state ────────────────────────────────────────────────────
+    let mut open_braces: i32 = 0;
+    let mut pending_input = String::new();
 
     let mut line_no: u32 = 0;
-    // Rolling buffer of recent runtime errors for `:last [--full]`.
     let mut error_history: Vec<String> = Vec::new();
 
     loop {
+        let prompt = if open_braces > 0 {
+            prompt_cont
+        } else {
+            prompt_main
+        };
         let line = match rl.readline(prompt) {
             Ok(l) => l,
             Err(ReadlineError::Interrupted) => {
-                // Ctrl+C — cancel the current line and re-prompt (do not exit).
+                if open_braces > 0 {
+                    open_braces = 0;
+                    pending_input.clear();
+                    println!("  (input cancelled)");
+                }
                 continue;
             }
-            Err(ReadlineError::Eof) => break, // Ctrl+D / Ctrl+Z+Enter
+            Err(ReadlineError::Eof) => break,
             Err(e) => {
                 eprintln!("read error: {e}");
                 break;
@@ -1355,169 +1358,229 @@ fn run_repl(trace_mode: TraceMode) -> Result<()> {
             continue;
         }
 
-        // Push to history so up/down arrows work.
         let _ = rl.add_history_entry(trimmed);
 
-        // ── Colon commands ────────────────────────────────────────
-        if let Some(cmd) = trimmed.strip_prefix(':') {
-            // Split on first space: ":ast var x = 1" → ("ast", "var x = 1")
-            let (cmd_word, cmd_arg) = cmd
-                .trim()
-                .split_once(' ')
-                .map(|(w, a)| (w, a.trim()))
-                .unwrap_or((cmd.trim(), ""));
+        // ── Colon commands (only when not in a multiline block) ────────────
+        if open_braces == 0 {
+            if let Some(cmd) = trimmed.strip_prefix(':') {
+                let (cmd_word, cmd_arg) = cmd
+                    .trim()
+                    .split_once(' ')
+                    .map(|(w, a)| (w, a.trim()))
+                    .unwrap_or((cmd.trim(), ""));
 
-            match cmd_word {
-                "exit" | "quit" | "q" => break,
+                match cmd_word {
+                    "exit" | "quit" | "q" => break,
 
-                "reset" => {
-                    tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
-                    tc.set_repl(true);
-                    repl_state = fidan_interp::new_repl_state(Arc::clone(&interner));
-                    println!("  (session state cleared)");
-                    continue;
-                }
-
-                "help" => {
-                    println!("  :help               show this message");
-                    println!("  :exit / :quit / :q  leave the REPL");
-                    println!("  :clear / :cls       clear the terminal (also Ctrl+L)");
-                    println!("  :reset              clear the session state");
-                    println!("  :ast  <snippet>     show the parsed AST node counts (debug)");
-                    println!("  :type <expr>        print the inferred type of an expression");
-                    println!(
-                        "  :last [--full]      show last runtime error (--full shows all recent)"
-                    );
-                    continue;
-                }
-
-                // ── :clear / :cls ─────────────────────────────────────────
-                "clear" | "cls" => {
-                    // ANSI: erase display + move cursor to top-left.
-                    print!("\x1b[2J\x1b[1;1H");
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
-                    continue;
-                }
-
-                // ── :ast <snippet> ────────────────────────────────────────
-                "ast" => {
-                    if cmd_arg.is_empty() {
-                        eprintln!("  usage: :ast <snippet>");
+                    "reset" => {
+                        tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
+                        tc.set_repl(true);
+                        mir_repl_state = fidan_interp::MirReplState::new();
+                        open_braces = 0;
+                        pending_input.clear();
+                        println!("  (session state cleared)");
                         continue;
                     }
-                    line_no += 1;
-                    let sname = format!("<repl:{line_no}>");
-                    let smap = Arc::new(SourceMap::new());
-                    let f = smap.add_file(sname.as_str(), cmd_arg);
-                    let (toks, lex_diags) = Lexer::new(&f, Arc::clone(&interner)).tokenise();
-                    for d in &lex_diags {
-                        fidan_diagnostics::render_to_stderr(d, &smap);
-                    }
-                    let (m, ast_diags) = fidan_parser::parse(&toks, f.id, Arc::clone(&interner));
-                    for d in &ast_diags {
-                        fidan_diagnostics::render_to_stderr(d, &smap);
-                    }
-                    if ast_diags.is_empty() {
-                        println!("  items : {}", m.items.len());
-                        println!("  exprs : {}", m.arena.exprs.len());
-                        println!("  stmts : {}", m.arena.stmts.len());
-                    }
-                    continue;
-                }
 
-                // ── :type <expr>  ────────────────────────────────────────
-                "type" => {
-                    if cmd_arg.is_empty() {
-                        eprintln!("  usage: :type <expr>");
+                    "help" => {
+                        println!("  :help               show this message");
+                        println!("  :exit / :quit / :q  leave the REPL");
+                        println!("  :clear / :cls       clear the terminal (also Ctrl+L)");
+                        println!("  :reset              clear the session state");
+                        println!("  :ast  <snippet>     show the parsed AST node counts (debug)");
+                        println!("  :type <expr>        print the inferred type of an expression");
+                        println!(
+                            "  :last [--full]      show last runtime error (--full shows all recent)"
+                        );
                         continue;
                     }
-                    line_no += 1;
-                    let sname = format!("<repl:{line_no}>");
-                    let smap = Arc::new(SourceMap::new());
-                    let f = smap.add_file(sname.as_str(), cmd_arg);
-                    let (toks, lex_diags) = Lexer::new(&f, Arc::clone(&interner)).tokenise();
-                    for d in &lex_diags {
-                        fidan_diagnostics::render_to_stderr(d, &smap);
-                    }
-                    let (m, parse_diags) = fidan_parser::parse(&toks, f.id, Arc::clone(&interner));
-                    for d in &parse_diags {
-                        fidan_diagnostics::render_to_stderr(d, &smap);
-                    }
-                    if lex_diags.is_empty() && parse_diags.is_empty() {
-                        match tc.infer_snippet_type(&m) {
-                            Some(ty_name) => println!("  : {ty_name}"),
-                            None => eprintln!("  (snippet has no bare expression to infer)"),
-                        }
-                        let _ = tc.drain_diags(); // discard type errors — :type is query-only
-                    }
-                    continue;
-                }
 
-                // ── :last [--full]  ────────────────────────────────────────
-                "last" => {
-                    if error_history.is_empty() {
-                        println!("  (no errors recorded this session)");
-                    } else if cmd_arg == "--full" {
-                        for (i, msg) in error_history.iter().enumerate().rev() {
-                            println!("  [{}]  {}", i + 1, msg);
-                        }
-                    } else {
-                        println!("  {}", error_history.last().unwrap());
-                        if error_history.len() > 1 {
-                            println!(
-                                "  ({} total — :last --full to see all)",
-                                error_history.len()
-                            );
-                        }
+                    // ── :clear / :cls ─────────────────────────────────────────
+                    "clear" | "cls" => {
+                        // ANSI: erase display + move cursor to top-left.
+                        print!("\x1b[2J\x1b[1;1H");
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                        continue;
                     }
-                    continue;
-                }
 
-                other => {
-                    eprintln!("  unknown command `:{other}`. Type :help for a list.");
-                    continue;
+                    // ── :ast <snippet> ────────────────────────────────────────
+                    "ast" => {
+                        if cmd_arg.is_empty() {
+                            eprintln!("  usage: :ast <snippet>");
+                            continue;
+                        }
+                        line_no += 1;
+                        let sname = format!("<repl:{line_no}>");
+                        let smap = Arc::new(SourceMap::new());
+                        let f = smap.add_file(sname.as_str(), cmd_arg);
+                        let (toks, lex_diags) = Lexer::new(&f, Arc::clone(&interner)).tokenise();
+                        for d in &lex_diags {
+                            fidan_diagnostics::render_to_stderr(d, &smap);
+                        }
+                        let (m, ast_diags) =
+                            fidan_parser::parse(&toks, f.id, Arc::clone(&interner));
+                        for d in &ast_diags {
+                            fidan_diagnostics::render_to_stderr(d, &smap);
+                        }
+                        if ast_diags.is_empty() {
+                            println!("  items : {}", m.items.len());
+                            println!("  exprs : {}", m.arena.exprs.len());
+                            println!("  stmts : {}", m.arena.stmts.len());
+                        }
+                        continue;
+                    }
+
+                    // ── :type <expr>  ────────────────────────────────────────
+                    "type" => {
+                        if cmd_arg.is_empty() {
+                            eprintln!("  usage: :type <expr>");
+                            continue;
+                        }
+                        line_no += 1;
+                        let sname = format!("<repl:{line_no}>");
+                        let smap = Arc::new(SourceMap::new());
+                        let f = smap.add_file(sname.as_str(), cmd_arg);
+                        let (toks, lex_diags) = Lexer::new(&f, Arc::clone(&interner)).tokenise();
+                        for d in &lex_diags {
+                            fidan_diagnostics::render_to_stderr(d, &smap);
+                        }
+                        let (m, parse_diags) =
+                            fidan_parser::parse(&toks, f.id, Arc::clone(&interner));
+                        for d in &parse_diags {
+                            fidan_diagnostics::render_to_stderr(d, &smap);
+                        }
+                        if lex_diags.is_empty() && parse_diags.is_empty() {
+                            match tc.infer_snippet_type(&m) {
+                                Some(ty_name) => println!("  : {ty_name}"),
+                                None => eprintln!("  (snippet has no bare expression to infer)"),
+                            }
+                            let _ = tc.drain_diags(); // discard type errors — :type is query-only
+                        }
+                        continue;
+                    }
+
+                    // ── :last [--full]  ────────────────────────────────────────
+                    "last" => {
+                        if error_history.is_empty() {
+                            println!("  (no errors recorded this session)");
+                        } else if cmd_arg == "--full" {
+                            for (i, msg) in error_history.iter().enumerate().rev() {
+                                println!("  [{}]  {}", i + 1, msg);
+                            }
+                        } else {
+                            println!("  {}", error_history.last().unwrap());
+                            if error_history.len() > 1 {
+                                println!(
+                                    "  ({} total — :last --full to see all)",
+                                    error_history.len()
+                                );
+                            }
+                        }
+                        continue;
+                    }
+
+                    other => {
+                        eprintln!("  unknown command `:{other}`. Type :help for a list.");
+                        continue;
+                    }
                 }
+            }
+        } // end `if open_braces == 0`
+
+        // ── Multiline brace counting ───────────────────────────────────────
+        for ch in trimmed.chars() {
+            match ch {
+                '{' => open_braces += 1,
+                '}' => open_braces = (open_braces - 1).max(0),
+                _ => {}
+            }
+        }
+        if !pending_input.is_empty() {
+            pending_input.push('\n');
+        }
+        pending_input.push_str(trimmed);
+        if open_braces > 0 {
+            continue; // wait for closing braces
+        }
+
+        // ── Complete input ready — compile full accumulated source ──────────
+        let complete_input = std::mem::take(&mut pending_input);
+
+        let mut candidate_source = mir_repl_state.accumulated_source.clone();
+        if !candidate_source.is_empty() {
+            candidate_source.push('\n');
+        }
+        candidate_source.push_str(&complete_input);
+        candidate_source.push('\n');
+
+        // ── Lex + parse the full candidate source ──────────────────────────
+        let exec_smap = Arc::new(SourceMap::new());
+        let exec_file = exec_smap.add_file("<repl>", &*candidate_source);
+        let (exec_toks, lex_diags) = Lexer::new(&exec_file, Arc::clone(&interner)).tokenise();
+        for d in &lex_diags {
+            fidan_diagnostics::render_to_stderr(d, &exec_smap);
+            error_history.push(format!("[{}]: {}", d.code, d.message));
+        }
+        if !lex_diags.is_empty() {
+            continue;
+        }
+
+        let (full_module, parse_diags) =
+            fidan_parser::parse(&exec_toks, exec_file.id, Arc::clone(&interner));
+        for d in &parse_diags {
+            fidan_diagnostics::render_to_stderr(d, &exec_smap);
+            error_history.push(format!("[{}]: {}", d.code, d.message));
+        }
+        if !parse_diags.is_empty() {
+            continue;
+        }
+
+        // ── Fresh type-check (consumes exec_tc to produce TypedModule) ──────
+        let mut exec_tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
+        exec_tc.set_repl(true);
+        exec_tc.check_module(&full_module);
+        let typed = exec_tc.finish_typed();
+        if !typed.diagnostics.is_empty() {
+            for d in &typed.diagnostics {
+                fidan_diagnostics::render_to_stderr(d, &exec_smap);
+                error_history.push(format!("[{}]: {}", d.code, d.message));
+            }
+            continue;
+        }
+
+        // ── HIR → MIR → optimisation passes ───────────────────────────────
+        let hir = fidan_hir::lower_module(&full_module, &typed, &interner);
+        let mut mir = fidan_mir::lower_program(&hir, &interner);
+        fidan_passes::run_all(&mut mir);
+
+        // ── Execute the new delta on the MIR machine ───────────────────────
+        match fidan_interp::run_mir_repl_line(
+            &mut mir_repl_state,
+            mir,
+            Arc::clone(&interner),
+            Arc::clone(&exec_smap),
+            500,
+        ) {
+            Ok(Some(echo)) => println!("{echo}"),
+            Ok(None) => {}
+            Err(e) => {
+                render_message_to_stderr(Severity::Error, e.code, &e.message);
+                render_trace_to_stderr(&e.trace, trace_mode);
+                error_history.push(e.message.clone());
+                // Don't commit: REPL state remains unchanged on runtime error.
+                continue;
             }
         }
 
-        // ── Lex + parse + typecheck ───────────────────────────────
-        line_no += 1;
-        let source_name = format!("<repl:{line_no}>");
-        let source_map = Arc::new(SourceMap::new());
-        let file = source_map.add_file(source_name.as_str(), trimmed);
-        let (tokens, lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
-        for diag in &lex_diags {
-            fidan_diagnostics::render_to_stderr(diag, &source_map);
-            error_history.push(format!("[{}]: {}", diag.code, diag.message));
-        }
+        // ── Commit: persist source and refresh :type TypeChecker ────────────
+        mir_repl_state.accumulated_source = candidate_source;
 
-        let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
-
-        for diag in &parse_diags {
-            fidan_diagnostics::render_to_stderr(diag, &source_map);
-            error_history.push(format!("[{}]: {}", diag.code, diag.message));
-        }
-
-        if lex_diags.is_empty() && parse_diags.is_empty() {
-            tc.check_module(&module);
-            let type_diags = tc.drain_diags();
-            if type_diags.is_empty() {
-                match fidan_interp::run_repl_line(&mut repl_state, module) {
-                    Ok(Some(echo)) => println!("{echo}"),
-                    Ok(None) => {}
-                    Err(e) => {
-                        render_message_to_stderr(Severity::Error, e.code, &e.message);
-                        render_trace_to_stderr(&e.trace, trace_mode);
-                        error_history.push(e.message);
-                    }
-                }
-            } else {
-                for diag in &type_diags {
-                    fidan_diagnostics::render_to_stderr(diag, &source_map);
-                    error_history.push(format!("[{}]: {}", diag.code, diag.message));
-                }
-            }
-        }
+        // Rebuild the persistent tc from the full module so :type queries
+        // can see all newly-defined names with correct type information.
+        tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
+        tc.set_repl(true);
+        tc.check_module(&full_module);
+        let _ = tc.drain_diags();
     }
 
     println!();

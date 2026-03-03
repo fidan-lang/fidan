@@ -2873,6 +2873,48 @@ Estimated effort: 4–8 weeks after Phase 11.
 
 ---
 
+### 22.11 – User-Defined (Custom) Decorators
+
+**Elevator pitch:** Define any `action` and use it as a decorator on other actions — like
+Python decorators but with startup-dispatch semantics rather than function-wrapping.
+
+```fidan
+action log_registration(fn_name oftype string) {
+    print("registered: " + fn_name)
+}
+
+@log_registration
+action my_handler() { ... }
+```
+
+At program startup, before the entry point runs, the runtime calls each custom decorator
+action once, passing the decorated function's name as a string argument (plus any extra
+arguments supplied in the decorator call, e.g. `@log_registration("override_name")`).
+
+**Why deferred:** Requires first-class function metadata and a startup dispatch hook in
+`MirMachine`. The validation layer (`W2004` for unknown names, type-checking decorator
+argument signatures) is already partially in place.  Full implementation needs:
+
+1. **Decorator signature validation in `fidan-typeck`:** The decorator action must exist in
+   scope at the `@name` site; its first parameter must accept `string` (the decorated
+   function's name); remaining parameter types are matched against the decorator arguments.
+2. **MIR annotation:** `MirFunction` gains a `custom_decorators: Vec<(FunctionId, Vec<MirLit>)>`
+   field carrying resolved decorator IDs + static arguments.
+3. **Startup dispatch loop in `MirMachine::run()`:** Before calling `FunctionId(0)` (the init
+   function), iterate over all functions and fire their custom decorator calls in declaration
+   order.
+
+**Safety rules that must be enforced at implementation time:**
+- Decorator name must not shadow or reuse a built-in decorator name (`precompile`, `deprecated`).
+- Decorator `action` must be declared **before** the `@name` site (no forward references).
+- Duplicate decorator of the same kind on the same function → compile error.
+- Import conflict (two modules export the same decorator name) → existing name-conflict logic.
+
+**Dependency:** Phase 5 (MIR interpreter) — all infrastructure is present; deferred by
+design decision.  Estimated effort: 1–2 weeks.
+
+---
+
 ### Feature → Phase Dependency Map
 
 | Feature | Earliest schedulable after | Estimated effort |
@@ -2882,6 +2924,7 @@ Estimated effort: 4–8 weeks after Phase 11.
 | 22.5 Compile-time slow hints | Phase 9 (Cranelift JIT) | 1 week |
 | 22.4 Language profiling | Phase 5 (MIR interpreter) | 1–2 weeks |
 | 22.3 Replayable bugs | Phase 5 (MIR interpreter) | 1–2 weeks |
+| 22.11 Custom decorators (startup dispatch) | Phase 5 (MIR interpreter) | 1–2 weeks |
 | 22.8 Hot reloading (multi-file) | Phase 7 (import system) | + 1–2 days on top of single-file |
 | 22.6 Sandboxing | Phase 7 (stdlib) | 2–3 weeks |
 | 22.2 Explain line | Phase 5 (MIR + typeck) | 2–3 weeks |
