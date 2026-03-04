@@ -113,6 +113,24 @@ fn subst_rvalue(rv: &mut Rvalue, resolve: &impl Fn(&Operand) -> Operand) {
             }
         }
         Rvalue::Literal(_) | Rvalue::CatchException => {}
+        Rvalue::Slice {
+            target,
+            start,
+            end,
+            step,
+            ..
+        } => {
+            subst_op(target, resolve);
+            if let Some(s) = start {
+                subst_op(s, resolve);
+            }
+            if let Some(e) = end {
+                subst_op(e, resolve);
+            }
+            if let Some(st) = step {
+                subst_op(st, resolve);
+            }
+        }
     }
 }
 

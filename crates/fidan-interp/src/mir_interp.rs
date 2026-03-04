@@ -1043,6 +1043,14 @@ impl MirMachine {
                 .current_exception
                 .take()
                 .unwrap_or(FidanValue::Nothing)),
+
+            Rvalue::Slice { target, start, end, inclusive, step } => {
+                let tgt  = self.eval_operand(&target, frame);
+                let s    = start.as_ref().map(|o| self.eval_operand(o, frame));
+                let e    = end.as_ref().map(|o| self.eval_operand(o, frame));
+                let step = step.as_ref().map(|o| self.eval_operand(o, frame));
+                self.eval_slice(tgt, s, e, inclusive, step)
+            }
         }
     }
 
@@ -1291,6 +1299,90 @@ impl MirMachine {
     }
 
     // ── Indexing ──────────────────────────────────────────────────────────────
+
+    fn eval_slice(
+        &self,
+        tgt: FidanValue,
+        start: Option<FidanValue>,
+        end: Option<FidanValue>,
+        inclusive: bool,
+        step: Option<FidanValue>,
+    ) -> Result<FidanValue, MirSignal> {
+        // Extract step (default 1; must not be 0).
+        let step_i = match step {
+            Some(FidanValue::Integer(n)) => {
+                if n == 0 {
+                    return Err(MirSignal::Panic("slice step cannot be zero".to_string()));
+                }
+                n
+            }
+            Some(other) => {
+                return Err(MirSignal::Panic(format!(
+                    "slice step must be an integer, got `{}`", other.type_name()
+                )));
+            }
+            None => 1,
+        };
+
+        // Helper: extract i64 from an optional index value.
+        let to_i64 = |v: Option<FidanValue>| -> Result<Option<i64>, MirSignal> {
+            match v {
+                None => Ok(None),
+                Some(FidanValue::Integer(n)) => Ok(Some(n)),
+                Some(other) => Err(MirSignal::Panic(format!(
+                    "slice index must be an integer, got `{}`", other.type_name()
+                ))),
+            }
+        };
+        let start_raw = to_i64(start)?;
+        let end_raw   = to_i64(end)?;
+
+        match tgt {
+            FidanValue::List(r) => {
+                let list  = r.borrow();
+                let len   = list.len() as i64;
+                let norm  = |i: i64| if i < 0 { (len + i).max(0) } else { i.min(len) };
+                let si    = start_raw.map(norm).unwrap_or(if step_i > 0 { 0 } else { len - 1 });
+                let ei    = end_raw.map(|e| {
+                    let n = norm(e);
+                    if inclusive { n + 1 } else { n }
+                }).unwrap_or(if step_i > 0 { len } else { -1 });
+
+                let mut out = FidanList::new();
+                let mut idx = si;
+                while (step_i > 0 && idx < ei) || (step_i < 0 && idx > ei) {
+                    if let Some(v) = list.get(idx as usize) {
+                        out.append(v.clone());
+                    }
+                    idx += step_i;
+                }
+                Ok(FidanValue::List(OwnedRef::new(out)))
+            }
+            FidanValue::String(s) => {
+                let chars: Vec<char> = s.as_str().chars().collect();
+                let len   = chars.len() as i64;
+                let norm  = |i: i64| if i < 0 { (len + i).max(0) } else { i.min(len) };
+                let si    = start_raw.map(norm).unwrap_or(if step_i > 0 { 0 } else { len - 1 });
+                let ei    = end_raw.map(|e| {
+                    let n = norm(e);
+                    if inclusive { n + 1 } else { n }
+                }).unwrap_or(if step_i > 0 { len } else { -1 });
+
+                let mut out = String::new();
+                let mut idx = si;
+                while (step_i > 0 && idx < ei) || (step_i < 0 && idx > ei) {
+                    if let Some(c) = chars.get(idx as usize) {
+                        out.push(*c);
+                    }
+                    idx += step_i;
+                }
+                Ok(FidanValue::String(FidanString::new(&out)))
+            }
+            other => Err(MirSignal::Panic(format!(
+                "cannot slice `{}`", other.type_name()
+            ))),
+        }
+    }
 
     fn index_get(&self, obj: FidanValue, idx: FidanValue) -> Result<FidanValue, MirSignal> {
         match (obj, idx) {

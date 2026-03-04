@@ -308,6 +308,16 @@ pub enum HirExprKind {
         object: Box<HirExpr>,
         index: Box<HirExpr>,
     },
+    /// Slice: `target[start..end]`, `target[start..]`, `target[..end]`, `target[..]`,
+    /// any of the above optionally followed by `step N`.
+    /// `inclusive` means `...` (inclusive upper bound).
+    Slice {
+        target: Box<HirExpr>,
+        start: Option<Box<HirExpr>>,
+        end: Option<Box<HirExpr>>,
+        inclusive: bool,
+        step: Option<Box<HirExpr>>,
+    },
 
     // ── Collections ───────────────────────────────────────────────────────────
     List(Vec<HirExpr>),

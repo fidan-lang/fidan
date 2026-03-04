@@ -33,6 +33,11 @@ pub struct Parser<'t> {
     pub(crate) sym_returns: Symbol,
     pub(crate) sym_default: Symbol,
     pub(crate) sym_else: Symbol,
+    /// `step` contextual keyword for slice expressions: `list[0..10 step 2]`.
+    pub(crate) sym_step: Symbol,
+    /// When `true`, `infix_bp` suppresses `..`/`...` so that `parse_expr_bp(0)` stops
+    /// before the range operator during slice-start parsing.
+    pub(crate) in_slice_start: bool,
     /// Sub-token stream for string-interpolation fragment re-lexing.
     /// When `Some`, `peek` / `advance` / `current_span` read from the fragment
     /// buffer instead of the main `tokens` slice.
@@ -45,6 +50,7 @@ impl<'t> Parser<'t> {
         let sym_returns = interner.intern("returns");
         let sym_default = interner.intern("default");
         let sym_else = interner.intern("else");
+        let sym_step = interner.intern("step");
         Self {
             tokens,
             pos: 0,
@@ -57,6 +63,8 @@ impl<'t> Parser<'t> {
             sym_returns,
             sym_default,
             sym_else,
+            sym_step,
+            in_slice_start: false,
             fragment: None,
         }
     }

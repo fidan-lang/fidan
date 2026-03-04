@@ -178,6 +178,12 @@ fn count_rvalue_reads(rv: &Rvalue, add: &mut impl FnMut(&Operand)) {
             }
         }
         Rvalue::Literal(_) | Rvalue::CatchException => {}
+        Rvalue::Slice { target, start, end, step, .. } => {
+            add(target);
+            if let Some(s) = start { add(s); }
+            if let Some(e) = end   { add(e); }
+            if let Some(st) = step { add(st); }
+        }
     }
 }
 
@@ -195,5 +201,6 @@ fn is_pure_rvalue(rv: &Rvalue) -> bool {
             | Rvalue::StringInterp(_)
             | Rvalue::Literal(_)
             | Rvalue::CatchException
+            | Rvalue::Slice { .. }
     )
 }

@@ -80,6 +80,13 @@ impl<'a> Printer<'a> {
             Expr::NullCoalesce { .. } => "<??> ".into(),
             Expr::CompoundAssign { .. } => "<compound-assign>".into(),
             Expr::Check { .. } => "<check-expr>".into(),
+            Expr::Slice { target, start, end, inclusive, step, .. } => {
+                let op = if *inclusive { "..." } else { ".." };
+                let s = start.map(|e| self.expr_hint(e)).unwrap_or_default();
+                let e = end.map(|e| self.expr_hint(e)).unwrap_or_default();
+                let st = step.map(|e| format!(" step {}", self.expr_hint(e))).unwrap_or_default();
+                format!("{}[{}{}{}{}]", self.expr_hint(*target), s, op, e, st)
+            }
             Expr::Error { .. } => "<error>".into(),
             Expr::Index { object, index, .. } => {
                 format!("{}[{}]", self.expr_hint(*object), self.expr_hint(*index))

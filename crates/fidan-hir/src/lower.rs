@@ -95,6 +95,13 @@ impl<'a> Ctx<'a> {
                 object: Box::new(self.lower_expr(object)),
                 index: Box::new(self.lower_expr(index)),
             },
+            Expr::Slice { target, start, end, inclusive, step, .. } => HirExprKind::Slice {
+                target: Box::new(self.lower_expr(target)),
+                start: start.map(|e| Box::new(self.lower_expr(e))),
+                end: end.map(|e| Box::new(self.lower_expr(e))),
+                inclusive,
+                step: step.map(|e| Box::new(self.lower_expr(e))),
+            },
 
             Expr::List { elements, .. } => {
                 HirExprKind::List(elements.iter().map(|&e| self.lower_expr(e)).collect())

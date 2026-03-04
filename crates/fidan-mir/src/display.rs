@@ -327,6 +327,13 @@ fn fmt_rvalue(rv: &Rvalue) -> String {
         }
         Rvalue::Literal(lit) => fmt_op(&Operand::Const(lit.clone())),
         Rvalue::CatchException => "catch_exception".to_string(),
+        Rvalue::Slice { target, start, end, inclusive, step } => {
+            let op = if *inclusive { "..." } else { ".." };
+            let s  = start.as_ref().map(fmt_op).unwrap_or_default();
+            let e  = end.as_ref().map(fmt_op).unwrap_or_default();
+            let st = step.as_ref().map(|x| format!(" step {}", fmt_op(x))).unwrap_or_default();
+            format!("{}[{}{}{}{}]", fmt_op(target), s, op, e, st)
+        }
     }
 }
 

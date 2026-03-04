@@ -133,6 +133,19 @@ pub enum Expr {
         span: Span,
     },
 
+    /// Slice expression: `target[start..end]`, `target[..end]`, `target[start..]`,
+    /// `target[..]`, any of the above with `step N`.
+    /// `inclusive` means `...` (inclusive end bound).
+    /// `start`, `end`, and `step` are all optional.
+    Slice {
+        target: ExprId,
+        start: Option<ExprId>,
+        end: Option<ExprId>,
+        inclusive: bool,
+        step: Option<ExprId>,
+        span: Span,
+    },
+
     // Error recovery placeholder
     Error {
         span: Span,
@@ -167,6 +180,7 @@ impl Expr {
             Expr::Dict { span, .. } => *span,
             Expr::Tuple { span, .. } => *span,
             Expr::Check { span, .. } => *span,
+            Expr::Slice { span, .. } => *span,
             Expr::Error { span } => *span,
         }
     }

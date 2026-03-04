@@ -182,6 +182,12 @@ fn hir_walk_expr(e: &HirExpr, out: &mut HashSet<Symbol>) {
             hir_walk_expr(object, out);
             hir_walk_expr(index, out);
         }
+        HirExprKind::Slice { target, start, end, step, .. } => {
+            hir_walk_expr(target, out);
+            if let Some(e) = start { hir_walk_expr(e, out); }
+            if let Some(e) = end   { hir_walk_expr(e, out); }
+            if let Some(e) = step  { hir_walk_expr(e, out); }
+        }
         HirExprKind::List(items) => {
             for e in items {
                 hir_walk_expr(e, out);
@@ -774,6 +780,26 @@ impl<'p> FnCtx<'p> {
                     dest,
                     object: obj,
                     index: idx,
+                });
+                Operand::Local(dest)
+            }
+
+            HirExprKind::Slice { target, start, end, inclusive, step } => {
+                let tgt = self.lower_expr(target);
+                let s   = start.as_deref().map(|e| self.lower_expr(e));
+                let e   = end.as_deref().map(|e| self.lower_expr(e));
+                let st  = step.as_deref().map(|e| self.lower_expr(e));
+                let dest = self.alloc_local();
+                self.emit(Instr::Assign {
+                    dest,
+                    ty,
+                    rhs: Rvalue::Slice {
+                        target: tgt,
+                        start: s,
+                        end: e,
+                        inclusive: *inclusive,
+                        step: st,
+                    },
                 });
                 Operand::Local(dest)
             }

@@ -1244,6 +1244,32 @@ impl TypeChecker {
                 }
             }
 
+            Expr::Slice {
+                target,
+                start,
+                end,
+                step,
+                ..
+            } => {
+                let tgt_ty = self.infer_expr(target, module);
+                if let Some(e) = start {
+                    self.infer_expr(e, module);
+                }
+                if let Some(e) = end {
+                    self.infer_expr(e, module);
+                }
+                if let Some(e) = step {
+                    self.infer_expr(e, module);
+                }
+                // A slice of a list is still a list of the same element type;
+                // a slice of a string is a string; anything else is dynamic.
+                match tgt_ty {
+                    FidanType::List(_) => tgt_ty,
+                    FidanType::String => FidanType::String,
+                    _ => FidanType::Dynamic,
+                }
+            }
+
             Expr::Binary { op, lhs, rhs, span } => {
                 let l = self.infer_expr(lhs, module);
                 let r = self.infer_expr(rhs, module);

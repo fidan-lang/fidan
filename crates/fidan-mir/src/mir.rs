@@ -152,6 +152,16 @@ pub enum Rvalue {
     /// Read the exception that caused the current catch-block to be entered.
     /// Placed by the lowerer as the initialiser of each `catch err {` binding.
     CatchException,
+    /// Slice: `target[start..end]`, `target[start..]`, `target[..end]`, `target[..]`,
+    /// optionally with `step`. Always produces a new value (copy semantics).
+    /// `inclusive` means `...` (inclusive upper bound).
+    Slice {
+        target: Operand,
+        start: Option<Operand>,
+        end: Option<Operand>,
+        inclusive: bool,
+        step: Option<Operand>,
+    },
 }
 
 // ── Instructions ──────────────────────────────────────────────────────────────
