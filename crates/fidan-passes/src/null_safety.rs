@@ -11,8 +11,8 @@
 //   2. Propagate through `Rvalue::NullCoalesce`: the result is NOT nothing (lhs
 //      is nothing → result is rhs, which is assumed non-nothing).
 //   3. Check each instruction for dangerous uses of definitely-nothing locals:
-//      - Binary/Unary arithmetic/comparison on a nothing operand.
-//      - Method call where the receiver is definitely nothing.
+//      - Binary arithmetic / bitwise on a nothing operand (comparison and logical
+//        ops are excluded — they are valid null-guard patterns: `x if is not nothing`).//      - Method call where the receiver is definitely nothing.
 //      - Field read/write where the object is definitely nothing.
 //      - Index read/write where the collection is definitely nothing.
 //      - Direct function call (`Callee::Fn`) where an argument matching a
@@ -26,6 +26,7 @@
 // the false-positive rate at zero while still catching the most common cases
 // such as forgetting to initialise a variable before use.
 
+use fidan_ast::BinOp;
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{Callee, FunctionId, Instr, LocalId, MirLit, MirProgram, Operand, Rvalue};
 use std::collections::HashSet;
@@ -88,13 +89,27 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<NullSafetyDiag
         for bb in &func.blocks {
             for instr in &bb.instructions {
                 match instr {
-                    // ── Arithmetic / comparison on nothing ────────────────────
+                    // ── Arithmetic / bitwise on nothing ───────────────────────
+                    // Comparison and logical ops (==, !=, <, <=, >, >=, and, or)
+                    // are valid null-guard patterns and must NOT be flagged.
                     Instr::Assign {
-                        rhs: Rvalue::Binary { lhs, rhs, .. },
+                        rhs: Rvalue::Binary { op, lhs, rhs },
                         ..
                     } => {
-                        if is_def_nothing(lhs, &def_nothing, &def_value)
-                            || is_def_nothing(rhs, &def_nothing, &def_value)
+                        let is_safe_op = matches!(
+                            op,
+                            BinOp::Eq
+                                | BinOp::NotEq
+                                | BinOp::Lt
+                                | BinOp::LtEq
+                                | BinOp::Gt
+                                | BinOp::GtEq
+                                | BinOp::And
+                                | BinOp::Or
+                        );
+                        if !is_safe_op
+                            && (is_def_nothing(lhs, &def_nothing, &def_value)
+                                || is_def_nothing(rhs, &def_nothing, &def_value))
                         {
                             diags.push(NullSafetyDiag {
                                 fn_name: fn_name.clone(),
