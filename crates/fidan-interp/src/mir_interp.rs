@@ -1079,6 +1079,50 @@ impl MirMachine {
                 if let Some(module) = self.stdlib_free_fns.get(&name).cloned() {
                     return self.dispatch_stdlib_call(&module, &name, args);
                 }
+                // ── Test assertion builtins ───────────────────────────────
+                // These must be dispatched before `call_builtin` because they
+                // need to return `Err(MirSignal::Panic)` on failure, which
+                // the `Option`-returning `call_builtin` cannot express.
+                match name.as_ref() {
+                    "assert" => {
+                        let cond = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                        return if cond.truthy() {
+                            Ok(FidanValue::Nothing)
+                        } else {
+                            Err(MirSignal::Panic("assertion failed".to_string()))
+                        };
+                    }
+                    "assert_eq" => {
+                        let mut it = args.into_iter();
+                        let a = it.next().unwrap_or(FidanValue::Nothing);
+                        let b = it.next().unwrap_or(FidanValue::Nothing);
+                        let equal = fidan_values_equal(&a, &b);
+                        return if equal {
+                            Ok(FidanValue::Nothing)
+                        } else {
+                            let da = builtins::display(&a);
+                            let db = builtins::display(&b);
+                            Err(MirSignal::Panic(format!(
+                                "assertion failed: expected {da} == {db}"
+                            )))
+                        };
+                    }
+                    "assert_ne" => {
+                        let mut it = args.into_iter();
+                        let a = it.next().unwrap_or(FidanValue::Nothing);
+                        let b = it.next().unwrap_or(FidanValue::Nothing);
+                        let equal = fidan_values_equal(&a, &b);
+                        return if !equal {
+                            Ok(FidanValue::Nothing)
+                        } else {
+                            let da = builtins::display(&a);
+                            Err(MirSignal::Panic(format!(
+                                "assertion failed: expected {da} != {da}"
+                            )))
+                        };
+                    }
+                    _ => {}
+                }
                 // Constructor builtins (e.g. `Shared(val)`) take priority; then
                 // true language builtins (print, input, len, type conversions, math).
                 // String/list/dict receiver methods are NOT free functions and must
@@ -1471,6 +1515,26 @@ enum MirSignal {
 
 type MirResult = Result<FidanValue, MirSignal>;
 
+// ── Value equality helper (used by assert_eq / assert_ne) ────────────────────
+
+/// Compare two `FidanValue`s for structural equality, mirroring `BinOp::Eq`.
+///
+/// Returns `true` when the values are considered equal by the Fidan runtime.
+fn fidan_values_equal(a: &FidanValue, b: &FidanValue) -> bool {
+    use FidanValue::*;
+    match (a, b) {
+        (Integer(x), Integer(y)) => x == y,
+        (Float(x), Float(y)) => x == y,
+        (Integer(x), Float(y)) => (*x as f64) == *y,
+        (Float(x), Integer(y)) => *x == (*y as f64),
+        (Boolean(x), Boolean(y)) => x == y,
+        (String(x), String(y)) => x.as_str() == y.as_str(),
+        (Nothing, Nothing) => true,
+        (Nothing, _) | (_, Nothing) => false,
+        _ => false,
+    }
+}
+
 // ── Arithmetic / logic helpers ────────────────────────────────────────────────
 
 fn mir_lit_to_value(lit: MirLit) -> FidanValue {
@@ -1828,6 +1892,46 @@ impl MirMachine {
             }
         }
     }
+
+    /// Run a sequence of pre-lowered test functions and return per-test outcomes.
+    ///
+    /// Called by [`run_tests`] after the init function has already been run.
+    /// Each test is called fresh (call stack cleared between tests).
+    pub fn run_test_suite(&mut self, test_fns: &[(String, FunctionId)]) -> Vec<TestResult> {
+        let mut results = Vec::with_capacity(test_fns.len());
+        for (name, fn_id) in test_fns {
+            self.call_stack.clear();
+            self.panic_trace.clear();
+            let outcome = self.call_function(*fn_id, vec![]);
+            let result = match outcome {
+                Ok(_) => TestResult {
+                    name: name.clone(),
+                    passed: true,
+                    message: None,
+                },
+                Err(MirSignal::Panic(msg)) => TestResult {
+                    name: name.clone(),
+                    passed: false,
+                    message: Some(msg),
+                },
+                Err(MirSignal::Throw(v)) => TestResult {
+                    name: name.clone(),
+                    passed: false,
+                    message: Some(format!(
+                        "unhandled exception: {}",
+                        builtins::display(&v)
+                    )),
+                },
+                Err(MirSignal::ParallelFail(msg)) => TestResult {
+                    name: name.clone(),
+                    passed: false,
+                    message: Some(msg),
+                },
+            };
+            results.push(result);
+        }
+        results
+    }
 }
 
 /// Execute one REPL line using the MIR interpreter.
@@ -1886,4 +1990,30 @@ pub fn run_mir(
     source_map: Arc<SourceMap>,
 ) -> Result<(), RunError> {
     run_mir_with_jit(program, interner, source_map, 500)
+}
+
+/// Run all `test { … }` blocks in a `MirProgram` and return per-test results.
+///
+/// 1. The init function (id 0) is run first so globals and imports are set up.
+/// 2. Each named test function is called in declaration order.
+/// 3. A test passes if the function returns normally; it fails if it panics
+///    (typically via `assert`/`assert_eq`).
+pub fn run_tests(
+    program: MirProgram,
+    interner: Arc<SymbolInterner>,
+    source_map: Arc<SourceMap>,
+) -> (Result<(), RunError>, Vec<TestResult>) {
+    // Collect the test list before moving `program` into the machine.
+    let test_fns: Vec<(String, FunctionId)> = program.test_functions.clone();
+
+    let mut machine = MirMachine::new(Arc::new(program), interner, source_map);
+    machine.set_jit_threshold(0); // keep JIT off for reproducible test runs
+
+    // Run module init (sets up globals, runs top-level statements).
+    if let Err(e) = machine.run() {
+        return (Err(e), vec![]);
+    }
+
+    let results = machine.run_test_suite(&test_fns);
+    (Ok(()), results)
 }

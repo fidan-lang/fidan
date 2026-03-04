@@ -56,6 +56,8 @@ pub enum TokenKind {
     Shared,
     Pending,
     Weak, // WeakShared
+    /// `test` — top-level test block declaration
+    Test,
     And,
     Or,
     Not,

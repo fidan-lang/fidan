@@ -9,5 +9,6 @@ mod builtins;
 mod mir_interp;
 
 pub use mir_interp::{
-    MirMachine, MirReplState, RunError, TraceFrame, run_mir, run_mir_repl_line, run_mir_with_jit,
+    MirMachine, MirReplState, RunError, TestResult, TraceFrame, run_mir, run_mir_repl_line,
+    run_mir_with_jit, run_tests,
 };

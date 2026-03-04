@@ -3003,6 +3003,54 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
         }
     }
 
+    // ── Lower test blocks ─────────────────────────────────────────────────────
+    // Each `test "name" { body }` becomes an anonymous parameterless function.
+    // The (name, fn_id) pair is recorded in `prog.test_functions` so the CLI
+    // test runner can call them one-by-one and report pass/fail per test.
+    for test_decl in &hir.tests {
+        let fn_sym = interner.intern(&format!("__test__:{}", test_decl.name));
+        let test_fn = MirFunction::new(
+            FunctionId(prog.functions.len() as u32),
+            fn_sym,
+            MirTy::Nothing,
+        );
+        let test_fn_id = prog.add_function(test_fn);
+        fn_param_names.insert(test_fn_id, vec![]);
+
+        let entry_bb = prog.function_mut(test_fn_id).alloc_block();
+        let mut ctx = FnCtx {
+            prog: &mut prog,
+            fn_id: test_fn_id,
+            cur_bb: entry_bb,
+            env: VarEnv::new(),
+            global_map: global_map.clone(),
+            fn_map: fn_map.clone(),
+            obj_map: obj_map.clone(),
+            terminated: false,
+            this_reg: None,
+            owner_class: None,
+            parent_map: parent_map.clone(),
+            method_ids: method_ids.clone(),
+            new_sym,
+            len_sym,
+            append_sym,
+            type_sym,
+            fn_is_extension: fn_is_extension.clone(),
+            loop_stack: vec![],
+            continue_sites: HashMap::new(),
+            wildcard_sym,
+            par_for_pending: Rc::clone(&pending_par_fors),
+            is_init_fn: false,
+            fn_param_names: fn_param_names.clone(),
+        };
+        ctx.lower_stmts(&test_decl.body);
+        if !ctx.terminated {
+            ctx.set_terminator(Terminator::Return(None));
+        }
+
+        prog.test_functions.push((test_decl.name.clone(), test_fn_id));
+    }
+
     // ── Propagate use_decls from HIR ──────────────────────────────────────────
     for decl in &hir.use_decls {
         if decl.module_path.len() >= 2 {

@@ -1246,22 +1246,45 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                     error_count += emit_mir_safety_diags(&mir, &interner, opts.strict_mode);
                     if error_count == 0 {
                         fidan_passes::run_all(&mut mir);
-                        match fidan_interp::run_mir_with_jit(
-                            mir,
-                            Arc::clone(&interner),
-                            Arc::clone(&source_map),
-                            opts.jit_threshold,
-                        ) {
-                            Ok(()) => {
-                                eprintln!("\x1b[1;32mtest passed\x1b[0m");
-                            }
-                            Err(err) => {
-                                let msg = err.message.trim_start_matches("assertion failed: ");
-                                eprintln!("\x1b[1;31mtest failed\x1b[0m: {}", msg);
-                                if !err.trace.is_empty() && opts.trace != TraceMode::None {
-                                    render_trace_to_stderr(&err.trace, opts.trace);
+                        let test_count = mir.test_functions.len();
+                        if test_count == 0 {
+                            eprintln!("note: no test blocks found");
+                        } else {
+                            match fidan_interp::run_tests(
+                                mir,
+                                Arc::clone(&interner),
+                                Arc::clone(&source_map),
+                            ) {
+                                (Err(err), _) => {
+                                    // Initialisation (top-level code) crashed before tests ran.
+                                    eprintln!("\x1b[1;31merror\x1b[0m: program initialisation failed: {}", err.message);
+                                    if !err.trace.is_empty() && opts.trace != TraceMode::None {
+                                        render_trace_to_stderr(&err.trace, opts.trace);
+                                    }
+                                    std::process::exit(1);
                                 }
-                                std::process::exit(1);
+                                (Ok(()), results) => {
+                                    let mut passed = 0usize;
+                                    let mut failed = 0usize;
+                                    for r in &results {
+                                        if r.passed {
+                                            passed += 1;
+                                            eprintln!("  \x1b[1;32m✓\x1b[0m {}", r.name);
+                                        } else {
+                                            failed += 1;
+                                            let msg = r.message.as_deref().unwrap_or("failed");
+                                            let msg = msg.trim_start_matches("assertion failed: ");
+                                            eprintln!("  \x1b[1;31m✗\x1b[0m {} — {}", r.name, msg);
+                                        }
+                                    }
+                                    eprintln!();
+                                    if failed == 0 {
+                                        eprintln!("\x1b[1;32m{} test{} passed\x1b[0m", passed, if passed == 1 { "" } else { "s" });
+                                    } else {
+                                        eprintln!("\x1b[1;32m{} passed\x1b[0m, \x1b[1;31m{} failed\x1b[0m", passed, failed);
+                                        std::process::exit(1);
+                                    }
+                                }
                             }
                         }
                     }

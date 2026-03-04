@@ -72,6 +72,17 @@ pub enum Item {
     },
     /// A top-level statement (for, while, if, check, attempt, etc.)
     Stmt(StmtId),
+    /// `test "name" { body }` — a named test block.
+    ///
+    /// Only executed when the program is run with `fidan test`.
+    /// The body may call `assert(cond)` and `assert_eq(a, b)`.
+    TestDecl {
+        /// Human-readable test name (from the string literal).
+        name: String,
+        /// Body statements (type-checked like a regular action body).
+        body: Vec<StmtId>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]

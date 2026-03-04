@@ -242,6 +242,7 @@ impl<'t> Parser<'t> {
             TokenKind::Object => Some(self.parse_object_decl()),
             TokenKind::Action => Some(self.parse_action_decl(false, decs)),
             TokenKind::Use => Some(self.parse_use_decl(false)),
+            TokenKind::Test => Some(self.parse_test_decl()),
             TokenKind::Export => {
                 self.advance(); // eat `export`
                 if matches!(self.peek(), TokenKind::Use) {
@@ -845,11 +846,45 @@ impl<'t> Parser<'t> {
         }
     }
 
+    // ── Test block declaration ────────────────────────────────────────────────
+    //
+    // Syntax: `test "name" { stmts }`
+    //
+    // The name is any non-empty string literal.  The body is a regular
+    // statement block.  Test blocks are only executed by `fidan test`.
+
+    fn parse_test_decl(&mut self) -> ItemId {
+        let start = self.current_span().start;
+        self.advance(); // eat `test`
+
+        // Expect a string literal name.
+        let name = if let TokenKind::LitString(s) = self.peek() {
+            let s = s.clone();
+            self.advance();
+            s
+        } else {
+            let span = self.current_span();
+            self.error("expected string literal after `test`", span);
+            String::from("<unnamed>")
+        };
+
+        self.skip_terminators();
+        let body = self.parse_block();
+        let end = self.current_span().end;
+        self.skip_one_terminator();
+
+        self.module.arena.alloc_item(Item::TestDecl {
+            name,
+            body,
+            span: Span::new(self.module.file, start, end),
+        })
+    }
+
     fn parse_use_decl(&mut self, re_export: bool) -> ItemId {
         let start = self.current_span().start;
-        self.advance(); // eat `use`
+        self.advance(); // eat `use` / `export use`
 
-        // ── File-path import: `use "./other.fdn"` or `use "../lib/utils.fdn"` ─
+        // File-path import: `use "some/path"` or `export use "some/path"`
         let file_path = if let TokenKind::LitString(s) = self.peek() {
             Some(s.clone())
         } else {

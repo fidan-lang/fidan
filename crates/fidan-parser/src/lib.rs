@@ -246,4 +246,143 @@ mod tests {
         // At least one item should have been recovered.
         assert!(!module.items.is_empty());
     }
+
+    // ── List comprehensions ───────────────────────────────────────────────────
+
+    #[test]
+    fn list_comprehension_simple() {
+        let (_, diags) = parse_src("var xs = [x for x in items]");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn list_comprehension_with_filter() {
+        let (_, diags) = parse_src("var evens = [x for x in nums if x % 2 == 0]");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn list_comprehension_with_transform() {
+        let (_, diags) = parse_src("var squares = [x * x for x in [1, 2, 3, 4, 5]]");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    // ── Dict literals & comprehensions ────────────────────────────────────────
+
+    #[test]
+    fn dict_literal() {
+        let (_, diags) = parse_src(r#"var d = {"a": 1, "b": 2, "c": 3}"#);
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn dict_comprehension() {
+        let (_, diags) = parse_src("var d = {x: x * 2 for x in [1, 2, 3]}");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    // ── Slice expressions ─────────────────────────────────────────────────────
+
+    #[test]
+    fn slice_full_range() {
+        let (_, diags) = parse_src("var s = xs[1..4]");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn slice_from_start() {
+        let (_, diags) = parse_src("var s = xs[..3]");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn slice_to_end() {
+        let (_, diags) = parse_src("var s = xs[2..]");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn slice_with_step() {
+        let (_, diags) = parse_src("var s = xs[0..10 step 2]");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn slice_negative_index() {
+        let (_, diags) = parse_src("var last = xs[-1]");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    // ── Test blocks ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_block_empty() {
+        let (_, diags) = parse_src(r#"test "empty" {}"#);
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn test_block_with_assert() {
+        let (_, diags) = parse_src(
+            r#"test "arithmetic" {
+                assert(1 + 1 == 2)
+                assert_eq(10 - 3, 7)
+                assert_ne("a", "b")
+            }"#,
+        );
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn multiple_test_blocks() {
+        let (module, diags) = parse_src(
+            r#"test "first" { assert(true) }
+            test "second" { assert(1 == 1) }
+            test "third" { assert_eq(2 + 2, 4) }"#,
+        );
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+        // Three test-decl items should be in the module.
+        assert_eq!(module.items.len(), 3);
+    }
+
+    #[test]
+    fn test_block_missing_name_is_recovered() {
+        // Should produce an error but not panic.
+        let (_, diags) = parse_src("test { assert(true) }");
+        assert!(!diags.is_empty(), "expected a diagnostic for missing test name");
+    }
+
+    // ── `use` declarations ───────────────────────────────────────────────────
+
+    #[test]
+    fn use_simple() {
+        let (_, diags) = parse_src("use std.io");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn use_grouped() {
+        let (_, diags) = parse_src("use std.io.{print, readFile}");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn use_alias() {
+        let (_, diags) = parse_src("use std.math as math");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    // ── Range expressions ────────────────────────────────────────────────────
+
+    #[test]
+    fn exclusive_range() {
+        let (_, diags) = parse_src("for i in 0..10 { print(i) }");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
+
+    #[test]
+    fn inclusive_range() {
+        let (_, diags) = parse_src("for i in 1...5 { print(i) }");
+        assert!(errors(&diags).is_empty(), "unexpected errors: {:?}", errors(&diags));
+    }
 }

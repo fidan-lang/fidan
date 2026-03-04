@@ -242,6 +242,13 @@ impl<'a> Printer<'a> {
                     self.print_stmt(sid, depth + 1);
                 }
             }
+
+            Item::TestDecl { name, body, .. } => {
+                println!("{p}TestDecl  \"{name}\"");
+                for &sid in body {
+                    self.print_stmt(sid, depth + 1);
+                }
+            }
         }
     }
 

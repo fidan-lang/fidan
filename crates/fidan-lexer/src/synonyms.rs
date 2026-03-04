@@ -43,6 +43,7 @@ pub fn lookup_keyword(s: &str) -> Option<TokenKind> {
         "Shared" => TokenKind::Shared,
         "Pending" => TokenKind::Pending,
         "WeakShared" => TokenKind::Weak,
+        "test" => TokenKind::Test,
         "with" => return None, // parameter-list context, kept as Ident
 
         // ── Literals ─────────────────────────────────────────────────────

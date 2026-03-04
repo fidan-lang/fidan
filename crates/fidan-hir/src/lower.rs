@@ -18,7 +18,7 @@ const DECORATOR_PRECOMPILE: &str = "precompile";
 use crate::hir::{
     HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr, HirExprKind,
     HirField, HirFunction, HirGlobal, HirInterpPart, HirModule, HirObject, HirParam, HirStmt,
-    HirTask, HirUseDecl,
+    HirTask, HirTestDecl, HirUseDecl,
 };
 
 // ── Context ────────────────────────────────────────────────────────────────────
@@ -514,6 +514,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
     let globals: Vec<HirGlobal> = vec![];
     let mut init_stmts: Vec<HirStmt> = vec![];
     let mut use_decls: Vec<HirUseDecl> = vec![];
+    let mut tests: Vec<HirTestDecl> = vec![];
 
     for &item_id in &module.items {
         match ctx.arena.get_item(item_id).clone() {
@@ -712,6 +713,15 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 init_stmts.push(ctx.lower_stmt(stmt_id));
             }
 
+            // Test blocks: lowered into named HirTestDecls, not into init_stmts.
+            Item::TestDecl { name, body, span } => {
+                tests.push(HirTestDecl {
+                    name,
+                    body: body.iter().map(|&s| ctx.lower_stmt(s)).collect(),
+                    span,
+                });
+            }
+
             // Module imports: capture stdlib imports and propagate to the interpreter.
             Item::Use {
                 path,
@@ -797,6 +807,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
         globals,
         init_stmts,
         use_decls,
+        tests,
     }
 }
 
@@ -816,5 +827,6 @@ pub fn merge_module(base: HirModule, imported: HirModule) -> HirModule {
     // Isolation is enforced at the type-checking layer: `pre_register_hir_into_tc`
     // only exposes `re_export = true` use_decls to the importing file's typechecker.
     merged.use_decls.extend(base.use_decls);
+    merged.tests.extend(base.tests);
     merged
 }

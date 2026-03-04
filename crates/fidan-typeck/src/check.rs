@@ -111,6 +111,10 @@ impl TypeChecker {
             ("boolean", SymbolKind::BuiltinAction),
             // Type constructors
             ("Shared", SymbolKind::BuiltinAction),
+            // Test assertion helpers — valid at any scope, panic on failure.
+            ("assert", SymbolKind::BuiltinAction),
+            ("assert_eq", SymbolKind::BuiltinAction),
+            ("assert_ne", SymbolKind::BuiltinAction),
         ];
         for &(name, kind) in builtins {
             let sym = self.interner.intern(name);
@@ -531,6 +535,8 @@ impl TypeChecker {
                 }
             }
             Item::ExprStmt(_) | Item::Assign { .. } | Item::Stmt(_) | Item::Destructure { .. } => {}
+            // Test blocks are not registered in the symbol table.
+            Item::TestDecl { .. } => {}
         }
     }
 
@@ -692,6 +698,17 @@ impl TypeChecker {
                         },
                     );
                 }
+            }
+
+            // ── test block ───────────────────────────────────────────────────────
+            // Type-checked like a parameterless action body.  `assert` / `assert_eq`
+            // are already registered as builtins so no special handling is needed.
+            Item::TestDecl { body, .. } => {
+                self.table.push_scope(ScopeKind::Block);
+                for &sid in body {
+                    self.check_stmt(sid, module);
+                }
+                self.table.pop_scope();
             }
         }
     }

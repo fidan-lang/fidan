@@ -457,6 +457,9 @@ pub struct MirProgram {
     pub use_decls: Vec<MirUseDecl>,
     /// Module-level global variables.  Indexed by `GlobalId`.
     pub globals: Vec<MirGlobal>,
+    /// Test-block functions registered for `fidan test`.
+    /// Each entry is `(human_readable_name, function_id)`.
+    pub test_functions: Vec<(String, FunctionId)>,
 }
 
 impl MirProgram {

@@ -32,6 +32,20 @@ pub struct HirModule {
     pub init_stmts: Vec<HirStmt>,
     /// Import declarations (`use std.io`, `use std.math.{sin}`, …).
     pub use_decls: Vec<HirUseDecl>,
+    /// Named test blocks (`test "name" { … }`), only executed by `fidan test`.
+    pub tests: Vec<HirTestDecl>,
+}
+
+// ── Test declarations ──────────────────────────────────────────────────────────
+
+/// A single `test "name" { … }` block in the HIR.
+#[derive(Debug)]
+pub struct HirTestDecl {
+    /// Human-readable test name.
+    pub name: String,
+    /// Body statements, type-checked like a regular action body.
+    pub body: Vec<HirStmt>,
+    pub span: Span,
 }
 
 // ── Use declarations ───────────────────────────────────────────────────────────
