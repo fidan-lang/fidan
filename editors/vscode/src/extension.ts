@@ -89,7 +89,7 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
     // Register format-on-save if enabled.
     if (config.get<boolean>("format.onSave") ?? true) {
         context.subscriptions.push(
-            vscode.workspace.onWillSaveTextDocument(async (event) => {
+            vscode.workspace.onWillSaveTextDocument(async (event: vscode.TextDocumentWillSaveEvent) => {
                 if (event.document.languageId !== "fidan") return;
                 if (!client || !client.isRunning()) return;
                 event.waitUntil(
@@ -97,7 +97,7 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
                         "vscode.executeFormatDocumentProvider",
                         event.document.uri,
                         { tabSize: 4, insertSpaces: true },
-                    ).then((edits) => edits ?? []),
+                    ).then((edits: vscode.TextEdit[] | undefined) => edits ?? []),
                 );
             }),
         );
@@ -106,7 +106,7 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
     // Watch configuration changes and restart the server when the binary path
     // or extra args change.
     context.subscriptions.push(
-        vscode.workspace.onDidChangeConfiguration(async (e) => {
+        vscode.workspace.onDidChangeConfiguration(async (e: vscode.ConfigurationChangeEvent) => {
             if (
                 e.affectsConfiguration("fidan.server.path") ||
                 e.affectsConfiguration("fidan.server.extraArgs")
