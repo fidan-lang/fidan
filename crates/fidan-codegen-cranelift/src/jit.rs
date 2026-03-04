@@ -20,7 +20,7 @@
 // the function entry / exit to convert the ABI "all I64" representation.
 
 use cranelift_codegen::ir::{
-    AbiParam, Block, Function, InstBuilder, MemFlags, TrapCode, UserFuncName, Value,
+    AbiParam, Block, BlockArg, Function, InstBuilder, MemFlags, TrapCode, UserFuncName, Value,
     condcodes::{FloatCC, IntCC},
     types::{F64, I8, I64},
 };
@@ -275,12 +275,11 @@ impl JitCompiler {
             let num_locals = func.local_count as usize;
             let mut cl_vars: Vec<Variable> = Vec::with_capacity(num_locals);
             for i in 0..num_locals {
-                let var = Variable::from_u32(i as u32);
                 let cl_ty = local_types
                     .get(&LocalId(i as u32))
                     .and_then(|t| mir_ty_to_cl(t))
                     .unwrap_or(I64);
-                builder.declare_var(var, cl_ty);
+                let var = builder.declare_var(cl_ty);
                 cl_vars.push(var);
             }
 
@@ -741,7 +740,7 @@ fn collect_phi_args(
     func: &MirFunction,
     src_block: BlockId,
     dst_block: BlockId,
-) -> Vec<Value> {
+) -> Vec<BlockArg> {
     let dst_bb = func.block(dst_block);
     dst_bb
         .phis
@@ -758,7 +757,7 @@ fn collect_phi_args(
                         .get(&phi.result)
                         .and_then(|t| mir_ty_to_cl(t))
                         .unwrap_or(I64);
-                    if val_ty == expected_ty {
+                    let coerced = if val_ty == expected_ty {
                         val
                     } else {
                         // Type mismatch — coerce safely.
@@ -769,7 +768,8 @@ fn collect_phi_args(
                             (I64, I8) => builder.ins().ireduce(I8, val),
                             _ => val,
                         }
-                    }
+                    };
+                    coerced.into()
                 })
         })
         .collect()

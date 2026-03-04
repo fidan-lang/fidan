@@ -423,9 +423,9 @@
 | `fidan check` | ✅ | Parse + typecheck only; exits non-zero on any error; `--max-errors N` accepted |
 | `fidan fix` | ✅ | Collects `Confidence::High` `SourceEdit` suggestions; applies to file or `--dry-run` prints old/new lines |
 | `fidan explain <code>` | ✅ | Prints code, title, category from `codes.rs` registry |
-| LSP server | ⬜ | |
-| VS Code extension skeleton | ⬜ | |
-| `fidan fmt` formatter | ⬜ | |
+| LSP server | ✅ | `fidan-lsp` crate: tower-lsp 0.20; `initialize`, `didOpen/Change/Close`, `publishDiagnostics`, `textDocument/formatting`; `DocumentStore` (DashMap); span→Position conversion; `fidan lsp` CLI subcommand |
+| VS Code extension skeleton | ✅ | `editors/vscode/`: `package.json`, TextMate grammar (`syntaxes/fidan.tmLanguage.json`), `language-configuration.json`, TypeScript LSP client (`src/extension.ts`), `tsconfig.json`; format-on-save; `fidan.restartServer` command |
+| `fidan fmt` formatter | ✅ | `fidan-fmt` crate: `format_source()`, `check_formatted()`, `FormatOptions`; `fidan fmt <file> [--in-place] [--check]` CLI; 17/17 formatter unit tests; idempotent on all constructs |
 
 ---
 

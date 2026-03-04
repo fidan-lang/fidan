@@ -82,6 +82,23 @@ enum Command {
     },
     /// Start the language server (LSP)
     Lsp,
+    /// Format a Fidan source file
+    Fmt {
+        /// Path to the .fdn source file
+        file: PathBuf,
+        /// Rewrite the file in place instead of printing to stdout
+        #[arg(long)]
+        in_place: bool,
+        /// Exit 1 if the file is not already formatted (useful in CI)
+        #[arg(long)]
+        check: bool,
+        /// Number of spaces per indent level (default: 4)
+        #[arg(long)]
+        indent_width: Option<usize>,
+        /// Soft line-length limit (default: 100)
+        #[arg(long)]
+        max_line_len: Option<usize>,
+    },
     /// Check a Fidan source file for errors without running it
     Check {
         /// Path to the .fdn source file
@@ -253,6 +270,57 @@ fn run_fix(file: PathBuf, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
+// ── Formatter ─────────────────────────────────────────────────────────────────
+
+fn run_fmt(
+    file: PathBuf,
+    in_place: bool,
+    check: bool,
+    indent_width: Option<usize>,
+    max_line_len: Option<usize>,
+) -> Result<()> {
+    let src = std::fs::read_to_string(&file).with_context(|| format!("cannot read {:?}", file))?;
+
+    let mut opts = fidan_fmt::FormatOptions::default();
+    if let Some(w) = indent_width {
+        opts.indent_width = w;
+    }
+    if let Some(l) = max_line_len {
+        opts.max_line_len = l;
+    }
+
+    let formatted = fidan_fmt::format_source(&src, &opts);
+
+    if check {
+        if formatted == src {
+            // Already formatted — exit 0 (success).
+            return Ok(());
+        }
+        render_message_to_stderr(
+            Severity::Error,
+            "fmt",
+            &format!(
+                "{} is not formatted — run `fidan fmt {}` to fix",
+                file.display(),
+                file.display()
+            ),
+        );
+        std::process::exit(1);
+    }
+
+    if in_place {
+        if formatted != src {
+            std::fs::write(&file, &formatted)
+                .with_context(|| format!("cannot write {:?}", file))?;
+            render_message_to_stderr(Severity::Note, "", &format!("formatted {}", file.display()));
+        }
+    } else {
+        print!("{formatted}");
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<()> {
     ensure_utf8_console();
     let cli = Cli::parse();
@@ -324,6 +392,13 @@ fn main() -> Result<()> {
             run_pipeline(opts)
         }
         Command::Fix { file, dry_run } => run_fix(file, dry_run),
+        Command::Fmt {
+            file,
+            in_place,
+            check,
+            indent_width,
+            max_line_len,
+        } => run_fmt(file, in_place, check, indent_width, max_line_len),
         Command::Explain { code } => {
             run_explain(&code);
             Ok(())
@@ -333,11 +408,7 @@ fn main() -> Result<()> {
             run_repl(trace_mode)
         }
         Command::Lsp => {
-            render_message_to_stderr(
-                Severity::Note,
-                "unimplemented",
-                "LSP server not yet implemented (Phase 10)",
-            );
+            fidan_lsp::run();
             Ok(())
         }
     }

@@ -4,5 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-fidan-driver = { workspace = true }
+fidan-source = { workspace = true }
+fidan-lexer = { workspace = true }
+fidan-parser = { workspace = true }
+fidan-diagnostics = { workspace = true }
+fidan-fmt = { workspace = true }
 anyhow = { workspace = true }
+dashmap = { workspace = true }
+tower-lsp = { workspace = true }
+tokio = { workspace = true }

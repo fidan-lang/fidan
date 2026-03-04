@@ -1,0 +1,13 @@
+[package]
+name = "fidan-fmt"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+fidan-source = { workspace = true }
+fidan-lexer = { workspace = true }
+fidan-ast = { workspace = true }
+fidan-parser = { workspace = true }
+
+[dev-dependencies]
+fidan-parser = { workspace = true }

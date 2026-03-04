@@ -101,8 +101,22 @@ fidan/
     ├── fidan-codegen-llvm/      ← LLVM backend — AOT only (`fidan build`, release binaries)
     ├── fidan-stdlib/            ← Standard library (Rust implementations)
     ├── fidan-driver/            ← Pipeline orchestration, Session, CompileOptions
+    ├── fidan-fmt/               ← Canonical source formatter (`fidan fmt`, `format_source()`)
     ├── fidan-lsp/               ← Language Server Protocol server
     └── fidan-cli/               ← Main binary: `fidan` command
+```
+
+**`editors/` tree:**
+
+```
+editors/
+└── vscode/
+    ├── package.json                 ← Extension manifest (language, grammar, config, commands)
+    ├── language-configuration.json  ← Brackets, comments, auto-close, folding
+    ├── syntaxes/
+    │   └── fidan.tmLanguage.json        ← TextMate grammar for syntax highlighting
+    └── src/
+        └── extension.ts                 ← LSP client (vscode-languageclient), format-on-save
 ```
 
 **Dependency rules (strict, enforced by Cargo):**
@@ -123,8 +137,9 @@ fidan-codegen-cranelift → fidan-mir, fidan-runtime          ← JIT only
 fidan-codegen-llvm      → fidan-mir, fidan-runtime          ← AOT only; optional feature flag, requires LLVM
 fidan-stdlib        → fidan-runtime
 fidan-driver        → all of the above, fidan-diagnostics
-fidan-lsp           → fidan-driver
-fidan-cli           → fidan-driver
+fidan-fmt           → fidan-parser, fidan-source
+fidan-lsp           → fidan-parser, fidan-lexer, fidan-source, fidan-diagnostics, fidan-fmt
+fidan-cli           → fidan-driver, fidan-fmt, fidan-lsp
 ```
 
 The strict layering prevents circular dependencies and makes unit-testing each stage trivial.
@@ -2054,31 +2069,56 @@ lines. Hot-patches the interpreter's environment on each entry.
 
 ---
 
-## 18. Stage 15 – Language Server (`fidan-lsp`)
+## 18. Stage 15 – Language Server (`fidan-lsp`) & VS Code Extension
 
 > Purpose: IDE integration (VS Code, Neovim, etc.) via the Language Server Protocol.
 
-**Crate:** `tower-lsp` (Rust async LSP framework built on `tower` and `tokio`).
+**Crate:** `tower-lsp` 0.20 — async LSP framework built on `tower` and `tokio`.  
+**Extension:** `editors/vscode/` — TypeScript LSP client using `vscode-languageclient` 9.
 
-### Features (prioritized)
+### Implemented
+
+| Feature | Notes |
+|---|---|
+| `initialize` / `initialized` / `shutdown` | Full lifecycle; `FULL` text sync |
+| `textDocument/didOpen` | Lex + parse + push diagnostics |
+| `textDocument/didChange` | Re-analyse on every keystroke |
+| `textDocument/didClose` | Remove from store + clear diagnostics |
+| `textDocument/formatting` | Calls `fidan_fmt::format_source()`; whole-document `TextEdit` |
+| `DocumentStore` | `DashMap<Url, Document>` — thread-safe, no global lock |
+| Span → Position conversion | `SourceFile::line_col()` → 0-based LSP positions |
+
+### Planned (P1/P2)
 
 | Feature | Priority | Notes |
 |---|---|---|
-| Diagnostics (errors, warnings) | P0 | Reuse `fidan-diagnostics` |
-| Go to definition | P0 | |
-| Hover (type info) | P0 | |
+| Hover (type info) | P1 | Requires `fidan-typeck` integration |
 | Completion | P1 | Identifier, field, method |
-| Inline hints (types) | P1 | Show inferred types |
-| Semantic highlighting | P1 | |
-| Rename symbol | P2 | |
-| Find all references | P2 | |
-| Code actions / quick fixes | P2 | Surface fix suggestions from `fidan-diagnostics` |
-| Format on save | P1 | |
 | Signature help | P1 | |
+| Inline hints (inferred types) | P1 | |
+| Semantic highlighting | P1 | |
+| Go to definition | P2 | |
+| Find all references | P2 | |
+| Rename symbol | P2 | |
+| Code actions / quick fixes | P2 | Surface `Confidence::High` suggestions from `fidan-diagnostics` |
 
-The LSP server uses the same `fidan-driver` pipeline but in **incremental mode**: only
-re-analyze changed files/functions. Future: use `salsa` crate for demand-driven incremental
-compilation.
+The LSP server will move to incremental re-analysis (salsa) once the demand-driven
+compilation model is in place.
+
+### VS Code Extension (`editors/vscode/`)
+
+The extension activates on `.fdn` files, spawns `fidan lsp` as a child process over
+stdio and registers a `vscode-languageclient` `LanguageClient`. Key user-facing features:
+
+- **Syntax highlighting** — full TextMate grammar covering keywords, types, literals,
+  operators, decorators, string interpolation, nestable block comments.  
+- **Format on save** — enabled by default (`fidan.format.onSave`); calls
+  `textDocument/formatting` on `onWillSaveTextDocument`.  
+- **Diagnostics** — errors and warnings appear inline and in the Problems panel in
+  real time.  
+- **Commands** — `Fidan: Restart Language Server`, `Fidan: Show Language Server Output`.
+
+
 
 ---
 
@@ -2397,8 +2437,8 @@ Cranelift's **permanent, final role** in the architecture — it will never be r
 - [ ] All `fidan` subcommands working
 - [ ] REPL migrated to MIR pipeline (incremental MIR append model; retire AST walker)
 - [ ] REPL with history and multi-line input
-- [ ] LSP server: diagnostics, hover, go-to-def, completion
-- [ ] VS Code extension skeleton (JSON grammar + LSP client)
+- [x] LSP server: diagnostics push, textDocument/formatting
+- [x] VS Code extension skeleton (TextMate grammar + TypeScript LSP client + format-on-save)
 - [ ] Formatter (`fidan fmt`)
 
 ### Phase 11 – LLVM AOT Backend + Performance (4–6 weeks)
