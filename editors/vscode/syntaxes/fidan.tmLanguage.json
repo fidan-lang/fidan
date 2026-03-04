@@ -9,6 +9,9 @@
         { "include": "#decorator" },
         { "include": "#string" },
         { "include": "#number" },
+        { "include": "#parallel-action-declaration" },
+        { "include": "#action-declaration" },
+        { "include": "#object-declaration" },
         { "include": "#keyword-declaration" },
         { "include": "#keyword-control" },
         { "include": "#keyword-modifier" },
@@ -16,9 +19,7 @@
         { "include": "#keyword-other" },
         { "include": "#type-builtin" },
         { "include": "#constant-language" },
-        { "include": "#action-declaration" },
-        { "include": "#parallel-action-declaration" },
-        { "include": "#object-declaration" },
+        { "include": "#type-user" },
         { "include": "#operator-symbolic" },
         { "include": "#identifier" }
     ],
@@ -111,32 +112,32 @@
         },
 
         "keyword-declaration": {
-            "match": "\\b(var|const|action|object|new|extends|extend|export|use|as)\\b",
+            "match": "\\b(var|const|action|object|new|extends|export|use|as|test)\\b",
             "name": "keyword.declaration.fidan"
         },
 
         "keyword-control": {
-            "match": "\\b(if|otherwise|when|else|for|in|while|break|continue|return|attempt|catch|finally|spawn|await|concurrent|parallel|task|test|expect)\\b",
+            "match": "\\b(if|otherwise|else|when|for|in|while|break|stop|continue|return|attempt|try|catch|finally|spawn|await|concurrent|parallel|task|check|panic|throw|sep)\\b",
             "name": "keyword.control.fidan"
         },
 
         "keyword-modifier": {
-            "match": "\\b(certain|optional|default|oftype|returns|with|also|this|parent|self)\\b",
+            "match": "\\b(certain|optional|oftype|returns|with|this|parent)\\b",
             "name": "keyword.other.modifier.fidan"
         },
 
         "keyword-operator": {
-            "match": "\\b(and|or|not|is|equals|mod|pow|lessthan|greaterthan)\\b",
+            "match": "\\b(and|or|not|is|equals|notequals|lessthan|greaterthan|lessthanorequals|greaterthanorequals|mod|pow|also)\\b",
             "name": "keyword.operator.word.fidan"
         },
 
         "keyword-other": {
-            "match": "\\b(set|import|from|global|override|abstract|interface|enum|typeof|oftype|Shared|Pending)\\b",
+            "match": "\\b(set)\\b",
             "name": "keyword.other.fidan"
         },
 
         "type-builtin": {
-            "match": "\\b(integer|int|float|decimal|boolean|bool|string|text|nothing|flexible|list|map|dict)\\b",
+            "match": "\\b(integer|int|float|decimal|boolean|bool|string|text|flexible|dynamic|list|map|dict|tuple|Shared|Pending|WeakShared)\\b",
             "name": "support.type.primitive.fidan"
         },
 
@@ -145,11 +146,18 @@
             "name": "constant.language.fidan"
         },
 
+        "type-user": {
+            "match": "\\b[A-Z][A-Za-z0-9_]*\\b",
+            "name": "entity.name.class.fidan"
+        },
+
         "action-declaration": {
-            "match": "\\b(action)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+            "match": "\\b(action)\\s+([A-Za-z_][A-Za-z0-9_]*)(\\s+(extends)\\s+([A-Za-z_][A-Za-z0-9_]*))?",
             "captures": {
                 "1": { "name": "keyword.declaration.fidan" },
-                "2": { "name": "entity.name.function.fidan" }
+                "2": { "name": "entity.name.function.fidan" },
+                "4": { "name": "keyword.declaration.fidan" },
+                "5": { "name": "entity.name.class.fidan" }
             }
         },
 
@@ -167,7 +175,7 @@
             "captures": {
                 "1": { "name": "keyword.declaration.fidan" },
                 "2": { "name": "entity.name.class.fidan" },
-                "4": { "name": "keyword.other.fidan" },
+                "4": { "name": "keyword.declaration.fidan" },
                 "5": { "name": "entity.name.class.fidan" }
             }
         },
@@ -175,7 +183,7 @@
         "operator-symbolic": {
             "patterns": [
                 {
-                    "match": "\\.\\.\\.?|\\.\\.=",
+                    "match": "\\.\\.\\.|\\.\\.",
                     "name": "keyword.operator.range.fidan"
                 },
                 {
@@ -183,15 +191,23 @@
                     "name": "keyword.operator.null-coalescing.fidan"
                 },
                 {
-                    "match": "(\\+|-|\\*|/|%|\\*\\*)=",
+                    "match": "(\\+|-|\\*|/|%)=",
                     "name": "keyword.operator.assignment.compound.fidan"
                 },
                 {
-                    "match": "=(?!=)",
-                    "name": "keyword.operator.assignment.fidan"
+                    "match": "=>",
+                    "name": "keyword.operator.fat-arrow.fidan"
                 },
                 {
-                    "match": "==|!=|<=|>=|<|>",
+                    "match": "->",
+                    "name": "keyword.operator.arrow.fidan"
+                },
+                {
+                    "match": "::",
+                    "name": "keyword.operator.path.fidan"
+                },
+                {
+                    "match": "==|!=|<=|>=|<<|>>|<|>",
                     "name": "keyword.operator.comparison.fidan"
                 },
                 {
@@ -199,20 +215,16 @@
                     "name": "keyword.operator.logical.fidan"
                 },
                 {
-                    "match": "&|\\||\\^|<<|>>",
+                    "match": "&|\\||\\^",
                     "name": "keyword.operator.bitwise.fidan"
                 },
                 {
-                    "match": "\\+|-|\\*\\*|\\*|/|%",
+                    "match": "\\*\\*|\\+|-|\\*|/|%",
                     "name": "keyword.operator.arithmetic.fidan"
                 },
                 {
-                    "match": "->",
-                    "name": "keyword.operator.arrow.fidan"
-                },
-                {
-                    "match": "=>",
-                    "name": "keyword.operator.fat-arrow.fidan"
+                    "match": "=(?![>=])",
+                    "name": "keyword.operator.assignment.fidan"
                 }
             ]
         },
