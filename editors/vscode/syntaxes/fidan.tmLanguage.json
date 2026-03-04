@@ -1,0 +1,225 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "Fidan",
+    "scopeName": "source.fidan",
+    "fileTypes": ["fdn"],
+    "patterns": [
+        { "include": "#block-comment" },
+        { "include": "#line-comment" },
+        { "include": "#decorator" },
+        { "include": "#string" },
+        { "include": "#number" },
+        { "include": "#keyword-declaration" },
+        { "include": "#keyword-control" },
+        { "include": "#keyword-modifier" },
+        { "include": "#keyword-operator" },
+        { "include": "#keyword-other" },
+        { "include": "#type-builtin" },
+        { "include": "#constant-language" },
+        { "include": "#action-declaration" },
+        { "include": "#parallel-action-declaration" },
+        { "include": "#object-declaration" },
+        { "include": "#operator-symbolic" },
+        { "include": "#identifier" }
+    ],
+    "repository": {
+
+        "block-comment": {
+            "name": "comment.block.fidan",
+            "begin": "#/",
+            "end": "/#",
+            "beginCaptures": { "0": { "name": "punctuation.definition.comment.begin.fidan" } },
+            "endCaptures":   { "0": { "name": "punctuation.definition.comment.end.fidan" } },
+            "patterns": [
+                { "include": "#block-comment" }
+            ]
+        },
+
+        "line-comment": {
+            "match": "##.*$|#(?![/]).*$",
+            "name": "comment.line.number-sign.fidan",
+            "captures": {
+                "0": { "name": "comment.line.number-sign.fidan" }
+            }
+        },
+
+        "decorator": {
+            "match": "@[A-Za-z_][A-Za-z0-9_]*",
+            "name": "entity.name.decorator.fidan"
+        },
+
+        "string": {
+            "name": "string.quoted.double.fidan",
+            "begin": "\"",
+            "end": "\"",
+            "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.fidan" } },
+            "endCaptures":   { "0": { "name": "punctuation.definition.string.end.fidan" } },
+            "patterns": [
+                { "include": "#string-escape" },
+                { "include": "#string-interpolation" }
+            ]
+        },
+
+        "string-escape": {
+            "match": "\\\\[nrt\\\\\"{}]",
+            "name": "constant.character.escape.fidan"
+        },
+
+        "string-interpolation": {
+            "name": "meta.interpolation.fidan",
+            "begin": "(?<!\\\\)\\{",
+            "end": "\\}",
+            "beginCaptures": { "0": { "name": "punctuation.definition.interpolation.begin.fidan" } },
+            "endCaptures":   { "0": { "name": "punctuation.definition.interpolation.end.fidan" } },
+            "patterns": [
+                { "include": "#block-comment" },
+                { "include": "#line-comment" },
+                { "include": "#string" },
+                { "include": "#number" },
+                { "include": "#keyword-control" },
+                { "include": "#keyword-operator" },
+                { "include": "#type-builtin" },
+                { "include": "#constant-language" },
+                { "include": "#operator-symbolic" },
+                { "include": "#identifier" }
+            ]
+        },
+
+        "number": {
+            "patterns": [
+                {
+                    "match": "0[xX][0-9A-Fa-f][0-9A-Fa-f_]*",
+                    "name": "constant.numeric.hex.fidan"
+                },
+                {
+                    "match": "0[bB][01][01_]*",
+                    "name": "constant.numeric.binary.fidan"
+                },
+                {
+                    "match": "0[oO][0-7][0-7_]*",
+                    "name": "constant.numeric.octal.fidan"
+                },
+                {
+                    "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9]+)?\\b",
+                    "name": "constant.numeric.float.fidan"
+                },
+                {
+                    "match": "\\b[0-9][0-9_]*\\b",
+                    "name": "constant.numeric.integer.fidan"
+                }
+            ]
+        },
+
+        "keyword-declaration": {
+            "match": "\\b(var|const|action|object|new|extends|extend|export|use|as)\\b",
+            "name": "keyword.declaration.fidan"
+        },
+
+        "keyword-control": {
+            "match": "\\b(if|otherwise|when|else|for|in|while|break|continue|return|attempt|catch|finally|spawn|await|concurrent|parallel|task|test|expect)\\b",
+            "name": "keyword.control.fidan"
+        },
+
+        "keyword-modifier": {
+            "match": "\\b(certain|optional|default|oftype|returns|with|also|this|parent|self)\\b",
+            "name": "keyword.other.modifier.fidan"
+        },
+
+        "keyword-operator": {
+            "match": "\\b(and|or|not|is|equals|mod|pow|lessthan|greaterthan)\\b",
+            "name": "keyword.operator.word.fidan"
+        },
+
+        "keyword-other": {
+            "match": "\\b(set|import|from|global|override|abstract|interface|enum|typeof|oftype|Shared|Pending)\\b",
+            "name": "keyword.other.fidan"
+        },
+
+        "type-builtin": {
+            "match": "\\b(integer|int|float|decimal|boolean|bool|string|text|nothing|flexible|list|map|dict)\\b",
+            "name": "support.type.primitive.fidan"
+        },
+
+        "constant-language": {
+            "match": "\\b(true|false|True|False|nothing)\\b",
+            "name": "constant.language.fidan"
+        },
+
+        "action-declaration": {
+            "match": "\\b(action)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+            "captures": {
+                "1": { "name": "keyword.declaration.fidan" },
+                "2": { "name": "entity.name.function.fidan" }
+            }
+        },
+
+        "parallel-action-declaration": {
+            "match": "\\b(parallel)\\s+(action)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+            "captures": {
+                "1": { "name": "keyword.control.fidan" },
+                "2": { "name": "keyword.declaration.fidan" },
+                "3": { "name": "entity.name.function.fidan" }
+            }
+        },
+
+        "object-declaration": {
+            "match": "\\b(object)\\s+([A-Za-z_][A-Za-z0-9_]*)(\\s+(extends)\\s+([A-Za-z_][A-Za-z0-9_]*))?\\b",
+            "captures": {
+                "1": { "name": "keyword.declaration.fidan" },
+                "2": { "name": "entity.name.class.fidan" },
+                "4": { "name": "keyword.other.fidan" },
+                "5": { "name": "entity.name.class.fidan" }
+            }
+        },
+
+        "operator-symbolic": {
+            "patterns": [
+                {
+                    "match": "\\.\\.\\.?|\\.\\.=",
+                    "name": "keyword.operator.range.fidan"
+                },
+                {
+                    "match": "\\?\\?",
+                    "name": "keyword.operator.null-coalescing.fidan"
+                },
+                {
+                    "match": "(\\+|-|\\*|/|%|\\*\\*)=",
+                    "name": "keyword.operator.assignment.compound.fidan"
+                },
+                {
+                    "match": "=(?!=)",
+                    "name": "keyword.operator.assignment.fidan"
+                },
+                {
+                    "match": "==|!=|<=|>=|<|>",
+                    "name": "keyword.operator.comparison.fidan"
+                },
+                {
+                    "match": "&&|\\|\\||!",
+                    "name": "keyword.operator.logical.fidan"
+                },
+                {
+                    "match": "&|\\||\\^|<<|>>",
+                    "name": "keyword.operator.bitwise.fidan"
+                },
+                {
+                    "match": "\\+|-|\\*\\*|\\*|/|%",
+                    "name": "keyword.operator.arithmetic.fidan"
+                },
+                {
+                    "match": "->",
+                    "name": "keyword.operator.arrow.fidan"
+                },
+                {
+                    "match": "=>",
+                    "name": "keyword.operator.fat-arrow.fidan"
+                }
+            ]
+        },
+
+        "identifier": {
+            "match": "[A-Za-z_][A-Za-z0-9_]*",
+            "name": "variable.other.fidan"
+        }
+    }
+}

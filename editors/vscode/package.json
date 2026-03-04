@@ -1,0 +1,122 @@
+{
+    "name": "fidan",
+    "displayName": "Fidan",
+    "description": "Syntax highlighting, formatting and language server support for the Fidan programming language.",
+    "version": "1.0.0",
+    "publisher": "AppSolves",
+    "license": "Fidan Programming Language License (FPLL) 1.0.0",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/AppSolves/fidan"
+    },
+    "engines": {
+        "vscode": "^1.109.0"
+    },
+    "categories": [
+        "Programming Languages",
+        "Formatters",
+        "Linters"
+    ],
+    "keywords": [
+        "fidan",
+        "fdn"
+    ],
+    "activationEvents": [],
+    "main": "./out/extension.js",
+    "contributes": {
+        "languages": [
+            {
+                "id": "fidan",
+                "aliases": [
+                    "Fidan",
+                    "fidan"
+                ],
+                "extensions": [
+                    ".fdn"
+                ],
+                "configuration": "./language-configuration.json",
+                "icon": {
+                    "light": "./icons/icon_transparent.png",
+                    "dark": "./icons/icon_transparent.png"
+                }
+            }
+        ],
+        "grammars": [
+            {
+                "language": "fidan",
+                "scopeName": "source.fidan",
+                "path": "./syntaxes/fidan.tmLanguage.json"
+            }
+        ],
+        "configuration": {
+            "title": "Fidan",
+            "properties": {
+                "fidan.server.path": {
+                    "type": "string",
+                    "default": "fidan",
+                    "description": "Path to the `fidan` binary used for the language server. Defaults to `fidan` on PATH."
+                },
+                "fidan.server.extraArgs": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "Extra arguments forwarded to `fidan lsp`."
+                },
+                "fidan.trace.server": {
+                    "type": "string",
+                    "enum": [
+                        "off",
+                        "messages",
+                        "verbose"
+                    ],
+                    "default": "off",
+                    "description": "Trace LSP communication in the Output channel."
+                },
+                "fidan.format.indentWidth": {
+                    "type": "number",
+                    "default": 4,
+                    "description": "Number of spaces per indent level used by `fidan fmt`."
+                },
+                "fidan.format.maxLineLen": {
+                    "type": "number",
+                    "default": 100,
+                    "description": "Target maximum line length used by `fidan fmt`."
+                },
+                "fidan.format.onSave": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Format Fidan files automatically on save."
+                }
+            }
+        },
+        "commands": [
+            {
+                "command": "fidan.restartServer",
+                "title": "Fidan: Restart Language Server"
+            },
+            {
+                "command": "fidan.showOutput",
+                "title": "Fidan: Show Language Server Output"
+            }
+        ]
+    },
+    "scripts": {
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "lint": "eslint src --ext ts"
+    },
+    "dependencies": {
+        "vscode-languageclient": "^9.0.1"
+    },
+    "devDependencies": {
+        "@types/node": "^25.3.3",
+        "@types/vscode": "^1.85.0",
+        "@typescript-eslint/eslint-plugin": "^8.56.1",
+        "@typescript-eslint/parser": "^8.56.1",
+        "eslint": "^10.0.2",
+        "typescript": "^5.4.0"
+    }
+}
