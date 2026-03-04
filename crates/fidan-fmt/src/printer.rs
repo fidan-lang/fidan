@@ -56,13 +56,6 @@ impl<'a> Printer<'a> {
         self.out.push_str(s);
     }
 
-    /// Write `s` followed by a newline.
-    #[inline]
-    pub fn wl(&mut self, s: &str) {
-        self.w(s);
-        self.nl();
-    }
-
     /// End the current line (write `\n`).
     /// Trailing spaces on the current line are trimmed before the newline.
     pub fn nl(&mut self) {
