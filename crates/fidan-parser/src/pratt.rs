@@ -424,11 +424,61 @@ impl<'t> Parser<'t> {
             }
             TokenKind::LBracket => {
                 self.advance();
-                let mut elems = vec![];
-                while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
-                    elems.push(self.parse_expr());
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
+                // Empty list: []
+                if matches!(self.peek(), TokenKind::RBracket) {
+                    let end = self.current_span().end;
+                    self.expect_tok(&TokenKind::RBracket);
+                    return self.module.arena.alloc_expr(Expr::List {
+                        elements: vec![],
+                        span: Span::new(self.module.file, span.start, end),
+                    });
+                }
+                // Parse first element (may be a full expression including ternary).
+                let first = self.parse_expr();
+                // Comprehension: [first for binding in iterable] / [first for binding in iterable if filter]
+                if matches!(self.peek(), TokenKind::For) {
+                    self.advance(); // eat `for`
+                    let binding = match self.peek().clone() {
+                        TokenKind::Ident(sym) => {
+                            self.advance();
+                            sym
+                        }
+                        _ => {
+                            let sp = self.current_span();
+                            self.error(
+                                "expected binding variable after `for` in list comprehension",
+                                sp,
+                            );
+                            self.interner.intern("_")
+                        }
+                    };
+                    self.expect_tok(&TokenKind::In);
+                    // Iterable must NOT use maybe_ternary to avoid consuming the optional `if` filter.
+                    let iterable = self.parse_expr_bp(0);
+                    let filter = if matches!(self.peek(), TokenKind::If) {
+                        self.advance(); // eat `if`
+                        Some(self.parse_expr_bp(0))
+                    } else {
+                        None
+                    };
+                    let end = self.current_span().end;
+                    self.expect_tok(&TokenKind::RBracket);
+                    return self.module.arena.alloc_expr(Expr::ListComp {
+                        element: first,
+                        binding,
+                        iterable,
+                        filter,
+                        span: Span::new(self.module.file, span.start, end),
+                    });
+                }
+                // Regular list literal — collect remaining elements.
+                let mut elems = vec![first];
+                if self.eat(&TokenKind::Comma) {
+                    while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
+                        elems.push(self.parse_expr());
+                        if !self.eat(&TokenKind::Comma) {
+                            break;
+                        }
                     }
                 }
                 let end = self.current_span().end;
@@ -439,10 +489,66 @@ impl<'t> Parser<'t> {
                 })
             }
             TokenKind::LBrace => {
-                // Dict literal: `{ key: value, key: value }`
+                // Dict literal or dict comprehension.
                 // Blocks are never primary expressions in Fidan, so `{` here is always a dict.
                 self.advance(); // eat `{`
-                let mut entries = vec![];
+                self.skip_terminators();
+                // Empty dict: {}
+                if matches!(self.peek(), TokenKind::RBrace) {
+                    let end = self.current_span().end;
+                    self.expect_tok(&TokenKind::RBrace);
+                    return self.module.arena.alloc_expr(Expr::Dict {
+                        entries: vec![],
+                        span: Span::new(self.module.file, span.start, end),
+                    });
+                }
+                // Parse the first key-value pair.
+                let first_key = self.parse_expr();
+                self.expect_tok(&TokenKind::Colon);
+                let first_val = self.parse_expr();
+                // Comprehension: {key: value for binding in iterable [...if filter]}
+                if matches!(self.peek(), TokenKind::For) {
+                    self.advance(); // eat `for`
+                    let binding = match self.peek().clone() {
+                        TokenKind::Ident(sym) => {
+                            self.advance();
+                            sym
+                        }
+                        _ => {
+                            let sp = self.current_span();
+                            self.error(
+                                "expected binding variable after `for` in dict comprehension",
+                                sp,
+                            );
+                            self.interner.intern("_")
+                        }
+                    };
+                    self.expect_tok(&TokenKind::In);
+                    let iterable = self.parse_expr_bp(0);
+                    let filter = if matches!(self.peek(), TokenKind::If) {
+                        self.advance(); // eat `if`
+                        Some(self.parse_expr_bp(0))
+                    } else {
+                        None
+                    };
+                    self.skip_terminators();
+                    let end = self.current_span().end;
+                    self.expect_tok(&TokenKind::RBrace);
+                    return self.module.arena.alloc_expr(Expr::DictComp {
+                        key: first_key,
+                        value: first_val,
+                        binding,
+                        iterable,
+                        filter,
+                        span: Span::new(self.module.file, span.start, end),
+                    });
+                }
+                // Regular dict literal — collect remaining entries.
+                let mut entries = vec![(first_key, first_val)];
+                // Allow comma or newline between entries; trailing separator is fine.
+                if !self.eat(&TokenKind::Comma) {
+                    self.skip_terminators();
+                }
                 loop {
                     self.skip_terminators();
                     if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
@@ -452,7 +558,6 @@ impl<'t> Parser<'t> {
                     self.expect_tok(&TokenKind::Colon);
                     let value = self.parse_expr();
                     entries.push((key, value));
-                    // Allow comma or newline between entries; trailing comma/newline is fine
                     if !self.eat(&TokenKind::Comma) {
                         self.skip_terminators();
                     }
@@ -671,7 +776,9 @@ impl<'t> Parser<'t> {
             TokenKind::DotDot | TokenKind::DotDotDot => {
                 // When parsing the start-expression of a slice we suppress range operators
                 // so that `obj[a..b]` doesn't turn `a..b` into an Expr::Binary(Range).
-                if self.in_slice_start { return None; }
+                if self.in_slice_start {
+                    return None;
+                }
                 (2, 3) // range, lower than add
             }
             TokenKind::Or => (3, 4),

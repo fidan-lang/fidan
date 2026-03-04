@@ -227,6 +227,17 @@ fn hir_walk_expr(e: &HirExpr, out: &mut HashSet<Symbol>) {
         | HirExprKind::This
         | HirExprKind::Parent
         | HirExprKind::Error => {}
+        HirExprKind::ListComp { element, iterable, filter, .. } => {
+            hir_walk_expr(element, out);
+            hir_walk_expr(iterable, out);
+            if let Some(f) = filter { hir_walk_expr(f, out); }
+        }
+        HirExprKind::DictComp { key, value, iterable, filter, .. } => {
+            hir_walk_expr(key, out);
+            hir_walk_expr(value, out);
+            hir_walk_expr(iterable, out);
+            if let Some(f) = filter { hir_walk_expr(f, out); }
+        }
     }
 }
 
@@ -299,6 +310,8 @@ struct FnCtx<'p> {
     new_sym: Symbol,
     /// Symbol for `"len"` — used in for-loop length queries.
     len_sym: Symbol,
+    /// Symbol for `"append"` — used in list comprehensions.
+    append_sym: Symbol,
     /// Symbol for `"type"` — used in typed catch-clause dispatch.
     type_sym: Symbol,
     /// Set of function names that are extension actions.
@@ -827,6 +840,25 @@ impl<'p> FnCtx<'p> {
                     rhs: Rvalue::Dict(pairs),
                 });
                 Operand::Local(dest)
+            }
+
+            // ── Comprehensions ────────────────────────────────────────────────
+            HirExprKind::ListComp { element, binding, iterable, filter } => {
+                self.lower_list_comp(
+                    *binding,
+                    iterable,
+                    element,
+                    filter.as_deref(),
+                )
+            }
+            HirExprKind::DictComp { key, value, binding, iterable, filter } => {
+                self.lower_dict_comp(
+                    *binding,
+                    iterable,
+                    key,
+                    value,
+                    filter.as_deref(),
+                )
             }
             HirExprKind::Tuple(elems) => {
                 let ops: Vec<Operand> = elems.iter().map(|e| self.lower_expr(e)).collect();
@@ -1888,6 +1920,239 @@ impl<'p> FnCtx<'p> {
         }
     }
 
+    // ── Comprehension desugaring ──────────────────────────────────────────────
+
+    /// Desugar `[element for binding in iterable (if filter)]` to an inline loop.
+    /// Returns an `Operand::Local` holding the freshly-built list.
+    fn lower_list_comp(
+        &mut self,
+        binding: fidan_lexer::Symbol,
+        iterable: &HirExpr,
+        element: &HirExpr,
+        filter: Option<&HirExpr>,
+    ) -> Operand {
+        // result = []
+        let result = self.alloc_local();
+        self.emit(Instr::Assign {
+            dest: result,
+            ty: MirTy::Dynamic,
+            rhs: Rvalue::List(vec![]),
+        });
+        self.lower_comp_loop(
+            binding,
+            iterable,
+            filter,
+            |ctx, elem_op| {
+                // Compute element expression value.
+                let elem_val = ctx.lower_expr(element);
+                // Discard elem_op (already stored as `binding` via define_var); use elem_val.
+                let _ = elem_op;
+                // result.append(elem_val)
+                let append_sym = ctx.append_sym;
+                ctx.emit(Instr::Call {
+                    dest: None,
+                    callee: Callee::Method {
+                        receiver: Operand::Local(result),
+                        method: append_sym,
+                    },
+                    args: vec![elem_val],
+                    span: fidan_source::Span::default(),
+                });
+            },
+        );
+        Operand::Local(result)
+    }
+
+    /// Desugar `{key: value for binding in iterable (if filter)}` to an inline loop.
+    /// Returns an `Operand::Local` holding the freshly-built dict.
+    fn lower_dict_comp(
+        &mut self,
+        binding: fidan_lexer::Symbol,
+        iterable: &HirExpr,
+        key: &HirExpr,
+        value: &HirExpr,
+        filter: Option<&HirExpr>,
+    ) -> Operand {
+        // result = {}
+        let result = self.alloc_local();
+        self.emit(Instr::Assign {
+            dest: result,
+            ty: MirTy::Dynamic,
+            rhs: Rvalue::Dict(vec![]),
+        });
+        self.lower_comp_loop(
+            binding,
+            iterable,
+            filter,
+            |ctx, _elem_op| {
+                let key_val = ctx.lower_expr(key);
+                let val_val = ctx.lower_expr(value);
+                // result[key] = value  (SetIndex converts any key to string via display)
+                ctx.emit(Instr::SetIndex {
+                    object: Operand::Local(result),
+                    index: key_val,
+                    value: val_val,
+                });
+            },
+        );
+        Operand::Local(result)
+    }
+
+    /// Shared inner-loop scaffold for both comprehension types.
+    ///
+    /// Emits:
+    /// ```text
+    /// idx = 0
+    /// len = iterable.len()
+    /// header:
+    ///   idx_phi = φ(pre: idx, step: idx_next)
+    ///   cond = idx_phi < len
+    ///   branch cond → body | exit
+    /// body:
+    ///   elem = iterable[idx_phi]
+    ///   binding = elem
+    ///   [filter branch if present]
+    ///   emit_body(ctx, elem_op)
+    ///   goto step
+    /// step:
+    ///   idx_next = idx_phi + 1
+    ///   goto header
+    /// exit:
+    /// ```
+    /// The `emit_body` closure is called with `&mut self` and the elem operand.
+    fn lower_comp_loop<F>(&mut self, binding: fidan_lexer::Symbol, iterable: &HirExpr, filter: Option<&HirExpr>, emit_body: F)
+    where
+        F: Fn(&mut Self, Operand),
+    {
+        let list_op = self.lower_expr(iterable);
+
+        // idx = 0
+        let idx0 = self.alloc_local();
+        self.emit(Instr::Assign {
+            dest: idx0,
+            ty: MirTy::Integer,
+            rhs: Rvalue::Literal(MirLit::Int(0)),
+        });
+
+        // len = list_op.len()
+        let len_local = self.alloc_local();
+        let len_sym = self.len_sym;
+        self.emit(Instr::Call {
+            dest: Some(len_local),
+            callee: Callee::Method {
+                receiver: list_op.clone(),
+                method: len_sym,
+            },
+            args: vec![],
+            span: fidan_source::Span::default(),
+        });
+
+        let pre_bb = self.cur_bb;
+        let header_bb = self.alloc_block();
+        let body_bb = self.alloc_block();
+        let step_bb = self.alloc_block();
+        let exit_bb = self.alloc_block();
+
+        self.goto(header_bb);
+        self.switch_to(header_bb);
+
+        // idx_phi = φ(pre: idx0)  — back-edge added after step_bb is lowered.
+        let idx_phi = self.alloc_local();
+        self.add_phi(
+            header_bb,
+            idx_phi,
+            MirTy::Integer,
+            vec![(pre_bb, Operand::Local(idx0))],
+        );
+
+        // cond = idx_phi < len
+        let cond = self.alloc_local();
+        self.emit(Instr::Assign {
+            dest: cond,
+            ty: MirTy::Boolean,
+            rhs: Rvalue::Binary {
+                op: fidan_ast::BinOp::Lt,
+                lhs: Operand::Local(idx_phi),
+                rhs: Operand::Local(len_local),
+            },
+        });
+        self.set_terminator(Terminator::Branch {
+            cond: Operand::Local(cond),
+            then_bb: body_bb,
+            else_bb: exit_bb,
+        });
+
+        // ── body_bb ───────────────────────────────────────────────────────────
+        self.switch_to(body_bb);
+
+        // elem = list_op[idx_phi]
+        let elem = self.alloc_local();
+        self.emit(Instr::GetIndex {
+            dest: elem,
+            object: list_op,
+            index: Operand::Local(idx_phi),
+        });
+        // binding = elem  (so the element/key/value exprs can reference `binding`)
+        let binding_local = self.alloc_local();
+        self.emit(Instr::Assign {
+            dest: binding_local,
+            ty: MirTy::Dynamic,
+            rhs: Rvalue::Use(Operand::Local(elem)),
+        });
+        self.define_var(binding, binding_local);
+
+        if let Some(filter_expr) = filter {
+            // Evaluate filter; only emit the body if truthy.
+            let filter_val = self.lower_expr(filter_expr);
+            let do_bb = self.alloc_block();
+            let skip_bb = self.alloc_block(); // re-use step_bb is fine too
+            self.set_terminator(Terminator::Branch {
+                cond: filter_val,
+                then_bb: do_bb,
+                else_bb: skip_bb,
+            });
+
+            // do_bb: emit accumulation, then goto step_bb
+            self.switch_to(do_bb);
+            emit_body(self, Operand::Local(binding_local));
+            if !self.terminated {
+                self.goto(step_bb);
+            }
+
+            // skip_bb: goto step_bb
+            self.switch_to(skip_bb);
+            self.goto(step_bb);
+        } else {
+            emit_body(self, Operand::Local(binding_local));
+            if !self.terminated {
+                self.goto(step_bb);
+            }
+        }
+
+        // ── step_bb ───────────────────────────────────────────────────────────
+        self.switch_to(step_bb);
+        let idx_next = self.alloc_local();
+        self.emit(Instr::Assign {
+            dest: idx_next,
+            ty: MirTy::Integer,
+            rhs: Rvalue::Binary {
+                op: fidan_ast::BinOp::Add,
+                lhs: Operand::Local(idx_phi),
+                rhs: Operand::Const(MirLit::Int(1)),
+            },
+        });
+        let step_end = self.cur_bb;
+        self.goto(header_bb);
+
+        // Back-patch the idx_phi in header_bb with the step back-edge.
+        self.func_mut().block_mut(header_bb).phis[0]
+            .operands
+            .push((step_end, Operand::Local(idx_next)));
+
+        // ── exit_bb ───────────────────────────────────────────────────────────
+        self.switch_to(exit_bb);
+    }
+
     // ── while-loop lowering ───────────────────────────────────────────────────
 
     fn lower_while_loop(&mut self, condition: &HirExpr, body: &[HirStmt]) {
@@ -2270,6 +2535,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
     // `new` is the constructor method name; `this` is the implicit first param.
     let new_sym = interner.intern("new");
     let len_sym = interner.intern("len");
+    let append_sym = interner.intern("append");
     let type_sym = interner.intern("type");
     let wildcard_sym = interner.intern("_");
     let this_name = interner.intern("this");
@@ -2444,6 +2710,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                         fn_is_extension: &HashSet<Symbol>,
                         new_sym: Symbol,
                         len_sym: Symbol,
+                        append_sym: Symbol,
                         type_sym: Symbol,
                         wildcard_sym: Symbol,
                         global_map: &HashMap<Symbol, GlobalId>,
@@ -2467,6 +2734,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             method_ids: method_ids.clone(),
             new_sym,
             len_sym,
+            append_sym,
             type_sym,
             fn_is_extension: fn_is_extension.clone(),
             loop_stack: vec![],
@@ -2526,6 +2794,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             &fn_is_extension,
             new_sym,
             len_sym,
+            append_sym,
             type_sym,
             wildcard_sym,
             &global_map,
@@ -2548,6 +2817,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 &fn_is_extension,
                 new_sym,
                 len_sym,
+                append_sym,
                 type_sym,
                 wildcard_sym,
                 &global_map,
@@ -2578,6 +2848,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             method_ids: method_ids.clone(),
             new_sym,
             len_sym,
+            append_sym,
             type_sym,
             fn_is_extension: fn_is_extension.clone(),
             loop_stack: vec![],
@@ -2694,6 +2965,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             method_ids: method_ids.clone(),
             new_sym,
             len_sym,
+            append_sym,
             type_sym,
             fn_is_extension: fn_is_extension.clone(),
             loop_stack: vec![],

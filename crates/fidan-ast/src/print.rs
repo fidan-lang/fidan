@@ -69,6 +69,8 @@ impl<'a> Printer<'a> {
             Expr::Unary { op, operand, .. } => format!("{:?}({})", op, self.expr_hint(*operand)),
             Expr::List { elements, .. } => format!("[…{}]", elements.len()),
             Expr::Dict { entries, .. } => format!("{{…{}}}", entries.len()),
+            Expr::ListComp { .. } => "[… for … in …]".to_string(),
+            Expr::DictComp { .. } => "{… : … for … in …}".to_string(),
             Expr::Tuple { elements, .. } => format!("(…{})", elements.len()),
             Expr::Ternary { .. } => "<ternary>".into(),
             Expr::Assign { .. } => "<assign>".into(),

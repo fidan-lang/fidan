@@ -1,0 +1,43 @@
+# comprehension.fdn — tests for list and dict comprehensions
+
+# ── Basic list comprehension ──────────────────────────────────────────────────
+var numbers = [1, 2, 3, 4, 5]
+
+var doubled = [x * 2 for x in numbers]
+print(doubled)
+
+# ── List comprehension with filter ───────────────────────────────────────────
+var evens = [x for x in numbers if x % 2 == 0]
+print(evens)
+
+# ── List comp over an inline literal ─────────────────────────────────────────
+var squares = [x * x for x in [1, 2, 3, 4, 5]]
+print(squares)
+
+# ── Filter: keep only elements > 3 ───────────────────────────────────────────
+var big = [x for x in numbers if x > 3]
+print(big)
+
+# ── Ternary inside list comp element ─────────────────────────────────────────
+var clamped = [0 if x < 3 else x for x in numbers]
+print(clamped)
+
+# ── Basic dict comprehension ──────────────────────────────────────────────────
+var sq_dict = {x: x * x for x in numbers}
+print(sq_dict["1"])
+print(sq_dict["4"])
+print(sq_dict["5"])
+
+# ── Dict comprehension with filter ───────────────────────────────────────────
+var even_dict = {x: x * 2 for x in numbers if x % 2 == 0}
+print(even_dict["2"])
+print(even_dict["4"])
+
+# ── Dict comprehension: name -> length ───────────────────────────────────────
+var names = ["alice", "bob", "charlie"]
+var name_len = {n: len(n) for n in names}
+print(name_len["alice"])
+print(name_len["bob"])
+print(name_len["charlie"])
+
+print("All comprehension tests passed!")

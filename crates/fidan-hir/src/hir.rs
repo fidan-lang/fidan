@@ -323,7 +323,22 @@ pub enum HirExprKind {
     List(Vec<HirExpr>),
     Dict(Vec<(HirExpr, HirExpr)>),
     Tuple(Vec<HirExpr>),
-
+    // ── Comprehensions ────────────────────────────────────────────
+    /// `[element for binding in iterable]` / `[... if filter]`
+    ListComp {
+        element: Box<HirExpr>,
+        binding: Symbol,
+        iterable: Box<HirExpr>,
+        filter: Option<Box<HirExpr>>,
+    },
+    /// `{key: value for binding in iterable}` / `{... if filter}`
+    DictComp {
+        key: Box<HirExpr>,
+        value: Box<HirExpr>,
+        binding: Symbol,
+        iterable: Box<HirExpr>,
+        filter: Option<Box<HirExpr>>,
+    },
     // ── String interpolation ──────────────────────────────────────────────────
     StringInterp(Vec<HirInterpPart>),
 

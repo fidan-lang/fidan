@@ -116,6 +116,24 @@ impl<'a> Ctx<'a> {
                 HirExprKind::Tuple(elements.iter().map(|&e| self.lower_expr(e)).collect())
             }
 
+            Expr::ListComp { element, binding, iterable, filter, .. } => {
+                HirExprKind::ListComp {
+                    element: Box::new(self.lower_expr(element)),
+                    binding,
+                    iterable: Box::new(self.lower_expr(iterable)),
+                    filter: filter.map(|f| Box::new(self.lower_expr(f))),
+                }
+            }
+            Expr::DictComp { key, value, binding, iterable, filter, .. } => {
+                HirExprKind::DictComp {
+                    key: Box::new(self.lower_expr(key)),
+                    value: Box::new(self.lower_expr(value)),
+                    binding,
+                    iterable: Box::new(self.lower_expr(iterable)),
+                    filter: filter.map(|f| Box::new(self.lower_expr(f))),
+                }
+            }
+
             Expr::StringInterp { parts, .. } => {
                 HirExprKind::StringInterp(parts.iter().map(|p| self.lower_interp_part(p)).collect())
             }

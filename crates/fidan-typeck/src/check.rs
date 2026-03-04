@@ -1385,6 +1385,71 @@ impl TypeChecker {
             }
 
             Expr::Error { .. } => FidanType::Error,
+
+            Expr::ListComp {
+                element,
+                binding,
+                iterable,
+                filter,
+                span,
+            } => {
+                let iter_ty = self.infer_expr(iterable, module);
+                let elem_ty = match iter_ty {
+                    FidanType::List(inner) => *inner,
+                    FidanType::String | FidanType::Dynamic => FidanType::Dynamic,
+                    _ => FidanType::Dynamic,
+                };
+                self.table.push_scope(ScopeKind::Block);
+                self.table.define(
+                    binding,
+                    SymbolInfo {
+                        kind: SymbolKind::Var,
+                        ty: elem_ty,
+                        span,
+                        is_mutable: false,
+                        initialized: Initialized::Yes,
+                    },
+                );
+                self.infer_expr(element, module);
+                if let Some(f) = filter {
+                    self.infer_expr(f, module);
+                }
+                self.table.pop_scope();
+                FidanType::Dynamic
+            }
+            Expr::DictComp {
+                key,
+                value,
+                binding,
+                iterable,
+                filter,
+                span,
+            } => {
+                let iter_ty = self.infer_expr(iterable, module);
+                let elem_ty = match iter_ty {
+                    FidanType::List(inner) => *inner,
+                    FidanType::String | FidanType::Dynamic => FidanType::Dynamic,
+                    _ => FidanType::Dynamic,
+                };
+                self.table.push_scope(ScopeKind::Block);
+                self.table.define(
+                    binding,
+                    SymbolInfo {
+                        kind: SymbolKind::Var,
+                        ty: elem_ty,
+                        span,
+                        is_mutable: false,
+                        initialized: Initialized::Yes,
+                    },
+                );
+                self.infer_expr(key, module);
+                self.infer_expr(value, module);
+                if let Some(f) = filter {
+                    self.infer_expr(f, module);
+                }
+                self.table.pop_scope();
+                FidanType::Dynamic
+            }
         }
     }
 

@@ -146,6 +146,27 @@ pub enum Expr {
         span: Span,
     },
 
+    /// List comprehension: `[element for binding in iterable]`
+    /// or `[element for binding in iterable if filter]`.
+    ListComp {
+        element: ExprId,
+        binding: Symbol,
+        iterable: ExprId,
+        filter: Option<ExprId>,
+        span: Span,
+    },
+
+    /// Dict comprehension: `{key: value for binding in iterable}`
+    /// or `{key: value for binding in iterable if filter}`.
+    DictComp {
+        key: ExprId,
+        value: ExprId,
+        binding: Symbol,
+        iterable: ExprId,
+        filter: Option<ExprId>,
+        span: Span,
+    },
+
     // Error recovery placeholder
     Error {
         span: Span,
@@ -181,6 +202,8 @@ impl Expr {
             Expr::Tuple { span, .. } => *span,
             Expr::Check { span, .. } => *span,
             Expr::Slice { span, .. } => *span,
+            Expr::ListComp { span, .. } => *span,
+            Expr::DictComp { span, .. } => *span,
             Expr::Error { span } => *span,
         }
     }
