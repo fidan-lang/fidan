@@ -8,3 +8,6 @@ fidan-source = { workspace = true }
 fidan-lexer = { workspace = true }
 fidan-ast = { workspace = true }
 fidan-typeck = { workspace = true }
+
+[dev-dependencies]
+fidan-parser = { workspace = true }

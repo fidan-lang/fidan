@@ -58,6 +58,7 @@ fn build_class_table(
     objects: &[MirObjectInfo],
     interner: &SymbolInterner,
 ) -> FxHashMap<fidan_lexer::Symbol, Arc<FidanClass>> {
+    let drop_sym = interner.intern("drop");
     let mut table: FxHashMap<fidan_lexer::Symbol, Arc<FidanClass>> = FxHashMap::default();
 
     // Build in the order objects appear (HIR outputs parents before children).
@@ -94,6 +95,11 @@ fn build_class_table(
             method_map.insert(sym, RuntimeFnId(fid.0));
         }
         let parent = obj.parent.and_then(|p| table.get(&p).cloned());
+
+        // `has_drop_action`: true if the class itself or any ancestor defines `drop`.
+        let own_has_drop = obj.methods.keys().any(|&sym| sym == drop_sym);
+        let parent_has_drop = parent.as_ref().map(|p| p.has_drop_action).unwrap_or(false);
+
         let name_str = interner.resolve(obj.name);
         let class = Arc::new(FidanClass {
             name: obj.name,
@@ -101,6 +107,7 @@ fn build_class_table(
             parent,
             fields: field_defs,
             methods: method_map,
+            has_drop_action: own_has_drop || parent_has_drop,
         });
         table.insert(obj.name, class);
     }
@@ -201,6 +208,11 @@ pub struct MirMachine {
     jit_flags: Arc<Vec<AtomicBool>>,
     /// Number of calls after which the JIT kicks in (0 = disabled).
     jit_threshold: u32,
+    /// Pre-interned symbol for the string `"drop"`.
+    ///
+    /// Stored here so `exec_drop_dispatch` can call `class.find_method(drop_sym)`
+    /// in O(1) without re-interning the string on every drop site.
+    drop_sym: Symbol,
 }
 
 /// A single test result recorded during `fidan test`.
@@ -268,6 +280,7 @@ impl MirMachine {
         // Build user-module function name map: all merged free functions (non-init,
         // non-method). Methods have `this` as their first param; we detect that.
         let this_sym = interner.intern("this");
+        let drop_sym = interner.intern("drop");
         let mut user_fn_map: FxHashMap<Symbol, FunctionId> = FxHashMap::default();
         for (i, func) in program.functions.iter().enumerate() {
             if i == 0 {
@@ -329,6 +342,7 @@ impl MirMachine {
             jit_fns,
             jit_flags,
             jit_threshold: 500,
+            drop_sym,
         }
     }
 
@@ -358,6 +372,7 @@ impl MirMachine {
             jit_fns: Arc::clone(&self.jit_fns),
             jit_flags: Arc::clone(&self.jit_flags),
             jit_threshold: self.jit_threshold,
+            drop_sym: self.drop_sym,
         }
     }
 
@@ -700,8 +715,11 @@ impl MirMachine {
                 let val = self.eval_operand(value, frame);
                 self.index_set(obj_val, idx_val, val)?;
             }
-            Instr::Drop { .. } => {
-                // Values are reference-counted; explicit Drop is a no-op here.
+            Instr::Drop { local } => {
+                // RAII: if the value being dropped is the last live reference to an
+                // object whose class defines a `drop` action, call it now — before
+                // the Rc refcount actually reaches zero via the frame slot overwrite.
+                self.exec_drop_dispatch(*local, frame)?;
             }
             Instr::CertainCheck { operand, name } => {
                 if matches!(self.eval_operand(operand, frame), FidanValue::Nothing) {
@@ -969,6 +987,61 @@ impl MirMachine {
         Ok(None)
     }
 
+    // ── Drop / RAII dispatch ──────────────────────────────────────────────────
+
+    /// Called at every `Instr::Drop` site.
+    ///
+    /// If the local holds an `Object` value AND:
+    ///   (a) the class (or any ancestor) has a user-defined `drop` action, AND
+    ///   (b) the `Rc` inside `OwnedRef` has `strong_count == 1` (this is the
+    ///       last live reference — the frame slot is about to be overwritten),
+    ///
+    /// …then the `drop` action is called with `this = the object`.
+    ///
+    /// This is pure RAII — no GC, no tracing, just deterministic destructor
+    /// dispatch triggered at the point the compiler already inserted `Drop`.
+    fn exec_drop_dispatch(
+        &mut self,
+        local: LocalId,
+        frame: &mut CallFrame,
+    ) -> Result<(), MirSignal> {
+        let val = frame.load(local);
+        if let FidanValue::Object(ref obj_ref) = val {
+            // Fast path: most classes have no drop action — bail immediately.
+            let (class_has_drop, drop_fn) = {
+                let obj = obj_ref.borrow();
+                let class = &obj.class;
+                if !class.has_drop_action {
+                    return Ok(());
+                }
+                // Resolve the `drop` method FunctionId from the class hierarchy.
+                let fn_id = class.find_method(self.drop_sym);
+                (true, fn_id)
+            };
+
+            if class_has_drop {
+                // Check strong_count: only the last owner triggers the destructor.
+                // Any clone/alias of this OwnedRef shares the same Rc — if count > 1
+                // another live reference exists and drop will be called by whoever
+                // holds the final reference.
+                // NOTE: `obj_ref.0` is the `Rc<RefCell<FidanObject>>`.
+                //
+                // strong_count includes the val binding above (+1) and the frame slot
+                // (+1 from frame.load clone), so a "sole owner" shows count == 2 here.
+                // We use == 2 as the "last owner" threshold.
+                let is_last_owner = std::rc::Rc::strong_count(&obj_ref.0) == 2;
+                if is_last_owner {
+                    if let Some(RuntimeFnId(id)) = drop_fn {
+                        // Call `drop` with only `this` — no other arguments.
+                        // We consume `val` here so the drop body can access `this`.
+                        self.call_function(FunctionId(id), vec![val])?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     // ── Rvalue evaluation ─────────────────────────────────────────────────────
 
     fn eval_rvalue(&mut self, rhs: Rvalue, frame: &mut CallFrame) -> Result<FidanValue, MirSignal> {
@@ -1044,10 +1117,16 @@ impl MirMachine {
                 .take()
                 .unwrap_or(FidanValue::Nothing)),
 
-            Rvalue::Slice { target, start, end, inclusive, step } => {
-                let tgt  = self.eval_operand(&target, frame);
-                let s    = start.as_ref().map(|o| self.eval_operand(o, frame));
-                let e    = end.as_ref().map(|o| self.eval_operand(o, frame));
+            Rvalue::Slice {
+                target,
+                start,
+                end,
+                inclusive,
+                step,
+            } => {
+                let tgt = self.eval_operand(&target, frame);
+                let s = start.as_ref().map(|o| self.eval_operand(o, frame));
+                let e = end.as_ref().map(|o| self.eval_operand(o, frame));
                 let step = step.as_ref().map(|o| self.eval_operand(o, frame));
                 self.eval_slice(tgt, s, e, inclusive, step)
             }
@@ -1296,6 +1375,7 @@ impl MirMachine {
                 parent: None,
                 fields: field_defs,
                 methods: Default::default(),
+                has_drop_action: false,
             });
             self.classes.insert(ty, Arc::clone(&class));
             class
@@ -1362,7 +1442,8 @@ impl MirMachine {
             }
             Some(other) => {
                 return Err(MirSignal::Panic(format!(
-                    "slice step must be an integer, got `{}`", other.type_name()
+                    "slice step must be an integer, got `{}`",
+                    other.type_name()
                 )));
             }
             None => 1,
@@ -1374,23 +1455,28 @@ impl MirMachine {
                 None => Ok(None),
                 Some(FidanValue::Integer(n)) => Ok(Some(n)),
                 Some(other) => Err(MirSignal::Panic(format!(
-                    "slice index must be an integer, got `{}`", other.type_name()
+                    "slice index must be an integer, got `{}`",
+                    other.type_name()
                 ))),
             }
         };
         let start_raw = to_i64(start)?;
-        let end_raw   = to_i64(end)?;
+        let end_raw = to_i64(end)?;
 
         match tgt {
             FidanValue::List(r) => {
-                let list  = r.borrow();
-                let len   = list.len() as i64;
-                let norm  = |i: i64| if i < 0 { (len + i).max(0) } else { i.min(len) };
-                let si    = start_raw.map(norm).unwrap_or(if step_i > 0 { 0 } else { len - 1 });
-                let ei    = end_raw.map(|e| {
-                    let n = norm(e);
-                    if inclusive { n + 1 } else { n }
-                }).unwrap_or(if step_i > 0 { len } else { -1 });
+                let list = r.borrow();
+                let len = list.len() as i64;
+                let norm = |i: i64| if i < 0 { (len + i).max(0) } else { i.min(len) };
+                let si = start_raw
+                    .map(norm)
+                    .unwrap_or(if step_i > 0 { 0 } else { len - 1 });
+                let ei = end_raw
+                    .map(|e| {
+                        let n = norm(e);
+                        if inclusive { n + 1 } else { n }
+                    })
+                    .unwrap_or(if step_i > 0 { len } else { -1 });
 
                 let mut out = FidanList::new();
                 let mut idx = si;
@@ -1404,13 +1490,17 @@ impl MirMachine {
             }
             FidanValue::String(s) => {
                 let chars: Vec<char> = s.as_str().chars().collect();
-                let len   = chars.len() as i64;
-                let norm  = |i: i64| if i < 0 { (len + i).max(0) } else { i.min(len) };
-                let si    = start_raw.map(norm).unwrap_or(if step_i > 0 { 0 } else { len - 1 });
-                let ei    = end_raw.map(|e| {
-                    let n = norm(e);
-                    if inclusive { n + 1 } else { n }
-                }).unwrap_or(if step_i > 0 { len } else { -1 });
+                let len = chars.len() as i64;
+                let norm = |i: i64| if i < 0 { (len + i).max(0) } else { i.min(len) };
+                let si = start_raw
+                    .map(norm)
+                    .unwrap_or(if step_i > 0 { 0 } else { len - 1 });
+                let ei = end_raw
+                    .map(|e| {
+                        let n = norm(e);
+                        if inclusive { n + 1 } else { n }
+                    })
+                    .unwrap_or(if step_i > 0 { len } else { -1 });
 
                 let mut out = String::new();
                 let mut idx = si;
@@ -1423,7 +1513,8 @@ impl MirMachine {
                 Ok(FidanValue::String(FidanString::new(&out)))
             }
             other => Err(MirSignal::Panic(format!(
-                "cannot slice `{}`", other.type_name()
+                "cannot slice `{}`",
+                other.type_name()
             ))),
         }
     }
@@ -1917,10 +2008,7 @@ impl MirMachine {
                 Err(MirSignal::Throw(v)) => TestResult {
                     name: name.clone(),
                     passed: false,
-                    message: Some(format!(
-                        "unhandled exception: {}",
-                        builtins::display(&v)
-                    )),
+                    message: Some(format!("unhandled exception: {}", builtins::display(&v))),
                 },
                 Err(MirSignal::ParallelFail(msg)) => TestResult {
                     name: name.clone(),

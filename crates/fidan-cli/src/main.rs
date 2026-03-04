@@ -1257,7 +1257,10 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                             ) {
                                 (Err(err), _) => {
                                     // Initialisation (top-level code) crashed before tests ran.
-                                    eprintln!("\x1b[1;31merror\x1b[0m: program initialisation failed: {}", err.message);
+                                    eprintln!(
+                                        "\x1b[1;31merror\x1b[0m: program initialisation failed: {}",
+                                        err.message
+                                    );
                                     if !err.trace.is_empty() && opts.trace != TraceMode::None {
                                         render_trace_to_stderr(&err.trace, opts.trace);
                                     }
@@ -1279,9 +1282,16 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                                     }
                                     eprintln!();
                                     if failed == 0 {
-                                        eprintln!("\x1b[1;32m{} test{} passed\x1b[0m", passed, if passed == 1 { "" } else { "s" });
+                                        eprintln!(
+                                            "\x1b[1;32m{} test{} passed\x1b[0m",
+                                            passed,
+                                            if passed == 1 { "" } else { "s" }
+                                        );
                                     } else {
-                                        eprintln!("\x1b[1;32m{} passed\x1b[0m, \x1b[1;31m{} failed\x1b[0m", passed, failed);
+                                        eprintln!(
+                                            "\x1b[1;32m{} passed\x1b[0m, \x1b[1;31m{} failed\x1b[0m",
+                                            passed, failed
+                                        );
                                         std::process::exit(1);
                                     }
                                 }
@@ -1336,6 +1346,58 @@ impl rustyline::highlight::Highlighter for ReplHelper {
     ) -> bool {
         false
     }
+}
+
+// ── REPL helpers ─────────────────────────────────────────────────────────────────────
+
+/// Count the net change in brace depth for one REPL input line.
+///
+/// `{` adds 1, `}` subtracts 1.  Content inside `"..."` double-quoted strings
+/// (including `{expr}` interpolation regions) and line comments starting with
+/// `#` is ignored so that e.g. `print("open: {")` does not accidentally trigger
+/// multiline continuation.
+///
+/// Single-quoted strings (`'...'`) are also handled for completeness.
+fn count_brace_delta(line: &str) -> i32 {
+    let mut delta: i32 = 0;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            // Line comments: everything to the end of the line is ignored.
+            '#' => break,
+
+            // Double-quoted string literal — skip until the closing `"`.
+            '"' => {
+                while let Some(sc) = chars.next() {
+                    match sc {
+                        '\\' => {
+                            chars.next();
+                        } // backslash-escaped character
+                        '"' => break, // end of string literal
+                        _ => {}
+                    }
+                }
+            }
+
+            // Single-quoted string — same treatment.
+            '\'' => {
+                while let Some(sc) = chars.next() {
+                    match sc {
+                        '\\' => {
+                            chars.next();
+                        }
+                        '\'' => break,
+                        _ => {}
+                    }
+                }
+            }
+
+            '{' => delta += 1,
+            '}' => delta -= 1,
+            _ => {}
+        }
+    }
+    delta
 }
 
 // ── REPL ─────────────────────────────────────────────────────────────────────────────
@@ -1431,6 +1493,18 @@ fn run_repl(trace_mode: TraceMode) -> Result<()> {
 
         let _ = rl.add_history_entry(trimmed);
 
+        // ── :cancel — abort multiline input (valid at any nesting depth) ──
+        if trimmed == ":cancel" {
+            if open_braces > 0 || !pending_input.is_empty() {
+                open_braces = 0;
+                pending_input.clear();
+                println!("  (multiline input cancelled)");
+            } else {
+                eprintln!("  (nothing to cancel — not inside a multiline block)");
+            }
+            continue;
+        }
+
         // ── Colon commands (only when not in a multiline block) ────────────
         if open_braces == 0 {
             if let Some(cmd) = trimmed.strip_prefix(':') {
@@ -1458,6 +1532,7 @@ fn run_repl(trace_mode: TraceMode) -> Result<()> {
                         println!("  :exit / :quit / :q  leave the REPL");
                         println!("  :clear / :cls       clear the terminal (also Ctrl+L)");
                         println!("  :reset              clear the session state");
+                        println!("  :cancel             abort a multiline block input");
                         println!("  :ast  <snippet>     show the parsed AST node counts (debug)");
                         println!("  :type <expr>        print the inferred type of an expression");
                         println!(
@@ -1558,14 +1633,8 @@ fn run_repl(trace_mode: TraceMode) -> Result<()> {
             }
         } // end `if open_braces == 0`
 
-        // ── Multiline brace counting ───────────────────────────────────────
-        for ch in trimmed.chars() {
-            match ch {
-                '{' => open_braces += 1,
-                '}' => open_braces = (open_braces - 1).max(0),
-                _ => {}
-            }
-        }
+        // ── Multiline brace counting (string-literal + comment aware) ─────
+        open_braces = (open_braces + count_brace_delta(trimmed)).max(0);
         if !pending_input.is_empty() {
             pending_input.push('\n');
         }

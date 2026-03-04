@@ -11,3 +11,6 @@ fidan-hir = { workspace = true }
 fidan-typeck = { workspace = true }
 rustc-hash = { workspace = true }
 indexmap = { workspace = true }
+
+[dev-dependencies]
+fidan-parser = { workspace = true }
