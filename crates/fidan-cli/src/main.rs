@@ -1297,6 +1297,13 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                             if !err.trace.is_empty() && opts.trace != TraceMode::None {
                                 render_trace_to_stderr(&err.trace, opts.trace);
                             }
+                            if opts.trace != TraceMode::Full {
+                                render_message_to_stderr(
+                                    Severity::Note,
+                                    "",
+                                    "run with `--trace full` for more details",
+                                );
+                            }
                         }
                     }
                 }
@@ -1787,6 +1794,13 @@ fn run_repl(trace_mode: TraceMode) -> Result<()> {
             Err(e) => {
                 render_message_to_stderr(Severity::Error, e.code, &e.message);
                 render_trace_to_stderr(&e.trace, trace_mode);
+                if trace_mode != TraceMode::Full {
+                    render_message_to_stderr(
+                        Severity::Note,
+                        "",
+                        "run with `--trace full` for more details",
+                    );
+                }
                 error_history.push(e.message.clone());
                 // Don't commit: REPL state remains unchanged on runtime error.
                 continue;

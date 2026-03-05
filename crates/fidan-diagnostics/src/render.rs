@@ -47,13 +47,107 @@ fn is_color_enabled() -> bool {
     std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
 }
 
+/// Detect the current terminal width, falling back to 80 columns.
+/// Result is clamped to [50, 120] so boxes never grow absurdly wide.
+/// `$COLUMNS` overrides the OS query (handy in CI or scripts).
+fn terminal_width() -> usize {
+    if let Ok(s) = std::env::var("COLUMNS") {
+        if let Ok(n) = s.trim().parse::<usize>() {
+            return n.clamp(50, 120);
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        #[repr(C)]
+        struct Winsize {
+            ws_row: u16,
+            ws_col: u16,
+            _ws_xpixel: u16,
+            _ws_ypixel: u16,
+        }
+        // TIOCGWINSZ ioctl number (platform-specific).
+        #[cfg(target_os = "macos")]
+        const TIOCGWINSZ: i32 = 0x40087468_u32 as i32;
+        #[cfg(not(target_os = "macos"))]
+        const TIOCGWINSZ: i32 = 0x5413;
+        unsafe extern "C" {
+            fn ioctl(fd: i32, request: i32, ...) -> i32;
+        }
+        use std::os::unix::io::AsRawFd;
+        let fd = std::io::stderr().as_raw_fd();
+        let mut ws = Winsize {
+            ws_row: 0,
+            ws_col: 0,
+            _ws_xpixel: 0,
+            _ws_ypixel: 0,
+        };
+        let ret = unsafe { ioctl(fd, TIOCGWINSZ, &mut ws as *mut Winsize) };
+        if ret == 0 && ws.ws_col >= 50 {
+            return (ws.ws_col as usize).min(120);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct Coord {
+            x: i16,
+            y: i16,
+        }
+        #[repr(C)]
+        struct SmallRect {
+            left: i16,
+            top: i16,
+            right: i16,
+            bottom: i16,
+        }
+        #[repr(C)]
+        struct ConsoleScreenBufferInfo {
+            dw_size: Coord,
+            dw_cursor_position: Coord,
+            w_attributes: u16,
+            sr_window: SmallRect,
+            dw_maximum_window_size: Coord,
+        }
+        unsafe extern "system" {
+            fn GetStdHandle(nStdHandle: u32) -> *mut core::ffi::c_void;
+            fn GetConsoleScreenBufferInfo(
+                hConsoleOutput: *mut core::ffi::c_void,
+                lpConsoleScreenBufferInfo: *mut ConsoleScreenBufferInfo,
+            ) -> i32;
+        }
+        // STD_ERROR_HANDLE = -12i32 as u32
+        const STD_ERROR_HANDLE: u32 = 0xFFFFFFF4;
+        let handle = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
+        if !handle.is_null() && handle as isize != -1 {
+            let mut info = std::mem::MaybeUninit::<ConsoleScreenBufferInfo>::uninit();
+            let ret = unsafe { GetConsoleScreenBufferInfo(handle, info.as_mut_ptr()) };
+            if ret != 0 {
+                let info = unsafe { info.assume_init() };
+                let w = (info.sr_window.right - info.sr_window.left + 1) as usize;
+                if w >= 50 {
+                    return w.min(120);
+                }
+            }
+        }
+    }
+
+    80 // fallback
+}
+
 // ── spanless badge renderer ───────────────────────────────────────────────────
 
 /// Render a spanless pipeline-level message to stderr.
 ///
-/// Used for phase stubs, extension warnings, LSP stubs, etc. — messages that
-/// have no source location and use the badge layout:
-/// ` ◆  note  code  message`
+/// When color/Unicode output is enabled the message is wrapped in a bordered
+/// box using box-drawing characters:
+///
+/// ```text
+///  ╭─ ✖ error ──────────────────────────────────────────────────────────────╮
+///  │  W2001  file 'test.js' does not have the '.fdn' extension              │
+///  ╰────────────────────────────────────────────────────────────────────────╯
+/// ```
 pub fn render_message_to_stderr(severity: Severity, code: impl std::fmt::Display, message: &str) {
     let code_s = code.to_string();
     if is_color_enabled() {
@@ -64,12 +158,39 @@ pub fn render_message_to_stderr(severity: Severity, code: impl std::fmt::Display
         };
         let sev_str = severity.to_string();
         let reset = "\x1b[0m";
-        let dim = "\x1b[2m";
-        if code_s.is_empty() {
-            eprintln!(" {sev_color}{sym}  {sev_str}{reset}  {message}");
+        let bold = "\x1b[1m";
+
+        // ── Box layout — adapts to the current terminal width ────────────────
+        // Top:    " ╭─ {sym} {sev_str} ─...─╮"   1+1+2+title_vis+1+dashes+1 = w
+        // Body:   " │  [{code}  ]{message}{pad}  │"  1+1+2+body_vis+pad+2+1 = w
+        // Bottom: " ╰─...─╯"                       1+1+(w-3)+1 = w
+        let w = terminal_width() - 1;
+        let cw = w - 7; // usable content width inside │  …  │
+
+        // Title (sym + sev_str): sym is 1 terminal column, space, sev_str chars.
+        let title_vis = 1 + 1 + sev_str.chars().count();
+        let dashes_top = w.saturating_sub(6 + title_vis);
+        eprintln!(
+            " {sev_color}╭─ {sym} {sev_str} {}╮{reset}",
+            "─".repeat(dashes_top)
+        );
+
+        // Body: optional bold "code  " prefix, then message.
+        let (body_styled, body_vis) = if code_s.is_empty() {
+            let v = message.chars().count();
+            (message.to_owned(), v)
         } else {
-            eprintln!(" {sev_color}{sym}  {sev_str}{reset}  {dim}{code_s}{reset}  {message}");
-        }
+            let v = code_s.chars().count() + 2 + message.chars().count();
+            (format!("{bold}{code_s}{reset}  {message}"), v)
+        };
+        let pad = cw.saturating_sub(body_vis.min(cw));
+        eprintln!(
+            " {sev_color}│{reset}  {body_styled}{}  {sev_color}│{reset}",
+            " ".repeat(pad)
+        );
+
+        // Bottom border.
+        eprintln!(" {sev_color}╰{}╯{reset}", "─".repeat(w - 3));
     } else {
         let sev_str = severity.to_string();
         if code_s.is_empty() {
@@ -186,7 +307,11 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
     //
     // Each secondary label with a distinct span gets its own mini-snippet so
     // the user can see both locations at a glance.
-    for label in diag.labels.iter().filter(|l| !l.primary && !l.message.is_empty()) {
+    for label in diag
+        .labels
+        .iter()
+        .filter(|l| !l.primary && !l.message.is_empty())
+    {
         // Resolve the source for this label's file (may differ from primary).
         let lfile = source_map.get(label.span.file);
         let lsrc: &str = &lfile.src;
@@ -209,7 +334,9 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
 
             eprintln!("{dp}  {lg} |");
             for ln in lctx_start..=lctx_end {
-                if ln == 0 || ln > ltotal { continue; }
+                if ln == 0 || ln > ltotal {
+                    continue;
+                }
                 let src_line = llines[ln - 1];
                 let ln_s = format!("{:>width$}", ln, width = lgutter_w);
                 if ln == lline {
