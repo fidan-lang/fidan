@@ -9,8 +9,10 @@
 mod analysis;
 mod convert;
 mod document;
+mod semantic;
 mod server;
 mod store;
+pub mod symbols;
 
 use server::FidanLsp;
 use tower_lsp::{LspService, Server};
@@ -24,7 +26,7 @@ pub fn run() {
         .build()
         .expect("failed to build tokio runtime")
         .block_on(async {
-            let stdin  = tokio::io::stdin();
+            let stdin = tokio::io::stdin();
             let stdout = tokio::io::stdout();
             let (service, socket) = LspService::new(FidanLsp::new);
             Server::new(stdin, stdout, socket).serve(service).await;

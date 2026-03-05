@@ -51,6 +51,8 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
     const extraArgs: string[] = config.get("server.extraArgs") ?? [];
 
     // The server is launched as `fidan lsp [extraArgs]`.
+    // The `debug` options mirror `run` exactly — the `Lsp` CLI subcommand
+    // accepts no flags, so never pass `--debug` or similar.
     const serverOptions: ServerOptions = {
         run: {
             command: binaryPath,
@@ -59,7 +61,7 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
         },
         debug: {
             command: binaryPath,
-            args: ["lsp", "--debug", ...extraArgs],
+            args: ["lsp", ...extraArgs],
             transport: TransportKind.stdio,
         },
     };

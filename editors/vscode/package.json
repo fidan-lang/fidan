@@ -51,6 +51,52 @@
                 "path": "./syntaxes/fidan.tmLanguage.json"
             }
         ],
+        "semanticTokenScopes": [
+            {
+                "language": "fidan",
+                "scopes": {
+                    "function": [
+                        "entity.name.function.fidan"
+                    ],
+                    "function.declaration": [
+                        "entity.name.function.fidan"
+                    ],
+                    "method": [
+                        "entity.name.function.member.fidan"
+                    ],
+                    "method.declaration": [
+                        "entity.name.function.member.fidan"
+                    ],
+                    "class": [
+                        "entity.name.class.fidan"
+                    ],
+                    "class.declaration": [
+                        "entity.name.class.fidan"
+                    ],
+                    "variable": [
+                        "variable.other.readwrite.fidan"
+                    ],
+                    "variable.declaration": [
+                        "variable.other.readwrite.fidan"
+                    ],
+                    "variable.declaration.readonly": [
+                        "variable.other.constant.fidan"
+                    ],
+                    "parameter": [
+                        "variable.parameter.fidan"
+                    ],
+                    "parameter.declaration": [
+                        "variable.parameter.fidan"
+                    ],
+                    "property": [
+                        "variable.other.property.fidan"
+                    ],
+                    "type": [
+                        "support.type.primitive.fidan"
+                    ]
+                }
+            }
+        ],
         "configuration": {
             "title": "Fidan",
             "properties": {
@@ -103,7 +149,12 @@
                 "command": "fidan.showOutput",
                 "title": "Fidan: Show Language Server Output"
             }
-        ]
+        ],
+        "configurationDefaults": {
+            "[fidan]": {
+                "editor.semanticHighlighting.enabled": true
+            }
+        }
     },
     "scripts": {
         "vscode:prepublish": "npm run compile",

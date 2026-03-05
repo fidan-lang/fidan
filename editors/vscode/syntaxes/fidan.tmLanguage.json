@@ -12,13 +12,14 @@
         { "include": "#parallel-action-declaration" },
         { "include": "#action-declaration" },
         { "include": "#object-declaration" },
+        { "include": "#task-declaration" },
         { "include": "#keyword-declaration" },
         { "include": "#keyword-control" },
         { "include": "#keyword-modifier" },
         { "include": "#keyword-operator" },
-        { "include": "#keyword-other" },
         { "include": "#type-builtin" },
         { "include": "#constant-language" },
+        { "include": "#function-call" },
         { "include": "#type-user" },
         { "include": "#operator-symbolic" },
         { "include": "#identifier" }
@@ -45,8 +46,11 @@
         },
 
         "decorator": {
-            "match": "@[A-Za-z_][A-Za-z0-9_]*",
-            "name": "entity.name.decorator.fidan"
+            "match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
+            "captures": {
+                "1": { "name": "keyword.operator.decorator.fidan" },
+                "2": { "name": "entity.name.function.decorator.fidan" }
+            }
         },
 
         "string": {
@@ -67,11 +71,11 @@
         },
 
         "string-interpolation": {
-            "name": "meta.interpolation.fidan",
+            "name": "meta.template.expression.fidan",
             "begin": "(?<!\\\\)\\{",
             "end": "\\}",
-            "beginCaptures": { "0": { "name": "punctuation.definition.interpolation.begin.fidan" } },
-            "endCaptures":   { "0": { "name": "punctuation.definition.interpolation.end.fidan" } },
+            "beginCaptures": { "0": { "name": "punctuation.definition.template-expression.begin.fidan" } },
+            "endCaptures":   { "0": { "name": "punctuation.definition.template-expression.end.fidan" } },
             "patterns": [
                 { "include": "#block-comment" },
                 { "include": "#line-comment" },
@@ -127,13 +131,8 @@
         },
 
         "keyword-operator": {
-            "match": "\\b(and|or|not|is|equals|notequals|lessthan|greaterthan|lessthanorequals|greaterthanorequals|mod|pow|also)\\b",
+            "match": "\\b(and|or|not|is|equals|notequals|lessthan|greaterthan|lessthanorequals|greaterthanorequals|mod|pow|also|set)\\b",
             "name": "keyword.operator.word.fidan"
-        },
-
-        "keyword-other": {
-            "match": "\\b(set)\\b",
-            "name": "keyword.other.fidan"
         },
 
         "type-builtin": {
@@ -177,6 +176,21 @@
                 "2": { "name": "entity.name.class.fidan" },
                 "4": { "name": "keyword.declaration.fidan" },
                 "5": { "name": "entity.name.class.fidan" }
+            }
+        },
+
+        "task-declaration": {
+            "match": "\\b(task)\\s+([A-Za-z_][A-Za-z0-9_]*)\\b",
+            "captures": {
+                "1": { "name": "keyword.control.fidan" },
+                "2": { "name": "entity.name.function.fidan" }
+            }
+        },
+
+        "function-call": {
+            "match": "\\b([a-z_][A-Za-z0-9_]*)(?=\\s*\\()",
+            "captures": {
+                "1": { "name": "entity.name.function.call.fidan" }
             }
         },
 

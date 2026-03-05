@@ -81,7 +81,15 @@ enum Command {
         trace: String,
     },
     /// Start the language server (LSP)
-    Lsp,
+    Lsp {
+        /// Communicate over stdin/stdout.
+        /// This flag is accepted for compatibility with LSP clients (e.g. VS Code's
+        /// vscode-languageclient) that automatically append `--stdio` to the server
+        /// process arguments when `TransportKind.stdio` is configured.  The Fidan
+        /// LSP server always uses stdio, so the flag is a no-op.
+        #[arg(long)]
+        stdio: bool,
+    },
     /// Format a Fidan source file
     Fmt {
         /// Path to the .fdn source file
@@ -407,7 +415,7 @@ fn main() -> Result<()> {
             let trace_mode = parse_trace(&trace)?;
             run_repl(trace_mode)
         }
-        Command::Lsp => {
+        Command::Lsp { .. } => {
             fidan_lsp::run();
             Ok(())
         }
