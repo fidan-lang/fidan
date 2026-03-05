@@ -114,9 +114,7 @@ impl FidanLsp {
             .filter_map(|(alias, rel_path)| {
                 let abs = if rel_path.starts_with('/') || rel_path.contains(':') {
                     std::path::PathBuf::from(rel_path)
-                } else if let Some(parent) =
-                    current_path.as_ref().and_then(|p| p.parent())
-                {
+                } else if let Some(parent) = current_path.as_ref().and_then(|p| p.parent()) {
                     parent.join(rel_path)
                 } else {
                     return None;
@@ -138,12 +136,20 @@ impl FidanLsp {
                 imports: import_urls.clone(),
             },
         );
-        // Proactively analyse imported files that are not yet open in the
-        // editor.  This allows hover and go-to-def to work across documents
-        // even when the user hasn't explicitly opened the imported file.
+        // Proactively analyse imported files.  Background-loaded documents
+        // (version == -1) are always re-read from disk so that edits to imported
+        // files are reflected immediately without requiring the user to open them
+        // in the editor.  Files that are actively open in the editor (version ≥ 0)
+        // are managed through their own did-open / did-change notifications and
+        // must NOT be overwritten with the on-disk version here.
         for (_, import_url) in &import_urls {
-            if self.store.get(import_url).is_some() {
-                continue; // already loaded
+            let skip = self
+                .store
+                .get(import_url)
+                .map(|d| d.version >= 0)
+                .unwrap_or(false);
+            if skip {
+                continue; // actively open in editor — let did_change manage it
             }
             if let Ok(path) = import_url.to_file_path() {
                 if let Ok(file_text) = std::fs::read_to_string(&path) {
@@ -151,7 +157,7 @@ impl FidanLsp {
                     self.store.insert(
                         import_url.clone(),
                         Document {
-                            version: 0,
+                            version: -1, // -1 = background-loaded; reloaded on every parent refresh
                             text: file_text,
                             diagnostics: vec![], // no diagnostics for background docs
                             semantic_tokens: r.semantic_tokens,
@@ -172,15 +178,16 @@ impl FidanLsp {
                     if let Some(mut doc) = self.store.get_mut(uri) {
                         if let Some(sym_entry) = doc.symbol_table.entries.get_mut(var_name) {
                             // Update the hover detail to show the real return type.
-                            let kw = if matches!(sym_entry.kind, crate::symbols::SymKind::Variable { is_const: true }) {
+                            let kw = if matches!(
+                                sym_entry.kind,
+                                crate::symbols::SymKind::Variable { is_const: true }
+                            ) {
                                 "const var"
                             } else {
                                 "var"
                             };
-                            sym_entry.detail = format!(
-                                "```fidan\n{} {}: {}\n```",
-                                kw, var_name, ret_type
-                            );
+                            sym_entry.detail =
+                                format!("```fidan\n{} {}: {}\n```", kw, var_name, ret_type);
                             // Also set ty_name so member accesses on `x` can be resolved
                             // if the return type is an object type.
                             sym_entry.ty_name = Some(ret_type.clone());
@@ -248,7 +255,10 @@ impl FidanLsp {
             if self.store.find_in_any_doc(type_name).is_none() {
                 continue;
             }
-            if self.resolve_member_cross_doc(type_name, member_name).is_some() {
+            if self
+                .resolve_member_cross_doc(type_name, member_name)
+                .is_some()
+            {
                 continue; // member found — no error
             }
             diags.push(Diagnostic {
@@ -295,14 +305,19 @@ impl FidanLsp {
                             source: Some("fidan".into()),
                             message: format!(
                                 "not enough arguments for `{}`: {} required but {} provided",
-                                site.method_name, required_count, site.arg_tys.len()
+                                site.method_name,
+                                required_count,
+                                site.arg_tys.len()
                             ),
                             ..Default::default()
                         });
                     } else {
                         // Method found — validate argument types against param types.
-                        for (i, (param_ty, arg_ty)) in
-                            entry.param_types.iter().zip(site.arg_tys.iter()).enumerate()
+                        for (i, (param_ty, arg_ty)) in entry
+                            .param_types
+                            .iter()
+                            .zip(site.arg_tys.iter())
+                            .enumerate()
                         {
                             if !Self::types_compatible(param_ty, arg_ty) {
                                 diags.push(Diagnostic {
@@ -334,7 +349,8 @@ impl FidanLsp {
         expected == actual
             || matches!(expected, "dynamic" | "?")
             || matches!(actual, "dynamic" | "?")
-    }}
+    }
+}
 
 // ── LanguageServer implementation ─────────────────────────────────────────────
 

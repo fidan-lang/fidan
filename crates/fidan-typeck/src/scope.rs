@@ -96,6 +96,13 @@ impl SymbolTable {
         }
     }
 
+    /// Remove a symbol from the current (innermost) scope, returning it if found.
+    /// Used to temporarily hide a variable while evaluating its own initializer,
+    /// so that self-referential declarations like `var x = x + 1` are caught.
+    pub fn remove_from_current_scope(&mut self, name: Symbol) -> Option<SymbolInfo> {
+        self.scopes.last_mut()?.symbols.remove(&name)
+    }
+
     /// Look up a symbol, walking from innermost to outermost scope.
     pub fn lookup(&self, name: Symbol) -> Option<&SymbolInfo> {
         for scope in self.scopes.iter().rev() {

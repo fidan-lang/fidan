@@ -814,12 +814,12 @@ impl TypeChecker {
         // has no `return` statement at all.
         if let Some(ref declared) = declared_ret {
             if !matches!(declared, FidanType::Nothing | FidanType::Dynamic)
-                && !self.body_has_any_return(body, module)
+                && !self.all_paths_return(body, module)
             {
                 let ret_name = self.ty_name(declared);
                 self.emit_error(
                     fidan_diagnostics::diag_code!("E0202"),
-                    format!("missing `return`: action must return a value of type `{ret_name}`"),
+                    format!("not all code paths return a value of type `{ret_name}`"),
                     action_span,
                 );
             }
@@ -1144,6 +1144,15 @@ impl TypeChecker {
         }
 
         let declared = ty.as_ref().map(|t| self.resolve_type_expr(t));
+
+        // Temporarily remove `name` from scope while evaluating the initializer.
+        // This prevents self-referential declarations like `var x = f(x)` from
+        // silently succeeding — without this, pass 1 pre-registers `x` and it
+        // would be found in scope during init evaluation. Outside REPL mode the
+        // user cannot intentionally refer to a not-yet-bound variable like this.
+        if !self.is_repl {
+            let _ = self.table.remove_from_current_scope(name);
+        }
 
         let inferred = if let Some(init_id) = init {
             let actual = self.infer_expr(init_id, module);
@@ -1695,7 +1704,7 @@ impl TypeChecker {
                             // Method not in local chain — may be in a cross-module
                             // parent.  Record for LSP-level validation.
                             let recv_ty = self.interner.resolve(sym).to_string();
-                            let mname   = self.interner.resolve(field).to_string();
+                            let mname = self.interner.resolve(field).to_string();
                             let arg_tys: Vec<String> = args
                                 .iter()
                                 .map(|(_, eid)| {
@@ -1709,12 +1718,13 @@ impl TypeChecker {
                                         .unwrap_or_else(|| "?".to_string())
                                 })
                                 .collect();
-                            self.cross_module_call_sites.push(crate::CrossModuleCallSite {
-                                receiver_ty: recv_ty,
-                                method_name: mname,
-                                arg_tys,
-                                span,
-                            });
+                            self.cross_module_call_sites
+                                .push(crate::CrossModuleCallSite {
+                                    receiver_ty: recv_ty,
+                                    method_name: mname,
+                                    arg_tys,
+                                    span,
+                                });
                         } else {
                             // Method found locally — validate that all required
                             // parameters were provided at this call site.
@@ -1763,84 +1773,75 @@ impl TypeChecker {
         }
     }
 
-    /// Returns `true` if `body` contains at least one `return` statement anywhere
-    /// in the control-flow tree.
-    fn body_has_any_return(&self, body: &[StmtId], module: &Module) -> bool {
+    /// Returns `true` when every possible execution path through `body` is
+    /// guaranteed to end with a `return` or `panic` — i.e. the function cannot
+    /// "fall off the end".
+    ///
+    /// The algorithm scans forward through the statement list.  As soon as it
+    /// finds a statement that terminates ALL paths (unconditional return/panic,
+    /// or an if/else where every branch terminates, etc.) it returns `true`
+    /// because any later statements would be unreachable.
+    fn all_paths_return(&self, body: &[StmtId], module: &Module) -> bool {
         for &sid in body {
             let stmt = module.arena.get_stmt(sid).clone();
-            match stmt {
-                Stmt::Return { .. } => return true,
-                Stmt::If {
-                    then_body,
-                    else_ifs,
-                    else_body,
-                    ..
-                } => {
-                    if self.body_has_any_return(&then_body, module) {
-                        return true;
-                    }
-                    for ei in &else_ifs {
-                        if self.body_has_any_return(&ei.body, module) {
-                            return true;
-                        }
-                    }
-                    if let Some(ref b) = else_body {
-                        if self.body_has_any_return(b, module) {
-                            return true;
-                        }
-                    }
-                }
-                Stmt::Check { arms, .. } => {
-                    for arm in &arms {
-                        if self.body_has_any_return(&arm.body, module) {
-                            return true;
-                        }
-                    }
-                }
-                Stmt::For { body, .. }
-                | Stmt::While { body, .. }
-                | Stmt::ParallelFor { body, .. } => {
-                    if self.body_has_any_return(&body, module) {
-                        return true;
-                    }
-                }
-                Stmt::Attempt {
-                    body,
-                    catches,
-                    otherwise,
-                    finally,
-                    ..
-                } => {
-                    if self.body_has_any_return(&body, module) {
-                        return true;
-                    }
-                    for c in &catches {
-                        if self.body_has_any_return(&c.body, module) {
-                            return true;
-                        }
-                    }
-                    if let Some(ref b) = otherwise {
-                        if self.body_has_any_return(b, module) {
-                            return true;
-                        }
-                    }
-                    if let Some(ref b) = finally {
-                        if self.body_has_any_return(b, module) {
-                            return true;
-                        }
-                    }
-                }
-                Stmt::ConcurrentBlock { tasks, .. } => {
-                    for task in &tasks {
-                        if self.body_has_any_return(&task.body, module) {
-                            return true;
-                        }
-                    }
-                }
-                _ => {}
+            if self.stmt_terminates_all_paths(&stmt, module) {
+                return true;
             }
         }
         false
+    }
+
+    /// Returns `true` if executing `stmt` guarantees that all subsequent control
+    /// flow ends with a return or panic (i.e. no execution path falls through).
+    fn stmt_terminates_all_paths(&self, stmt: &Stmt, module: &Module) -> bool {
+        match stmt {
+            // Unconditional exits.
+            Stmt::Return { .. } | Stmt::Panic { .. } => true,
+
+            // `if … else if … else` — only terminates all paths when there IS
+            // an `else` branch AND every branch terminates.
+            Stmt::If {
+                then_body,
+                else_ifs,
+                else_body: Some(else_body),
+                ..
+            } => {
+                self.all_paths_return(then_body, module)
+                    && else_ifs
+                        .iter()
+                        .all(|ei| self.all_paths_return(&ei.body, module))
+                    && self.all_paths_return(else_body, module)
+            }
+
+            // `check` — terminates if every arm terminates and there is at
+            // least one arm (a check with zero arms is vacuously non-terminating
+            // because no path is taken).
+            Stmt::Check { arms, .. } => {
+                !arms.is_empty() && arms.iter().all(|a| self.all_paths_return(&a.body, module))
+            }
+
+            // `attempt` — terminates if the try body AND every catch AND the
+            // otherwise (else) branch all terminate.
+            Stmt::Attempt {
+                body,
+                catches,
+                otherwise,
+                ..
+            } => {
+                self.all_paths_return(body, module)
+                    && catches
+                        .iter()
+                        .all(|c| self.all_paths_return(&c.body, module))
+                    && otherwise
+                        .as_deref()
+                        .map(|b| self.all_paths_return(b, module))
+                        .unwrap_or(false)
+            }
+
+            // Loops and other compound statements don't guarantee a return
+            // because their bodies might never execute (zero iterations, etc.).
+            _ => false,
+        }
     }
 
     /// Check that all non-optional params of `initialize` for `obj_sym` are supplied.
