@@ -222,13 +222,13 @@ different type on at least one code path.
 
 Erroneous example:
 
-    action double with (required n -> integer) returns integer {
+    action double with (certain n -> integer) returns integer {
         return "twice"      # error: returns string, expected integer
     }
 
 Fix: return a value of the declared return type:
 
-    action double with (required n -> integer) returns integer {
+    action double with (certain n -> integer) returns integer {
         return n * 2
     }
 "#,
@@ -256,13 +256,13 @@ Fix: make sure both operands have compatible types:
 
         // ── Argument / call ───────────────────────────────────────────────────
         "E0301" => Some(
-            r#"A `required` parameter was not supplied at the call site.  Every
-parameter marked `required` must be passed either positionally or by
+            r#"A required parameter was not supplied at the call site. Every
+parameter not marked with `optional` must be passed either positionally or by
 name.
 
 Erroneous example:
 
-    action greet with (required name -> string) {
+    action greet with (certain name -> string) { # `certain` means `name` can not be `nothing`
         print("Hello, {name}!")
     }
 
@@ -369,7 +369,7 @@ is no longer needed.
 
 Example:
 
-    action greet with (required name -> string, optional title -> string) {
+    action greet with (certain name -> string, optional title -> string) {
         print("Hello!")     # warning: `name` and `title` never used
     }
 
@@ -496,7 +496,7 @@ Fix: replace the call with the recommended replacement, then remove the
         "W2006" => Some(
             r#"A local variable that is statically known to hold `nothing` was used
 in a context that requires a real value — arithmetic, a method call,
-field or index access, or a function parameter marked `required`.
+field or index access, or a function parameter marked `certain`.
 
 Because `nothing` is not a number, object, or container, these
 operations will raise a runtime panic when the program is executed.
@@ -508,7 +508,7 @@ Erroneous example:
 
 Another common pattern:
 
-    action find with (required haystack -> list) returns dynamic {
+    action find with (certain haystack -> list) returns dynamic {
         # ... search that may return nothing ...
     }
 
@@ -573,7 +573,7 @@ Erroneous example:
 
 Fix: add a termination condition:
 
-    action countdown with (required n -> integer) {
+    action countdown with (certain n -> integer) {
         if n <= 0 { return }
         countdown(n - 1)
     }
@@ -586,7 +586,7 @@ propagated to the top level without being caught.
 
 Example:
 
-    action divide with (required a -> integer, required b -> integer) returns integer {
+    action divide with (certain a -> integer, certain b -> integer) returns integer {
         if b == 0 {
             panic("cannot divide by zero")
         }
