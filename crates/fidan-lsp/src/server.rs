@@ -13,21 +13,73 @@ use tower_lsp::{Client, LanguageServer};
 // ── Keyword / builtin completion lists ────────────────────────────────────────
 
 const COMPLETION_KEYWORDS: &[&str] = &[
-    "var", "const", "action", "object", "extends", "return",
-    "if", "otherwise", "when", "then", "for", "in", "while",
-    "break", "continue", "attempt", "catch", "finally",
-    "panic", "use", "export", "check", "as", "oftype",
-    "certain", "optional", "dynamic", "flexible", "parallel",
-    "concurrent", "task", "spawn", "await", "Shared", "Pending",
-    "WeakShared", "test", "tuple", "nothing", "true", "false",
-    "and", "or", "not", "set", "also", "with", "returns",
-    "this", "parent", "new",
+    "var",
+    "const",
+    "action",
+    "object",
+    "extends",
+    "return",
+    "if",
+    "otherwise",
+    "when",
+    "then",
+    "for",
+    "in",
+    "while",
+    "break",
+    "continue",
+    "attempt",
+    "catch",
+    "finally",
+    "panic",
+    "use",
+    "export",
+    "check",
+    "as",
+    "oftype",
+    "certain",
+    "optional",
+    "dynamic",
+    "flexible",
+    "parallel",
+    "concurrent",
+    "task",
+    "spawn",
+    "await",
+    "Shared",
+    "Pending",
+    "WeakShared",
+    "test",
+    "tuple",
+    "nothing",
+    "true",
+    "false",
+    "and",
+    "or",
+    "not",
+    "set",
+    "also",
+    "with",
+    "returns",
+    "this",
+    "parent",
+    "new",
 ];
 
 const BUILTIN_FUNCTIONS: &[&str] = &[
-    "print", "println", "eprint", "input", "len", "type",
-    "string", "integer", "float", "boolean",
-    "assert", "assert_eq", "assert_ne",
+    "print",
+    "println",
+    "eprint",
+    "input",
+    "len",
+    "type",
+    "string",
+    "integer",
+    "float",
+    "boolean",
+    "assert",
+    "assert_eq",
+    "assert_ne",
 ];
 
 // ── Server ────────────────────────────────────────────────────────────────────
@@ -157,18 +209,35 @@ impl LanguageServer for FidanLsp {
         let file = SourceFile::new(FileId(0), uri.as_str(), doc.text.as_str());
         let offset = lsp_pos_to_offset(&file, pos);
 
-        let name = doc
-            .identifier_spans
+        let spans = &doc.identifier_spans;
+        let hit = spans
             .iter()
-            .find(|(span, _)| offset >= span.start && offset < span.end)
-            .map(|(_, n)| n.as_str());
+            .position(|(span, _)| offset >= span.start && offset < span.end);
 
-        let name = match name {
-            Some(n) => n,
+        let hit_idx = match hit {
+            Some(i) => i,
             None => return Ok(None),
         };
 
-        let entry = match doc.symbol_table.get(name) {
+        let (cur_span, cur_name) = &spans[hit_idx];
+
+        // First try a plain lookup for the identifier under the cursor.
+        // Then fall back to a qualified `"Prev.current"` lookup for member
+        // accesses and field hover (e.g. `Dinosaur.name`).
+        let entry = doc.symbol_table.get(cur_name.as_str()).or_else(|| {
+            if hit_idx == 0 {
+                return None;
+            }
+            let (prev_span, prev_name) = &spans[hit_idx - 1];
+            // The only byte between ident and member is a `.` (1 byte).
+            if cur_span.start == prev_span.end + 1 {
+                doc.symbol_table.get(&format!("{}.{}", prev_name, cur_name))
+            } else {
+                None
+            }
+        });
+
+        let entry = match entry {
             Some(e) => e,
             None => return Ok(None),
         };
@@ -199,18 +268,31 @@ impl LanguageServer for FidanLsp {
         let file = SourceFile::new(FileId(0), uri.as_str(), doc.text.as_str());
         let offset = lsp_pos_to_offset(&file, pos);
 
-        let name = doc
-            .identifier_spans
+        let spans = &doc.identifier_spans;
+        let hit_idx = match spans
             .iter()
-            .find(|(span, _)| offset >= span.start && offset < span.end)
-            .map(|(_, n)| n.clone());
-
-        let name = match name {
-            Some(n) => n,
+            .position(|(span, _)| offset >= span.start && offset < span.end)
+        {
+            Some(i) => i,
             None => return Ok(None),
         };
 
-        let entry = match doc.symbol_table.get(&name) {
+        let (cur_span, cur_name) = &spans[hit_idx];
+
+        // Plain lookup first; then qualified `"Prev.name"` for member access.
+        let entry = doc.symbol_table.get(cur_name.as_str()).or_else(|| {
+            if hit_idx == 0 {
+                return None;
+            }
+            let (prev_span, prev_name) = &spans[hit_idx - 1];
+            if cur_span.start == prev_span.end + 1 {
+                doc.symbol_table.get(&format!("{}.{}", prev_name, cur_name))
+            } else {
+                None
+            }
+        });
+
+        let entry = match entry {
             Some(e) => e,
             None => return Ok(None),
         };
@@ -224,10 +306,7 @@ impl LanguageServer for FidanLsp {
 
     // ── Completion ─────────────────────────────────────────────────────────
 
-    async fn completion(
-        &self,
-        params: CompletionParams,
-    ) -> RpcResult<Option<CompletionResponse>> {
+    async fn completion(&self, params: CompletionParams) -> RpcResult<Option<CompletionResponse>> {
         let uri = &params.text_document_position.text_document.uri;
 
         let doc = match self.store.get(uri) {
@@ -314,9 +393,10 @@ impl LanguageServer for FidanLsp {
 
         // Never format while there are errors — the formatter may produce
         // `<error>` placeholder tokens that corrupt the document.
-        let has_errors = doc.diagnostics.iter().any(|d| {
-            d.severity == Some(DiagnosticSeverity::ERROR)
-        });
+        let has_errors = doc
+            .diagnostics
+            .iter()
+            .any(|d| d.severity == Some(DiagnosticSeverity::ERROR));
         if has_errors {
             return Ok(None);
         }

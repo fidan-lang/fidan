@@ -103,6 +103,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
         }
 
         // Fields — stored under "ClassName.field_name".
+        // Use `info.span` as a temporary placeholder; corrected in the
+        // AST pass below where the individual FieldDecl spans are available.
         for (&fsym, fty) in &info.fields {
             let fname = res(fsym);
             let ty_s = type_name(fty, interner);
@@ -120,30 +122,45 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
     // ── Top-level variable / const declarations ───────────────────────────────
     for &iid in &module.items {
         let item = module.arena.get_item(iid);
-        if let Item::VarDecl {
-            name,
-            ty,
-            is_const,
-            span,
-            ..
-        } = item
-        {
-            let vname = res(*name);
-            let ty_s = ty
-                .as_ref()
-                .map(|t| fmt_type_expr(t, interner))
-                .unwrap_or_else(|| "?".into());
-            let kw = if *is_const { "const var" } else { "var" };
-            table.put(
-                vname.clone(),
-                SymbolEntry {
-                    kind: SymKind::Variable {
-                        is_const: *is_const,
+        match item {
+            Item::VarDecl {
+                name,
+                ty,
+                is_const,
+                span,
+                ..
+            } => {
+                let vname = res(*name);
+                let ty_s = ty
+                    .as_ref()
+                    .map(|t| fmt_type_expr(t, interner))
+                    .unwrap_or_else(|| "?".into());
+                let kw = if *is_const { "const var" } else { "var" };
+                table.put(
+                    vname.clone(),
+                    SymbolEntry {
+                        kind: SymKind::Variable {
+                            is_const: *is_const,
+                        },
+                        span: *span,
+                        detail: format!("```fidan\n{} {}: {}\n```", kw, vname, ty_s),
                     },
-                    span: *span,
-                    detail: format!("```fidan\n{} {}: {}\n```", kw, vname, ty_s),
-                },
-            );
+                );
+            }
+            // Fix-up field declaration spans from the AST — ObjectInfo only stores
+            // FidanType per field, not the source span, so the typed pass above used
+            // the whole-object span.  Here we overwrite with the real FieldDecl span.
+            Item::ObjectDecl { name, fields, .. } => {
+                let class_name = res(*name);
+                for field in fields {
+                    let fname = res(field.name);
+                    let key = format!("{}.{}", class_name, fname);
+                    if let Some(entry) = table.entries.get_mut(&key) {
+                        entry.span = field.span;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 

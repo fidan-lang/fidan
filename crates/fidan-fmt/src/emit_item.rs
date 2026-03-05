@@ -115,12 +115,29 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
                 p.w(&last_s);
                 p.w("}");
             } else {
-                for (i, seg) in path.iter().enumerate() {
-                    if i > 0 {
-                        p.w(".");
-                    }
-                    let s = p.sym_s(*seg);
+                // File-path imports store the raw path string (without quotes) as a
+                // single symbol, e.g. `use "test.fdn"` is interned as `test.fdn`.
+                // Detect them and re-wrap in double-quotes on output.
+                let is_file_path = path.len() == 1 && {
+                    let s = p.sym_s(path[0]);
+                    s.ends_with(".fdn")
+                        || s.starts_with("./")
+                        || s.starts_with("../")
+                        || s.starts_with('/')
+                };
+                if is_file_path {
+                    let s = p.sym_s(path[0]);
+                    p.w("\"");
                     p.w(&s);
+                    p.w("\"");
+                } else {
+                    for (i, seg) in path.iter().enumerate() {
+                        if i > 0 {
+                            p.w(".");
+                        }
+                        let s = p.sym_s(*seg);
+                        p.w(&s);
+                    }
                 }
             }
             if let Some(a) = alias {

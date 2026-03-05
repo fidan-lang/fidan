@@ -79,6 +79,10 @@ pub fn compute(
     // Raw tokens before delta-encoding: (line, start_char, length, type, mods)
     // Both line and start_char are 0-based.
     let mut raw: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
+    // Track the semantic token type last emitted for an identifier so that
+    // dotted type-qualifier chains (e.g. `extends module.Foo`) can inherit
+    // the class classification from the preceding segment.
+    let mut prev_emitted_tt: Option<u32> = None;
 
     for idx in 0..n {
         let tok = meaningful[idx];
@@ -126,9 +130,15 @@ pub fn compute(
             } else {
                 (TT_TYPE, 0)
             }
+        } else if matches!(prev, Some(TokenKind::Dot)) && prev_emitted_tt == Some(TT_CLASS) {
+            // Qualified type path after `extends`: `extends module.Foo` or `extends a.b.Foo`.
+            // The preceding identifier was classified as TT_CLASS (e.g. the namespace
+            // `module` after `extends`), so keep the class color for the next segment too.
+            (TT_CLASS, 0)
         } else {
             classify(&sym_str, prev, next)
         };
+        prev_emitted_tt = Some(tt);
 
         let (line1, col1) = file.line_col(tok.span.start);
         let line = line1.saturating_sub(1);
