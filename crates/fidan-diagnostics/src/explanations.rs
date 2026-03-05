@@ -169,6 +169,19 @@ Fix options:
 "#,
         ),
 
+        "E0107" => Some(
+            r#"An `extends` clause names the same object that is being declared.
+An object cannot be its own parent — this would create an unresolvable
+inheritance cycle.
+
+Erroneous example:
+
+    object Dinosaur extends Dinosaur   # error: self-extension
+
+Fix: extend a different object, or remove the `extends` clause entirely.
+"#,
+        ),
+
         "E0105" => Some(
             r#"A type annotation refers to a name that is not a built-in type and has
 not been declared as an `object` in the current scope.  This usually

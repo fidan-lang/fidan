@@ -23,16 +23,16 @@ use tower_lsp::lsp_types::{
 
 // ── Legend indices ────────────────────────────────────────────────────────────
 
-pub const TT_FUNCTION:  u32 = 0;
-pub const TT_METHOD:    u32 = 1;
-pub const TT_CLASS:     u32 = 2;
-pub const TT_VARIABLE:  u32 = 3;
+pub const TT_FUNCTION: u32 = 0;
+pub const TT_METHOD: u32 = 1;
+pub const TT_CLASS: u32 = 2;
+pub const TT_VARIABLE: u32 = 3;
 pub const TT_PARAMETER: u32 = 4;
-pub const TT_PROPERTY:  u32 = 5;
-pub const TT_TYPE:      u32 = 6;
+pub const TT_PROPERTY: u32 = 5;
+pub const TT_TYPE: u32 = 6;
 
 pub const TM_DECLARATION: u32 = 1 << 0;
-pub const TM_READONLY:    u32 = 1 << 1;
+pub const TM_READONLY: u32 = 1 << 1;
 
 /// Build the `SemanticTokensLegend` that must be advertised in the server
 /// capabilities (`initialize` response). The indices here MUST stay in sync
@@ -40,13 +40,13 @@ pub const TM_READONLY:    u32 = 1 << 1;
 pub fn legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
         token_types: vec![
-            SemanticTokenType::FUNCTION,   // 0
-            SemanticTokenType::METHOD,     // 1
-            SemanticTokenType::CLASS,      // 2
-            SemanticTokenType::VARIABLE,   // 3
-            SemanticTokenType::PARAMETER,  // 4
-            SemanticTokenType::PROPERTY,   // 5
-            SemanticTokenType::TYPE,       // 6
+            SemanticTokenType::FUNCTION,  // 0
+            SemanticTokenType::METHOD,    // 1
+            SemanticTokenType::CLASS,     // 2
+            SemanticTokenType::VARIABLE,  // 3
+            SemanticTokenType::PARAMETER, // 4
+            SemanticTokenType::PROPERTY,  // 5
+            SemanticTokenType::TYPE,      // 6
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION, // bit 0
@@ -98,15 +98,42 @@ pub fn compute(
             continue;
         }
 
-        let prev = if idx > 0 { Some(&meaningful[idx - 1].kind) } else { None };
-        let next = if idx + 1 < n { Some(&meaningful[idx + 1].kind) } else { None };
+        let prev = if idx > 0 {
+            Some(&meaningful[idx - 1].kind)
+        } else {
+            None
+        };
+        let next = if idx + 1 < n {
+            Some(&meaningful[idx + 1].kind)
+        } else {
+            None
+        };
 
-        let (tt, mods) = classify(&sym_str, prev, next);
+        // `returns TYPE` — `returns` is kept as Ident by the lexer (contextual
+        // keyword), so we check the previous token's string to detect the type
+        // position that classify() cannot see through a bare TokenKind.
+        let prev_resolved: Option<std::sync::Arc<str>> = prev.and_then(|k| {
+            if let TokenKind::Ident(s) = k {
+                Some(interner.resolve(*s))
+            } else {
+                None
+            }
+        });
+        let prev_ident_str: Option<&str> = prev_resolved.as_deref();
+        let (tt, mods) = if prev_ident_str == Some("returns") {
+            if sym_str.starts_with(|c: char| c.is_uppercase()) {
+                (TT_CLASS, 0)
+            } else {
+                (TT_TYPE, 0)
+            }
+        } else {
+            classify(&sym_str, prev, next)
+        };
 
         let (line1, col1) = file.line_col(tok.span.start);
-        let line  = line1.saturating_sub(1);
+        let line = line1.saturating_sub(1);
         let start = col1.saturating_sub(1);
-        let len   = (tok.span.end - tok.span.start) as u32;
+        let len = (tok.span.end - tok.span.start) as u32;
 
         raw.push((line, start, len, tt, mods));
     }
@@ -117,13 +144,17 @@ pub fn compute(
 
     // Delta-encode: each token's line/start is relative to the previous one.
     let mut result = Vec::with_capacity(raw.len());
-    let mut prev_line  = 0u32;
+    let mut prev_line = 0u32;
     let mut prev_start = 0u32;
 
     for (line, start, len, tt, mods) in raw {
-        let delta_line  = line - prev_line;
-        let delta_start = if delta_line == 0 { start - prev_start } else { start };
-        prev_line  = line;
+        let delta_line = line - prev_line;
+        let delta_start = if delta_line == 0 {
+            start - prev_start
+        } else {
+            start
+        };
+        prev_line = line;
         prev_start = start;
         result.push(SemanticToken {
             delta_line,
@@ -139,11 +170,7 @@ pub fn compute(
 
 // ── Classification ────────────────────────────────────────────────────────────
 
-fn classify(
-    sym: &str,
-    prev: Option<&TokenKind>,
-    next: Option<&TokenKind>,
-) -> (u32, u32) {
+fn classify(sym: &str, prev: Option<&TokenKind>, next: Option<&TokenKind>) -> (u32, u32) {
     // ── Declaration sites ─────────────────────────────────────────────────────
 
     // `var NAME` / `const NAME`
@@ -191,6 +218,11 @@ fn classify(
     // ── `extends TYPE` ────────────────────────────────────────────────────────
     if matches!(prev, Some(TokenKind::Extends)) {
         return (TT_CLASS, 0);
+    }
+
+    // ── `@DECORATOR_NAME` ────────────────────────────────────────────────────
+    if matches!(prev, Some(TokenKind::At)) {
+        return (TT_FUNCTION, 0);
     }
 
     // ── Type position: `oftype NAME` or `-> NAME` ────────────────────────────

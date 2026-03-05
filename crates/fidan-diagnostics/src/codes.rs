@@ -81,6 +81,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "module not found",
         category: "imports",
     },
+    DiagnosticCode {
+        code: "E0107",
+        title: "object cannot extend itself",
+        category: "names",
+    },
     // ── Type system ───────────────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0201",

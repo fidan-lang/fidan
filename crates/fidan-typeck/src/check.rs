@@ -553,7 +553,14 @@ impl TypeChecker {
                 ..
             } => {
                 if let Some(p) = parent {
-                    if !self.objects.contains_key(p) {
+                    if *p == *name {
+                        let pname = self.interner.resolve(*name).to_string();
+                        self.emit_error(
+                            fidan_diagnostics::diag_code!("E0107"),
+                            format!("object `{pname}` cannot extend itself"),
+                            *span,
+                        );
+                    } else if !self.objects.contains_key(p) {
                         let pname = self.interner.resolve(*p).to_string();
                         self.emit_error(
                             fidan_diagnostics::diag_code!("E0100"),
