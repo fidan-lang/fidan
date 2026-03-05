@@ -4,6 +4,7 @@ use crate::document::Document;
 use crate::symbols::SymbolEntry;
 use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
+use dashmap::mapref::one::RefMut;
 use tower_lsp::lsp_types::Url;
 
 /// Concurrent map from `Url` → `Document`.
@@ -29,6 +30,11 @@ impl DocumentStore {
     /// Borrow the document stored under `uri`, if present.
     pub fn get(&self, uri: &Url) -> Option<Ref<'_, Url, Document>> {
         self.inner.get(uri)
+    }
+
+    /// Mutably borrow the document stored under `uri`, if present.
+    pub fn get_mut(&self, uri: &Url) -> Option<RefMut<'_, Url, Document>> {
+        self.inner.get_mut(uri)
     }
 
     /// Remove and discard the document stored under `uri`.

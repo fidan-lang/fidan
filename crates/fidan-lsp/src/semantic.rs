@@ -221,8 +221,9 @@ fn classify(sym: &str, prev: Option<&TokenKind>, next: Option<&TokenKind>) -> (u
     }
 
     // ── Import alias `use ... as NAME` ───────────────────────────────────────
+    // Always a namespace/module alias — colour it like a class (yellow).
     if matches!(prev, Some(TokenKind::As)) {
-        return (TT_VARIABLE, TM_DECLARATION);
+        return (TT_CLASS, TM_DECLARATION);
     }
 
     // ── `extends TYPE` ────────────────────────────────────────────────────────

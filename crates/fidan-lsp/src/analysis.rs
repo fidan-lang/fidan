@@ -3,13 +3,13 @@
 
 use crate::convert::span_to_range;
 use crate::{semantic, symbols};
-use fidan_ast::{Item, Module};
+use fidan_ast::{Expr, Item, Module};
 use fidan_diagnostics::{Diagnostic as FidanDiag, Severity};
 use fidan_lexer::{Lexer, SymbolInterner, TokenKind};
 use fidan_source::{FileId, SourceFile, Span};
+use fidan_typeck::CrossModuleCallSite;
 use std::sync::Arc;
 use tower_lsp::lsp_types::{self as lsp, DiagnosticSeverity, SemanticToken};
-use fidan_typeck::CrossModuleCallSite;
 
 /// Output of a single analysis run.
 pub struct AnalysisResult {
@@ -26,6 +26,10 @@ pub struct AnalysisResult {
     pub cross_module_field_accesses: Vec<(String, String, Span)>,
     /// Method call sites on cross-module receivers, with inferred arg types.
     pub cross_module_call_sites: Vec<CrossModuleCallSite>,
+    /// Top-level `var x = recv.method()` where `method` resolved to Dynamic (cross-module).
+    /// Stored as `(var_name, receiver_type_name, method_name)` so the server can patch
+    /// the symbol-table entry after loading cross-module docs.
+    pub dynamic_var_call_sites: Vec<(String, String, String)>,
 }
 
 /// Lex, parse and type-check `text`, returning all diagnostics as LSP
@@ -58,10 +62,17 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     // ── Type-check (full — needed to build hover/completion symbol table) ────
     let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
     let symbol_table = symbols::build(&module, &typed, &interner);
-    let typeck_diags = typed.diagnostics;
 
     // ── File-path import extraction ─────────────────────────────────────
     let imports = extract_imports(&module, &interner);
+
+    // ── Dynamic var call sites (cross-module method return type patching) ──
+    let dynamic_var_call_sites = extract_dynamic_var_calls(&module, &typed, &interner);
+
+    // Consume typed fields now (after all borrows of `typed` are done).
+    let typeck_diags = typed.diagnostics;
+    let cross_module_field_accesses = typed.cross_module_field_accesses;
+    let cross_module_call_sites = typed.cross_module_call_sites;
 
     // ── Diagnostics ───────────────────────────────────────────────────────────
     let diagnostics = lex_diags
@@ -80,8 +91,9 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
         identifier_spans,
         symbol_table,
         imports,
-        cross_module_field_accesses: typed.cross_module_field_accesses,
-        cross_module_call_sites: typed.cross_module_call_sites,
+        cross_module_field_accesses,
+        cross_module_call_sites,
+        dynamic_var_call_sites,
     }
 }
 
@@ -119,6 +131,47 @@ fn extract_imports(module: &Module, interner: &SymbolInterner) -> Vec<(String, S
             }
         })
         .collect()
+}
+
+/// Collect top-level `var x = recv.method()` sites where the call's return type
+/// resolved to `Dynamic` (cross-module receiver).  The server uses these to
+/// retrospectively patch `x`'s symbol-table entry once the imported doc is loaded.
+fn extract_dynamic_var_calls(
+    module: &Module,
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    for &iid in &module.items {
+        if let Item::VarDecl {
+            name,
+            init: Some(init_eid),
+            ..
+        } = module.arena.get_item(iid)
+        {
+            // Only interested in vars whose init expression resolved to Dynamic.
+            if !matches!(
+                typed.expr_types.get(init_eid),
+                Some(fidan_typeck::FidanType::Dynamic) | None
+            ) {
+                continue;
+            }
+            // Check if the init is a Call whose callee is a Field expression.
+            if let Expr::Call { callee, .. } = module.arena.get_expr(*init_eid) {
+                if let Expr::Field { object, field, .. } = module.arena.get_expr(*callee) {
+                    if let Some(fidan_typeck::FidanType::Object(obj_sym)) =
+                        typed.expr_types.get(object)
+                    {
+                        let var_name = interner.resolve(*name).to_string();
+                        let recv_ty = interner.resolve(*obj_sym).to_string();
+                        let method_name = interner.resolve(*field).to_string();
+                        out.push((var_name, recv_ty, method_name));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 fn fidan_to_lsp(d: &FidanDiag, file: &SourceFile) -> lsp::Diagnostic {

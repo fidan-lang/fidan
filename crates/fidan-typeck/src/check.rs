@@ -613,6 +613,7 @@ impl TypeChecker {
                 return_ty,
                 body,
                 decorators,
+                span,
                 ..
             } => {
                 self.check_decorators(decorators);
@@ -633,7 +634,7 @@ impl TypeChecker {
                     None
                 };
                 // `this_ty` is already set if we're inside an ObjectDecl scope.
-                self.check_action_body(params, return_ty, body, None, implicit_ret, module);
+                self.check_action_body(params, return_ty, body, None, implicit_ret, *span, module);
             }
 
             Item::ExtensionAction {
@@ -643,6 +644,7 @@ impl TypeChecker {
                 return_ty,
                 body,
                 decorators,
+                span,
                 ..
             } => {
                 self.check_decorators(decorators);
@@ -655,7 +657,7 @@ impl TypeChecker {
                 }
                 let ext_ty = FidanType::Object(*extends);
                 let prev_this = self.this_ty.replace(ext_ty.clone());
-                self.check_action_body(params, return_ty, body, Some(ext_ty), None, module);
+                self.check_action_body(params, return_ty, body, Some(ext_ty), None, *span, module);
                 self.this_ty = prev_this;
             }
 
@@ -751,6 +753,7 @@ impl TypeChecker {
         inject_this: Option<FidanType>,
         // If Some, overrides the resolved return type (e.g. `Nothing` for `new` constructors).
         implicit_return_ty: Option<FidanType>,
+        action_span: Span,
         module: &Module,
     ) {
         let ret = if let Some(implicit) = implicit_return_ty {
@@ -758,6 +761,7 @@ impl TypeChecker {
         } else {
             return_ty.as_ref().map(|t| self.resolve_type_expr(t))
         };
+        let declared_ret = ret.clone();
         // `None` means no annotation → return type is inferred / unconstrained.
         // Only set `current_return_ty` to `Some(T)` when an explicit annotation
         // was written; otherwise any `return value` is accepted.
@@ -804,6 +808,21 @@ impl TypeChecker {
 
         for &sid in body {
             self.check_stmt(sid, module);
+        }
+
+        // Emit E0202 if a non-Nothing return type was declared but the action body
+        // has no `return` statement at all.
+        if let Some(ref declared) = declared_ret {
+            if !matches!(declared, FidanType::Nothing | FidanType::Dynamic)
+                && !self.body_has_any_return(body, module)
+            {
+                let ret_name = self.ty_name(declared);
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0202"),
+                    format!("missing `return`: action must return a value of type `{ret_name}`"),
+                    action_span,
+                );
+            }
         }
 
         self.table.pop_scope();
@@ -1696,6 +1715,12 @@ impl TypeChecker {
                                 arg_tys,
                                 span,
                             });
+                        } else {
+                            // Method found locally — validate that all required
+                            // parameters were provided at this call site.
+                            if let Some(minfo) = self.find_method_info(&sym, field) {
+                                self.check_params_provided(&minfo.params, args, span);
+                            }
                         }
                         ret
                     }
@@ -1720,6 +1745,102 @@ impl TypeChecker {
             }
         }
         FidanType::Dynamic
+    }
+
+    /// Walk the local object inheritance chain of `obj_sym` to find the [`ActionInfo`] for
+    /// `method`.  Returns `None` when not found locally (may live in a cross-module parent).
+    fn find_method_info(&self, obj_sym: &Symbol, method: Symbol) -> Option<ActionInfo> {
+        let mut cur = *obj_sym;
+        loop {
+            let info = self.objects.get(&cur)?;
+            if let Some(m) = info.methods.get(&method) {
+                return Some(m.clone());
+            }
+            match info.parent {
+                Some(p) if self.objects.contains_key(&p) => cur = p,
+                _ => return None,
+            }
+        }
+    }
+
+    /// Returns `true` if `body` contains at least one `return` statement anywhere
+    /// in the control-flow tree.
+    fn body_has_any_return(&self, body: &[StmtId], module: &Module) -> bool {
+        for &sid in body {
+            let stmt = module.arena.get_stmt(sid).clone();
+            match stmt {
+                Stmt::Return { .. } => return true,
+                Stmt::If {
+                    then_body,
+                    else_ifs,
+                    else_body,
+                    ..
+                } => {
+                    if self.body_has_any_return(&then_body, module) {
+                        return true;
+                    }
+                    for ei in &else_ifs {
+                        if self.body_has_any_return(&ei.body, module) {
+                            return true;
+                        }
+                    }
+                    if let Some(ref b) = else_body {
+                        if self.body_has_any_return(b, module) {
+                            return true;
+                        }
+                    }
+                }
+                Stmt::Check { arms, .. } => {
+                    for arm in &arms {
+                        if self.body_has_any_return(&arm.body, module) {
+                            return true;
+                        }
+                    }
+                }
+                Stmt::For { body, .. }
+                | Stmt::While { body, .. }
+                | Stmt::ParallelFor { body, .. } => {
+                    if self.body_has_any_return(&body, module) {
+                        return true;
+                    }
+                }
+                Stmt::Attempt {
+                    body,
+                    catches,
+                    otherwise,
+                    finally,
+                    ..
+                } => {
+                    if self.body_has_any_return(&body, module) {
+                        return true;
+                    }
+                    for c in &catches {
+                        if self.body_has_any_return(&c.body, module) {
+                            return true;
+                        }
+                    }
+                    if let Some(ref b) = otherwise {
+                        if self.body_has_any_return(b, module) {
+                            return true;
+                        }
+                    }
+                    if let Some(ref b) = finally {
+                        if self.body_has_any_return(b, module) {
+                            return true;
+                        }
+                    }
+                }
+                Stmt::ConcurrentBlock { tasks, .. } => {
+                    for task in &tasks {
+                        if self.body_has_any_return(&task.body, module) {
+                            return true;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     /// Check that all non-optional params of `initialize` for `obj_sym` are supplied.

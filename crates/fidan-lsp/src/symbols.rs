@@ -34,6 +34,12 @@ pub struct SymbolEntry {
     /// For Method/Action entries: parameter types in declaration order.
     /// Used by the LSP to validate cross-module call argument types.
     pub param_types: Vec<String>,
+    /// For Method/Action entries: whether each parameter is required (`!optional`).
+    /// Used by the LSP to emit E0301 when a required arg is not provided.
+    pub param_required: Vec<bool>,
+    /// For Method/Action entries: the declared return type name (e.g. `"string"`).
+    /// Used by the server to patch `var x: dynamic` → `var x: string`.
+    pub return_type: Option<String>,
 }
 
 /// Per-document symbol registry built after every analysis pass.
@@ -70,7 +76,9 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
     for (&sym, info) in &typed.actions {
         let name = res(sym);
         let detail = fmt_action_sig(&name, info, interner);
-        let param_types: Vec<String> = info.params.iter()
+        let param_types: Vec<String> = info
+            .params
+            .iter()
             .map(|p| type_name(&p.ty, interner))
             .collect();
         table.put(
@@ -81,6 +89,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 detail,
                 ty_name: None,
                 param_types,
+                param_required: info.params.iter().map(|p| !p.optional).collect(),
+                return_type: Some(type_name(&info.return_ty, interner)),
             },
         );
     }
@@ -99,6 +109,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 // inheritance chain across documents (e.g. TRex → Dinosaur).
                 ty_name: info.parent.map(|p| res(p)),
                 param_types: vec![],
+                param_required: vec![],
+                return_type: None,
             },
         );
 
@@ -107,7 +119,9 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
         for (&msym, minfo) in &info.methods {
             let mname = res(msym);
             let sig = fmt_action_sig(&mname, minfo, interner);
-            let param_types: Vec<String> = minfo.params.iter()
+            let param_types: Vec<String> = minfo
+                .params
+                .iter()
                 .map(|p| type_name(&p.ty, interner))
                 .collect();
             table.put(
@@ -118,6 +132,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     detail: sig,
                     ty_name: None,
                     param_types,
+                    param_required: minfo.params.iter().map(|p| !p.optional).collect(),
+                    return_type: Some(type_name(&minfo.return_ty, interner)),
                 },
             );
         }
@@ -136,6 +152,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     detail: format!("```fidan\n{}.{}: {}\n```", name, fname, ty_s),
                     ty_name: None,
                     param_types: vec![],
+                    param_required: vec![],
+                    return_type: None,
                 },
             );
         }
@@ -177,6 +195,27 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     .as_ref()
                     .map(|t| fmt_type_expr(t, interner))
                     .or_else(|| ty_name.clone())
+                    .or_else(|| {
+                        // Show the inferred type even for non-Object init expressions
+                        // (e.g. `var x = rex.roar()` where roar returns `nothing`).
+                        if let Some(init_eid) = *init {
+                            match typed.expr_types.get(&init_eid) {
+                                Some(t)
+                                    if !matches!(
+                                        t,
+                                        FidanType::Unknown
+                                            | FidanType::Error
+                                            | FidanType::Object(_)
+                                    ) =>
+                                {
+                                    Some(type_name(t, interner))
+                                }
+                                _ => None,
+                            }
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_else(|| "?".into());
                 table.put(
                     vname.clone(),
@@ -188,6 +227,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                         detail: format!("```fidan\n{} {}: {}\n```", kw, vname, ty_s),
                         ty_name,
                         param_types: vec![],
+                        param_required: vec![],
+                        return_type: None,
                     },
                 );
             }
@@ -250,6 +291,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                         ),
                         ty_name: None,
                         param_types: vec![],
+                        param_required: vec![],
+                        return_type: None,
                     },
                 );
             }
@@ -260,7 +303,9 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     continue;
                 }
                 let sig = fmt_action_sig(&mname, minfo, interner);
-                let param_types: Vec<String> = minfo.params.iter()
+                let param_types: Vec<String> = minfo
+                    .params
+                    .iter()
                     .map(|p| type_name(&p.ty, interner))
                     .collect();
                 table.put(
@@ -271,6 +316,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                         detail: sig,
                         ty_name: None,
                         param_types,
+                        param_required: minfo.params.iter().map(|p| !p.optional).collect(),
+                        return_type: Some(type_name(&minfo.return_ty, interner)),
                     },
                 );
             }
@@ -291,8 +338,13 @@ fn fmt_action_sig(name: &str, info: &ActionInfo, interner: &SymbolInterner) -> S
         .map(|p| {
             let pname = res(p.name);
             let ty = type_name(&p.ty, interner);
-            let prefix = if p.certain { "certain" } else { "optional" };
-            format!("{} {} -> {}", prefix, pname, ty)
+            if p.certain {
+                format!("certain {} -> {}", pname, ty)
+            } else if p.optional {
+                format!("optional {} -> {}", pname, ty)
+            } else {
+                format!("{} -> {}", pname, ty)
+            }
         })
         .collect();
     let ret = type_name(&info.return_ty, interner);

@@ -164,6 +164,32 @@ impl FidanLsp {
             }
         }
 
+        // Patch `var x: dynamic` entries whose init was a cross-module method call.
+        // Now that background docs are loaded we can resolve the actual return type.
+        for (var_name, recv_ty, method_name) in &result.dynamic_var_call_sites {
+            if let Some((_, entry)) = self.resolve_member_cross_doc(recv_ty, method_name) {
+                if let Some(ref ret_type) = entry.return_type {
+                    if let Some(mut doc) = self.store.get_mut(uri) {
+                        if let Some(sym_entry) = doc.symbol_table.entries.get_mut(var_name) {
+                            // Update the hover detail to show the real return type.
+                            let kw = if matches!(sym_entry.kind, crate::symbols::SymKind::Variable { is_const: true }) {
+                                "const var"
+                            } else {
+                                "var"
+                            };
+                            sym_entry.detail = format!(
+                                "```fidan\n{} {}: {}\n```",
+                                kw, var_name, ret_type
+                            );
+                            // Also set ty_name so member accesses on `x` can be resolved
+                            // if the return type is an object type.
+                            sym_entry.ty_name = Some(ret_type.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         // LSP-level cross-module validation — runs after imported docs are in
         // the store so the symbol-table search can traverse the full chain.
         let extra = self.check_cross_module_diagnostics(
@@ -259,26 +285,42 @@ impl FidanLsp {
                     }
                 }
                 Some((_, entry)) => {
-                    // Method found — validate argument types against param types.
-                    for (i, (param_ty, arg_ty)) in
-                        entry.param_types.iter().zip(site.arg_tys.iter()).enumerate()
-                    {
-                        if !Self::types_compatible(param_ty, arg_ty) {
-                            diags.push(Diagnostic {
-                                range: convert::span_to_range(&file, site.span),
-                                severity: Some(DiagnosticSeverity::ERROR),
-                                code: Some(NumberOrString::String("E0302".into())),
-                                source: Some("fidan".into()),
-                                message: format!(
-                                    "argument {} of `{}` expects type `{}`, found `{}`",
-                                    i + 1,
-                                    site.method_name,
-                                    param_ty,
-                                    arg_ty,
-                                ),
-                                ..Default::default()
-                            });
-                            break; // report first mismatch only
+                    // Check that all required parameters are provided (E0301).
+                    let required_count = entry.param_required.iter().filter(|&&r| r).count();
+                    if site.arg_tys.len() < required_count {
+                        diags.push(Diagnostic {
+                            range: convert::span_to_range(&file, site.span),
+                            severity: Some(DiagnosticSeverity::ERROR),
+                            code: Some(NumberOrString::String("E0301".into())),
+                            source: Some("fidan".into()),
+                            message: format!(
+                                "not enough arguments for `{}`: {} required but {} provided",
+                                site.method_name, required_count, site.arg_tys.len()
+                            ),
+                            ..Default::default()
+                        });
+                    } else {
+                        // Method found — validate argument types against param types.
+                        for (i, (param_ty, arg_ty)) in
+                            entry.param_types.iter().zip(site.arg_tys.iter()).enumerate()
+                        {
+                            if !Self::types_compatible(param_ty, arg_ty) {
+                                diags.push(Diagnostic {
+                                    range: convert::span_to_range(&file, site.span),
+                                    severity: Some(DiagnosticSeverity::ERROR),
+                                    code: Some(NumberOrString::String("E0302".into())),
+                                    source: Some("fidan".into()),
+                                    message: format!(
+                                        "argument {} of `{}` expects type `{}`, found `{}`",
+                                        i + 1,
+                                        site.method_name,
+                                        param_ty,
+                                        arg_ty,
+                                    ),
+                                    ..Default::default()
+                                });
+                                break; // report first mismatch only
+                            }
                         }
                     }
                 }

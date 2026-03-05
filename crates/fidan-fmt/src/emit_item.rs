@@ -193,15 +193,18 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
 
                 // Methods (separated by a blank line from fields if any exist)
                 let methods_vec: Vec<ItemId> = methods.clone();
-                if !fields.is_empty() && !methods_vec.is_empty() {
-                    p.blank();
-                }
                 for (i, &mid) in methods_vec.iter().enumerate() {
                     if i > 0 {
+                        // blank line between consecutive methods
                         p.blank();
+                    } else if !fields.is_empty() {
+                        // one blank line separating the field block from the first method
+                        p.blank();
+                    } else {
+                        // no fields — just a plain newline before the first method
+                        p.nl();
                     }
                     let method = p.arena.get_item(mid).clone();
-                    p.nl();
                     emit_item(p, &method, true);
                 }
 
