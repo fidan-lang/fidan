@@ -7,6 +7,7 @@
 // per-call-frame catch stack, mirroring the `PushCatch`/`PopCatch`
 // instructions emitted by the MIR lowerer.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -1788,26 +1789,46 @@ fn eval_unary(op: UnOp, v: FidanValue) -> Result<FidanValue, MirSignal> {
 /// - Module-level variables are always stored via `StoreGlobal`/`LoadGlobal`,
 ///   so skipping old init instructions is safe — their effects live in `globals`.
 /// - `globals_snapshot` preserves computed values across recompile boundaries.
+/// - `persistent_global_names` is the stable GID registry: the ordered list of
+///   all global symbol names ever registered. Passed to `lower_program` on every
+///   recompilation so every symbol always gets the same `GlobalId` index.
 /// - Appending new source to `accumulated_source` deterministically extends the
 ///   init function's `bb0`; new control-flow BBs are reachable only from the
 ///   new tail of `bb0`, so the branch-following logic is still correct.
+/// - `ns_cursor` and `body_cursor` together form a split-cursor: both are
+///   relative offsets within their respective sections of bb0, so adding new
+///   `use` imports (which extend the namespace section) never shifts the body
+///   cursor, and previously-executed namespace inits are skipped just like body
+///   instructions — nothing is ever re-executed.
 pub struct MirReplState {
     /// All source text entered so far (grows with each successful input).
     pub accumulated_source: String,
-    /// Number of instructions already executed in `blocks[0]` of FunctionId(0).
-    /// On every run we skip the first `init_bb0_cursor` instructions.
-    pub init_bb0_cursor: usize,
+    /// Number of namespace-init instructions already executed (i.e. the
+    /// already-committed `Assign+StoreGlobal` pairs at the start of bb0).
+    pub ns_cursor: usize,
+    /// Number of body instructions (past the namespace-init section) already
+    /// executed.
+    pub body_cursor: usize,
     /// Global values after the last successful execution.
     /// Pre-filled into each new `MirMachine` before running the delta.
     pub globals_snapshot: Vec<FidanValue>,
+    /// Ordered list of all global symbol names registered so far.
+    /// Passed as `existing_globals` to `lower_program` on every recompilation
+    /// to guarantee every symbol always gets the same `GlobalId` index.
+    pub persistent_global_names: Vec<String>,
+    /// Fast O(1) dedup guard for `persistent_global_names`.
+    persistent_global_set: HashSet<String>,
 }
 
 impl MirReplState {
     pub fn new() -> Self {
         Self {
             accumulated_source: String::new(),
-            init_bb0_cursor: 0,
+            ns_cursor: 0,
+            body_cursor: 0,
             globals_snapshot: Vec::new(),
+            persistent_global_names: Vec::new(),
+            persistent_global_set: HashSet::new(),
         }
     }
 }
@@ -1821,15 +1842,18 @@ impl Default for MirReplState {
 impl MirMachine {
     // ── REPL helpers ─────────────────────────────────────────────────────────
 
-    /// Count instructions in `blocks[0]` of the init function (FunctionId 0).
-    /// Used as the REPL cursor: after execution, advance by this amount so the
-    /// next run only dispatches newly added instructions.
-    pub fn count_init_bb0_instrs(&self) -> usize {
-        self.program
+    /// Count **body** instructions in `blocks[0]` of the init function.
+    /// Body instructions are those after the namespace-init section
+    /// (`ns_instr_count` = `namespace_global_count * 2` pairs at the start).
+    /// Returns `(ns_instr_count, body_instr_count)` for the REPL cursors.
+    pub fn count_init_split_instrs(&self, ns_instr_count: usize) -> (usize, usize) {
+        let total = self
+            .program
             .function(FunctionId(0))
             .block(BlockId(0))
             .instructions
-            .len()
+            .len();
+        (ns_instr_count, total.saturating_sub(ns_instr_count))
     }
 
     /// Snapshot all global values (used to preserve state between REPL lines).
@@ -1846,6 +1870,46 @@ impl MirMachine {
             if i < g.len() {
                 g[i] = v.clone();
             }
+        }
+    }
+
+    /// REPL split-execution: skips already-executed namespace init instructions
+    /// (`ns_cursor`), runs new namespace inits up to `ns_instr_count`, skips
+    /// already-executed body instructions (`body_cursor`), then runs the new
+    /// body delta.  Nothing is ever re-executed.
+    pub fn run_init_split(
+        &mut self,
+        ns_cursor: usize,
+        ns_instr_count: usize,
+        body_cursor: usize,
+    ) -> Result<(), RunError> {
+        self.call_stack.clear();
+        self.panic_trace.clear();
+        let entry = FunctionId(0);
+        let func = self.program.function(entry);
+        let local_count = func.local_count;
+        let fn_name = self.sym_str(func.name).to_string();
+        let mut frame = CallFrame::new(local_count, fn_name);
+        self.call_stack.push((entry, None, vec![]));
+        let result = self.run_init_split_inner(&mut frame, ns_cursor, ns_instr_count, body_cursor);
+        self.call_stack.pop();
+        match result {
+            Ok(_) => Ok(()),
+            Err(MirSignal::Throw(v)) => Err(RunError {
+                code: fidan_diagnostics::diag_code!("R0001"),
+                message: format!("unhandled exception: {}", builtins::display(&v)),
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
+            Err(MirSignal::Panic(msg)) => Err(RunError {
+                code: fidan_diagnostics::diag_code!("R0001"),
+                message: msg,
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
+            Err(MirSignal::ParallelFail(msg)) => Err(RunError {
+                code: fidan_diagnostics::diag_code!("R9001"),
+                message: msg,
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
         }
     }
 
@@ -1992,6 +2056,139 @@ impl MirMachine {
         }
     }
 
+    /// Inner implementation for split-cursor REPL execution.
+    ///
+    /// Runs bb0 instructions in three phases:
+    /// 1. `[0 .. ns_instr_count]`  — namespace init (always re-run, idempotent)
+    /// 2. skip `body_cursor` instructions
+    /// 3. run the rest (new body delta)
+    fn run_init_split_inner(
+        &mut self,
+        frame: &mut CallFrame,
+        ns_cursor: usize,
+        ns_instr_count: usize,
+        body_cursor: usize,
+    ) -> Result<Option<FidanValue>, MirSignal> {
+        let fn_id = FunctionId(0);
+        let program = Arc::clone(&self.program);
+        let mut bb_id = BlockId(0);
+        let mut prev_bb: Option<BlockId> = None;
+        let mut entered_bb0 = false;
+
+        'outer: loop {
+            {
+                let bb = program.function(fn_id).block(bb_id);
+                if !bb.phis.is_empty() {
+                    let phis: Vec<(LocalId, FidanValue)> = bb
+                        .phis
+                        .iter()
+                        .map(|phi| {
+                            let val = if let Some(p) = prev_bb {
+                                phi.operands
+                                    .iter()
+                                    .find(|(src, _)| *src == p)
+                                    .map(|(_, op)| self.eval_operand(op, frame))
+                                    .unwrap_or(FidanValue::Nothing)
+                            } else {
+                                FidanValue::Nothing
+                            };
+                            (phi.result, val)
+                        })
+                        .collect();
+                    for (dest, val) in phis {
+                        frame.store(dest, val);
+                    }
+                }
+            }
+
+            let instr_count = program.function(fn_id).block(bb_id).instructions.len();
+            // On the entry block: skip old ns inits, run new ns inits, skip old
+            // body, run new body delta — in one contiguous pass with two skips.
+            let instr_start = if !entered_bb0 && bb_id == BlockId(0) {
+                entered_bb0 = true;
+                // Run new namespace inits [ns_cursor..ns_instr_count].
+                let ns_new_end = ns_instr_count.min(instr_count);
+                for i in ns_cursor..ns_new_end {
+                    let instr = &program.function(fn_id).block(bb_id).instructions[i];
+                    match self.exec_instr(instr, frame) {
+                        Ok(Some(ret)) => return Ok(Some(ret)),
+                        Ok(None) => {}
+                        Err(MirSignal::Throw(v)) => {
+                            if let Some(catch_bb) = frame.catch_stack.pop() {
+                                frame.current_exception = Some(v);
+                                prev_bb = Some(bb_id);
+                                bb_id = catch_bb;
+                                continue 'outer;
+                            } else {
+                                return Err(MirSignal::Throw(v));
+                            }
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                // Body starts at ns_instr_count; skip already-executed body instrs.
+                (ns_instr_count + body_cursor).min(instr_count)
+            } else {
+                0
+            };
+
+            for i in instr_start..instr_count {
+                let instr = &program.function(fn_id).block(bb_id).instructions[i];
+                match self.exec_instr(instr, frame) {
+                    Ok(Some(ret)) => return Ok(Some(ret)),
+                    Ok(None) => {}
+                    Err(MirSignal::Throw(v)) => {
+                        if let Some(catch_bb) = frame.catch_stack.pop() {
+                            frame.current_exception = Some(v);
+                            prev_bb = Some(bb_id);
+                            bb_id = catch_bb;
+                            continue 'outer;
+                        } else {
+                            return Err(MirSignal::Throw(v));
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+
+            let term = program.function(fn_id).block(bb_id).terminator.clone();
+            match term {
+                Terminator::Return(op) => {
+                    let val = op.as_ref().map(|o| self.eval_operand(o, frame));
+                    return Ok(val);
+                }
+                Terminator::Goto(target) => {
+                    prev_bb = Some(bb_id);
+                    bb_id = target;
+                }
+                Terminator::Branch {
+                    cond,
+                    then_bb,
+                    else_bb,
+                } => {
+                    let cv = self.eval_operand(&cond, frame);
+                    prev_bb = Some(bb_id);
+                    bb_id = if cv.truthy() { then_bb } else { else_bb };
+                }
+                Terminator::Throw { value } => {
+                    let v = self.eval_operand(&value, frame);
+                    if let Some(catch_bb) = frame.catch_stack.pop() {
+                        frame.current_exception = Some(v);
+                        prev_bb = Some(bb_id);
+                        bb_id = catch_bb;
+                    } else {
+                        return Err(MirSignal::Throw(v));
+                    }
+                }
+                Terminator::Unreachable => {
+                    return Err(MirSignal::Panic(
+                        "reached unreachable block in init function".into(),
+                    ));
+                }
+            }
+        }
+    }
+
     /// Run a sequence of pre-lowered test functions and return per-test outcomes.
     ///
     /// Called by [`run_tests`] after the init function has already been run.
@@ -2055,15 +2252,27 @@ pub fn run_mir_repl_line(
     jit_threshold: u32,
     echo_sym: Option<fidan_lexer::Symbol>,
 ) -> Result<Option<FidanValue>, RunError> {
+    // Extend the persistent GID registry with any new globals the latest
+    // compilation added (namespace imports and var declarations).
+    for g in &program.globals {
+        let name = interner.resolve(g.name);
+        if state.persistent_global_set.insert(name.to_string()) {
+            state.persistent_global_names.push(name.to_string());
+        }
+    }
+
+    let ns_instr_count = program.namespace_global_count * 2;
     let mut machine = MirMachine::new(Arc::new(program), interner, source_map);
     machine.set_jit_threshold(jit_threshold);
     // Pre-fill globals from the previous snapshot so all previously-defined
     // variables have their correct values when the new delta executes.
     machine.restore_globals(&state.globals_snapshot);
-    let cursor = state.init_bb0_cursor;
-    machine.run_init_delta(cursor)?;
-    // Commit updated cursor + globals for the next line.
-    state.init_bb0_cursor = machine.count_init_bb0_instrs();
+    // Skip old ns inits, run new ns inits, skip old body, run new body delta.
+    machine.run_init_split(state.ns_cursor, ns_instr_count, state.body_cursor)?;
+    // Commit updated cursors + globals for the next line.
+    let (new_ns, new_body) = machine.count_init_split_instrs(ns_instr_count);
+    state.ns_cursor = new_ns;
+    state.body_cursor = new_body;
     state.globals_snapshot = machine.snapshot_globals();
 
     // If the caller requested an echo, find the global with `echo_sym` (the last

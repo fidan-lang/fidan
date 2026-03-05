@@ -40,7 +40,7 @@ fn run_src(src: &str) -> Result<(), RunError> {
     );
     let tm = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
     let hir = fidan_hir::lower_module(&module, &tm, &interner);
-    let mut mir = fidan_mir::lower_program(&hir, &interner);
+    let mut mir = fidan_mir::lower_program(&hir, &interner, &[]);
     fidan_passes::run_all(&mut mir);
     run_mir(mir, interner, source_map)
 }
@@ -54,7 +54,7 @@ fn build_mir(src: &str) -> (fidan_mir::MirProgram, Arc<SymbolInterner>) {
     let (module, _) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
     let tm = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
     let hir = fidan_hir::lower_module(&module, &tm, &interner);
-    let mir = fidan_mir::lower_program(&hir, &interner);
+    let mir = fidan_mir::lower_program(&hir, &interner, &[]);
     (mir, interner)
 }
 

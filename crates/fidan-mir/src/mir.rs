@@ -460,6 +460,12 @@ pub struct MirProgram {
     /// Test-block functions registered for `fidan test`.
     /// Each entry is `(human_readable_name, function_id)`.
     pub test_functions: Vec<(String, FunctionId)>,
+    /// Number of globals registered from `use` declarations (namespace / specific-name
+    /// stdlib imports).  In the init function's entry block, the first
+    /// `namespace_global_count * 2` instructions are always the namespace init
+    /// section (one `Assign` + one `StoreGlobal` per namespace global).
+    /// The REPL uses this to split namespace inits from body inits.
+    pub namespace_global_count: usize,
 }
 
 impl MirProgram {

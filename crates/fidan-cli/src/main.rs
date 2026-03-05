@@ -1250,7 +1250,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
     // ── --emit mir ─────────────────────────────────────────────────────────────
     if opts.emit.contains(&EmitKind::Mir) {
         if let Some(ref hir) = merged_hir {
-            let mir = fidan_mir::lower_program(hir, &interner);
+            let mir = fidan_mir::lower_program(hir, &interner, &[]);
             println!("=== mir: {source_name} ===");
             println!("  functions: {}", mir.functions.len());
             fidan_mir::print_program(&mir);
@@ -1280,7 +1280,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
         ExecutionMode::Interpret => {
             if error_count == 0 {
                 if let Some(ref hir) = merged_hir {
-                    let mut mir = fidan_mir::lower_program(hir, &interner);
+                    let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
                     // ── MIR safety analysis (E0401, W1004) ───────────────────────
                     error_count += emit_mir_safety_diags(&mir, &interner, opts.strict_mode);
                     if error_count == 0 {
@@ -1327,7 +1327,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
         ExecutionMode::Test => {
             if error_count == 0 {
                 if let Some(ref hir) = merged_hir {
-                    let mut mir = fidan_mir::lower_program(hir, &interner);
+                    let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
                     // ── MIR safety analysis (E0401, W1004) ───────────────────
                     error_count += emit_mir_safety_diags(&mir, &interner, opts.strict_mode);
                     if error_count == 0 {
@@ -1823,7 +1823,8 @@ fn run_repl(trace_mode: TraceMode) -> Result<()> {
 
         // ── HIR → MIR → optimisation passes ───────────────────────────────
         let hir = fidan_hir::lower_module(&full_module, &typed, &interner);
-        let mut mir = fidan_mir::lower_program(&hir, &interner);
+        let mut mir =
+            fidan_mir::lower_program(&hir, &interner, &mir_repl_state.persistent_global_names);
         // Run MIR safety diagnostics (W2006 null-safety, W1004 unawaited, etc.).
         emit_mir_safety_diags(&mir, &interner, false);
         fidan_passes::run_all(&mut mir);

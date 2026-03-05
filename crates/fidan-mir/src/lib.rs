@@ -29,7 +29,7 @@ mod tests {
         let (module, _) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
         let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
         let hir = fidan_hir::lower_module(&module, &typed, &interner);
-        lower_program(&hir, &interner)
+        lower_program(&hir, &interner, &[])
     }
 
     // ── 1. Empty program has only the init function ───────────────────────────

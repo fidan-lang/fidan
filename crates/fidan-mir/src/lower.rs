@@ -1,4 +1,4 @@
-// fidan-mir/src/lower.rs
+﻿// fidan-mir/src/lower.rs
 //
 // HIR → MIR lowering.
 //
@@ -182,11 +182,23 @@ fn hir_walk_expr(e: &HirExpr, out: &mut HashSet<Symbol>) {
             hir_walk_expr(object, out);
             hir_walk_expr(index, out);
         }
-        HirExprKind::Slice { target, start, end, step, .. } => {
+        HirExprKind::Slice {
+            target,
+            start,
+            end,
+            step,
+            ..
+        } => {
             hir_walk_expr(target, out);
-            if let Some(e) = start { hir_walk_expr(e, out); }
-            if let Some(e) = end   { hir_walk_expr(e, out); }
-            if let Some(e) = step  { hir_walk_expr(e, out); }
+            if let Some(e) = start {
+                hir_walk_expr(e, out);
+            }
+            if let Some(e) = end {
+                hir_walk_expr(e, out);
+            }
+            if let Some(e) = step {
+                hir_walk_expr(e, out);
+            }
         }
         HirExprKind::List(items) => {
             for e in items {
@@ -227,16 +239,31 @@ fn hir_walk_expr(e: &HirExpr, out: &mut HashSet<Symbol>) {
         | HirExprKind::This
         | HirExprKind::Parent
         | HirExprKind::Error => {}
-        HirExprKind::ListComp { element, iterable, filter, .. } => {
+        HirExprKind::ListComp {
+            element,
+            iterable,
+            filter,
+            ..
+        } => {
             hir_walk_expr(element, out);
             hir_walk_expr(iterable, out);
-            if let Some(f) = filter { hir_walk_expr(f, out); }
+            if let Some(f) = filter {
+                hir_walk_expr(f, out);
+            }
         }
-        HirExprKind::DictComp { key, value, iterable, filter, .. } => {
+        HirExprKind::DictComp {
+            key,
+            value,
+            iterable,
+            filter,
+            ..
+        } => {
             hir_walk_expr(key, out);
             hir_walk_expr(value, out);
             hir_walk_expr(iterable, out);
-            if let Some(f) = filter { hir_walk_expr(f, out); }
+            if let Some(f) = filter {
+                hir_walk_expr(f, out);
+            }
         }
     }
 }
@@ -797,11 +824,17 @@ impl<'p> FnCtx<'p> {
                 Operand::Local(dest)
             }
 
-            HirExprKind::Slice { target, start, end, inclusive, step } => {
+            HirExprKind::Slice {
+                target,
+                start,
+                end,
+                inclusive,
+                step,
+            } => {
                 let tgt = self.lower_expr(target);
-                let s   = start.as_deref().map(|e| self.lower_expr(e));
-                let e   = end.as_deref().map(|e| self.lower_expr(e));
-                let st  = step.as_deref().map(|e| self.lower_expr(e));
+                let s = start.as_deref().map(|e| self.lower_expr(e));
+                let e = end.as_deref().map(|e| self.lower_expr(e));
+                let st = step.as_deref().map(|e| self.lower_expr(e));
                 let dest = self.alloc_local();
                 self.emit(Instr::Assign {
                     dest,
@@ -843,23 +876,19 @@ impl<'p> FnCtx<'p> {
             }
 
             // ── Comprehensions ────────────────────────────────────────────────
-            HirExprKind::ListComp { element, binding, iterable, filter } => {
-                self.lower_list_comp(
-                    *binding,
-                    iterable,
-                    element,
-                    filter.as_deref(),
-                )
-            }
-            HirExprKind::DictComp { key, value, binding, iterable, filter } => {
-                self.lower_dict_comp(
-                    *binding,
-                    iterable,
-                    key,
-                    value,
-                    filter.as_deref(),
-                )
-            }
+            HirExprKind::ListComp {
+                element,
+                binding,
+                iterable,
+                filter,
+            } => self.lower_list_comp(*binding, iterable, element, filter.as_deref()),
+            HirExprKind::DictComp {
+                key,
+                value,
+                binding,
+                iterable,
+                filter,
+            } => self.lower_dict_comp(*binding, iterable, key, value, filter.as_deref()),
             HirExprKind::Tuple(elems) => {
                 let ops: Vec<Operand> = elems.iter().map(|e| self.lower_expr(e)).collect();
                 let dest = self.alloc_local();
@@ -1938,28 +1967,23 @@ impl<'p> FnCtx<'p> {
             ty: MirTy::Dynamic,
             rhs: Rvalue::List(vec![]),
         });
-        self.lower_comp_loop(
-            binding,
-            iterable,
-            filter,
-            |ctx, elem_op| {
-                // Compute element expression value.
-                let elem_val = ctx.lower_expr(element);
-                // Discard elem_op (already stored as `binding` via define_var); use elem_val.
-                let _ = elem_op;
-                // result.append(elem_val)
-                let append_sym = ctx.append_sym;
-                ctx.emit(Instr::Call {
-                    dest: None,
-                    callee: Callee::Method {
-                        receiver: Operand::Local(result),
-                        method: append_sym,
-                    },
-                    args: vec![elem_val],
-                    span: fidan_source::Span::default(),
-                });
-            },
-        );
+        self.lower_comp_loop(binding, iterable, filter, |ctx, elem_op| {
+            // Compute element expression value.
+            let elem_val = ctx.lower_expr(element);
+            // Discard elem_op (already stored as `binding` via define_var); use elem_val.
+            let _ = elem_op;
+            // result.append(elem_val)
+            let append_sym = ctx.append_sym;
+            ctx.emit(Instr::Call {
+                dest: None,
+                callee: Callee::Method {
+                    receiver: Operand::Local(result),
+                    method: append_sym,
+                },
+                args: vec![elem_val],
+                span: fidan_source::Span::default(),
+            });
+        });
         Operand::Local(result)
     }
 
@@ -1980,21 +2004,16 @@ impl<'p> FnCtx<'p> {
             ty: MirTy::Dynamic,
             rhs: Rvalue::Dict(vec![]),
         });
-        self.lower_comp_loop(
-            binding,
-            iterable,
-            filter,
-            |ctx, _elem_op| {
-                let key_val = ctx.lower_expr(key);
-                let val_val = ctx.lower_expr(value);
-                // result[key] = value  (SetIndex converts any key to string via display)
-                ctx.emit(Instr::SetIndex {
-                    object: Operand::Local(result),
-                    index: key_val,
-                    value: val_val,
-                });
-            },
-        );
+        self.lower_comp_loop(binding, iterable, filter, |ctx, _elem_op| {
+            let key_val = ctx.lower_expr(key);
+            let val_val = ctx.lower_expr(value);
+            // result[key] = value  (SetIndex converts any key to string via display)
+            ctx.emit(Instr::SetIndex {
+                object: Operand::Local(result),
+                index: key_val,
+                value: val_val,
+            });
+        });
         Operand::Local(result)
     }
 
@@ -2020,8 +2039,13 @@ impl<'p> FnCtx<'p> {
     /// exit:
     /// ```
     /// The `emit_body` closure is called with `&mut self` and the elem operand.
-    fn lower_comp_loop<F>(&mut self, binding: fidan_lexer::Symbol, iterable: &HirExpr, filter: Option<&HirExpr>, emit_body: F)
-    where
+    fn lower_comp_loop<F>(
+        &mut self,
+        binding: fidan_lexer::Symbol,
+        iterable: &HirExpr,
+        filter: Option<&HirExpr>,
+        emit_body: F,
+    ) where
         F: Fn(&mut Self, Operand),
     {
         let list_op = self.lower_expr(iterable);
@@ -2529,7 +2553,16 @@ fn collect_assigned_vars_impl(stmts: &[HirStmt], out: &mut HashSet<Symbol>) {
 ///
 /// Functions are numbered sequentially.  The first function (`FunctionId(0)`)
 /// is always the top-level initialisation function (globals + init_stmts).
-pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
+///
+/// `existing_globals` is the persistent GID registry maintained by the REPL
+/// (`MirReplState::persistent_global_names`).  The lowerer pre-populates
+/// `global_map` from this slice so every symbol always gets the same `GlobalId`
+/// across recompilations.  Pass `&[]` for non-REPL (file / batch) compilation.
+pub fn lower_program(
+    hir: &HirModule,
+    interner: &SymbolInterner,
+    existing_globals: &[String],
+) -> MirProgram {
     let mut prog = MirProgram::new();
 
     // `new` is the constructor method name; `this` is the implicit first param.
@@ -2618,31 +2651,31 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
         Rc::new(RefCell::new(VecDeque::new()));
 
     // ── Pre-pass ④: register module-level globals ─────────────────────────────────
-    // Module-level `const var` / `var` declarations.  Each one gets a
-    // `GlobalId` slot so that named functions can read/write them via
-    // `LoadGlobal`/`StoreGlobal` without needing access to the init fn’s
-    // local SSA environment.
-    // Note: the HIR lowerer puts top-level VarDecls into `init_stmts`, not
-    // `globals` (which is always empty); we scan `init_stmts` directly.
+    // Stable GID assignment: pre-populate from the persistent REPL registry
+    // first so every symbol retains its GID across recompilations.
+    // For non-REPL compilation `existing_globals` is empty and this is a no-op.
     let mut global_map: HashMap<Symbol, GlobalId> = HashMap::new();
-    for stmt in &hir.init_stmts {
-        if let HirStmt::VarDecl { name, ty, .. } = stmt {
-            let gid = GlobalId(prog.globals.len() as u32);
-            prog.globals.push(MirGlobal {
-                name: *name,
-                ty: fidan_ty_to_mir(ty),
-            });
-            global_map.insert(*name, gid);
-        }
+    for (i, name) in existing_globals.iter().enumerate() {
+        let sym = interner.intern(name.as_str());
+        let gid = GlobalId(i as u32);
+        prog.globals.push(MirGlobal {
+            name: sym,
+            ty: MirTy::Dynamic,
+        });
+        global_map.insert(sym, gid);
     }
-    // Register `use std.MODULE` and `use usermod` namespace aliases as module-level globals.
-    // This allows named action bodies to read them via `LoadGlobal`, instead
-    // of being limited to the init function's SSA-local scope.
+
+    // Register `use std.MODULE` / `use usermod` namespace aliases and specific-name
+    // stdlib imports as module-level globals.  Skip any already registered above.
+    // Count ALL namespace globals (existing + new) so the REPL can compute the
+    // boundary between the namespace init section and the body in bb0.
+    let mut namespace_global_count: usize = 0;
     for decl in &hir.use_decls {
         if decl.module_path.len() >= 2 && decl.specific_names.is_none() {
             let module = &decl.module_path[1];
             let ns_alias = decl.alias.clone().unwrap_or_else(|| module.clone());
             let alias_sym = interner.intern(&ns_alias);
+            namespace_global_count += 1;
             if !global_map.contains_key(&alias_sym) {
                 let gid = GlobalId(prog.globals.len() as u32);
                 prog.globals.push(MirGlobal {
@@ -2652,12 +2685,13 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 global_map.insert(alias_sym, gid);
             }
         } else if decl.module_path.len() == 1 && decl.specific_names.is_none() {
-            // User module: `use test2` → module_path = ["test2"].
+            // User module: `use test2` -> module_path = ["test2"].
             let ns_alias = decl
                 .alias
                 .clone()
                 .unwrap_or_else(|| decl.module_path[0].clone());
             let alias_sym = interner.intern(&ns_alias);
+            namespace_global_count += 1;
             if !global_map.contains_key(&alias_sym) {
                 let gid = GlobalId(prog.globals.len() as u32);
                 prog.globals.push(MirGlobal {
@@ -2667,10 +2701,11 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 global_map.insert(alias_sym, gid);
             }
         } else if let Some(ref names) = decl.specific_names {
-            // Specific-name stdlib import: `use std.io.{readFile}` → each name is a global.
+            // Specific-name stdlib import: `use std.io.{readFile}` -> each name is a global.
             if decl.module_path.len() >= 2 {
                 for fn_name in names {
                     let fn_sym = interner.intern(fn_name);
+                    namespace_global_count += 1;
                     if !global_map.contains_key(&fn_sym) {
                         let gid = GlobalId(prog.globals.len() as u32);
                         prog.globals.push(MirGlobal {
@@ -2683,7 +2718,22 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             }
         }
     }
+    prog.namespace_global_count = namespace_global_count;
 
+    // Module-level `var` declarations -- registered after namespace globals.
+    // With stable GIDs, symbols already in the registry are skipped.
+    for stmt in &hir.init_stmts {
+        if let HirStmt::VarDecl { name, ty, .. } = stmt {
+            if !global_map.contains_key(name) {
+                let gid = GlobalId(prog.globals.len() as u32);
+                prog.globals.push(MirGlobal {
+                    name: *name,
+                    ty: fidan_ty_to_mir(ty),
+                });
+                global_map.insert(*name, gid);
+            }
+        }
+    }
     // Build FunctionId → param-name-order map for sorting named call args.
     let mut fn_param_names: HashMap<FunctionId, Vec<Symbol>> = HashMap::new();
     for func in &hir.functions {
@@ -3048,7 +3098,8 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
             ctx.set_terminator(Terminator::Return(None));
         }
 
-        prog.test_functions.push((test_decl.name.clone(), test_fn_id));
+        prog.test_functions
+            .push((test_decl.name.clone(), test_fn_id));
     }
 
     // ── Propagate use_decls from HIR ──────────────────────────────────────────
@@ -3064,10 +3115,7 @@ pub fn lower_program(hir: &HirModule, interner: &SymbolInterner) -> MirProgram {
                 re_export: decl.re_export,
                 is_stdlib: true,
             });
-        } else if decl.module_path.len() == 1
-            && decl.specific_names.is_none()
-            && decl.re_export
-        {
+        } else if decl.module_path.len() == 1 && decl.specific_names.is_none() && decl.re_export {
             // User-module re-export: `export use mymod`.
             // Stored so re-export chaining (`lib.mymod.fn()`) resolves in `get_field`.
             // `is_stdlib: false` prevents the alias from entering `stdlib_modules`,
