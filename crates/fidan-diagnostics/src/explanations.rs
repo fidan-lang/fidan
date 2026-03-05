@@ -286,6 +286,45 @@ Fix: check the spelling or add the missing declaration to the object.
 "#,
         ),
 
+        "E0205" => Some(
+            r#"A parameter or variable that may hold `nothing` at runtime was used in
+a context that requires a concrete value (such as a range bound, an arithmetic
+operand, a for-loop iterable, or an index target).
+
+This happens when a parameter is declared without the `certain` keyword, which
+means callers may pass `nothing` as the argument.  If `nothing` is passed and
+the code reaches the problematic expression, a runtime error (R0001) will occur.
+
+Erroneous example:
+
+    action roar with (times oftype integer) returns string {  # no `certain`!
+        parallel for x in 1 .. times {   # error: `times` may be `nothing`
+            print("ROAR!")
+        }
+        return "done"
+    }
+
+Fix (option 1 — add `certain` to guarantee the caller cannot pass `nothing`):
+
+    action roar with (certain times oftype integer) returns string {
+        parallel for x in 1 .. times {   # OK
+            print("ROAR!")
+        }
+        return "done"
+    }
+
+Fix (option 2 — keep optional but guard at the call site with `??`):
+
+    action roar with (times oftype integer) returns string {
+        var safe_times = times ?? 0
+        parallel for x in 1 .. safe_times {
+            print("ROAR!")
+        }
+        return "done"
+    }
+"#,
+        ),
+
         "E0301" => Some(
             r#"A required parameter was not supplied at the call site. Every
 parameter not marked with `optional` must be passed either positionally or by

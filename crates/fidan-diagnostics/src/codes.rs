@@ -107,6 +107,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "unknown field or method on object",
         category: "types",
     },
+    DiagnosticCode {
+        code: "E0205",
+        title: "nullable value used in non-nullable context",
+        category: "null-safety",
+    },
     // ── Argument / call ───────────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0301",

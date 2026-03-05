@@ -18,7 +18,7 @@ use fidan_mir::{
 };
 use fidan_runtime::{
     FidanClass, FidanDict, FidanList, FidanObject, FidanPending, FidanString, FidanValue, FieldDef,
-    FunctionId as RuntimeFnId, OwnedRef, ParallelArgs, ParallelCapture,
+    FunctionId as RuntimeFnId, OwnedRef, ParallelArgs, ParallelCapture, display as fidan_display,
 };
 use fidan_source::{SourceMap, Span};
 use fidan_stdlib::{StdlibResult, parallel::ParallelOp};
@@ -1681,10 +1681,18 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
         (BinOp::Mul, Float(a), Integer(b)) => Float(a * *b as f64),
         (BinOp::Div, Integer(a), Float(b)) => Float(*a as f64 / b),
         (BinOp::Div, Float(a), Integer(b)) => Float(a / *b as f64),
-        // String concatenation
+        // String concatenation — any value on either side coerces to string
         (BinOp::Add, String(a), String(b)) => {
             let mut s = a.as_str().to_string();
             s.push_str(b.as_str());
+            String(FidanString::new(&s))
+        }
+        (BinOp::Add, String(a), v) => {
+            let s = format!("{}{}", a.as_str(), fidan_display(v));
+            String(FidanString::new(&s))
+        }
+        (BinOp::Add, v, String(b)) => {
+            let s = format!("{}{}", fidan_display(v), b.as_str());
             String(FidanString::new(&s))
         }
         // Comparison — integer

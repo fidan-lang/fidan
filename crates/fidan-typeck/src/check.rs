@@ -972,6 +972,12 @@ impl TypeChecker {
                 body,
                 span,
             } => {
+                // E0205: iterable must not be possibly-nothing.
+                self.require_non_nullable(
+                    iterable,
+                    "for-loop iterable (requires list or string)",
+                    module,
+                );
                 let iter_ty = self.infer_expr(iterable, module);
                 let elem_ty = match iter_ty {
                     FidanType::List(inner) => *inner,
@@ -1049,6 +1055,12 @@ impl TypeChecker {
                 body,
                 span,
             } => {
+                // E0205: iterable must not be possibly-nothing.
+                self.require_non_nullable(
+                    iterable,
+                    "parallel-for iterable (requires list or string)",
+                    module,
+                );
                 self.infer_expr(iterable, module);
                 self.table.push_scope(ScopeKind::Block);
                 self.table.define(
@@ -1307,6 +1319,12 @@ impl TypeChecker {
             }
 
             Expr::Index { object, index, .. } => {
+                // E0205: the collection being indexed must not be possibly-nothing.
+                self.require_non_nullable(
+                    object,
+                    "index target (requires list, dict, or string)",
+                    module,
+                );
                 let obj_ty = self.infer_expr(object, module);
                 self.infer_expr(index, module);
                 match obj_ty {
@@ -1346,10 +1364,43 @@ impl TypeChecker {
             Expr::Binary { op, lhs, rhs, span } => {
                 let l = self.infer_expr(lhs, module);
                 let r = self.infer_expr(rhs, module);
+                // E0205: check each operand for possibly-nothing values before
+                // binary_result sees the types.  Comparisons and logical ops are
+                // excluded because they are valid null-guard patterns.
+                // String concatenation (`+` where either side is String) is also
+                // excluded — any value safely coerces to a string at runtime.
+                let is_string_concat = matches!(op, BinOp::Add)
+                    && matches!((&l, &r), (FidanType::String, _) | (_, FidanType::String));
+                if !is_string_concat {
+                    let op_desc: Option<&str> = match op {
+                        BinOp::Range | BinOp::RangeInclusive => {
+                            Some("range operand (requires `integer`)")
+                        }
+                        BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => {
+                            Some("bitwise operand (requires `integer`)")
+                        }
+                        BinOp::Add
+                        | BinOp::Sub
+                        | BinOp::Mul
+                        | BinOp::Div
+                        | BinOp::Rem
+                        | BinOp::Pow => Some("arithmetic operand"),
+                        // Eq/NotEq/Lt/LtEq/Gt/GtEq/And/Or — valid with nullable values.
+                        _ => None,
+                    };
+                    if let Some(desc) = op_desc {
+                        self.require_non_nullable(lhs, desc, module);
+                        self.require_non_nullable(rhs, desc, module);
+                    }
+                }
                 self.binary_result(op, &l, &r, span)
             }
 
             Expr::Unary { op, operand, .. } => {
+                // E0205: unary +/- require a concrete number.
+                if matches!(op, UnOp::Pos | UnOp::Neg) {
+                    self.require_non_nullable(operand, "arithmetic operand", module);
+                }
                 let inner = self.infer_expr(operand, module);
                 match op {
                     UnOp::Pos => inner,
@@ -1899,6 +1950,80 @@ impl TypeChecker {
                 };
                 self.emit_error(fidan_diagnostics::diag_code!("E0301"), msg, span);
             }
+        }
+    }
+
+    // ── Null-safety helpers (E0205) ───────────────────────────────────────
+
+    /// Returns `(name, use_span, decl_span, is_param)` when `expr_id` is a
+    /// plain identifier that may hold `nothing` at runtime:
+    ///   - a non-`certain` parameter  → `Initialized::Maybe`
+    ///   - an uninitialised typed variable → `Initialized::No`
+    ///
+    /// `Dynamic`/`Error`/`Unknown`/`Nothing`-typed symbols are excluded.
+    fn possibly_nothing_ident(
+        &self,
+        expr_id: ExprId,
+        module: &Module,
+    ) -> Option<(String, Span, Span, bool)> {
+        let expr = module.arena.get_expr(expr_id).clone();
+        let Expr::Ident {
+            name,
+            span: use_span,
+        } = expr
+        else {
+            return None;
+        };
+        let info = self.table.lookup(name)?;
+        if !matches!(info.initialized, Initialized::Maybe | Initialized::No) {
+            return None;
+        }
+        if matches!(
+            info.ty,
+            FidanType::Dynamic | FidanType::Error | FidanType::Unknown | FidanType::Nothing
+        ) {
+            return None;
+        }
+        let name_str = self.interner.resolve(name).to_string();
+        let is_param = info.kind == SymbolKind::Param;
+        Some((name_str, use_span, info.span, is_param))
+    }
+
+    /// Emit E0205 if `expr_id` is a possibly-`nothing` value used as `context`.
+    fn require_non_nullable(&mut self, expr_id: ExprId, context: &str, module: &Module) {
+        if let Some((name, use_span, decl_span, is_param)) =
+            self.possibly_nothing_ident(expr_id, module)
+        {
+            let (subject, hint) = if is_param {
+                (
+                    format!("parameter `{name}` is not `certain` and may be `nothing`"),
+                    format!(
+                        "add `certain` to the parameter declaration, \
+                         or guard with `{name} ?? <default>`"
+                    ),
+                )
+            } else {
+                (
+                    format!("variable `{name}` is not initialised and is implicitly `nothing`"),
+                    format!("assign a value before use, or guard with `{name} ?? <default>`"),
+                )
+            };
+            let mut diag = Diagnostic::error(
+                fidan_diagnostics::diag_code!("E0205"),
+                format!("{subject} — used as {context}"),
+                use_span,
+            )
+            .with_label(Label::primary(use_span, "may be `nothing` here"))
+            .with_note(hint);
+            if decl_span != use_span {
+                let decl_label = if is_param {
+                    "declared without `certain`"
+                } else {
+                    "declared without an initialiser"
+                };
+                diag = diag.with_label(Label::secondary(decl_span, decl_label));
+            }
+            self.diags.push(diag);
         }
     }
 

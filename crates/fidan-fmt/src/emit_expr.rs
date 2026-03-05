@@ -15,12 +15,7 @@ fn binop_prec(op: BinOp) -> u8 {
         BinOp::Range | BinOp::RangeInclusive => 2,
         BinOp::Or => 3,
         BinOp::And => 4,
-        BinOp::Eq
-        | BinOp::NotEq
-        | BinOp::Lt
-        | BinOp::LtEq
-        | BinOp::Gt
-        | BinOp::GtEq => 5,
+        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => 5,
         BinOp::BitOr => 6,
         BinOp::BitXor => 7,
         BinOp::BitAnd => 8,
@@ -188,7 +183,9 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
             p.w(" = ");
             emit_expr(p, value);
         }
-        Expr::CompoundAssign { op, target, value, .. } => {
+        Expr::CompoundAssign {
+            op, target, value, ..
+        } => {
             emit_expr_prec(p, target, 15);
             p.w(" ");
             p.w(binop_str(op));
@@ -227,7 +224,12 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
 
         // ── Ternary ──────────────────────────────────────────────────────
         // Fidan ternary syntax: `then_val if condition else else_val`
-        Expr::Ternary { condition, then_val, else_val, .. } => {
+        Expr::Ternary {
+            condition,
+            then_val,
+            else_val,
+            ..
+        } => {
             let needs_parens = 0_u8 < min_prec;
             if needs_parens {
                 p.w("(");
@@ -277,7 +279,9 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
         }
 
         // ── Check expression ─────────────────────────────────────────────
-        Expr::Check { scrutinee, arms, .. } => {
+        Expr::Check {
+            scrutinee, arms, ..
+        } => {
             p.w("check ");
             emit_expr(p, scrutinee);
             p.w(" {");
@@ -295,7 +299,14 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
         }
 
         // ── Slice ─────────────────────────────────────────────────────────
-        Expr::Slice { target, start, end, inclusive, step, .. } => {
+        Expr::Slice {
+            target,
+            start,
+            end,
+            inclusive,
+            step,
+            ..
+        } => {
             emit_expr_prec(p, target, 15);
             p.w("[");
             if let Some(s) = start {
@@ -313,7 +324,13 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
         }
 
         // ── List comprehension ────────────────────────────────────────────
-        Expr::ListComp { element, binding, iterable, filter, .. } => {
+        Expr::ListComp {
+            element,
+            binding,
+            iterable,
+            filter,
+            ..
+        } => {
             p.w("[");
             emit_expr(p, element);
             p.w(" for ");
@@ -329,7 +346,14 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
         }
 
         // ── Dict comprehension ────────────────────────────────────────────
-        Expr::DictComp { key, value, binding, iterable, filter, .. } => {
+        Expr::DictComp {
+            key,
+            value,
+            binding,
+            iterable,
+            filter,
+            ..
+        } => {
             p.w("{");
             emit_expr(p, key);
             p.w(": ");
@@ -363,7 +387,7 @@ pub fn emit_arg_list(p: &mut Printer<'_>, args: &[Arg]) {
         if let Some(name) = arg.name {
             let n = p.sym_s(name);
             p.w(&n);
-            p.w(": ");
+            p.w(" = ");
         }
         emit_expr(p, arg.value);
     }
