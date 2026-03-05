@@ -525,6 +525,9 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 methods,
                 span,
             } => {
+                // HIR only needs the last segment (the object name) for parent lookup.
+                // For qualified paths like `module.Foo`, we use `Foo` as the parent symbol.
+                let hir_parent = parent.as_ref().and_then(|p| p.last().copied());
                 let hir_fields: Vec<HirField> = fields
                     .iter()
                     .map(|f| {
@@ -586,7 +589,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
 
                 objects.push(HirObject {
                     name,
-                    parent,
+                    parent: hir_parent,
                     fields: hir_fields,
                     methods: hir_methods,
                     span,

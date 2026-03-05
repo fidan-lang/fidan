@@ -32,7 +32,9 @@ pub enum Item {
     /// `object Name extends Parent { fields... methods... }`
     ObjectDecl {
         name: Symbol,
-        parent: Option<Symbol>,
+        /// Parent type path. A single element `[Foo]` means a local `extends Foo`.
+        /// Multiple elements `[module, Foo]` mean a qualified `extends module.Foo`.
+        parent: Option<Vec<Symbol>>,
         fields: Vec<FieldDecl>,
         methods: Vec<ItemId>,
         span: Span,

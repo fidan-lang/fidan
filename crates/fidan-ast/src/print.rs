@@ -171,7 +171,15 @@ impl<'a> Printer<'a> {
                 ..
             } => {
                 let parent_s = parent
-                    .map(|p| format!(" extends {}", self.sym(p)))
+                    .as_ref()
+                    .map(|parts| {
+                        let joined = parts
+                            .iter()
+                            .map(|&s| self.sym(s).to_string())
+                            .collect::<Vec<_>>()
+                            .join(".");
+                        format!(" extends {}", joined)
+                    })
                     .unwrap_or_default();
                 println!("{p}ObjectDecl  {}{parent_s}", self.sym(*name));
                 for f in fields {

@@ -307,10 +307,22 @@ impl LanguageServer for FidanLsp {
     ) -> RpcResult<Option<Vec<TextEdit>>> {
         let uri = &params.text_document.uri;
 
-        let text = match self.store.get(uri) {
-            Some(doc) => doc.text.clone(),
+        let doc = match self.store.get(uri) {
+            Some(d) => d,
             None => return Ok(None),
         };
+
+        // Never format while there are errors — the formatter may produce
+        // `<error>` placeholder tokens that corrupt the document.
+        let has_errors = doc.diagnostics.iter().any(|d| {
+            d.severity == Some(DiagnosticSeverity::ERROR)
+        });
+        if has_errors {
+            return Ok(None);
+        }
+
+        let text = doc.text.clone();
+        drop(doc);
 
         let opts = FormatOptions {
             indent_width: params.options.tab_size as usize,

@@ -484,7 +484,11 @@ impl<'t> Parser<'t> {
         self.advance(); // eat `object`
         let name = self.expect_ident_sym("expected object name");
         let parent = if self.eat(&TokenKind::Extends) {
-            Some(self.expect_ident_sym("expected parent name after `extends`"))
+            let mut path = vec![self.expect_ident_sym("expected parent name after `extends`")];
+            while self.eat(&TokenKind::Dot) {
+                path.push(self.expect_ident_sym("expected name after `.` in `extends` path"));
+            }
+            Some(path)
         } else {
             None
         };

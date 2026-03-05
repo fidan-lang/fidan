@@ -337,7 +337,9 @@ impl TypeChecker {
                 let mut obj = ObjectInfo {
                     fields: FxHashMap::default(),
                     methods: FxHashMap::default(),
-                    parent: *parent,
+                    // Store only the last segment (local object name).
+                    // For cross-module paths like `module.Foo`, this is `Foo`.
+                    parent: parent.as_ref().and_then(|p| p.last().copied()),
                     span: *span,
                 };
                 for field in fields {
@@ -552,29 +554,38 @@ impl TypeChecker {
                 span,
                 ..
             } => {
-                if let Some(p) = parent {
-                    if *p == *name {
+                if let Some(path) = parent {
+                    if path.len() == 1 && path[0] == *name {
                         let pname = self.interner.resolve(*name).to_string();
                         self.emit_error(
                             fidan_diagnostics::diag_code!("E0107"),
                             format!("object `{pname}` cannot extend itself"),
                             *span,
                         );
-                    } else if !self.objects.contains_key(p) {
-                        let pname = self.interner.resolve(*p).to_string();
+                    } else if path.len() == 1 && !self.objects.contains_key(&path[0]) {
+                        let pname = self.interner.resolve(path[0]).to_string();
                         self.emit_error(
                             fidan_diagnostics::diag_code!("E0100"),
                             format!("undefined object `{pname}` in `extends` clause"),
                             *span,
                         );
                     }
+                    // Multi-segment qualified paths (e.g. `module.Foo`) cannot be
+                    // verified in single-file type checking — suppress E0100.
                 }
 
                 let obj_ty = FidanType::Object(*name);
                 let prev_this = self.this_ty.replace(obj_ty.clone());
 
+                // Determine parent type for `parent` keyword binding inside methods.
+                let parent_ty = match parent.as_ref() {
+                    Some(path) if path.len() == 1 => Some(FidanType::Object(path[0])),
+                    Some(_) => Some(FidanType::Dynamic), // cross-module
+                    None => None,
+                };
+
                 self.table.push_scope(ScopeKind::Object);
-                self.inject_this_and_parent(obj_ty, *parent, module.file);
+                self.inject_this_and_parent(obj_ty, parent_ty, module.file);
 
                 for &mid in methods {
                     let method = module.arena.get_item(mid).clone();
@@ -1919,18 +1930,18 @@ impl TypeChecker {
     fn inject_this_and_parent(
         &mut self,
         this_ty: FidanType,
-        parent_sym: Option<Symbol>,
+        parent_ty: Option<FidanType>,
         file: FileId,
     ) {
         self.inject_this_binding(this_ty, file);
-        if let Some(p) = parent_sym {
+        if let Some(ty) = parent_ty {
             let dummy = self.dummy_span();
             let parent = self.interner.intern("parent");
             self.table.define(
                 parent,
                 SymbolInfo {
                     kind: SymbolKind::Var,
-                    ty: FidanType::Object(p),
+                    ty,
                     span: dummy,
                     is_mutable: false,
                     initialized: Initialized::Yes,

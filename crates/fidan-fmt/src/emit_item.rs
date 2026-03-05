@@ -33,7 +33,13 @@ pub fn emit_module(p: &mut Printer<'_>, module: &Module) {
 pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
     match item {
         // ── Module-level var / const var ──────────────────────────────────
-        Item::VarDecl { name, ty, init, is_const, .. } => {
+        Item::VarDecl {
+            name,
+            ty,
+            init,
+            is_const,
+            ..
+        } => {
             if *is_const {
                 p.w("const var ");
             } else {
@@ -64,7 +70,9 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
         }
 
         // ── Module-level tuple destructure ────────────────────────────────
-        Item::Destructure { bindings, value, .. } => {
+        Item::Destructure {
+            bindings, value, ..
+        } => {
             p.w("var (");
             for (i, sym) in bindings.iter().enumerate() {
                 if i > 0 {
@@ -78,7 +86,13 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
         }
 
         // ── Use / export use ─────────────────────────────────────────────
-        Item::Use { path, alias, re_export, grouped, .. } => {
+        Item::Use {
+            path,
+            alias,
+            re_export,
+            grouped,
+            ..
+        } => {
             if *re_export {
                 p.w("export ");
             }
@@ -117,14 +131,25 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
         }
 
         // ── Object declaration ────────────────────────────────────────────
-        Item::ObjectDecl { name, parent, fields, methods, .. } => {
+        Item::ObjectDecl {
+            name,
+            parent,
+            fields,
+            methods,
+            ..
+        } => {
             p.w("object ");
             let n = p.sym_s(*name);
             p.w(&n);
-            if let Some(par) = parent {
+            if let Some(parts) = parent {
                 p.w(" extends ");
-                let par_s = p.sym_s(*par);
-                p.w(&par_s);
+                for (i, &seg) in parts.iter().enumerate() {
+                    if i > 0 {
+                        p.w(".");
+                    }
+                    let s = p.sym_s(seg);
+                    p.w(&s);
+                }
             }
             p.w(" {");
 
