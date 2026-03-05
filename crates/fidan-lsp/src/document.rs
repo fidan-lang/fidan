@@ -2,7 +2,8 @@
 
 use crate::symbols::SymbolTable;
 use fidan_source::Span;
-use tower_lsp::lsp_types::{Diagnostic, SemanticToken};
+use std::collections::HashMap;
+use tower_lsp::lsp_types::{Diagnostic, SemanticToken, Url};
 
 /// A single open document tracked by the language server.
 #[derive(Debug, Clone)]
@@ -20,4 +21,6 @@ pub struct Document {
     pub symbol_table: SymbolTable,
     /// Every identifier token's span + resolved name, used for position lookup.
     pub identifier_spans: Vec<(Span, String)>,
+    /// Namespace alias → absolute file URL for `use "file.fdn" as alias` imports.
+    pub imports: HashMap<String, Url>,
 }

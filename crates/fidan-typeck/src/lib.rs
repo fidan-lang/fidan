@@ -15,20 +15,36 @@
 //! let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
 //! ```
 
+mod check;
+mod infer;
+mod parallel_check;
 mod scope;
 mod types;
-mod infer;
-mod check;
-mod parallel_check;
 
+pub use check::{ActionInfo, ObjectInfo, ParamInfo, TypeChecker};
 pub use types::FidanType;
-pub use check::{TypeChecker, ObjectInfo, ActionInfo, ParamInfo};
 
 use fidan_ast::{ExprId, Module};
 use fidan_diagnostics::Diagnostic;
 use fidan_lexer::{Symbol, SymbolInterner};
+use fidan_source::Span;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+
+/// A method call whose signature couldn't be verified locally because the
+/// method lives in a cross-module parent class.  The LSP validates argument
+/// types against the cross-document method signature at analysis time.
+#[derive(Debug, Clone)]
+pub struct CrossModuleCallSite {
+    /// Resolved name of the receiver type, e.g. `"TRex"`.
+    pub receiver_ty: String,
+    /// Name of the method being called, e.g. `"roar"`.
+    pub method_name: String,
+    /// Inferred argument types in call order, e.g. `["string"]`.
+    pub arg_tys: Vec<String>,
+    /// Span of the whole call expression (for diagnostic placement).
+    pub span: Span,
+}
 
 /// Full type-information produced after a successful type-checking pass.
 ///
@@ -44,6 +60,12 @@ pub struct TypedModule {
     pub objects: FxHashMap<Symbol, ObjectInfo>,
     /// Top-level action signatures (name → signature).
     pub actions: FxHashMap<Symbol, ActionInfo>,
+    /// Non-call field / method accesses on types with cross-module parents.
+    /// The LSP validates these against cross-document symbol tables.
+    pub cross_module_field_accesses: Vec<(String, String, Span)>,
+    /// Method call sites where the callee is in a cross-module parent class.
+    /// The LSP validates argument types against the cross-document signature.
+    pub cross_module_call_sites: Vec<CrossModuleCallSite>,
 }
 
 /// Run all type-checking passes over `module` and return the resulting diagnostics.
@@ -121,11 +143,13 @@ mod tests {
 
     #[test]
     fn if_otherwise_is_clean() {
-        assert!(check_errors(
-            r#"var x = 5
+        assert!(
+            check_errors(
+                r#"var x = 5
             if x > 0 { print("pos") } otherwise { print("neg") }"#
-        )
-        .is_empty());
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -140,49 +164,57 @@ mod tests {
 
     #[test]
     fn test_block_is_clean() {
-        assert!(check_errors(
-            r#"test "math" {
+        assert!(
+            check_errors(
+                r#"test "math" {
                 assert(1 + 1 == 2)
                 assert_eq(10 - 3, 7)
             }"#
-        )
-        .is_empty());
+            )
+            .is_empty()
+        );
     }
 
     #[test]
     fn assert_builtins_are_registered() {
         // All three assert builtins must be callable with no type errors.
-        assert!(check_errors(
-            r#"test "assertions" {
+        assert!(
+            check_errors(
+                r#"test "assertions" {
                 assert(true)
                 assert_eq(1, 1)
                 assert_ne("a", "b")
             }"#
-        )
-        .is_empty());
+            )
+            .is_empty()
+        );
     }
 
     #[test]
     fn object_declaration_is_clean() {
-        assert!(check_errors(
-            r#"object Point {
+        assert!(
+            check_errors(
+                r#"object Point {
                 var x oftype float
                 var y oftype float
             }"#
-        )
-        .is_empty());
+            )
+            .is_empty()
+        );
     }
 
     // ── Parallel-safety diagnostics ───────────────────────────────────────────
 
     #[test]
     fn parallel_action_is_clean() {
-        assert!(check_errors(
-            r#"parallel action compute returns integer {
+        assert!(
+            check_errors(
+                r#"parallel action compute returns integer {
                 var n = 42
                 return n
             }"#
-        )
-        .is_empty());
+            )
+            .is_empty()
+        );
     }
 }

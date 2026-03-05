@@ -268,6 +268,24 @@ Fix: make sure both operands have compatible types:
         ),
 
         // ── Argument / call ───────────────────────────────────────────────────
+        "E0204" => Some(
+            r#"A field or method was accessed on an object that does not declare it
+and it is not inherited from any locally-known parent class.
+
+Erroneous example:
+
+    object Cat {
+        var name oftype string
+        new with (name oftype string) { this.name = name }
+    }
+
+    const var c = Cat("Whiskers")
+    print(c.wouf)   # error: Cat has no field or method `wouf`
+
+Fix: check the spelling or add the missing declaration to the object.
+"#,
+        ),
+
         "E0301" => Some(
             r#"A required parameter was not supplied at the call site. Every
 parameter not marked with `optional` must be passed either positionally or by
@@ -285,6 +303,23 @@ Fix: pass the argument:
 
     greet("Alice")          # positional
     greet(name = "Alice")   # named
+"#,
+        ),
+
+        "E0302" => Some(
+            r#"A method or action was called with an argument of the wrong type.
+
+Erroneous example:
+
+    action add with (certain a oftype integer, certain b oftype integer) returns integer {
+        return a + b
+    }
+
+    add("one", "two")   # error: expected `integer`, found `string`
+
+Fix: pass an argument of the correct type:
+
+    add(1, 2)           # OK
 "#,
         ),
 

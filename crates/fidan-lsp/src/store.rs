@@ -1,6 +1,7 @@
 //! Thread-safe in-memory store for all open documents.
 
 use crate::document::Document;
+use crate::symbols::SymbolEntry;
 use dashmap::DashMap;
 use dashmap::mapref::one::Ref;
 use tower_lsp::lsp_types::Url;
@@ -33,6 +34,20 @@ impl DocumentStore {
     /// Remove and discard the document stored under `uri`.
     pub fn remove(&self, uri: &Url) {
         self.inner.remove(uri);
+    }
+
+    /// Search every open document for a symbol entry with the given key.
+    ///
+    /// Returns a clone of the first matching entry together with the URI of
+    /// the document it was found in.  The `Ref` from `get()` must be dropped
+    /// **before** calling this method to avoid re-entrant shard locking.
+    pub fn find_in_any_doc(&self, key: &str) -> Option<(Url, SymbolEntry)> {
+        for kv in self.inner.iter() {
+            if let Some(e) = kv.value().symbol_table.get(key) {
+                return Some((kv.key().clone(), e.clone()));
+            }
+        }
+        None
     }
 }
 

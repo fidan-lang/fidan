@@ -102,10 +102,20 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "unsupported operand types for operator",
         category: "types",
     },
+    DiagnosticCode {
+        code: "E0204",
+        title: "unknown field or method on object",
+        category: "types",
+    },
     // ── Argument / call ───────────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0301",
         title: "missing required argument",
+        category: "args",
+    },
+    DiagnosticCode {
+        code: "E0302",
+        title: "argument type mismatch",
         category: "args",
     },
     // ── Concurrency / safety ──────────────────────────────────────────────────

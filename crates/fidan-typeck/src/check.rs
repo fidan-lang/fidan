@@ -66,6 +66,12 @@ pub struct TypeChecker {
     /// Set of action names decorated with `@deprecated`.
     /// Used by `infer_call` to emit W2005 at call sites.
     deprecated_actions: rustc_hash::FxHashSet<Symbol>,
+    /// Non-call field / method accesses that hit a cross-module parent during
+    /// `resolve_field`.  The LSP validates them cross-document.
+    pub cross_module_field_accesses: Vec<(String, String, Span)>,
+    /// Method call sites where the method lives in a cross-module parent.
+    /// The LSP validates argument types against the cross-document signature.
+    pub cross_module_call_sites: Vec<crate::CrossModuleCallSite>,
 }
 
 impl TypeChecker {
@@ -83,6 +89,8 @@ impl TypeChecker {
             expr_types: FxHashMap::default(),
             actions: FxHashMap::default(),
             deprecated_actions: rustc_hash::FxHashSet::default(),
+            cross_module_field_accesses: vec![],
+            cross_module_call_sites: vec![],
         };
         tc.register_builtins();
         tc
@@ -278,6 +286,8 @@ impl TypeChecker {
             expr_types: self.expr_types,
             objects: self.objects,
             actions: self.actions,
+            cross_module_field_accesses: self.cross_module_field_accesses,
+            cross_module_call_sites: self.cross_module_call_sites,
         }
     }
 
@@ -1494,23 +1504,64 @@ impl TypeChecker {
         match ty {
             FidanType::Object(sym) => {
                 let sym = *sym;
-                // Try field, then method, then walk inheritance chain.
-                if let Some(ft) = self
-                    .objects
-                    .get(&sym)
-                    .and_then(|o| o.fields.get(&field))
-                    .cloned()
-                {
-                    return ft;
+                // If the root object is not locally known, record the access
+                // for LSP-level cross-document validation.
+                if !self.objects.contains_key(&sym) {
+                    let tn = self.interner.resolve(sym).to_string();
+                    let fn_ = self.interner.resolve(field).to_string();
+                    self.cross_module_field_accesses.push((tn, fn_, span));
+                    return FidanType::Dynamic;
                 }
-                if let Some(_) = self.objects.get(&sym).and_then(|o| o.methods.get(&field)) {
-                    return FidanType::Function;
+                // Walk the local inheritance chain iteratively.
+                let mut cur = sym;
+                loop {
+                    // ── own field ───────────────────────────────────────────
+                    let found_field = self
+                        .objects
+                        .get(&cur)
+                        .and_then(|o| o.fields.get(&field))
+                        .cloned();
+                    if let Some(ft) = found_field {
+                        return ft;
+                    }
+                    // ── own method ──────────────────────────────────────────
+                    let found_method = self
+                        .objects
+                        .get(&cur)
+                        .map(|o| o.methods.contains_key(&field))
+                        .unwrap_or(false);
+                    if found_method {
+                        return FidanType::Function;
+                    }
+                    // ── parent ──────────────────────────────────────────────
+                    let parent = self.objects.get(&cur).and_then(|o| o.parent);
+                    match parent {
+                        None => {
+                            // Chain exhausted with no match — emit diagnostic.
+                            let type_name = self.ty_name(&FidanType::Object(sym));
+                            let field_name = self.interner.resolve(field).to_string();
+                            self.emit_error(
+                                fidan_diagnostics::diag_code!("E0204"),
+                                format!(
+                                    "object `{type_name}` has no field or method `{field_name}`"
+                                ),
+                                span,
+                            );
+                            return FidanType::Error;
+                        }
+                        Some(p) if !self.objects.contains_key(&p) => {
+                            // Parent is from another module — record for LSP
+                            // cross-document validation instead of silently dropping.
+                            let tn = self.interner.resolve(sym).to_string();
+                            let fn_ = self.interner.resolve(field).to_string();
+                            self.cross_module_field_accesses.push((tn, fn_, span));
+                            return FidanType::Dynamic;
+                        }
+                        Some(p) => {
+                            cur = p;
+                        }
+                    }
                 }
-                if let Some(parent_sym) = self.objects.get(&sym).and_then(|o| o.parent) {
-                    return self.resolve_field(&FidanType::Object(parent_sym), field, span);
-                }
-                // Unknown field — return Dynamic to avoid spam for now.
-                FidanType::Dynamic
             }
             FidanType::String => {
                 let f = self.interner.resolve(field);
@@ -1620,8 +1671,33 @@ impl TypeChecker {
                 let recv = self.infer_expr(object, module);
                 match recv {
                     FidanType::Object(sym) => {
-                        // Walk inheritance for method return type
-                        self.method_return(&sym, field)
+                        let ret = self.method_return(&sym, field);
+                        if matches!(ret, FidanType::Dynamic) {
+                            // Method not in local chain — may be in a cross-module
+                            // parent.  Record for LSP-level validation.
+                            let recv_ty = self.interner.resolve(sym).to_string();
+                            let mname   = self.interner.resolve(field).to_string();
+                            let arg_tys: Vec<String> = args
+                                .iter()
+                                .map(|(_, eid)| {
+                                    self.expr_types
+                                        .get(eid)
+                                        .map(|t| {
+                                            t.display_name(&|s| {
+                                                self.interner.resolve(s).to_string()
+                                            })
+                                        })
+                                        .unwrap_or_else(|| "?".to_string())
+                                })
+                                .collect();
+                            self.cross_module_call_sites.push(crate::CrossModuleCallSite {
+                                receiver_ty: recv_ty,
+                                method_name: mname,
+                                arg_tys,
+                                span,
+                            });
+                        }
+                        ret
                     }
                     _ => FidanType::Dynamic,
                 }

@@ -28,6 +28,12 @@ pub struct SymbolEntry {
     pub span: Span,
     /// Pre-rendered Markdown displayed as hover text.
     pub detail: String,
+    /// For variable declarations: the resolved type name, used to follow
+    /// member accesses like `rex.name` → look up `TRex.name`.
+    pub ty_name: Option<String>,
+    /// For Method/Action entries: parameter types in declaration order.
+    /// Used by the LSP to validate cross-module call argument types.
+    pub param_types: Vec<String>,
 }
 
 /// Per-document symbol registry built after every analysis pass.
@@ -64,12 +70,17 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
     for (&sym, info) in &typed.actions {
         let name = res(sym);
         let detail = fmt_action_sig(&name, info, interner);
+        let param_types: Vec<String> = info.params.iter()
+            .map(|p| type_name(&p.ty, interner))
+            .collect();
         table.put(
             name,
             SymbolEntry {
                 kind: SymKind::Action,
                 span: info.span,
                 detail,
+                ty_name: None,
+                param_types,
             },
         );
     }
@@ -84,6 +95,10 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 kind: SymKind::Object,
                 span: info.span,
                 detail,
+                // Store the parent type name so the LSP can follow the
+                // inheritance chain across documents (e.g. TRex → Dinosaur).
+                ty_name: info.parent.map(|p| res(p)),
+                param_types: vec![],
             },
         );
 
@@ -92,12 +107,17 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
         for (&msym, minfo) in &info.methods {
             let mname = res(msym);
             let sig = fmt_action_sig(&mname, minfo, interner);
+            let param_types: Vec<String> = minfo.params.iter()
+                .map(|p| type_name(&p.ty, interner))
+                .collect();
             table.put(
                 format!("{}.{}", name, mname),
                 SymbolEntry {
                     kind: SymKind::Method,
                     span: minfo.span,
                     detail: sig,
+                    ty_name: None,
+                    param_types,
                 },
             );
         }
@@ -114,6 +134,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     kind: SymKind::Field,
                     span: info.span,
                     detail: format!("```fidan\n{}.{}: {}\n```", name, fname, ty_s),
+                    ty_name: None,
+                    param_types: vec![],
                 },
             );
         }
@@ -126,16 +148,36 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
             Item::VarDecl {
                 name,
                 ty,
+                init,
                 is_const,
                 span,
-                ..
             } => {
                 let vname = res(*name);
+                let kw = if *is_const { "const var" } else { "var" };
+                // Infer the concrete type name so member accesses like
+                // `rex.name` can be resolved via `TRex.name` in any doc.
+                let ty_name: Option<String> = if let Some(t) = ty.as_ref() {
+                    if let TypeExpr::Named { name: tname, .. } = t {
+                        Some(res(*tname))
+                    } else {
+                        None
+                    }
+                } else if let Some(init_eid) = *init {
+                    if let Some(FidanType::Object(sym)) = typed.expr_types.get(&init_eid) {
+                        Some(res(*sym))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                // Use the inferred type name in the hover detail when there is
+                // no explicit annotation (avoids showing `?` for `rex = TRex(...)`).
                 let ty_s = ty
                     .as_ref()
                     .map(|t| fmt_type_expr(t, interner))
+                    .or_else(|| ty_name.clone())
                     .unwrap_or_else(|| "?".into());
-                let kw = if *is_const { "const var" } else { "var" };
                 table.put(
                     vname.clone(),
                     SymbolEntry {
@@ -144,6 +186,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                         },
                         span: *span,
                         detail: format!("```fidan\n{} {}: {}\n```", kw, vname, ty_s),
+                        ty_name,
+                        param_types: vec![],
                     },
                 );
             }
@@ -161,6 +205,76 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 }
             }
             _ => {}
+        }
+    }
+
+    // ── Inherited members ─────────────────────────────────────────────────────
+    // For each child object, walk the parent chain and add entries for fields
+    // and methods it inherits (e.g. `"TRex.name"` inherited from `"Dinosaur"`).
+    // We collect (child, parent) pairs first so the main `typed.objects` map
+    // can still be borrowed immutably inside the loop.
+    let child_parent_pairs: Vec<(Symbol, Option<Symbol>)> = typed
+        .objects
+        .iter()
+        .map(|(&s, info)| (s, info.parent))
+        .collect();
+
+    for (child_sym, _) in &child_parent_pairs {
+        let child_name = res(*child_sym);
+        let child_info = &typed.objects[child_sym];
+        let mut cur = child_info.parent;
+        while let Some(parent_sym) = cur {
+            let parent_info = match typed.objects.get(&parent_sym) {
+                Some(i) => i,
+                None => break,
+            };
+            let parent_name = res(parent_sym);
+            // Inherited fields — reuse the already-corrected field span.
+            for (&fsym, fty) in &parent_info.fields {
+                let fname = res(fsym);
+                let ty_s = type_name(fty, interner);
+                let key = format!("{}.{}", child_name, fname);
+                let span = table
+                    .entries
+                    .get(&format!("{}.{}", parent_name, fname))
+                    .map(|e| e.span)
+                    .unwrap_or(parent_info.span);
+                table.put(
+                    key,
+                    SymbolEntry {
+                        kind: SymKind::Field,
+                        span,
+                        detail: format!(
+                            "```fidan\n(inherited from {}) {}: {}\n```",
+                            parent_name, fname, ty_s
+                        ),
+                        ty_name: None,
+                        param_types: vec![],
+                    },
+                );
+            }
+            // Inherited methods (skip constructors).
+            for (&msym, minfo) in &parent_info.methods {
+                let mname = res(msym);
+                if mname == "new" {
+                    continue;
+                }
+                let sig = fmt_action_sig(&mname, minfo, interner);
+                let param_types: Vec<String> = minfo.params.iter()
+                    .map(|p| type_name(&p.ty, interner))
+                    .collect();
+                table.put(
+                    format!("{}.{}", child_name, mname),
+                    SymbolEntry {
+                        kind: SymKind::Method,
+                        span: minfo.span,
+                        detail: sig,
+                        ty_name: None,
+                        param_types,
+                    },
+                );
+            }
+            cur = parent_info.parent;
         }
     }
 
