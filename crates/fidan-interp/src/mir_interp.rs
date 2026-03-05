@@ -2042,15 +2042,19 @@ impl MirMachine {
 ///    already-executed instructions).
 /// 4. Updates `state.init_bb0_cursor` and `state.globals_snapshot` for the next call.
 ///
-/// Returns `Ok(None)` on success (expression echo is not yet implemented in the
-/// MIR path — that can be added later via a designated echo-global).
+/// If `echo_sym` is `Some(sym)`, the program is expected to contain a global
+/// with that name (the last declaration with that name, if redeclared multiple
+/// times in REPL mode).  Its value after execution is returned as
+/// `Ok(Some(FidanValue))` so the caller can display it.  `Nothing` values are
+/// returned as-is; the caller decides whether to suppress them.
 pub fn run_mir_repl_line(
     state: &mut MirReplState,
     program: MirProgram,
     interner: Arc<SymbolInterner>,
     source_map: Arc<SourceMap>,
     jit_threshold: u32,
-) -> Result<Option<String>, RunError> {
+    echo_sym: Option<fidan_lexer::Symbol>,
+) -> Result<Option<FidanValue>, RunError> {
     let mut machine = MirMachine::new(Arc::new(program), interner, source_map);
     machine.set_jit_threshold(jit_threshold);
     // Pre-fill globals from the previous snapshot so all previously-defined
@@ -2061,6 +2065,28 @@ pub fn run_mir_repl_line(
     // Commit updated cursor + globals for the next line.
     state.init_bb0_cursor = machine.count_init_bb0_instrs();
     state.globals_snapshot = machine.snapshot_globals();
+
+    // If the caller requested an echo, find the global with `echo_sym` (the last
+    // declaration wins — in REPL mode redeclarations produce multiple GlobalId slots
+    // and `global_map` points to the latest one) and return its value.
+    if let Some(sym) = echo_sym {
+        // Iterate in reverse to find the LAST GlobalId registered for this symbol.
+        let echo_gid = machine
+            .program
+            .globals
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, g)| g.name == sym)
+            .map(|(i, _)| i);
+        if let Some(idx) = echo_gid {
+            let snap = &state.globals_snapshot;
+            if idx < snap.len() {
+                return Ok(Some(snap[idx].clone()));
+            }
+        }
+    }
+
     Ok(None)
 }
 

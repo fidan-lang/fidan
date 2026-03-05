@@ -1732,12 +1732,59 @@ fn run_repl(trace_mode: TraceMode) -> Result<()> {
         // ── Complete input ready — compile full accumulated source ──────────
         let complete_input = std::mem::take(&mut pending_input);
 
-        let mut candidate_source = mir_repl_state.accumulated_source.clone();
-        if !candidate_source.is_empty() {
-            candidate_source.push('\n');
-        }
-        candidate_source.push_str(&complete_input);
-        candidate_source.push('\n');
+        // ── Auto-echo: mini-parse just the new input to see if its last item
+        //   is a bare expression.  If so we wrap it as
+        //   `var __repl_echo__ set <expr>` so the value is preserved in a
+        //   global after execution and can be displayed without calling print().
+        let echo_sym = interner.intern("__repl_echo__");
+        let (echo_sym_opt, candidate_source) = {
+            use fidan_ast::Item;
+            let mini_smap = Arc::new(SourceMap::new());
+            let mini_file = mini_smap.add_file("<echo-check>", complete_input.as_str());
+            let (mini_toks, _) = Lexer::new(&mini_file, Arc::clone(&interner)).tokenise();
+            let (mini_mod, _) =
+                fidan_parser::parse(&mini_toks, mini_file.id, Arc::clone(&interner));
+            let last = mini_mod.items.last().map(|id| mini_mod.arena.get_item(*id));
+            if let Some(Item::ExprStmt(expr_id)) = last {
+                let accumulated = &mir_repl_state.accumulated_source;
+                let wrapped = if mini_mod.items.len() == 1 {
+                    // Entire input is the bare expression — wrap it directly.
+                    if accumulated.is_empty() {
+                        format!("var __repl_echo__ set {}\n", complete_input.trim())
+                    } else {
+                        format!(
+                            "{}\nvar __repl_echo__ set {}\n",
+                            accumulated,
+                            complete_input.trim()
+                        )
+                    }
+                } else {
+                    // Multiple items: use the expr span to find the split point.
+                    let span = mini_mod.arena.get_expr(*expr_id).span();
+                    let lo = span.start as usize;
+                    let hi = span.end as usize;
+                    let expr_text = &complete_input[lo..hi.min(complete_input.len())];
+                    let prefix = &complete_input[..lo];
+                    if accumulated.is_empty() {
+                        format!("{}var __repl_echo__ set {}\n", prefix, expr_text)
+                    } else {
+                        format!(
+                            "{}\n{}var __repl_echo__ set {}\n",
+                            accumulated, prefix, expr_text
+                        )
+                    }
+                };
+                (Some(echo_sym), wrapped)
+            } else {
+                let mut s = mir_repl_state.accumulated_source.clone();
+                if !s.is_empty() {
+                    s.push('\n');
+                }
+                s.push_str(&complete_input);
+                s.push('\n');
+                (None, s)
+            }
+        };
 
         // ── Lex + parse the full candidate source ──────────────────────────
         let exec_smap = Arc::new(SourceMap::new());
@@ -1788,8 +1835,15 @@ fn run_repl(trace_mode: TraceMode) -> Result<()> {
             Arc::clone(&interner),
             Arc::clone(&exec_smap),
             500,
+            echo_sym_opt,
         ) {
-            Ok(Some(echo)) => println!("{echo}"),
+            Ok(Some(val)) => {
+                // Suppress Nothing values (e.g. from print() calls that happen
+                // to be the last expression — the side effect already printed).
+                if !matches!(val, fidan_interp::FidanValue::Nothing) {
+                    println!("{}", fidan_interp::display_value(&val));
+                }
+            }
             Ok(None) => {}
             Err(e) => {
                 render_message_to_stderr(Severity::Error, e.code, &e.message);
