@@ -1,0 +1,182 @@
+{
+    "Action declaration": {
+        "prefix": "action",
+        "body": [
+            "action ${1:name} with (${2:param} oftype ${3:type}) returns ${4:nothing} {",
+            "\t$0",
+            "}"
+        ],
+        "description": "Declare a new action (function)"
+    },
+    "Action no params": {
+        "prefix": "action0",
+        "body": [
+            "action ${1:name} {",
+            "\t$0",
+            "}"
+        ],
+        "description": "Declare an action with no parameters"
+    },
+    "Object declaration": {
+        "prefix": "object",
+        "body": [
+            "object ${1:Name} {",
+            "\tvar ${2:field} oftype ${3:string}",
+            "",
+            "\tnew with (${2:field} oftype ${3:string}) {",
+            "\t\tthis.${2:field} = ${2:field}",
+            "\t}",
+            "",
+            "\t$0",
+            "}"
+        ],
+        "description": "Declare a new object type"
+    },
+    "Object with extends": {
+        "prefix": "objectx",
+        "body": [
+            "object ${1:Name} extends ${2:Parent} {",
+            "\t$0",
+            "}"
+        ],
+        "description": "Declare an object that extends another"
+    },
+    "Variable declaration": {
+        "prefix": "var",
+        "body": "var ${1:name} = ${0:value}",
+        "description": "Declare a variable"
+    },
+    "Typed variable declaration": {
+        "prefix": "vart",
+        "body": "var ${1:name} oftype ${2:type} = ${0:value}",
+        "description": "Declare a typed variable"
+    },
+    "Const variable declaration": {
+        "prefix": "const",
+        "body": "const var ${1:name} = ${0:value}",
+        "description": "Declare a constant variable"
+    },
+    "If statement": {
+        "prefix": "if",
+        "body": [
+            "if ${1:condition} {",
+            "\t$0",
+            "}"
+        ],
+        "description": "If statement"
+    },
+    "If-otherwise statement": {
+        "prefix": "ifo",
+        "body": [
+            "if ${1:condition} {",
+            "\t$2",
+            "} otherwise {",
+            "\t$0",
+            "}"
+        ],
+        "description": "If-otherwise statement"
+    },
+    "For loop": {
+        "prefix": "for",
+        "body": [
+            "for ${1:item} in ${2:collection} {",
+            "\t$0",
+            "}"
+        ],
+        "description": "For-in loop"
+    },
+    "While loop": {
+        "prefix": "while",
+        "body": [
+            "while ${1:condition} {",
+            "\t$0",
+            "}"
+        ],
+        "description": "While loop"
+    },
+    "Attempt-catch block": {
+        "prefix": "attempt",
+        "body": [
+            "attempt {",
+            "\t$1",
+            "} catch ${2:err} {",
+            "\t$0",
+            "}"
+        ],
+        "description": "Attempt-catch error handling block"
+    },
+    "Attempt-catch-finally block": {
+        "prefix": "attemptf",
+        "body": [
+            "attempt {",
+            "\t$1",
+            "} catch ${2:err} {",
+            "\t$3",
+            "} finally {",
+            "\t$0",
+            "}"
+        ],
+        "description": "Attempt-catch-finally error handling block"
+    },
+    "Use stdlib import": {
+        "prefix": "use",
+        "body": "use std.${1:io}",
+        "description": "Import a standard library module"
+    },
+    "Test block": {
+        "prefix": "test",
+        "body": [
+            "test \"${1:description}\" {",
+            "\t$0",
+            "}"
+        ],
+        "description": "Declare a test block"
+    },
+    "Parallel block": {
+        "prefix": "parallel",
+        "body": [
+            "parallel {",
+            "\ttask { $1 }",
+            "\ttask { $0 }",
+            "}"
+        ],
+        "description": "Parallel execution block"
+    },
+    "Concurrent block": {
+        "prefix": "concurrent",
+        "body": [
+            "concurrent {",
+            "\ttask { $1 }",
+            "\ttask { $0 }",
+            "}"
+        ],
+        "description": "Concurrent execution block"
+    },
+    "Spawn and await": {
+        "prefix": "spawn",
+        "body": [
+            "var ${1:handle} = spawn ${2:someAction}($3)",
+            "await ${1:handle}"
+        ],
+        "description": "Spawn an async task and await it"
+    },
+    "Check statement": {
+        "prefix": "check",
+        "body": [
+            "check ${1:value} {",
+            "\t${2:pattern} => {",
+            "\t\t$3",
+            "\t}",
+            "\t_ => {",
+            "\t\t$0",
+            "\t}",
+            "}"
+        ],
+        "description": "Pattern-matching check statement"
+    },
+    "Print line": {
+        "prefix": "print",
+        "body": "print(${1:\"Hello, World!\"})",
+        "description": "Print to stdout"
+    }
+}

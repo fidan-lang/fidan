@@ -40,6 +40,9 @@ pub struct SymbolEntry {
     /// For Method/Action entries: the declared return type name (e.g. `"string"`).
     /// Used by the server to patch `var x: dynamic` → `var x: string`.
     pub return_type: Option<String>,
+    /// Parameter names with their declaration spans, for named-argument go-to-definition.
+    /// E.g. `foo(times = 10)` — clicking `times` jumps to the `times` param span.
+    pub param_names: Vec<(String, Span)>,
 }
 
 /// Per-document symbol registry built after every analysis pass.
@@ -91,6 +94,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 param_types,
                 param_required: info.params.iter().map(|p| !p.optional).collect(),
                 return_type: Some(type_name(&info.return_ty, interner)),
+                param_names: vec![],
             },
         );
     }
@@ -111,6 +115,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 param_types: vec![],
                 param_required: vec![],
                 return_type: None,
+                param_names: vec![],
             },
         );
 
@@ -134,6 +139,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     param_types,
                     param_required: minfo.params.iter().map(|p| !p.optional).collect(),
                     return_type: Some(type_name(&minfo.return_ty, interner)),
+                    param_names: vec![],
                 },
             );
         }
@@ -154,6 +160,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     param_types: vec![],
                     param_required: vec![],
                     return_type: None,
+                    param_names: vec![],
                 },
             );
         }
@@ -224,18 +231,24 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                             is_const: *is_const,
                         },
                         span: *span,
-                        detail: format!("```fidan\n{} {}: {}\n```", kw, vname, ty_s),
+                        detail: format!("```fidan\n{} {} -> {}\n```", kw, vname, ty_s),
                         ty_name,
                         param_types: vec![],
                         param_required: vec![],
                         return_type: None,
+                        param_names: vec![],
                     },
                 );
             }
             // Fix-up field declaration spans from the AST — ObjectInfo only stores
             // FidanType per field, not the source span, so the typed pass above used
             // the whole-object span.  Here we overwrite with the real FieldDecl span.
-            Item::ObjectDecl { name, fields, .. } => {
+            Item::ObjectDecl {
+                name,
+                fields,
+                methods,
+                ..
+            } => {
                 let class_name = res(*name);
                 for field in fields {
                     let fname = res(field.name);
@@ -243,6 +256,38 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     if let Some(entry) = table.entries.get_mut(&key) {
                         entry.span = field.span;
                     }
+                }
+                // Patch method parameter spans from AST so named-arg goto-def works.
+                for &mid in methods {
+                    if let Item::ActionDecl {
+                        name: mname,
+                        params,
+                        ..
+                    } = module.arena.get_item(mid)
+                    {
+                        let key = format!("{}.{}", class_name, res(*mname));
+                        if let Some(entry) = table.entries.get_mut(&key) {
+                            entry.param_names =
+                                params.iter().map(|p| (res(p.name), p.span)).collect();
+                        }
+                    }
+                }
+            }
+            Item::ActionDecl { name, params, .. } => {
+                let aname = res(*name);
+                if let Some(entry) = table.entries.get_mut(&aname) {
+                    entry.param_names = params.iter().map(|p| (res(p.name), p.span)).collect();
+                }
+            }
+            Item::ExtensionAction {
+                name,
+                extends,
+                params,
+                ..
+            } => {
+                let key = format!("{}.{}", res(*extends), res(*name));
+                if let Some(entry) = table.entries.get_mut(&key) {
+                    entry.param_names = params.iter().map(|p| (res(p.name), p.span)).collect();
                 }
             }
             _ => {}
@@ -293,6 +338,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                         param_types: vec![],
                         param_required: vec![],
                         return_type: None,
+                        param_names: vec![],
                     },
                 );
             }
@@ -318,6 +364,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                         param_types,
                         param_required: minfo.params.iter().map(|p| !p.optional).collect(),
                         return_type: Some(type_name(&minfo.return_ty, interner)),
+                        param_names: vec![],
                     },
                 );
             }

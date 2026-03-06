@@ -11,6 +11,20 @@ use fidan_typeck::CrossModuleCallSite;
 use std::sync::Arc;
 use tower_lsp::lsp_types::{self as lsp, DiagnosticSeverity, SemanticToken};
 
+// ── Inlay hint site ───────────────────────────────────────────────────────────
+
+/// A position in the source where the LSP should show a synthetic label.
+#[derive(Debug, Clone)]
+pub struct InlayHintSite {
+    /// Byte offset in the source at which to insert the label
+    /// (placed immediately *after* the relevant identifier).
+    pub byte_offset: u32,
+    /// Text to display, e.g. `": integer"`.
+    pub label: String,
+    /// `true` → type annotation, `false` → parameter name.
+    pub is_type_hint: bool,
+}
+
 /// Output of a single analysis run.
 pub struct AnalysisResult {
     pub diagnostics: Vec<lsp::Diagnostic>,
@@ -30,6 +44,8 @@ pub struct AnalysisResult {
     /// Stored as `(var_name, receiver_type_name, method_name)` so the server can patch
     /// the symbol-table entry after loading cross-module docs.
     pub dynamic_var_call_sites: Vec<(String, String, String)>,
+    /// Positions where the editor should display synthetic type labels.
+    pub inlay_hint_sites: Vec<InlayHintSite>,
 }
 
 /// Lex, parse and type-check `text`, returning all diagnostics as LSP
@@ -69,6 +85,10 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     // ── Dynamic var call sites (cross-module method return type patching) ──
     let dynamic_var_call_sites = extract_dynamic_var_calls(&module, &typed, &interner);
 
+    // ── Inlay hints (untyped var declarations) ────────────────────────────────
+    let inlay_hint_sites =
+        collect_inlay_hints(&module, &interner, &symbol_table, &identifier_spans);
+
     // Consume typed fields now (after all borrows of `typed` are done).
     let typeck_diags = typed.diagnostics;
     let cross_module_field_accesses = typed.cross_module_field_accesses;
@@ -94,6 +114,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
         cross_module_field_accesses,
         cross_module_call_sites,
         dynamic_var_call_sites,
+        inlay_hint_sites,
     }
 }
 
@@ -175,6 +196,32 @@ fn extract_dynamic_var_calls(
 }
 
 fn fidan_to_lsp(d: &FidanDiag, file: &SourceFile) -> lsp::Diagnostic {
+    // Encode machine-applicable suggestions as JSON in `data` so the
+    // `code_action` handler can offer quick-fix actions without re-running
+    // the full analysis pipeline.
+    let data: Option<serde_json::Value> = if d.suggestions.is_empty() {
+        None
+    } else {
+        let fixes: Vec<serde_json::Value> = d
+            .suggestions
+            .iter()
+            .filter_map(|s| {
+                let edit = s.edit.as_ref()?;
+                Some(serde_json::json!({
+                    "message": s.message,
+                    "start":   edit.span.start,
+                    "end":     edit.span.end,
+                    "replacement": edit.replacement,
+                }))
+            })
+            .collect();
+        if fixes.is_empty() {
+            None
+        } else {
+            Some(serde_json::json!(fixes))
+        }
+    };
+
     lsp::Diagnostic {
         range: span_to_range(file, d.span),
         severity: Some(match d.severity {
@@ -188,6 +235,61 @@ fn fidan_to_lsp(d: &FidanDiag, file: &SourceFile) -> lsp::Diagnostic {
         related_information: None,
         tags: None,
         code_description: None,
-        data: None,
+        data,
     }
+}
+
+/// Collect inlay hint sites from a module.
+///
+/// Currently emits a `": type"` label after the name of every `var`/`const var`
+/// declaration that has **no explicit type annotation** but whose type was
+/// successfully inferred during the type-check pass.
+fn collect_inlay_hints(
+    module: &Module,
+    interner: &SymbolInterner,
+    symbol_table: &symbols::SymbolTable,
+    identifier_spans: &[(Span, String)],
+) -> Vec<InlayHintSite> {
+    let mut hints = Vec::new();
+    for &iid in &module.items {
+        if let Item::VarDecl { name, ty: None, .. } = module.arena.get_item(iid) {
+            let name_str = interner.resolve(*name).to_string();
+            // Only emit if the symbol table resolved a concrete type.
+            let entry = match symbol_table.get(&name_str) {
+                Some(e) => e,
+                None => continue,
+            };
+            // Extract type from hover detail: `"```fidan\nvar x: integer\n```"`.
+            // Grab the part after the `:` on the middle line.
+            let type_label = extract_type_from_detail(&entry.detail);
+            if type_label == "?" {
+                continue; // unresolved — don't clutter the editor
+            }
+            // Find the identifier token span for the variable name in the source.
+            // Use the first occurrence that matches the declared name exactly.
+            if let Some((span, _)) = identifier_spans.iter().find(|(_, n)| n == &name_str) {
+                hints.push(InlayHintSite {
+                    byte_offset: span.end,
+                    label: format!(" -> {}", type_label),
+                    is_type_hint: true,
+                });
+            }
+        }
+    }
+    hints
+}
+
+/// Extract the type string from a hover detail like `"```fidan\nvar x: integer\n```"`.
+fn extract_type_from_detail(detail: &str) -> &str {
+    // The detail for variables looks like:  `\`\`\`fidan\nvar x -> type\n\`\`\``
+    // We want everything after the last `->` on the declaration line, trimmed.
+    for line in detail.lines() {
+        if let Some(colon_pos) = line.rfind("->") {
+            let candidate = line[colon_pos + 2..].trim();
+            if !candidate.is_empty() && !candidate.contains('`') {
+                return candidate;
+            }
+        }
+    }
+    "?"
 }

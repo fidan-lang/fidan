@@ -137,9 +137,20 @@
                     "type": "boolean",
                     "default": true,
                     "description": "Format Fidan files automatically on save."
+                },
+                "fidan.run.terminalName": {
+                    "type": "string",
+                    "default": "Fidan",
+                    "description": "Name of the integrated terminal used by the 'Fidan: Run Current File' command."
                 }
             }
         },
+        "snippets": [
+            {
+                "language": "fidan",
+                "path": "./syntaxes/fidan.code-snippets.json"
+            }
+        ],
         "commands": [
             {
                 "command": "fidan.restartServer",
@@ -148,8 +159,22 @@
             {
                 "command": "fidan.showOutput",
                 "title": "Fidan: Show Language Server Output"
+            },
+            {
+                "command": "fidan.runFile",
+                "title": "Fidan: Run Current File",
+                "icon": "$(play)"
             }
         ],
+        "menus": {
+            "editor/title": [
+                {
+                    "command": "fidan.runFile",
+                    "when": "resourceLangId == fidan",
+                    "group": "navigation"
+                }
+            ]
+        },
         "configurationDefaults": {
             "[fidan]": {
                 "editor.semanticHighlighting.enabled": true
@@ -166,7 +191,7 @@
         "vscode-languageclient": "^9.0.1"
     },
     "devDependencies": {
-        "@types/node": "^25.3.3",
+        "@types/node": "^25.3.5",
         "@types/vscode": "^1.85.0",
         "@typescript-eslint/eslint-plugin": "^8.56.1",
         "@typescript-eslint/parser": "^8.56.1",

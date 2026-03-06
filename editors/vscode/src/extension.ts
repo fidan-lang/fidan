@@ -9,6 +9,7 @@ import {
 
 let client: LanguageClient | undefined;
 let outputChannel: vscode.OutputChannel;
+let statusBarItem: vscode.StatusBarItem;
 
 // ---------------------------------------------------------------------------
 // Activation
@@ -18,15 +19,46 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     outputChannel = vscode.window.createOutputChannel("Fidan Language Server");
     context.subscriptions.push(outputChannel);
 
+    // Status bar item showing LSP server state.
+    statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 10);
+    statusBarItem.command = "fidan.showOutput";
+    statusBarItem.tooltip = "Fidan Language Server — click to show output";
+    setStatusBarStarting();
+    statusBarItem.show();
+    context.subscriptions.push(statusBarItem);
+
     // Register commands before starting the server so they're immediately available.
     context.subscriptions.push(
         vscode.commands.registerCommand("fidan.restartServer", async () => {
+            setStatusBarStarting();
             await stopClient();
             await startClient(context);
             vscode.window.showInformationMessage("Fidan language server restarted.");
         }),
         vscode.commands.registerCommand("fidan.showOutput", () => {
             outputChannel.show();
+        }),
+        vscode.commands.registerCommand("fidan.runFile", async () => {
+            const editor = vscode.window.activeTextEditor;
+            if (!editor) {
+                vscode.window.showWarningMessage("Fidan: No active file to run.");
+                return;
+            }
+            if (editor.document.languageId !== "fidan") {
+                vscode.window.showWarningMessage("Fidan: Active file is not a Fidan (.fdn) file.");
+                return;
+            }
+            await editor.document.save();
+            const filePath = editor.document.uri.fsPath;
+            const config = vscode.workspace.getConfiguration("fidan");
+            const terminalName: string = config.get("run.terminalName") ?? "Fidan";
+            const fidan: string = config.get("server.path") ?? "fidan";
+            let terminal = vscode.window.terminals.find(t => t.name === terminalName);
+            if (!terminal) {
+                terminal = vscode.window.createTerminal(terminalName);
+            }
+            terminal.show(true);
+            terminal.sendText(`${fidan} run "${filePath}"`);
         }),
     );
 
@@ -122,12 +154,14 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
     try {
         await client.start();
         outputChannel.appendLine("[fidan] Language server started.");
+        setStatusBarRunning();
     } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         outputChannel.appendLine(`[fidan] Failed to start language server: ${message}`);
         outputChannel.appendLine(
             `[fidan] Make sure the 'fidan' binary is on your PATH or set 'fidan.server.path' in settings.`,
         );
+        setStatusBarError();
         // Do not throw — users may not have the binary installed yet (syntax
         // highlighting still works without the server).
     }
@@ -138,5 +172,38 @@ async function stopClient(): Promise<void> {
         outputChannel.appendLine("[fidan] Stopping language server.");
         await client.stop();
         client = undefined;
+        setStatusBarStopped();
     }
+}
+
+// ---------------------------------------------------------------------------
+// Status bar helpers
+// ---------------------------------------------------------------------------
+
+function setStatusBarRunning(): void {
+    if (!statusBarItem) return;
+    statusBarItem.text = "$(check) Fidan";
+    statusBarItem.backgroundColor = undefined;
+    statusBarItem.tooltip = "Fidan Language Server — running. Click to show output.";
+}
+
+function setStatusBarStarting(): void {
+    if (!statusBarItem) return;
+    statusBarItem.text = "$(sync~spin) Fidan";
+    statusBarItem.backgroundColor = undefined;
+    statusBarItem.tooltip = "Fidan Language Server — starting…";
+}
+
+function setStatusBarStopped(): void {
+    if (!statusBarItem) return;
+    statusBarItem.text = "$(circle-slash) Fidan";
+    statusBarItem.backgroundColor = undefined;
+    statusBarItem.tooltip = "Fidan Language Server — stopped. Click to show output.";
+}
+
+function setStatusBarError(): void {
+    if (!statusBarItem) return;
+    statusBarItem.text = "$(error) Fidan";
+    statusBarItem.backgroundColor = new vscode.ThemeColor("statusBarItem.errorBackground");
+    statusBarItem.tooltip = "Fidan Language Server — failed to start. Click to show output.";
 }

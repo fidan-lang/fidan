@@ -1,5 +1,6 @@
 //! Per-document model stored in the [`DocumentStore`].
 
+use crate::analysis::InlayHintSite;
 use crate::symbols::SymbolTable;
 use fidan_source::Span;
 use std::collections::HashMap;
@@ -23,4 +24,6 @@ pub struct Document {
     pub identifier_spans: Vec<(Span, String)>,
     /// Namespace alias → absolute file URL for `use "file.fdn" as alias` imports.
     pub imports: HashMap<String, Url>,
+    /// Inlay hint positions computed during the last analysis pass.
+    pub inlay_hint_sites: Vec<InlayHintSite>,
 }
