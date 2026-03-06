@@ -1008,11 +1008,11 @@ impl<'p> FnCtx<'p> {
         result_ty: &FidanType,
     ) -> Operand {
         let scrut = self.lower_expr(scrutinee);
-        let join_bb = self.alloc_block();
-        let result_local = self.alloc_local();
         let ty = fidan_ty_to_mir(result_ty);
 
         let mut phi_ops: Vec<(BlockId, Operand)> = vec![];
+        // Arm-exit blocks backpatched to Goto(join_bb) once join_bb is known.
+        let mut pending_exits: Vec<BlockId> = vec![];
 
         for arm in arms {
             let arm_bb = self.alloc_block();
@@ -1064,7 +1064,7 @@ impl<'p> FnCtx<'p> {
             };
             let arm_end = self.cur_bb;
             if !self.terminated {
-                self.goto(join_bb);
+                pending_exits.push(arm_end); // backpatched below
             }
             phi_ops.push((arm_end, arm_val));
 
@@ -1076,10 +1076,19 @@ impl<'p> FnCtx<'p> {
         }
 
         // Fallthrough (no match) → join
+        let fallthrough_bb = self.cur_bb;
         if !self.terminated {
-            self.goto(join_bb);
+            pending_exits.push(fallthrough_bb); // backpatched below
         }
-        phi_ops.push((self.cur_bb, Operand::Const(MirLit::Nothing)));
+        phi_ops.push((fallthrough_bb, Operand::Const(MirLit::Nothing)));
+
+        // Allocate join_bb after all arm blocks — forward edges only, no
+        // false loop back-edges for find_loop_blocks.
+        let join_bb = self.alloc_block();
+        let result_local = self.alloc_local();
+        for exit_bb in pending_exits {
+            self.func_mut().block_mut(exit_bb).terminator = Terminator::Goto(join_bb);
+        }
 
         self.switch_to(join_bb);
         self.add_phi(join_bb, result_local, ty, phi_ops);
@@ -1660,11 +1669,17 @@ impl<'p> FnCtx<'p> {
 
     fn lower_check_stmt(&mut self, scrutinee: &HirExpr, arms: &[HirCheckArm]) {
         let scrut = self.lower_expr(scrutinee);
-        let join_bb = self.alloc_block();
+        // join_bb is allocated AFTER all arm blocks so every arm exit is a
+        // forward edge.  Allocating it first would create back-edges that
+        // `find_loop_blocks` misidentifies as loop back-edges, producing false
+        // W5003 "called inside a loop" warnings for code that follows a `check`.
         let env_before = self.env.clone();
 
         // Track (arm_end_bb, env_after_arm) for phi-node merging at the join.
         let mut arm_end_envs: Vec<(BlockId, VarEnv)> = vec![];
+        // Arm-exit blocks whose Goto(join_bb) must be backpatched once join_bb
+        // is allocated.
+        let mut pending_exits: Vec<BlockId> = vec![];
 
         for arm in arms {
             let arm_bb = self.alloc_block();
@@ -1702,7 +1717,7 @@ impl<'p> FnCtx<'p> {
             let arm_end = self.cur_bb;
             arm_end_envs.push((arm_end, self.env.clone()));
             if !self.terminated {
-                self.goto(join_bb);
+                pending_exits.push(arm_end); // backpatched below
             }
 
             if is_wildcard {
@@ -1718,7 +1733,14 @@ impl<'p> FnCtx<'p> {
         let fallthrough_bb = self.cur_bb;
         arm_end_envs.push((fallthrough_bb, env_before.clone()));
         if !self.terminated {
-            self.goto(join_bb);
+            pending_exits.push(fallthrough_bb); // backpatched below
+        }
+
+        // Allocate join_bb here — its ID is strictly greater than all arm
+        // blocks, so the backpatched exits are forward edges.
+        let join_bb = self.alloc_block();
+        for exit_bb in pending_exits {
+            self.func_mut().block_mut(exit_bb).terminator = Terminator::Goto(join_bb);
         }
 
         // Switch to join and emit phi nodes for variables changed in any arm.
