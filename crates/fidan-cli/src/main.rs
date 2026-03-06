@@ -1731,11 +1731,11 @@ fn run_with_reload(opts: CompileOptions) -> Result<()> {
             if watched.insert(dir.clone()) {
                 if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
                     eprintln!(
-                        "\x1b[1;31m[⟳ reload] cannot watch {}: {e}\x1b[0m",
+                        "\x1b[1;31m[↻ reload] cannot watch {}: {e}\x1b[0m",
                         dir.display()
                     );
                 } else {
-                    eprintln!("\x1b[2m[⟳ reload] also watching {}\x1b[0m", dir.display());
+                    eprintln!("\x1b[2m[↻ reload] also watching {}\x1b[0m", dir.display());
                 }
             }
         }
@@ -1746,7 +1746,7 @@ fn run_with_reload(opts: CompileOptions) -> Result<()> {
     watch_extra(&mut watcher, initial_extra, &mut extra_watched);
 
     eprintln!(
-        "\x1b[2m[⟳ reload] watching {} — Ctrl+C to stop\x1b[0m",
+        "\x1b[2m[↻ reload] watching {} — Ctrl+C to stop\x1b[0m",
         entry_dir.display()
     );
 
@@ -1786,7 +1786,7 @@ fn run_with_reload(opts: CompileOptions) -> Result<()> {
                     })
                     .collect();
                 eprintln!(
-                    "\x1b[2m[⟳ reload] {} changed — re-running\x1b[0m",
+                    "\x1b[2m[↻ reload] {} changed — re-running\x1b[0m",
                     changed.join(", ")
                 );
 
@@ -1797,7 +1797,7 @@ fn run_with_reload(opts: CompileOptions) -> Result<()> {
                 // Re-run — errors are printed but do not stop the watcher.
                 let _ = run_pipeline(opts.clone());
             }
-            Ok(Err(e)) => eprintln!("\x1b[1;31m[⟳ reload] watcher error: {e}\x1b[0m"),
+            Ok(Err(e)) => eprintln!("\x1b[1;31m[↻ reload] watcher error: {e}\x1b[0m"),
             Err(_) => break, // channel closed
         }
     }

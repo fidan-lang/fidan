@@ -327,7 +327,7 @@
 | `--reload` flag on `fidan run` | ✅ | `CompileOptions::reload: bool`; wired in `fidan-cli` |
 | `notify` crate file-system watcher integration | ✅ | `recommended_watcher` via `notify` workspace dep; cross-platform (inotify / FSEvents / ReadDirectoryChangesW) |
 | Single-file watch + sibling `.fdn` files | ✅ | `run_with_reload()` watches the entry-point directory (`NonRecursive`); reacts to any `.fdn` write/create/remove event |
-| Re-run on change, diff printed to stderr | ✅ | Prints `[⟳ reload] <filename> changed — re-running` before each re-run |
+| Re-run on change, diff printed to stderr | ✅ | Prints `[↻ reload] <filename> changed — re-running` before each re-run |
 | Debounce (100 ms) | ✅ | Drains queued events; ignores events within 100 ms of the last one |
 | Ctrl+C exits cleanly | ✅ | Channel close propagates from OS signal handler |
 | Multi-file watch (transitive `use` imports) | ⬜ | Currently watches the whole directory; per-import tracking deferred to Phase 7+ |
