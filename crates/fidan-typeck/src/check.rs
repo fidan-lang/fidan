@@ -1285,14 +1285,49 @@ impl TypeChecker {
                 }
             }
 
-            Expr::This { .. } => self.this_ty.clone().unwrap_or(FidanType::Dynamic),
+            Expr::This { span } => {
+                if self.this_ty.is_none() {
+                    let diag = Diagnostic::error(
+                        fidan_diagnostics::diag_code!("E0306"),
+                        "`this` can only be used inside an object body, one of its methods, \
+                         or an `action … extends ObjectName` extension",
+                        span,
+                    );
+                    self.diags.push(diag);
+                    return FidanType::Error;
+                }
+                self.this_ty.clone().unwrap_or(FidanType::Dynamic)
+            }
 
-            Expr::Parent { .. } => {
+            Expr::Parent { span } => {
+                if self.this_ty.is_none() {
+                    let diag = Diagnostic::error(
+                        fidan_diagnostics::diag_code!("E0307"),
+                        "`parent` can only be used inside an object that extends another object, \
+                         or an `action … extends` extension — no object context here",
+                        span,
+                    );
+                    self.diags.push(diag);
+                    return FidanType::Error;
+                }
                 if let Some(FidanType::Object(sym)) = self.this_ty.clone() {
                     if let Some(parent) = self.objects.get(&sym).and_then(|o| o.parent) {
                         return FidanType::Object(parent);
                     }
+                    // Object exists but has no parent.
+                    let obj_name = self.interner.resolve(sym);
+                    let diag = Diagnostic::error(
+                        fidan_diagnostics::diag_code!("E0307"),
+                        format!(
+                            "`parent` used inside `{}`, which does not extend any object",
+                            obj_name
+                        ),
+                        span,
+                    );
+                    self.diags.push(diag);
+                    return FidanType::Error;
                 }
+                // Extension-action with an inlined this_ty that isn't Object(sym) (edge case).
                 FidanType::Dynamic
             }
 

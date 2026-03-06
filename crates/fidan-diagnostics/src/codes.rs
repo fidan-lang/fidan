@@ -138,7 +138,18 @@ pub static CODES: &[DiagnosticCode] = &[
         code: "E0305",
         title: "too many arguments provided to action",
         category: "args",
-    }, // ── Concurrency / safety ──────────────────────────────────────────────────
+    },
+    DiagnosticCode {
+        code: "E0306",
+        title: "`this` used outside object or extension-action context",
+        category: "objects",
+    },
+    DiagnosticCode {
+        code: "E0307",
+        title: "`parent` used in a context with no parent type",
+        category: "objects",
+    },
+    // ── Concurrency / safety ──────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0401",
         title: "data race: module-level variable mutated in concurrent tasks",

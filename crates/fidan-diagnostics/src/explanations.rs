@@ -387,6 +387,59 @@ If the action should accept additional data, add the corresponding parameters:
 "#,
         ),
 
+        // ── Object context ──────────────────────────────────────────────────
+        "E0306" => Some(
+            r#"`this` can only be used inside an `object` body, one of its methods,
+or an `action` that extends an object (`action name extends ObjectName ...`).
+Using `this` anywhere else — in a free action, at module level, or inside
+a test block — is invalid because there is no object instance in scope.
+
+Erroneous example:
+
+    action greet() {
+        print(this.name)   # error E0306: no object in scope
+    }
+
+Fix: move the logic into an object method:
+
+    object Greeter {
+        var name oftype string
+
+        action greet() {
+            print(this.name)   # OK — inside an object method
+        }
+    }
+"#,
+        ),
+
+        "E0307" => Some(
+            r#"`parent` can only be used inside an object that extends another object,
+or inside an `action` that extends a child object.
+`parent` refers to the parent object's fields and methods; it is meaningless
+if the current object has no declared parent.
+
+Erroneous example:
+
+    object Animal {
+        action speak() {
+            print(parent.sound)   # error E0307: Animal has no parent
+        }
+    }
+
+Fix: either remove the `parent` reference or add an `extends` clause:
+
+    object LivingThing {
+        var sound = "..."
+    }
+
+    object Animal extends LivingThing {
+        action speak() {
+            print(parent.sound)   # OK
+        }
+    }
+"#,
+        ),
+
         // ── Concurrency / safety ──────────────────────────────────────────────
         "E0401" => Some(
             r#"A module-level variable is written by one parallel task and read or 
