@@ -13,6 +13,7 @@ mod dead_code;
 mod inlining;
 pub mod null_safety;
 pub mod parallel_check;
+pub mod precompile_hints;
 pub mod unawaited_pending;
 mod unreachable_pruning;
 
@@ -22,6 +23,7 @@ pub use dead_code::DeadCodeElimination;
 pub use inlining::Inlining;
 pub use null_safety::NullSafetyDiag;
 pub use parallel_check::ParallelRaceDiag;
+pub use precompile_hints::SlowHintDiag;
 pub use unawaited_pending::UnawaitedPendingDiag;
 pub use unreachable_pruning::UnreachablePruning;
 
@@ -47,6 +49,14 @@ pub fn check_null_safety(
     interner: &fidan_lexer::SymbolInterner,
 ) -> Vec<NullSafetyDiag> {
     null_safety::check(prog, interner)
+}
+
+/// Emit compile-time "Why Is This Slow?" hints (W5001, W5003).
+pub fn check_slow_hints(
+    prog: &MirProgram,
+    interner: &fidan_lexer::SymbolInterner,
+) -> Vec<SlowHintDiag> {
+    precompile_hints::check(prog, interner)
 }
 
 /// Run all optimisation passes in the standard order.

@@ -82,9 +82,39 @@ const BUILTIN_FUNCTIONS: &[&str] = &[
     "assert_ne",
 ];
 
-// ── Named-arg goto-def result ───────────────────────────────────────────────
+/// All known `std.*` module names for import completion.
+const STD_MODULES: &[(&str, &str)] = &[
+    ("io", "File I/O, stdin/stdout/stderr, paths, directories"),
+    ("net", "TcpSocket, HttpClient, HttpServer"),
+    (
+        "collections",
+        "Set, Queue, Deque, BTreeMap, parallel collection ops",
+    ),
+    (
+        "math",
+        "sin, cos, sqrt, floor, ceil, abs, min, max, random, pi, e",
+    ),
+    (
+        "string",
+        "split, join, trim, replace, contains, startsWith, endsWith",
+    ),
+    (
+        "concurrent",
+        "Task, Channel — cooperative scheduler helpers",
+    ),
+    (
+        "parallel",
+        "Shared, Pending, parallelMap, parallelFilter, parallelFor",
+    ),
+    ("debug", "assert, assertEq, inspect, profile"),
+    ("test", "describe/it blocks, expect(...).to... matchers"),
+    ("cli", "Argument parsing, coloured output, progress bars"),
+    ("time", "DateTime, Duration, wait"),
+    ("json", "parse, stringify, path queries"),
+    ("env", "Environment variables, platform info"),
+];
 
-/// Result returned by `find_named_arg_param`.
+// ── Named-arg goto-def result ───────────────────────────────────────────────
 enum NamedArgLookup {
     /// Parameter declaration found in the current document.
     InDoc(Span),
@@ -403,7 +433,12 @@ impl LanguageServer for FidanLsp {
                 inlay_hint_provider: Some(OneOf::Left(true)),
                 code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![".".to_string(), " ".to_string()]),
+                    trigger_characters: Some(vec![
+                        ".".to_string(),
+                        " ".to_string(),
+                        "\"".to_string(),
+                        "/".to_string(),
+                    ]),
                     resolve_provider: Some(false),
                     ..Default::default()
                 }),
@@ -762,6 +797,19 @@ impl LanguageServer for FidanLsp {
             named_param_entries: Vec<(String, Span)>,
             /// When named params live in an imported doc: (recv_ty, method_name).
             named_param_cross: Option<(String, String)>,
+            /// Import context: if the cursor is inside a `use` statement,
+            /// contains either `("file", partial_path)` or `("std", partial_mod)`.
+            import_ctx: Option<ImportContext>,
+        }
+
+        /// What kind of import the cursor is inside.
+        enum ImportContext {
+            /// Inside `use "partial/path"` — partial filesystem path typed so far.
+            FilePath(String),
+            /// After `use std.` — partial stdlib module name typed so far.
+            StdLib(String),
+            /// After `use ` (bare identifier) — partial user-module name.
+            BareIdent(String),
         }
 
         let phase1 = {
@@ -773,167 +821,380 @@ impl LanguageServer for FidanLsp {
             let cursor = lsp_pos_to_offset(&file, pos) as usize;
             let src = doc.text.as_bytes();
 
-            // ── Dot-triggered receiver resolution ────────────────────────────
-            let dot_res: Option<DotResolution> = if trigger == Some(".") {
-                let dot_pos = (cursor as u32).saturating_sub(1);
-                let recv = doc
-                    .identifier_spans
+            // ── Import context detection ──────────────────────────────────────
+            // Check if the cursor sits inside a `use` statement so we can offer
+            // file-path or stdlib-module completion instead of general symbols.
+            let import_ctx: Option<ImportContext> = {
+                // Extract the line up to the cursor.
+                let line_start = src[..cursor]
                     .iter()
-                    .rev()
-                    .find(|(span, _)| span.end <= dot_pos)
-                    .map(|(_, name)| name.clone());
+                    .rposition(|&b| b == b'\n')
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                let line_up_to_cursor = std::str::from_utf8(&src[line_start..cursor])
+                    .unwrap_or("")
+                    .trim_start();
 
-                if let Some(rn) = recv {
-                    if let Some(url) = doc.imports.get(rn.as_str()) {
-                        Some(DotResolution::ModuleAlias(url.clone()))
+                if let Some(rest) = line_up_to_cursor.strip_prefix("use") {
+                    let rest = rest.trim_start_matches(' ');
+                    if let Some(inside) = rest.strip_prefix('"') {
+                        // File-path import: `use "partial/path`
+                        Some(ImportContext::FilePath(inside.to_string()))
+                    } else if let Some(after_std) = rest.strip_prefix("std.") {
+                        // Stdlib import: `use std.partial`
+                        Some(ImportContext::StdLib(after_std.to_string()))
+                    } else if !rest.is_empty()
+                        && rest
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_' || c == '.' || c == '/')
+                    {
+                        // Bare user-module identifier: `use mymod`
+                        Some(ImportContext::BareIdent(rest.to_string()))
                     } else {
-                        doc.symbol_table
-                            .get(rn.as_str())
-                            .and_then(|e| e.ty_name.as_deref())
-                            .map(|ty| DotResolution::TypeName(ty.to_string()))
+                        None
                     }
                 } else {
                     None
                 }
-            } else {
-                None
             };
 
-            // If dot-triggered and resolved, skip standard items entirely.
-            if dot_res.is_some() {
+            // If we're in an import context, skip all other completion logic
+            // and return early from Phase 1.
+            if import_ctx.is_some() {
                 Phase1 {
-                    dot_res,
+                    dot_res: None,
                     local_items: vec![],
                     named_param_entries: vec![],
                     named_param_cross: None,
+                    import_ctx,
                 }
             } else {
-                // ── Standard (non-dot) symbol items ──────────────────────────────
-                let local_items: Vec<CompletionItem> = doc
-                    .symbol_table
-                    .all()
-                    .filter(|(name, _)| !name.contains('.'))
-                    .map(|(name, entry)| {
-                        let kind = Some(match &entry.kind {
-                            SymKind::Action | SymKind::Method => CompletionItemKind::FUNCTION,
-                            SymKind::Object => CompletionItemKind::CLASS,
-                            SymKind::Variable { .. } => CompletionItemKind::VARIABLE,
-                            SymKind::Field => CompletionItemKind::FIELD,
-                        });
-                        let insert_text = if matches!(entry.kind, SymKind::Action | SymKind::Object)
-                            && !entry.param_types.is_empty()
-                        {
-                            Some(format!("{}($0)", name))
-                        } else {
-                            None
-                        };
-                        CompletionItem {
-                            label: name.clone(),
-                            kind,
-                            insert_text_format: insert_text
-                                .as_ref()
-                                .map(|_| InsertTextFormat::SNIPPET),
-                            insert_text,
-                            documentation: Some(Documentation::MarkupContent(MarkupContent {
-                                kind: MarkupKind::Markdown,
-                                value: entry.detail.clone(),
-                            })),
-                            ..Default::default()
-                        }
-                    })
-                    .collect();
-
-                // ── Named-parameter detection ─────────────────────────────────────
-                // Walk backward to find if the cursor is inside a function call and
-                // collect parameter names for `paramName = ` suggestions.
-                let mut named_param_entries: Vec<(String, Span)> = vec![];
-                let mut named_param_cross: Option<(String, String)> = None;
-
-                let mut depth: i32 = 0;
-                let mut open_paren: Option<usize> = None;
-                let mut i = cursor.saturating_sub(1);
-                loop {
-                    match src.get(i) {
-                        Some(b')') | Some(b']') => depth += 1,
-                        Some(b'(') | Some(b'[') => {
-                            if depth == 0 {
-                                open_paren = Some(i);
-                                break;
-                            }
-                            depth -= 1;
-                        }
-                        None => break,
-                        _ => {}
-                    }
-                    if i == 0 {
-                        break;
-                    }
-                    i -= 1;
-                }
-
-                if let Some(open) = open_paren {
-                    if let Some((fn_span, fn_name)) = doc
+                // ── Dot-triggered receiver resolution ────────────────────────────
+                let dot_res: Option<DotResolution> = if trigger == Some(".") {
+                    let dot_pos = (cursor as u32).saturating_sub(1);
+                    let recv = doc
                         .identifier_spans
                         .iter()
                         .rev()
-                        .find(|(span, _)| span.end as usize <= open)
-                    {
-                        // Try direct lookup first, then dot-receiver-qualified.
-                        let entry_opt = doc.symbol_table.get(fn_name.as_str()).or_else(|| {
-                            let fn_start = fn_span.start as usize;
-                            if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
-                                let recv = doc
-                                    .identifier_spans
-                                    .iter()
-                                    .rev()
-                                    .find(|(span, _)| (span.end as usize) < fn_start)?;
-                                let ty = doc
-                                    .symbol_table
-                                    .get(recv.1.as_str())
-                                    .and_then(|e| e.ty_name.as_deref())?;
-                                doc.symbol_table.get(&format!("{}.{}", ty, fn_name))
-                            } else {
-                                None
-                            }
-                        });
+                        .find(|(span, _)| span.end <= dot_pos)
+                        .map(|(_, name)| name.clone());
 
-                        if let Some(entry) = entry_opt {
-                            named_param_entries = entry.param_names.clone();
+                    if let Some(rn) = recv {
+                        if let Some(url) = doc.imports.get(rn.as_str()) {
+                            Some(DotResolution::ModuleAlias(url.clone()))
                         } else {
-                            // Record for cross-doc resolution in Phase 2.
-                            let fn_start = fn_span.start as usize;
-                            if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
-                                if let Some((_, recv_name)) = doc
-                                    .identifier_spans
-                                    .iter()
-                                    .rev()
-                                    .find(|(span, _)| (span.end as usize) < fn_start)
+                            doc.symbol_table
+                                .get(rn.as_str())
+                                .and_then(|e| e.ty_name.as_deref())
+                                .map(|ty| DotResolution::TypeName(ty.to_string()))
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // If dot-triggered and resolved, skip standard items entirely.
+                if dot_res.is_some() {
+                    Phase1 {
+                        dot_res,
+                        local_items: vec![],
+                        named_param_entries: vec![],
+                        named_param_cross: None,
+                        import_ctx: None,
+                    }
+                } else {
+                    // ── Standard (non-dot) symbol items ──────────────────────────────
+                    let local_items: Vec<CompletionItem> = doc
+                        .symbol_table
+                        .all()
+                        .filter(|(name, _)| !name.contains('.'))
+                        .map(|(name, entry)| {
+                            let kind = Some(match &entry.kind {
+                                SymKind::Action | SymKind::Method => CompletionItemKind::FUNCTION,
+                                SymKind::Object => CompletionItemKind::CLASS,
+                                SymKind::Variable { .. } => CompletionItemKind::VARIABLE,
+                                SymKind::Field => CompletionItemKind::FIELD,
+                            });
+                            let insert_text =
+                                if matches!(entry.kind, SymKind::Action | SymKind::Object)
+                                    && !entry.param_types.is_empty()
                                 {
-                                    if let Some(ty) = doc
+                                    Some(format!("{}($0)", name))
+                                } else {
+                                    None
+                                };
+                            CompletionItem {
+                                label: name.clone(),
+                                kind,
+                                insert_text_format: insert_text
+                                    .as_ref()
+                                    .map(|_| InsertTextFormat::SNIPPET),
+                                insert_text,
+                                documentation: Some(Documentation::MarkupContent(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: entry.detail.clone(),
+                                })),
+                                ..Default::default()
+                            }
+                        })
+                        .collect();
+
+                    // ── Named-parameter detection ─────────────────────────────────────
+                    // Walk backward to find if the cursor is inside a function call and
+                    // collect parameter names for `paramName = ` suggestions.
+                    let mut named_param_entries: Vec<(String, Span)> = vec![];
+                    let mut named_param_cross: Option<(String, String)> = None;
+
+                    let mut depth: i32 = 0;
+                    let mut open_paren: Option<usize> = None;
+                    let mut i = cursor.saturating_sub(1);
+                    loop {
+                        match src.get(i) {
+                            Some(b')') | Some(b']') => depth += 1,
+                            Some(b'(') | Some(b'[') => {
+                                if depth == 0 {
+                                    open_paren = Some(i);
+                                    break;
+                                }
+                                depth -= 1;
+                            }
+                            None => break,
+                            _ => {}
+                        }
+                        if i == 0 {
+                            break;
+                        }
+                        i -= 1;
+                    }
+
+                    if let Some(open) = open_paren {
+                        if let Some((fn_span, fn_name)) = doc
+                            .identifier_spans
+                            .iter()
+                            .rev()
+                            .find(|(span, _)| span.end as usize <= open)
+                        {
+                            // Try direct lookup first, then dot-receiver-qualified.
+                            let entry_opt = doc.symbol_table.get(fn_name.as_str()).or_else(|| {
+                                let fn_start = fn_span.start as usize;
+                                if fn_start > 0
+                                    && src.get(fn_start.saturating_sub(1)) == Some(&b'.')
+                                {
+                                    let recv = doc
+                                        .identifier_spans
+                                        .iter()
+                                        .rev()
+                                        .find(|(span, _)| (span.end as usize) < fn_start)?;
+                                    let ty = doc
                                         .symbol_table
-                                        .get(recv_name.as_str())
-                                        .and_then(|e| e.ty_name.as_deref())
-                                        .map(|s| s.to_string())
+                                        .get(recv.1.as_str())
+                                        .and_then(|e| e.ty_name.as_deref())?;
+                                    doc.symbol_table.get(&format!("{}.{}", ty, fn_name))
+                                } else {
+                                    None
+                                }
+                            });
+
+                            if let Some(entry) = entry_opt {
+                                named_param_entries = entry.param_names.clone();
+                            } else {
+                                // Record for cross-doc resolution in Phase 2.
+                                let fn_start = fn_span.start as usize;
+                                if fn_start > 0
+                                    && src.get(fn_start.saturating_sub(1)) == Some(&b'.')
+                                {
+                                    if let Some((_, recv_name)) = doc
+                                        .identifier_spans
+                                        .iter()
+                                        .rev()
+                                        .find(|(span, _)| (span.end as usize) < fn_start)
                                     {
-                                        named_param_cross = Some((ty, fn_name.clone()));
+                                        if let Some(ty) = doc
+                                            .symbol_table
+                                            .get(recv_name.as_str())
+                                            .and_then(|e| e.ty_name.as_deref())
+                                            .map(|s| s.to_string())
+                                        {
+                                            named_param_cross = Some((ty, fn_name.clone()));
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                Phase1 {
-                    dot_res,
-                    local_items,
-                    named_param_entries,
-                    named_param_cross,
-                }
-            } // end else (standard path)
+                    Phase1 {
+                        dot_res,
+                        local_items,
+                        named_param_entries,
+                        named_param_cross,
+                        import_ctx: None,
+                    }
+                } // end else (standard path)
+            } // end else (not import context)
             // `doc` (DashMap Ref) is dropped here.
         };
 
         // ── Phase 2: cross-document resolution + assemble response ────────────
+
+        // ── Import context: file-path or stdlib completion ────────────────────
+        if let Some(import_ctx) = phase1.import_ctx {
+            let items: Vec<CompletionItem> = match import_ctx {
+                ImportContext::StdLib(partial) => {
+                    // Suggest matching `std.*` modules.
+                    STD_MODULES
+                        .iter()
+                        .filter(|(name, _)| name.starts_with(partial.as_str()))
+                        .map(|(name, doc)| CompletionItem {
+                            label: format!("std.{}", name),
+                            kind: Some(CompletionItemKind::MODULE),
+                            insert_text: Some(format!("std.{}", name)),
+                            documentation: Some(Documentation::MarkupContent(MarkupContent {
+                                kind: MarkupKind::PlainText,
+                                value: doc.to_string(),
+                            })),
+                            sort_text: Some(format!("0std.{}", name)),
+                            ..Default::default()
+                        })
+                        .collect()
+                }
+                ImportContext::FilePath(partial) => {
+                    // Suggest .fdn files and directories relative to the current file.
+                    if let Ok(file_path) = uri.to_file_path() {
+                        let base_dir = file_path.parent().unwrap_or(&file_path).to_path_buf();
+                        // Split partial into (directory_prefix, file_prefix).
+                        let (search_dir, file_prefix) =
+                            if partial.contains('/') || partial.contains('\\') {
+                                let sep_pos = partial.rfind(|c| c == '/' || c == '\\').unwrap();
+                                let dir_part = &partial[..sep_pos];
+                                let name_part = &partial[sep_pos + 1..];
+                                (base_dir.join(dir_part), name_part.to_string())
+                            } else {
+                                (base_dir.clone(), partial.clone())
+                            };
+                        // Pre-compute the directory prefix string so it can be moved into the closure.
+                        let prefix_len = partial.len() - file_prefix.len();
+                        let dir_prefix = partial[..prefix_len].to_string();
+                        // Enumerate directory entries on a blocking thread — never call
+                        // std::fs::read_dir directly on a tokio async executor thread.
+                        tokio::task::spawn_blocking(move || {
+                            let mut file_items: Vec<CompletionItem> = vec![];
+                            if let Ok(entries) = std::fs::read_dir(&search_dir) {
+                                for entry in entries.flatten() {
+                                    let name = entry.file_name();
+                                    let name_str = name.to_string_lossy();
+                                    if !name_str.starts_with(file_prefix.as_str()) {
+                                        continue;
+                                    }
+                                    let path = entry.path();
+                                    let is_dir = path.is_dir();
+                                    let is_fdn =
+                                        path.extension().and_then(|e| e.to_str()) == Some("fdn");
+                                    if is_dir {
+                                        let dir_label = format!("{}/", name_str);
+                                        let insert = format!("{}{}/", dir_prefix, name_str);
+                                        file_items.push(CompletionItem {
+                                            label: dir_label,
+                                            kind: Some(CompletionItemKind::FOLDER),
+                                            insert_text: Some(insert),
+                                            ..Default::default()
+                                        });
+                                    } else if is_fdn {
+                                        let stem = path
+                                            .file_stem()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .to_string();
+                                        let insert = format!("{}{}.fdn\"", dir_prefix, stem);
+                                        file_items.push(CompletionItem {
+                                            label: name_str.to_string(),
+                                            kind: Some(CompletionItemKind::FILE),
+                                            insert_text: Some(insert),
+                                            ..Default::default()
+                                        });
+                                    }
+                                }
+                            }
+                            file_items
+                        })
+                        .await
+                        .unwrap_or_default()
+                    } else {
+                        vec![]
+                    }
+                }
+                ImportContext::BareIdent(partial) => {
+                    // Offer stdlib modules matching the bare identifier as well as
+                    // any .fdn files in the current directory.
+                    let mut items: Vec<CompletionItem> = vec![];
+
+                    // Stdlib modules whose first segment starts with the partial.
+                    for (name, doc) in STD_MODULES {
+                        let full = format!("std.{}", name);
+                        if full.starts_with(partial.as_str()) || "std".starts_with(partial.as_str())
+                        {
+                            items.push(CompletionItem {
+                                label: full.clone(),
+                                kind: Some(CompletionItemKind::MODULE),
+                                insert_text: Some(full.clone()),
+                                documentation: Some(Documentation::MarkupContent(MarkupContent {
+                                    kind: MarkupKind::PlainText,
+                                    value: doc.to_string(),
+                                })),
+                                sort_text: Some(format!("0{}", full)),
+                                ..Default::default()
+                            });
+                        }
+                    }
+
+                    // .fdn files in the current directory (enumerated on a blocking thread).
+                    if let Ok(file_path) = uri.to_file_path() {
+                        if let Some(base_dir) = file_path.parent().map(|p| p.to_path_buf()) {
+                            // `partial` is already owned — move it directly into the closure,
+                            // no clone needed.
+                            let fdn_items = tokio::task::spawn_blocking(move || {
+                                let mut fdn_items: Vec<CompletionItem> = vec![];
+                                if let Ok(entries) = std::fs::read_dir(&base_dir) {
+                                    for entry in entries.flatten() {
+                                        let path = entry.path();
+                                        if path.extension().and_then(|e| e.to_str()) != Some("fdn")
+                                        {
+                                            continue;
+                                        }
+                                        // Skip the current file.
+                                        if path == file_path {
+                                            continue;
+                                        }
+                                        let stem = path
+                                            .file_stem()
+                                            .unwrap_or_default()
+                                            .to_string_lossy()
+                                            .to_string();
+                                        if stem.starts_with(partial.as_str()) {
+                                            fdn_items.push(CompletionItem {
+                                                label: stem.clone(),
+                                                kind: Some(CompletionItemKind::MODULE),
+                                                insert_text: Some(stem),
+                                                ..Default::default()
+                                            });
+                                        }
+                                    }
+                                }
+                                fdn_items
+                            })
+                            .await
+                            .unwrap_or_default();
+                            items.extend(fdn_items);
+                        }
+                    }
+
+                    items
+                }
+            };
+            return Ok(Some(CompletionResponse::Array(items)));
+        }
 
         // Dot-triggered: collect members (walking full cross-module chain).
         if let Some(dot_res) = phase1.dot_res {

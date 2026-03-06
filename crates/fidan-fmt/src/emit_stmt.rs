@@ -237,8 +237,9 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
 
         // ── Panic / throw ─────────────────────────────────────────────────
         Stmt::Panic { value, .. } => {
-            p.w("panic ");
+            p.w("panic(");
             emit_expr(p, value);
+            p.w(")");
         }
 
         // ── Error placeholder ─────────────────────────────────────────────

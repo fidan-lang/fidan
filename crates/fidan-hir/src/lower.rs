@@ -15,11 +15,50 @@ use fidan_typeck::{FidanType, TypedModule};
 /// a single constant prevents typo-divergence.
 const DECORATOR_PRECOMPILE: &str = "precompile";
 
+/// All built-in decorator names.  Any decorator NOT in this list and present in
+/// the symbol table as an `Action` is treated as a user-defined custom decorator.
+const BUILTIN_DECORATORS: &[&str] = &[DECORATOR_PRECOMPILE, "deprecated"];
+
 use crate::hir::{
-    HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr, HirExprKind,
-    HirField, HirFunction, HirGlobal, HirInterpPart, HirModule, HirObject, HirParam, HirStmt,
-    HirTask, HirTestDecl, HirUseDecl,
+    CustomDecorator, DecoratorArg, HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm,
+    HirElseIf, HirExpr, HirExprKind, HirField, HirFunction, HirGlobal, HirInterpPart, HirModule,
+    HirObject, HirParam, HirStmt, HirTask, HirTestDecl, HirUseDecl,
 };
+
+// ── Helpers ────────────────────────────────────────────────────────────────────
+
+/// Extract user-defined (custom) decorators from an AST decorator list.
+///
+/// Built-in decorator names (`precompile`, `deprecated`) are skipped.
+/// Non-literal args are silently ignored — decorator args must be compile-time
+/// constants (int, float, string, bool).
+fn extract_custom_decorators(
+    arena: &AstArena,
+    decorators: &[fidan_ast::Decorator],
+    interner: &SymbolInterner,
+) -> Vec<CustomDecorator> {
+    decorators
+        .iter()
+        .filter(|d| {
+            let name = interner.resolve(d.name);
+            !BUILTIN_DECORATORS.contains(&name.as_ref())
+        })
+        .map(|d| {
+            let args: Vec<DecoratorArg> = d
+                .args
+                .iter()
+                .filter_map(|&id| match arena.get_expr(id) {
+                    Expr::IntLit { value, .. } => Some(DecoratorArg::Int(*value)),
+                    Expr::FloatLit { value, .. } => Some(DecoratorArg::Float(*value)),
+                    Expr::StrLit { value, .. } => Some(DecoratorArg::Str(value.clone())),
+                    Expr::BoolLit { value, .. } => Some(DecoratorArg::Bool(*value)),
+                    _ => None,
+                })
+                .collect();
+            CustomDecorator { name: d.name, args }
+        })
+        .collect()
+}
 
 // ── Context ────────────────────────────────────────────────────────────────────
 
@@ -439,6 +478,7 @@ impl<'a> Ctx<'a> {
         body: &[StmtId],
         is_parallel: bool,
         precompile: bool,
+        custom_decorators: Vec<crate::hir::CustomDecorator>,
         span: Span,
     ) -> HirFunction {
         HirFunction {
@@ -449,6 +489,7 @@ impl<'a> Ctx<'a> {
             body: self.lower_stmts(body),
             is_parallel,
             precompile,
+            custom_decorators,
             span,
         }
     }
@@ -571,6 +612,11 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                             let precompile = decorators.iter().any(|d| {
                                 ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE
                             });
+                            let custom_decs = extract_custom_decorators(
+                                ctx.arena,
+                                &decorators,
+                                ctx.interner,
+                            );
                             Some(ctx.lower_function(
                                 mname,
                                 None,
@@ -579,6 +625,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                                 &body,
                                 is_parallel,
                                 precompile,
+                                custom_decs,
                                 mspan,
                             ))
                         } else {
@@ -614,6 +661,8 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 let precompile = decorators
                     .iter()
                     .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
+                let custom_decs =
+                    extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
                 functions.push(ctx.lower_function(
                     name,
                     None,
@@ -622,6 +671,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     &body,
                     is_parallel,
                     precompile,
+                    custom_decs,
                     span,
                 ));
             }
@@ -646,6 +696,8 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 let precompile = decorators
                     .iter()
                     .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
+                let custom_decs =
+                    extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
                 functions.push(ctx.lower_function(
                     name,
                     Some(extends),
@@ -654,6 +706,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     &body,
                     is_parallel,
                     precompile,
+                    custom_decs,
                     span,
                 ));
             }

@@ -584,4 +584,52 @@ mod tests {
         let tokens = lex("nothing");
         assert_eq!(tokens[0], TokenKind::Nothing);
     }
+
+    /// Integration test: tokenise the canonical `test/examples/test.fdn` file
+    /// and verify it produces **no `TokenKind::Unknown`** tokens and contains
+    /// the expected structural tokens (keywords, identifiers, braces, strings).
+    ///
+    /// The file path is resolved relative to the workspace root via the
+    /// `CARGO_MANIFEST_DIR` of the **workspace** (set by Cargo for every crate).
+    #[test]
+    fn test_tokenise_test_fdn() {
+        // Locate the workspace root two directories above this crate's manifest.
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest.parent().unwrap().parent().unwrap();
+        let path = workspace.join("test").join("examples").join("test.fdn");
+        let src =
+            std::fs::read_to_string(&path).unwrap_or_else(|_| panic!("cannot read {:?}", path));
+
+        let file = SourceFile::new(
+            fidan_source::FileId(0),
+            path.to_str().unwrap_or("test.fdn"),
+            &*src,
+        );
+        let interner = Arc::new(SymbolInterner::new());
+        let (tokens, diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+
+        // No lexer errors.
+        assert!(diags.is_empty(), "lex diagnostics: {diags:?}");
+
+        // No unknown characters.
+        let unknown: Vec<_> = tokens
+            .iter()
+            .filter(|t| matches!(t.kind, TokenKind::Unknown(_)))
+            .collect();
+        assert!(unknown.is_empty(), "unknown tokens: {unknown:?}");
+
+        // Must contain at least: `object`, `action`, `var`, identifiers, braces.
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::Object));
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::Action));
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::Var));
+        assert!(tokens.iter().any(|t| t.kind == TokenKind::LBrace));
+        assert!(tokens.iter().any(|t| matches!(t.kind, TokenKind::Ident(_))));
+
+        // Reasonable token count (not empty, not trivially small).
+        assert!(
+            tokens.len() > 50,
+            "expected >50 tokens, got {}",
+            tokens.len()
+        );
+    }
 }

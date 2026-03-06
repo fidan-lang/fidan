@@ -2315,12 +2315,22 @@ impl TypeChecker {
     /// Validate a list of decorators, emitting W2004 for any that are not
     /// recognised by the compiler.
     ///
-    /// Recognised decorators: `precompile`, `deprecated`.
+    /// Recognised decorators: `precompile`, `deprecated`, and any user-defined
+    /// action that is in scope (custom decorator pattern from §22.11).
     fn check_decorators(&mut self, decorators: &[Decorator]) {
         const KNOWN: &[&str] = &["precompile", "deprecated"];
         for dec in decorators {
             let name = self.interner.resolve(dec.name);
-            if !KNOWN.contains(&name.as_ref()) {
+            if KNOWN.contains(&name.as_ref()) {
+                continue; // built-in decorator — always valid
+            }
+            // A user-defined action in scope is a valid custom decorator.
+            let is_user_action = self
+                .table
+                .lookup(dec.name)
+                .map(|i| matches!(i.kind, SymbolKind::Action))
+                .unwrap_or(false);
+            if !is_user_action {
                 self.emit_warning(
                     fidan_diagnostics::diag_code!("W2004"),
                     format!("unknown decorator `@{name}` — will be ignored at runtime"),

@@ -408,6 +408,56 @@ impl MirMachine {
     pub fn run(&mut self) -> Result<(), RunError> {
         self.call_stack.clear();
         self.panic_trace.clear();
+
+        // ── Startup: fire custom decorator calls in declaration order ─────────
+        // Collect into an owned Vec first to avoid holding a borrow on
+        // `self.program` while calling `call_function` (which needs &mut self).
+        let decorator_dispatch: Vec<(FunctionId, Vec<FidanValue>)> = {
+            let mut entries = Vec::new();
+            for func in self.program.functions.iter() {
+                if func.custom_decorators.is_empty() {
+                    continue;
+                }
+                let fn_name = self.interner.resolve(func.name).to_string();
+                for (dec_fn_id, extra_args) in &func.custom_decorators {
+                    let mut args: Vec<FidanValue> = Vec::with_capacity(extra_args.len() + 1);
+                    args.push(FidanValue::String(FidanString::new(&fn_name)));
+                    args.extend(extra_args.iter().cloned().map(mir_lit_to_value));
+                    entries.push((*dec_fn_id, args));
+                }
+            }
+            entries
+        };
+        for (dec_fn_id, args) in decorator_dispatch {
+            match self.call_function(dec_fn_id, args) {
+                Ok(_) => {}
+                Err(MirSignal::Throw(v)) => {
+                    return Err(RunError {
+                        code: fidan_diagnostics::diag_code!("R0001"),
+                        message: format!(
+                            "decorator: unhandled exception: {}",
+                            builtins::display(&v)
+                        ),
+                        trace: std::mem::take(&mut self.panic_trace),
+                    })
+                }
+                Err(MirSignal::Panic(msg)) => {
+                    return Err(RunError {
+                        code: fidan_diagnostics::diag_code!("R0001"),
+                        message: format!("decorator panicked: {msg}"),
+                        trace: std::mem::take(&mut self.panic_trace),
+                    })
+                }
+                Err(MirSignal::ParallelFail(msg)) => {
+                    return Err(RunError {
+                        code: fidan_diagnostics::diag_code!("R9001"),
+                        message: msg,
+                        trace: std::mem::take(&mut self.panic_trace),
+                    })
+                }
+            }
+        }
+
         let entry = FunctionId(0);
         match self.call_function(entry, vec![]) {
             Ok(_) => Ok(()),

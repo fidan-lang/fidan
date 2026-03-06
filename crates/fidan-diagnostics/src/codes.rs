@@ -13,6 +13,7 @@
 //! | E4xxx  | Concurrency / safety errors       |
 //! | W1xxx  | Warnings — lifecycle              |
 //! | W2xxx  | Warnings — style / lint           |
+//! | W5xxx  | Warnings — performance hints      |
 //! | R1xxx  | Runtime — execution / control     |
 //! | R2xxx  | Runtime — arithmetic / bounds     |
 //! | R3xxx  | Runtime — I/O                     |
@@ -244,6 +245,27 @@ pub static CODES: &[DiagnosticCode] = &[
         code: "R9001",
         title: "one or more tasks failed in a `parallel` block",
         category: "parallel",
+    },
+    // ── Performance hints ────────────────────────────────────────────────────
+    DiagnosticCode {
+        code: "W5001",
+        title: "loop body uses `flexible` (dynamic) type — JIT cannot specialize",
+        category: "performance",
+    },
+    DiagnosticCode {
+        code: "W5002",
+        title: "loop closure captures mutable outer variable — prevents hoisting",
+        category: "performance",
+    },
+    DiagnosticCode {
+        code: "W5003",
+        title: "action called in hot loop path but lacks `@precompile`",
+        category: "performance",
+    },
+    DiagnosticCode {
+        code: "W5004",
+        title: "`@precompile` has no effect in AOT build mode",
+        category: "performance",
     },
 ];
 

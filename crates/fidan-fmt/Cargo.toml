@@ -11,3 +11,4 @@ fidan-parser = { workspace = true }
 
 [dev-dependencies]
 fidan-parser = { workspace = true }
+fidan-diagnostics = { workspace = true }

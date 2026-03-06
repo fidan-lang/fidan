@@ -116,7 +116,30 @@ pub struct HirFunction {
     /// `true` when the `@precompile` decorator was applied — the JIT should
     /// compile this function eagerly before the first call.
     pub precompile: bool,
+    /// User-defined (custom) decorators applied to this function.
+    pub custom_decorators: Vec<CustomDecorator>,
     pub span: Span,
+}
+
+/// A compile-time literal argument to a user-defined decorator.
+#[derive(Debug, Clone)]
+pub enum DecoratorArg {
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+}
+
+/// A user-defined decorator application on a function.
+///
+/// At program startup the runtime calls `decorator_action(fn_name, arg1, arg2, ...)`
+/// for every `CustomDecorator` entry on a function, in declaration order.
+#[derive(Debug, Clone)]
+pub struct CustomDecorator {
+    /// The name of the decorator action (resolved at HIR-lowering time).
+    pub name: Symbol,
+    /// Compile-time literal arguments beyond the implicit `fn_name: string` first arg.
+    pub args: Vec<DecoratorArg>,
 }
 
 #[derive(Debug)]

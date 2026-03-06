@@ -705,7 +705,12 @@ impl<'t> Parser<'t> {
                             self.advance();
                             continue;
                         }
-                        params.push(self.parse_single_param());
+                        match self.peek() {
+                            TokenKind::Certain | TokenKind::Optional | TokenKind::Ident(_) => {
+                                params.push(self.parse_single_param());
+                            }
+                            _ => break, // unrecognised token — stop before looping forever
+                        }
                     }
                     self.eat(&TokenKind::RParen);
                 }

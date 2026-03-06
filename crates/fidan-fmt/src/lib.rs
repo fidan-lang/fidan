@@ -213,4 +213,68 @@ mod tests {
         // not differ — the key is that the function doesn't panic.
         let _ = check_formatted(src, &FormatOptions::default());
     }
+
+    // ── Round-trip ────────────────────────────────────────────────────────
+
+    /// Format `test/examples/test.fdn`, re-parse the result, and verify:
+    ///   1. The second parse produces zero errors.
+    ///   2. The top-level item count is preserved.
+    ///   3. A third format pass is identical to the second (idempotence).
+    #[test]
+    fn round_trip_test_fdn() {
+        use fidan_diagnostics::Severity;
+        use fidan_lexer::{Lexer, SymbolInterner};
+        use fidan_source::{FileId, SourceFile};
+        use std::sync::Arc;
+
+        // ── locate test/examples/test.fdn relative to workspace root ──────
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest.parent().unwrap().parent().unwrap();
+        let path = workspace.join("test").join("examples").join("test.fdn");
+        let original = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+
+        // ── count top-level items in the original source ───────────────────
+        let item_count_original = {
+            let interner = Arc::new(SymbolInterner::new());
+            let file = SourceFile::new(FileId(0), "<original>", original.as_str());
+            let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, _) = fidan_parser::parse(&tokens, FileId(0), interner);
+            module.items.len()
+        };
+
+        // ── pass 1: format the original ───────────────────────────────────
+        let opts = FormatOptions::default();
+        let formatted = format_source(&original, &opts);
+
+        // ── pass 2: re-parse the formatted source — must be error-free ────
+        let item_count_formatted = {
+            let interner = Arc::new(SymbolInterner::new());
+            let file = SourceFile::new(FileId(0), "<formatted>", formatted.as_str());
+            let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, diags) = fidan_parser::parse(&tokens, FileId(0), interner);
+            let errors: Vec<_> = diags
+                .iter()
+                .filter(|d| d.severity == Severity::Error)
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "re-parsing formatted source produced errors:\n{errors:#?}\n\nFormatted source:\n{formatted}"
+            );
+            module.items.len()
+        };
+
+        // ── item count must be preserved ──────────────────────────────────
+        assert_eq!(
+            item_count_original, item_count_formatted,
+            "top-level item count changed after formatting: {item_count_original} → {item_count_formatted}"
+        );
+
+        // ── idempotence: a second format pass must be a no-op ─────────────
+        let formatted2 = format_source(&formatted, &opts);
+        assert_eq!(
+            formatted, formatted2,
+            "formatter is not idempotent on test.fdn!\nfirst pass:\n{formatted}\nsecond pass:\n{formatted2}"
+        );
+    }
 }

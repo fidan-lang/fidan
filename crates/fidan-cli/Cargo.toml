@@ -25,3 +25,4 @@ clap = { workspace = true }
 anyhow = { workspace = true }
 rustyline = { workspace = true }
 mimalloc = { workspace = true }
+notify = { workspace = true }

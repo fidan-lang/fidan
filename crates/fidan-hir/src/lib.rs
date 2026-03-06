@@ -4,9 +4,9 @@ mod hir;
 mod lower;
 
 pub use hir::{
-    HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr, HirExprKind,
-    HirField, HirFunction, HirGlobal, HirInterpPart, HirModule, HirObject, HirParam, HirStmt,
-    HirTask, HirTestDecl, HirUseDecl,
+    CustomDecorator, DecoratorArg, HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf,
+    HirExpr, HirExprKind, HirField, HirFunction, HirGlobal, HirInterpPart, HirModule, HirObject,
+    HirParam, HirStmt, HirTask, HirTestDecl, HirUseDecl,
 };
 pub use lower::{lower_module, merge_module};
 

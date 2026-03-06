@@ -357,6 +357,10 @@ pub struct MirFunction {
     pub local_count: u32,
     /// `true` when `@precompile` was applied — JIT should compile eagerly.
     pub precompile: bool,
+    /// User-defined decorator calls to fire at program startup before the init function.
+    /// Each entry is `(decorator_fn_id, extra_args)`.  The runtime prepends the decorated
+    /// function's name as the first string argument when dispatching.
+    pub custom_decorators: Vec<(FunctionId, Vec<MirLit>)>,
 }
 
 impl MirFunction {
@@ -369,6 +373,7 @@ impl MirFunction {
             blocks: vec![],
             local_count: 0,
             precompile: false,
+            custom_decorators: vec![],
         }
     }
 

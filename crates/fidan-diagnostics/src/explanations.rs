@@ -820,6 +820,102 @@ so you can diagnose them together.
 "#,
         ),
 
+        // ── Performance hints ─────────────────────────────────────────────────
+        "W5001" => Some(
+            r#"A loop body contains a local variable with type `flexible` (dynamic)
+that is produced by a function call and then used as an argument to
+another call, field access, or index access.
+
+Because the type is only known at runtime, the JIT compiler cannot
+specialize the loop body — every iteration incurs dynamic dispatch
+overhead.
+
+Erroneous example:
+
+    action process_items with (certain items -> list) {
+        for item in items {
+            var result = transform(item)   # result: flexible
+            print(result.name)             # W5001: dynamic field access in loop
+        }
+    }
+
+Fix — option A: annotate the enclosing action with `@precompile`:
+
+    @precompile
+    action process_items with (certain items -> list) {
+        for item in items {
+            var result = transform(item)
+            print(result.name)
+        }
+    }
+
+Fix — option B: replace `flexible` with a concrete type (e.g. `string`):
+
+    action transform with (certain x -> integer) returns string { ... }
+
+    action process_items with (certain items -> list oftype integer) {
+        for item in items {
+            var result oftype string = transform(item)  # concrete type
+            print(result)
+        }
+    }
+
+Note: this hint is a best-effort static analysis.  Not every dynamic
+variable in a loop causes a measurable slowdown — profile first.
+Use `--strict` to treat performance hints as hard errors.
+"#,
+        ),
+
+        "W5002" => Some(
+            r#"A closure defined inside a loop body captures a mutable variable
+from the enclosing scope.  This prevents the JIT from hoisting the
+closure's code out of the loop and may inhibit optimization.
+
+This hint is reserved for a future pass that tracks closure upvalues.
+"#,
+        ),
+
+        "W5003" => Some(
+            r#"An action is called on every iteration of a loop, but it is not
+annotated with `@precompile`.  Without `@precompile` the JIT will
+compile the action lazily on first call; subsequent calls are fast,
+but the first call incurs compilation latency inside the hot path.
+
+Erroneous example:
+
+    action helper with (certain x -> integer) returns integer {
+        return x * 2
+    }
+
+    action main {
+        for i in range(1000000) {
+            var y = helper(i)   # W5003: `helper` not @precompile
+        }
+    }
+
+Fix — annotate `helper` with `@precompile`:
+
+    @precompile
+    action helper with (certain x -> integer) returns integer {
+        return x * 2
+    }
+
+`@precompile` tells the JIT to compile the action eagerly before the
+program starts executing, so there is no per-call compilation overhead.
+"#,
+        ),
+
+        "W5004" => Some(
+            r#"`@precompile` is a hint to the Cranelift JIT to eagerly compile an
+action before execution begins.  In AOT (ahead-of-time) build mode all
+actions are already fully compiled before the program runs, so the
+annotation has no additional effect and can be removed.
+
+To silence this warning, remove `@precompile` from the action
+declaration or switch to a JIT / interpreter build target.
+"#,
+        ),
+
         _ => None,
     }
 }

@@ -14,8 +14,8 @@ use std::rc::Rc;
 
 use fidan_ast::BinOp;
 use fidan_hir::{
-    HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr, HirExprKind,
-    HirFunction, HirInterpPart, HirModule, HirStmt,
+    DecoratorArg, HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr,
+    HirExprKind, HirFunction, HirInterpPart, HirModule, HirStmt,
 };
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_typeck::FidanType;
@@ -2644,6 +2644,34 @@ pub fn lower_program(
         }
 
         prog.objects.push(obj_info);
+    }
+
+    // ── Post-pass: resolve custom decorator references now that all FunctionIds are known ──
+    // `fn_map` maps top-level Symbol → FunctionId (built in pre-pass ②).
+    for hir_func in &hir.functions {
+        if hir_func.custom_decorators.is_empty() {
+            continue;
+        }
+        if let Some(&decorated_fn_id) = fn_map.get(&hir_func.name) {
+            for custom_dec in &hir_func.custom_decorators {
+                if let Some(&dec_fn_id) = fn_map.get(&custom_dec.name) {
+                    let lit_args: Vec<MirLit> = custom_dec
+                        .args
+                        .iter()
+                        .map(|a| match a {
+                            DecoratorArg::Int(v) => MirLit::Int(*v),
+                            DecoratorArg::Float(v) => MirLit::Float(*v),
+                            DecoratorArg::Str(v) => MirLit::Str(v.clone()),
+                            DecoratorArg::Bool(v) => MirLit::Bool(*v),
+                        })
+                        .collect();
+                    prog.functions[decorated_fn_id.0 as usize]
+                        .custom_decorators
+                        .push((dec_fn_id, lit_args));
+                }
+                // If decorator fn not found, W2004 already emitted by typeck — skip silently
+            }
+        }
     }
 
     // Shared queue for deferred parallel-for body functions.

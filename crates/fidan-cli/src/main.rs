@@ -57,6 +57,9 @@ enum Command {
         /// Treat select warnings (W1001–W1003, W2004–W2006) as errors
         #[arg(long)]
         strict: bool,
+        /// Watch source files and re-run automatically on change
+        #[arg(long)]
+        reload: bool,
     },
     /// Compile a Fidan source file to a native binary
     Build {
@@ -130,6 +133,14 @@ enum Command {
     Explain {
         /// Diagnostic code
         code: String,
+    },
+    /// Scaffold a new Fidan project in a new directory
+    New {
+        /// Name of the project (also the directory name)
+        project_name: String,
+        /// Output directory (default: current directory)
+        #[arg(short, long)]
+        dir: Option<PathBuf>,
     },
 }
 
@@ -278,7 +289,122 @@ fn run_fix(file: PathBuf, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-// ── Formatter ─────────────────────────────────────────────────────────────────
+// ── Hot Reload ────────────────────────────────────────────────────────────────
+
+/// Run a Fidan program and re-run it whenever any watched source file changes.
+///
+/// On each file-save event the full pipeline is re-run from scratch (lex →
+/// parse → typecheck → HIR/MIR → interpret).  This is clean and correct
+/// because all pipeline state is freshly constructed per run.
+fn run_with_reload(opts: CompileOptions) -> Result<()> {
+    use notify::{Event, RecursiveMode, Watcher, recommended_watcher};
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    let watch_path = opts.input.clone();
+
+    // Collect the initial set of files to watch.  After Phase 7 the import
+    // system is in place, so we watch the entry point + all `.fdn` siblings
+    // in the same directory as a pragmatic approximation.
+    let watch_dir = watch_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+
+    let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
+    let mut watcher = recommended_watcher(tx)?;
+    watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
+
+    eprintln!(
+        "\x1b[2m[reload] watching {} — Ctrl+C to stop\x1b[0m",
+        watch_dir.display()
+    );
+
+    // Run once immediately on startup.
+    run_pipeline(opts.clone())?;
+
+    // Debounce: ignore events that arrive within 100 ms of the last one.
+    let debounce = Duration::from_millis(100);
+    let mut last_event = Instant::now() - debounce;
+
+    loop {
+        match rx.recv() {
+            Ok(Ok(event)) => {
+                // Only react to write/create/remove events on `.fdn` files.
+                let is_fdn = event.paths.iter().any(|p| {
+                    p.extension().and_then(|e| e.to_str()) == Some("fdn")
+                });
+                if !is_fdn {
+                    continue;
+                }
+                // Drain any queued events to debounce.
+                while rx.try_recv().is_ok() {}
+                if last_event.elapsed() < debounce {
+                    continue;
+                }
+                last_event = Instant::now();
+
+                // Print a brief diff summary.
+                let changed: Vec<String> = event
+                    .paths
+                    .iter()
+                    .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+                    .collect();
+                eprintln!(
+                    "\x1b[2m[reload] {} changed — re-running\x1b[0m",
+                    changed.join(", ")
+                );
+
+                // Re-run — errors are printed but do not stop the watcher.
+                let _ = run_pipeline(opts.clone());
+            }
+            Ok(Err(e)) => eprintln!("[reload] watcher error: {e}"),
+            Err(_) => break, // channel closed
+        }
+    }
+    Ok(())
+}
+
+fn run_new(project_name: &str, parent_dir: Option<&PathBuf>) -> Result<()> {
+    let base = parent_dir
+        .cloned()
+        .unwrap_or_else(|| std::env::current_dir().expect("cannot read cwd"));
+    let project_dir = base.join(project_name);
+
+    if project_dir.exists() {
+        bail!("directory {:?} already exists", project_dir);
+    }
+
+    std::fs::create_dir_all(&project_dir)
+        .with_context(|| format!("cannot create directory {:?}", project_dir))?;
+
+    // main.fdn — boilerplate entry point
+    let main_src = format!(
+        concat!(
+            "# {name}\n",
+            "# Entry point — run with: fidan run main.fdn\n",
+            "\n",
+            "action main() {{\n",
+            "    print(\"Hello from {name}!\")\n",
+            "}}\n",
+            "\n",
+            "main()\n"
+        ),
+        name = project_name
+    );
+    std::fs::write(project_dir.join("main.fdn"), &main_src)
+        .with_context(|| "cannot write main.fdn")?;
+
+    render_message_to_stderr(
+        Severity::Note,
+        "",
+        &format!(
+            "created project `{}` — run: fidan run {}/main.fdn",
+            project_name, project_name
+        ),
+    );
+    Ok(())
+}
 
 fn run_fmt(
     file: PathBuf,
@@ -341,6 +467,7 @@ fn main() -> Result<()> {
             max_errors,
             jit_threshold,
             strict,
+            reload,
         } => {
             let emit_kinds = parse_emit(&emit)?;
             let trace_mode = parse_trace(&trace)?;
@@ -358,7 +485,11 @@ fn main() -> Result<()> {
                 jit_threshold,
                 strict_mode: strict,
             };
-            run_pipeline(opts)
+            if reload {
+                run_with_reload(opts)
+            } else {
+                run_pipeline(opts)
+            }
         }
         Command::Build {
             file, output, emit, ..
@@ -419,6 +550,7 @@ fn main() -> Result<()> {
             fidan_lsp::run();
             Ok(())
         }
+        Command::New { project_name, dir } => run_new(&project_name, dir.as_ref()),
     }
 }
 
@@ -484,7 +616,7 @@ fn render_trace_to_stderr(trace: &[fidan_interp::TraceFrame], mode: TraceMode) {
 fn is_strict_escalated(code: &str) -> bool {
     matches!(
         code,
-        "W1001" | "W1002" | "W1003" | "W2004" | "W2005" | "W2006"
+        "W1001" | "W1002" | "W1003" | "W2004" | "W2005" | "W2006" | "W5001"
     )
 }
 
@@ -538,6 +670,24 @@ fn emit_mir_safety_diags(
             ),
         );
         if strict_mode {
+            errs += 1;
+        }
+    }
+
+    // ── W5001 / W5003: compile-time slow hints ────────────────────────────────
+    for diag in fidan_passes::check_slow_hints(mir, interner) {
+        let code = match diag.code {
+            "W5001" => fidan_diagnostics::diag_code!("W5001"),
+            "W5003" => fidan_diagnostics::diag_code!("W5003"),
+            _ => continue,
+        };
+        let sev = if strict_mode && diag.code == "W5001" {
+            Severity::Error
+        } else {
+            Severity::Warning
+        };
+        render_message_to_stderr(sev, code, &diag.context);
+        if strict_mode && diag.code == "W5001" {
             errs += 1;
         }
     }
