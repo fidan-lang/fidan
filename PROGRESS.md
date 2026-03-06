@@ -509,6 +509,8 @@ stdin sequence with `fidan run <file> --replay <id>`.
 | List comprehension (`[x * 2 for x in items if x > 0]`) | ✅ | Parser production + HIR desugar to `for` loop that appends to a fresh list local; `if` guard as conditional append; nested comprehensions supported. |
 | Dict comprehension (`{k: v for k, v in pairs}`) | ✅ | Same desugaring as list comprehension; emits `Dict` insert calls; destructuring iteration over list-of-tuples or dict entries. |
 | `test{}` blocks | ✅ | `parse_test_decl()` → `HirTestDecl` → `MirProgram::test_functions`; `fidan test` command runs them; per-function pass/fail with coloured output. |
+| Enums / ADTs (§22.13) | ⬜ | `enum Direction { North, South }` / `enum Result { Ok(value), Err(msg) }` + `match` exhaustiveness check. Needs `Item::EnumDecl`, `FidanValue::Enum { tag, payload }`, `MirInstr::ConstructEnum`. Earliest: Phase 3 (typeck) + Phase 5 (MIR). |
+| Regex (§22.14) | ⬜ | `/pattern/flags` literals, `regex` stdlib module, DFA engine (linear time). Transparent Cranelift native DFA emit after Phase 9. Earliest: Phase 7 (stdlib). |
 
 ---
 

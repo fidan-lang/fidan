@@ -114,6 +114,281 @@ const STD_MODULES: &[(&str, &str)] = &[
     ("env", "Environment variables, platform info"),
 ];
 
+/// Members exported by each implemented stdlib module.
+/// Kept in sync with each module's `exported_names()` function.
+const STD_MODULE_MEMBERS: &[(&str, &[&str])] = &[
+    (
+        "io",
+        &[
+            "print",
+            "println",
+            "eprint",
+            "readLine",
+            "read_line",
+            "readline",
+            "readFile",
+            "read_file",
+            "writeFile",
+            "write_file",
+            "appendFile",
+            "append_file",
+            "deleteFile",
+            "delete_file",
+            "fileExists",
+            "file_exists",
+            "exists",
+            "isFile",
+            "is_file",
+            "isDir",
+            "is_dir",
+            "makeDir",
+            "make_dir",
+            "mkdir",
+            "listDir",
+            "list_dir",
+            "readDir",
+            "read_dir",
+            "copyFile",
+            "copy_file",
+            "renameFile",
+            "rename_file",
+            "join",
+            "joinPath",
+            "join_path",
+            "dirname",
+            "dir_name",
+            "basename",
+            "base_name",
+            "fileName",
+            "file_name",
+            "extension",
+            "cwd",
+            "currentDir",
+            "current_dir",
+            "absolutePath",
+            "absolute_path",
+            "getEnv",
+            "get_env",
+            "env",
+            "setEnv",
+            "set_env",
+            "args",
+            "argv",
+            "flush",
+            "isatty",
+        ],
+    ),
+    (
+        "math",
+        &[
+            "sin",
+            "cos",
+            "tan",
+            "asin",
+            "acos",
+            "atan",
+            "atan2",
+            "sinh",
+            "cosh",
+            "tanh",
+            "sqrt",
+            "cbrt",
+            "pow",
+            "exp",
+            "exp2",
+            "log",
+            "log2",
+            "log10",
+            "logN",
+            "floor",
+            "ceil",
+            "round",
+            "trunc",
+            "fract",
+            "abs",
+            "sign",
+            "signum",
+            "min",
+            "max",
+            "clamp",
+            "hypot",
+            "pi",
+            "e",
+            "tau",
+            "inf",
+            "nan",
+            "isNan",
+            "is_nan",
+            "isInfinite",
+            "is_infinite",
+            "isFinite",
+            "is_finite",
+            "random",
+            "randomInt",
+            "random_int",
+            "toDeg",
+            "to_deg",
+            "degrees",
+            "toRad",
+            "to_rad",
+            "radians",
+        ],
+    ),
+    (
+        "string",
+        &[
+            "toUpper",
+            "upper",
+            "toLower",
+            "lower",
+            "capitalize",
+            "trim",
+            "trimStart",
+            "ltrim",
+            "trim_start",
+            "trimEnd",
+            "rtrim",
+            "trim_end",
+            "split",
+            "join",
+            "lines",
+            "contains",
+            "startsWith",
+            "starts_with",
+            "endsWith",
+            "ends_with",
+            "indexOf",
+            "index_of",
+            "lastIndexOf",
+            "last_index_of",
+            "replace",
+            "replaceFirst",
+            "replace_first",
+            "slice",
+            "substr",
+            "padStart",
+            "pad_start",
+            "padEnd",
+            "pad_end",
+            "repeat",
+            "reverse",
+            "len",
+            "length",
+            "isEmpty",
+            "is_empty",
+            "format",
+            "parseInt",
+            "parse_int",
+            "parseFloat",
+            "parse_float",
+            "chars",
+            "bytes",
+            "fromChars",
+            "from_chars",
+            "charCode",
+            "char_code",
+            "fromCharCode",
+            "from_char_code",
+        ],
+    ),
+    (
+        "collections",
+        &[
+            "range",
+            "Set",
+            "setAdd",
+            "set_add",
+            "setRemove",
+            "set_remove",
+            "setContains",
+            "set_contains",
+            "setToList",
+            "set_to_list",
+            "setLen",
+            "set_len",
+            "setUnion",
+            "set_union",
+            "setIntersect",
+            "set_intersect",
+            "setDiff",
+            "set_diff",
+            "Queue",
+            "enqueue",
+            "dequeue",
+            "peek",
+            "Stack",
+            "push",
+            "pop",
+            "top",
+            "stackPeek",
+            "flatten",
+            "zip",
+            "unique",
+            "dedup",
+            "reverse",
+            "sort",
+            "count",
+            "length",
+            "len",
+            "isEmpty",
+            "is_empty",
+            "concat",
+            "slice",
+            "first",
+            "last",
+            "join",
+            "sum",
+            "product",
+            "min",
+            "max",
+        ],
+    ),
+    (
+        "time",
+        &[
+            "now",
+            "timestamp",
+            "sleep",
+            "wait",
+            "elapsed",
+            "date",
+            "time",
+            "datetime",
+            "format",
+            "year",
+            "month",
+            "day",
+            "hour",
+            "minute",
+            "second",
+            "weekday",
+        ],
+    ),
+    (
+        "parallel",
+        &[
+            "parallelMap",
+            "parallel_map",
+            "parallelFilter",
+            "parallel_filter",
+            "parallelForEach",
+            "parallel_for_each",
+            "parallelReduce",
+            "parallel_reduce",
+        ],
+    ),
+];
+
+/// Returns the exported member names for a stdlib module, or an empty slice
+/// if the module is not found. Used by both import-context and dot-completion.
+fn stdlib_members(mod_name: &str) -> &'static [&'static str] {
+    STD_MODULE_MEMBERS
+        .iter()
+        .find(|(name, _)| *name == mod_name)
+        .map(|(_, fns)| *fns)
+        .unwrap_or(&[])
+}
+
 // ── Named-arg goto-def result ───────────────────────────────────────────────
 enum NamedArgLookup {
     /// Parameter declaration found in the current document.
@@ -168,6 +443,9 @@ impl FidanLsp {
             })
             .collect();
 
+        let stdlib_import_map: HashMap<String, String> =
+            result.stdlib_imports.into_iter().collect();
+
         self.store.insert(
             uri.clone(),
             Document {
@@ -178,6 +456,7 @@ impl FidanLsp {
                 symbol_table: result.symbol_table,
                 identifier_spans: result.identifier_spans,
                 imports: import_urls.clone(),
+                stdlib_imports: stdlib_import_map,
                 inlay_hint_sites: result.inlay_hint_sites,
             },
         );
@@ -209,6 +488,7 @@ impl FidanLsp {
                             symbol_table: r.symbol_table,
                             identifier_spans: r.identifier_spans,
                             imports: HashMap::new(),
+                            stdlib_imports: HashMap::new(),
                             inlay_hint_sites: vec![], // not shown for background docs
                         },
                     );
@@ -649,6 +929,7 @@ impl LanguageServer for FidanLsp {
             CrossDoc(String, String),                 // (type_name, member_name)
             CrossDocNamedArg(String, String, String), // (recv_ty, method_name, param_name)
             ImportDoc(Url, String), // (import_file_url, symbol_name) — for `module.Type`
+            OpenFile(Url),          // open the imported file at line 0 (alias goto-def)
             NotFound,
         }
 
@@ -716,6 +997,9 @@ impl LanguageServer for FidanLsp {
                         None => named_arg.map(named_to_phase1).unwrap_or(Phase1::NotFound),
                     }
                 }
+            } else if let Some(import_url) = doc.imports.get(cur_name.as_str()) {
+                // Cursor is on a module alias itself — open the imported file.
+                Phase1::OpenFile(import_url.clone())
             } else {
                 named_arg.map(named_to_phase1).unwrap_or(Phase1::NotFound)
             };
@@ -755,6 +1039,7 @@ impl LanguageServer for FidanLsp {
                 };
                 (url, span)
             }
+            Phase1::OpenFile(url) => (url, Span::default()),
             Phase1::NotFound => return Ok(None),
         };
 
@@ -795,8 +1080,10 @@ impl LanguageServer for FidanLsp {
         enum DotResolution {
             /// Receiver is a variable/object — use `collect_type_members`.
             TypeName(String),
-            /// Receiver is a module-alias import — show its top-level exports.
+            /// Receiver is a file-module alias import — show its top-level exports.
             ModuleAlias(Url),
+            /// Receiver is a stdlib module alias — show its exported member names.
+            StdLibModule(String),
         }
 
         struct Phase1 {
@@ -820,6 +1107,8 @@ impl LanguageServer for FidanLsp {
             StdLib(String),
             /// After `use ` (bare identifier) — partial user-module name.
             BareIdent(String),
+            /// Inside `use std.<module>.{partial` — show members of that module.
+            StdLibMember(String, String), // (module_name, partial)
         }
 
         let phase1 = {
@@ -851,8 +1140,22 @@ impl LanguageServer for FidanLsp {
                         // File-path import: `use "partial/path`
                         Some(ImportContext::FilePath(inside.to_string()))
                     } else if let Some(after_std) = rest.strip_prefix("std.") {
-                        // Stdlib import: `use std.partial`
-                        Some(ImportContext::StdLib(after_std.to_string()))
+                        // Check for grouped/destructured import: `use std.io.{partial`
+                        if let Some(dot_brace) = after_std.find(".{") {
+                            let mod_name = after_std[..dot_brace].to_string();
+                            let after_brace = &after_std[dot_brace + 2..];
+                            // partial = text after the last comma (handles `use std.io.{a, b`)
+                            let partial = after_brace
+                                .rsplit(',')
+                                .next()
+                                .unwrap_or(after_brace)
+                                .trim_start()
+                                .to_string();
+                            Some(ImportContext::StdLibMember(mod_name, partial))
+                        } else {
+                            // Plain stdlib module completion: `use std.partial`
+                            Some(ImportContext::StdLib(after_std.to_string()))
+                        }
                     } else if !rest.is_empty()
                         && rest
                             .chars()
@@ -892,6 +1195,8 @@ impl LanguageServer for FidanLsp {
                     if let Some(rn) = recv {
                         if let Some(url) = doc.imports.get(rn.as_str()) {
                             Some(DotResolution::ModuleAlias(url.clone()))
+                        } else if let Some(mod_name) = doc.stdlib_imports.get(rn.as_str()) {
+                            Some(DotResolution::StdLibModule(mod_name.clone()))
                         } else {
                             doc.symbol_table
                                 .get(rn.as_str())
@@ -1202,6 +1507,18 @@ impl LanguageServer for FidanLsp {
 
                     items
                 }
+                ImportContext::StdLibMember(mod_name, partial) => {
+                    // Suggest members of `std.<mod_name>` that start with `partial`.
+                    stdlib_members(&mod_name)
+                        .iter()
+                        .filter(|name| name.starts_with(partial.as_str()))
+                        .map(|name| CompletionItem {
+                            label: name.to_string(),
+                            kind: Some(CompletionItemKind::FUNCTION),
+                            ..Default::default()
+                        })
+                        .collect()
+                }
             };
             return Ok(Some(CompletionResponse::Array(items)));
         }
@@ -1264,6 +1581,17 @@ impl LanguageServer for FidanLsp {
                                 })),
                                 ..Default::default()
                             }
+                        })
+                        .collect();
+                    return Ok(Some(CompletionResponse::Array(items)));
+                }
+                DotResolution::StdLibModule(mod_name) => {
+                    let items: Vec<CompletionItem> = stdlib_members(&mod_name)
+                        .iter()
+                        .map(|name| CompletionItem {
+                            label: name.to_string(),
+                            kind: Some(CompletionItemKind::FUNCTION),
+                            ..Default::default()
                         })
                         .collect();
                     return Ok(Some(CompletionResponse::Array(items)));

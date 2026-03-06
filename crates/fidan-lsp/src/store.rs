@@ -102,7 +102,7 @@ impl DocumentStore {
                 .value()
                 .symbol_table
                 .all()
-                .filter(|(name, _)| !name.contains('.'))
+                .filter(|(name, entry)| !name.contains('.') && !entry.is_param)
                 .map(|(n, e)| (n.clone(), e.clone()))
                 .collect(),
             None => vec![],

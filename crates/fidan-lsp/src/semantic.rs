@@ -275,6 +275,13 @@ fn classify(sym: &str, prev: Option<&TokenKind>, next: Option<&TokenKind>) -> (u
         return (TT_VARIABLE, TM_DECLARATION);
     }
 
+    // ── `use MODULE.PATH` — colour the first segment after `use` as a class
+    // (yellow). The outer-loop `prev_emitted_tt` chain propagates TT_CLASS
+    // through subsequent dotted segments automatically.
+    if matches!(prev, Some(TokenKind::Use)) {
+        return (TT_CLASS, 0);
+    }
+
     // ── Import alias `use ... as NAME` ───────────────────────────────────────
     // Always a namespace/module alias — colour it like a class (yellow).
     if matches!(prev, Some(TokenKind::As)) {

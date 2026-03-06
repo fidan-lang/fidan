@@ -24,6 +24,9 @@ pub struct Document {
     pub identifier_spans: Vec<(Span, String)>,
     /// Namespace alias → absolute file URL for `use "file.fdn" as alias` imports.
     pub imports: HashMap<String, Url>,
+    /// Stdlib module alias → canonical module name. E.g. `use std.io` → `"io" → "io"`;
+    /// `use std.math as m` → `"m" → "math"`.
+    pub stdlib_imports: HashMap<String, String>,
     /// Inlay hint positions computed during the last analysis pass.
     pub inlay_hint_sites: Vec<InlayHintSite>,
 }

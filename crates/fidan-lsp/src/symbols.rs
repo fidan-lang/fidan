@@ -43,6 +43,9 @@ pub struct SymbolEntry {
     /// Parameter names with their declaration spans, for named-argument go-to-definition.
     /// E.g. `foo(times = 10)` — clicking `times` jumps to the `times` param span.
     pub param_names: Vec<(String, Span)>,
+    /// `true` when this entry was created from an action parameter.
+    /// Used to hide parameters from cross-module completion lists.
+    pub is_param: bool,
 }
 
 /// Per-document symbol registry built after every analysis pass.
@@ -100,6 +103,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 param_required: info.params.iter().map(|p| !p.optional).collect(),
                 return_type: Some(type_name(&info.return_ty, interner)),
                 param_names: vec![],
+                is_param: false,
             },
         );
     }
@@ -121,6 +125,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 param_required: vec![],
                 return_type: None,
                 param_names: vec![],
+                is_param: false,
             },
         );
 
@@ -145,6 +150,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     param_required: minfo.params.iter().map(|p| !p.optional).collect(),
                     return_type: Some(type_name(&minfo.return_ty, interner)),
                     param_names: vec![],
+                    is_param: false,
                 },
             );
         }
@@ -166,6 +172,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     param_required: vec![],
                     return_type: None,
                     param_names: vec![],
+                    is_param: false,
                 },
             );
         }
@@ -242,6 +249,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                         param_required: vec![],
                         return_type: None,
                         param_names: vec![],
+                        is_param: false,
                     },
                 );
             }
@@ -315,6 +323,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                             param_required: vec![],
                             return_type: None,
                             param_names: vec![],
+                            is_param: true,
                         };
                         scope_params.insert(pname.clone(), entry.clone());
                         // Flat table fallback for files without name collisions.
@@ -360,6 +369,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
             param_required: vec![],
             return_type: Some("string".to_string()),
             param_names: vec![],
+            is_param: false,
         },
     );
 
@@ -403,6 +413,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                         param_required: vec![],
                         return_type: None,
                         param_names: vec![],
+                        is_param: false,
                     },
                 );
             }
@@ -429,6 +440,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                         param_required: minfo.params.iter().map(|p| !p.optional).collect(),
                         return_type: Some(type_name(&minfo.return_ty, interner)),
                         param_names: vec![],
+                        is_param: false,
                     },
                 );
             }

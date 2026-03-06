@@ -3046,6 +3046,174 @@ lowering. High priority for the self-hosting phase. Estimated effort: 2–4 week
 
 ---
 
+---
+
+### 22.14 – Regex with JIT Automaton Compilation
+
+**Elevator pitch:** First-class regex literals with a dedicated syntax, full Unicode support,
+and transparent JIT compilation of the automaton to native code — zero user annotations required.
+
+```fidan
+use std.regex
+
+# Regex literal syntax: /pattern/flags
+var email_pat = /^[\w.+-]+@[\w-]+\.[a-z]{2,}$/i
+var digits    = /\d+/g
+
+# Matching
+if email_pat.matches("user@example.com") {
+    print("valid email")
+}
+
+# Extracting — returns a list oftype string
+var nums = digits.findAll("abc 42 def 7")     # ["42", "7"]
+
+# Capturing groups — returns list oftype list oftype string
+var parts = /(\w+)=(\w+)/.captures("key=value")  # [["key=value", "key", "value"]]
+
+# Replace
+var result = /foo/g.replace("foo bar foo", "baz")   # "baz bar baz"
+```
+
+---
+
+**Transparent JIT compilation — no annotation needed:**
+
+Regex automata are compiled to native code **automatically** at pattern construction time.
+No decorator, no opt-in flag, no user-visible knob of any kind:
+
+| Phase | Regex engine | User action |
+|---|---|---|
+| Phase 7 (stdlib lands) | Interpreted `regex_automata::meta::Regex` (linear DFA, no backtracking) | nothing |
+| Phase 9+ (Cranelift JIT available) | Cranelift-compiled native DFA, triggered at construction | nothing |
+
+A Fidan action that calls `pat.matches(str)` with `@precompile` will have its *surrounding
+Fidan code* JIT-compiled by Cranelift. The regex dispatch inside `matches()` is
+also native, because the automaton was already compiled at the point where the pattern
+was constructed — both layers are native with zero user ceremony.
+
+**Self-hosting note:** Once the stdlib is rewritten in Fidan (self-hosting phase), the
+`regex` module's hot dispatch actions can be annotated with the standard `@precompile`
+decorator like any other action. No separate concept is needed — `@precompile` on a
+regex-heavy action covers both the Fidan glue code and any inlineable dispatch path.
+
+---
+
+**Regex literal syntax:**
+
+```
+/pattern/flags
+```
+
+- Flags: `i` (case-insensitive), `m` (multiline), `s` (dot-all), `g` (global / find-all),
+  `x` (extended / whitespace-ignored)
+- Regex literals are first-class values of type `regex`
+- Constructed once (at the statement where the literal appears), cached automatically —
+  no recompile on repeated calls through the same code path
+
+**Syntax disambiguation:** `/` is also the division operator. The lexer uses the same
+rule as JavaScript (contextual): `/` after an operator, keyword, or open delimiter starts
+a regex literal; `/` after an identifier, closing delimiter, or literal is division.
+
+---
+
+**Automaton construction and caching:**
+
+Every regex literal and every `regex.compile(...)` call produces a `FidanValue::Regex`
+wrapping an `Arc<CompiledRegex>`. The first time the pattern is constructed, the
+interpreted automaton is built. Once Phase 9 Cranelift JIT is active, construction
+also triggers DFA-to-native emission; the native function pointer is cached in the
+`Arc<CompiledRegex>` and all subsequent `.matches()` / `.findAll()` / etc. calls
+dispatch directly to the native path — identical semantics, zero user changes.
+
+The interpreted path (Phase 7+) uses Rust's `regex-automata` crate with its DFA engine —
+already linear time with no backtracking. The JIT path compiles the same DFA state table
+to a Cranelift jump-table function, eliminating the bytecode dispatch overhead.
+
+---
+
+**stdlib `regex` module surface:**
+
+```fidan
+use std.regex
+
+# Construction (also via literal syntax)
+var p = regex.compile("\\d+")
+var p = regex.compile("\\d+", flags: "gi")
+
+# Testing
+p.matches(text oftype string) returns boolean
+p.test(text)                                 # alias for matches
+
+# Extraction
+p.findFirst(text) returns string or nothing
+p.findAll(text)   returns list oftype string
+p.captures(text)  returns list oftype list oftype string
+
+# Replacement
+p.replace(text oftype string, with oftype string) returns string
+p.replaceAll(text, with)                           # alias when flag g is set
+
+# Destructuring a match result
+p.match(text) returns MatchResult or nothing
+# MatchResult fields: .full (string), .groups (list oftype string), .start (int), .end (int)
+
+# Split
+p.split(text) returns list oftype string
+```
+
+---
+
+**Implementation notes (for when this is scheduled):**
+
+1. **Lexer:** Add `TokenKind::RegexLiteral { pattern: Symbol, flags: Symbol }`.
+   Context-sensitive `/` disambiguation via a `last_was_value: bool` flag (same approach
+   as JS lexers).
+
+2. **AST:** `Expr::RegexLit { pattern: String, flags: String, span: Span }`.
+
+3. **Runtime:** New `FidanValue::Regex(Arc<CompiledRegex>)` variant.
+   `CompiledRegex` wraps either:
+   - `regex_automata::meta::Regex` (interpreted path), or
+   - a native function pointer (JIT path, produced by Cranelift)
+
+4. **stdlib `regex` module:** Implements `RegexDispatch` — dispatches `matches`,
+   `findAll`, `captures`, `replace`, etc. via `FidanValue::Regex`.
+
+5. **Transparent JIT trigger:** After Phase 9 (Cranelift available), every `CompiledRegex`
+   construction path checks whether the Cranelift JIT is initialised. If so, it
+   immediately emits native code and caches the function pointer — no decorator, no
+   deferred counter, no user annotation.
+
+6. **Cranelift DFA emission:** The regex automaton (a DFA state table) is lowered to a
+   Cranelift function: a jump table over state transitions, one Cranelift `Block` per DFA
+   state. This reuses the same `CraneliftJit` instance already used for `@precompile`
+   function bodies. Unlike `@precompile` (which triggers at call-count threshold), regex
+   emission is always eager at construction time.
+
+7. **`--sandbox` compatibility:** Regex patterns are pure data-processing; sandboxing has
+   no restrictions on regex. However, a malicious pattern causing catastrophic backtracking
+   is mitigated by using DFA-based matching (linear time guarantee) rather than backtracking
+   NFA engines (PCRE2 / RE2 / Python's `re`).
+
+---
+
+**Why mainstream languages cannot easily replicate the JIT path:**
+
+| Language | Regex JIT story |
+|---|---|
+| Python | `re` module: NFA (backtracking, exponential worst-case). PCRE2 (`regex` package) has optional PCRE2 JIT but requires external C lib. |
+| JavaScript | V8 Irregexp: regex JIT built into the engine but not user-accessible or controllable. |
+| Rust | `regex` crate: DFA (linear), no native-code emission — uses a bytecode interpreter. |
+| Go | `regexp` package: RE2-based, linear, no JIT path. |
+| **Fidan** | **DFA (linear by default) + automatic transparent Cranelift native emission at pattern construction.** |
+
+**Dependency:** Phase 7 (stdlib infrastructure) for the interpreted DFA path; Phase 9
+(Cranelift JIT) for transparent native DFA emission — reuses the same `CraneliftJit`
+instance. Estimated effort: 2–3 weeks for interpreted path; +1 week for Phase 9 JIT integration.
+
+---
+
 ### Feature → Phase Dependency Map
 
 | Feature | Earliest schedulable after | Estimated effort |
@@ -3061,7 +3229,9 @@ lowering. High priority for the self-hosting phase. Estimated effort: 2–4 week
 | 22.2 Explain line | Phase 5 (MIR + typeck) | 2–3 weeks |
 | 22.9 `@extern` FFI (interpreter path) | Phase 5 (MIR interpreter) | 2–4 weeks |
 | 22.13 Enums (ADTs) | Phase 3 (typeck) + Phase 5 (MIR) | 2–4 weeks |
+| 22.14 Regex (interpreted DFA path) | Phase 7 (stdlib) | 2–3 weeks |
 | 22.1 Time-travel debug | Phase 9 (JIT tracing hooks) | 3–5 weeks |
 | 22.9 `@extern` FFI (zero-overhead AOT) | Phase 11 (LLVM AOT) | + 1 week on top of interpreter path |
+| 22.14 Regex (transparent native DFA via Cranelift) | Phase 9 (Cranelift JIT) | + 1 week on top of interpreted path |
 | 22.12 `Stream`/`Handle` & stdio manipulation | self-hosting phase | deferred (needs method dispatch) |
 | 22.10 Native GPU / CUDA (`@gpu`) | Phase 11 (LLVM AOT + NVPTX) | 4–8 weeks after Phase 11 |

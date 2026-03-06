@@ -36,6 +36,9 @@ pub struct AnalysisResult {
     /// File-path imports declared in this document: `(alias_name, file_path_string)`.
     /// E.g. `use "test.fdn" as module` → `("module", "test.fdn")`.
     pub imports: Vec<(String, String)>,
+    /// Stdlib imports: `(alias_name, module_name)`.
+    /// E.g. `use std.io` → `("io", "io")`; `use std.math as m` → `("m", "math")`.
+    pub stdlib_imports: Vec<(String, String)>,
     /// Non-call member accesses where the target type has a cross-module parent.
     pub cross_module_field_accesses: Vec<(String, String, Span)>,
     /// Method call sites on cross-module receivers, with inferred arg types.
@@ -82,6 +85,9 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     // ── File-path import extraction ─────────────────────────────────────
     let imports = extract_imports(&module, &interner);
 
+    // ── Stdlib import extraction (`use std.<module>`) ────────────────────
+    let stdlib_imports = extract_stdlib_imports(&module, &interner);
+
     // ── Dynamic var call sites (cross-module method return type patching) ──
     let dynamic_var_call_sites = extract_dynamic_var_calls(&module, &typed, &interner);
 
@@ -111,6 +117,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
         identifier_spans,
         symbol_table,
         imports,
+        stdlib_imports,
         cross_module_field_accesses,
         cross_module_call_sites,
         dynamic_var_call_sites,
@@ -147,6 +154,46 @@ fn extract_imports(module: &Module, interner: &SymbolInterner) -> Vec<(String, S
                             .to_string()
                     });
                 Some((alias_str, path_str))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Extract `(alias, module_name)` pairs from `use std.<module>` items (namespace imports only).
+/// Grouped/destructured imports (`use std.io.{fn}`) are excluded — those inject free names.
+fn extract_stdlib_imports(module: &Module, interner: &SymbolInterner) -> Vec<(String, String)> {
+    module
+        .items
+        .iter()
+        .filter_map(|&iid| {
+            if let Item::Use {
+                path,
+                alias,
+                grouped,
+                ..
+            } = module.arena.get_item(iid)
+            {
+                // Need at least `std` + one module segment.
+                if path.len() < 2 {
+                    return None;
+                }
+                // Must start with `std`.
+                if interner.resolve(path[0]).as_ref() != "std" {
+                    return None;
+                }
+                // Skip grouped imports — they flatten names into scope, not a namespace.
+                if *grouped {
+                    return None;
+                }
+                // Module name is the second segment (e.g. "io", "math").
+                let module_name = interner.resolve(path[1]).to_string();
+                // Alias: explicit `as name` or implicit last segment.
+                let alias_str = alias
+                    .map(|a| interner.resolve(a).to_string())
+                    .unwrap_or_else(|| module_name.clone());
+                Some((alias_str, module_name))
             } else {
                 None
             }
