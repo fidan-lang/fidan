@@ -532,6 +532,17 @@ impl MirMachine {
             frame.store(param.local, val);
         }
 
+        // Runtime guard: too many arguments are a bug that typeck should have
+        // caught at compile time.  Panic at runtime as a safety net.
+        if args.len() > func.params.len() {
+            let fn_name_s = self.sym_str(func.name).to_string();
+            let expected = func.params.len();
+            let got = args.len();
+            return Err(MirSignal::Panic(format!(
+                "too many arguments to `{fn_name_s}`: expected {expected}, got {got}"
+            )));
+        }
+
         // Consume the call-site span set by exec_instr just before calling us.
         // Push raw fn_id + args into the call stack — the label is built lazily
         // only when a panic/throw actually fires and we need the trace.

@@ -11,9 +11,9 @@
 //!
 //! On the command line:
 //! ```text
-//! fidan fmt file.fdn            # print to stdout
-//! fidan fmt file.fdn --in-place # rewrite in place
-//! fidan fmt file.fdn --check    # exit 1 if not already formatted (CI mode)
+//! fidan format file.fdn            # print to stdout
+//! fidan format file.fdn --in-place # rewrite in place
+//! fidan format file.fdn --check    # exit 1 if not already formatted (CI mode)
 //! ```
 
 pub mod config;
@@ -41,8 +41,7 @@ pub fn format_source(src: &str, opts: &FormatOptions) -> String {
     let interner = Arc::new(SymbolInterner::new());
     let file = SourceFile::new(FileId(0), "<fmt>", src);
     let (tokens, _lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
-    let (module, _parse_diags) =
-        fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+    let (module, _parse_diags) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
     let mut p = printer::Printer::new(&module.arena, &interner, opts);
     emit_module(&mut p, &module);
     p.finish()
@@ -50,7 +49,7 @@ pub fn format_source(src: &str, opts: &FormatOptions) -> String {
 
 /// Returns `true` when `src` is already formatted according to `opts`.
 ///
-/// Useful for CI checks (`fidan fmt --check`): exit non-zero when this
+/// Useful for CI checks (`fidan format --check`): exit non-zero when this
 /// returns `false`.
 pub fn check_formatted(src: &str, opts: &FormatOptions) -> bool {
     format_source(src, opts) == src
@@ -117,7 +116,8 @@ mod tests {
 
     #[test]
     fn action_with_params() {
-        let src = "action greet with (certain name oftype string) returns string {\n    return name\n}\n";
+        let src =
+            "action greet with (certain name oftype string) returns string {\n    return name\n}\n";
         let out = fmt(src);
         assert_eq!(out, src);
         assert_idempotent(src);

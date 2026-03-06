@@ -4,31 +4,40 @@ use fidan_source::SourceMap;
 // ─────────────────────────────────────────────────────────────────────────────
 // Fidan Diagnostic Renderer
 //
-// Span-anchored format:
+// Span-anchored format (TTY / color):
+//
+//  ╭─ ✖ error[E0101] ────────────────────────────────────────────────────────╮
+//  │  undefined name `greting`                                               │
+//  │  test.fdn:2:7                                                           │
+//  ╰─────────────────────────────────────────────────────────────────────────╯
+//     |
+//   1 | var greeting = "Hello"
+//   2 | print(greting)
+//     |       ^^^^^^^ unknown name
+//     |
+//  help: did you mean `greeting`?
+//     |
+//   2 | print(greeting)
+//     |       +++++++
+//     |
+//
+// Non-TTY (piped/redirected) falls back to the flat rustc-style:
 //
 //   error[E0101]: undefined name `greting`
 //     --> test.fdn:2:7
-//      |
-//    1 | var greeting = "Hello"
-//    2 | print(greting)
-//      |       ^^^^^^^ unknown name
-//      |
-//   help: did you mean `greeting`?
-//      |
-//    2 | print(greeting)
-//      |       +++++++
-//      |
+//      …
 //
 // Cause-chain (one level per cause, labelled):
 //
 //   caused by (1/2):
-//     error[E0201]: …
-//       --> …
-//       …
+//     ╭─ ✖ error[E0201] ──…
+//     …
 //
 // Spanless pipeline badge:
 //
-//    ◆  note  unimplemented  interpreter not yet implemented (Phase 5)
+//  ╭─ ◆ note ────────────────────────────────────╮
+//  │  interpreter not yet implemented (Phase 5)  │
+//  ╰─────────────────────────────────────────────╯
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -233,7 +242,7 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
         ("", "", "", "", "", "")
     };
 
-    // ── Header: error[E0101]: message ────────────────────────────────────────
+    // ── Header box (TTY) or flat line (non-TTY) ──────────────────────────────
     let kind_label = match diag.severity {
         Severity::Error if !diag.code.is_empty() => format!("error[{}]", diag.code),
         Severity::Warning if !diag.code.is_empty() => format!("warning[{}]", diag.code),
@@ -241,10 +250,48 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
         Severity::Warning => "warning".to_string(),
         Severity::Note => "note".to_string(),
     };
-    eprintln!("{dp}{hdr_c}{bold}{kind_label}{reset}: {}", diag.message);
-
-    // ── Location ─────────────────────────────────────────────────────────────
-    eprintln!("{dp}  {dim}-->{reset} {name}:{line}:{col}");
+    if color {
+        let sym = match diag.severity {
+            Severity::Error => "\u{2716}",   // ✖
+            Severity::Warning => "\u{26a0}", // ⚠
+            Severity::Note => "\u{25c6}",    // ◆
+        };
+        let w = terminal_width() - 1;
+        let cw = w - 7; // usable content width inside │  …  │
+        // Top: " ╭─ {sym} {kind_label} ─{dashes}╮"
+        let title_vis = 1 + 1 + kind_label.chars().count();
+        let dashes_top = w.saturating_sub(6 + title_vis);
+        eprintln!(
+            "{dp} {hdr_c}\u{256d}\u{2500} {sym} {kind_label} {}\u{256e}{reset}",
+            "\u{2500}".repeat(dashes_top)
+        );
+        // Message body line
+        let msg_chars: String = diag.message.chars().take(cw).collect();
+        let msg_vis = msg_chars.chars().count();
+        let msg_pad = cw.saturating_sub(msg_vis);
+        eprintln!(
+            "{dp} {hdr_c}\u{2502}{reset}  {bold}{msg_chars}{reset}{}  {hdr_c}\u{2502}{reset}",
+            " ".repeat(msg_pad)
+        );
+        // Location line (dimmed)
+        let loc_str = format!("{name}:{line}:{col}");
+        let loc_chars: String = loc_str.chars().take(cw).collect();
+        let loc_vis = loc_chars.chars().count();
+        let loc_pad = cw.saturating_sub(loc_vis);
+        eprintln!(
+            "{dp} {hdr_c}\u{2502}{reset}  {dim}{loc_chars}{reset}{}  {hdr_c}\u{2502}{reset}",
+            " ".repeat(loc_pad)
+        );
+        // Bottom border
+        eprintln!(
+            "{dp} {hdr_c}\u{2570}{}\u{256f}{reset}",
+            "\u{2500}".repeat(w - 3)
+        );
+    } else {
+        // Non-TTY: keep the flat rustc-style format
+        eprintln!("{dp}{kind_label}: {}", diag.message);
+        eprintln!("{dp}  --> {name}:{line}:{col}");
+    }
 
     // ── Source snippet with context window ───────────────────────────────────
     let all_lines: Vec<&str> = src.lines().collect();

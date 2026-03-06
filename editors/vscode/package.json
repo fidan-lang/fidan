@@ -126,12 +126,12 @@
                 "fidan.format.indentWidth": {
                     "type": "number",
                     "default": 4,
-                    "description": "Number of spaces per indent level used by `fidan fmt`."
+                    "description": "Number of spaces per indent level used by `fidan format`."
                 },
                 "fidan.format.maxLineLen": {
                     "type": "number",
                     "default": 100,
-                    "description": "Target maximum line length used by `fidan fmt`."
+                    "description": "Target maximum line length used by `fidan format`."
                 },
                 "fidan.format.onSave": {
                     "type": "boolean",

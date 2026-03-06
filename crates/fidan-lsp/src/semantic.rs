@@ -9,7 +9,7 @@
 //!   4 = parameter  (action parameter declarations)
 //!   5 = property   (field accesses after `.`)
 //!   6 = type       (built-in type names after `oftype` / `->`)
-//!   7 = keyword    (reserved for future contextual keyword overrides)
+//!   7 = keyword    (word-alias synonym tokens: `also`, `sep`)
 //!
 //! Token modifiers (bitmask):
 //!   bit 0 = declaration
@@ -30,6 +30,7 @@ pub const TT_VARIABLE: u32 = 3;
 pub const TT_PARAMETER: u32 = 4;
 pub const TT_PROPERTY: u32 = 5;
 pub const TT_TYPE: u32 = 6;
+pub const TT_KEYWORD: u32 = 7;
 
 pub const TM_DECLARATION: u32 = 1 << 0;
 pub const TM_READONLY: u32 = 1 << 1;
@@ -47,6 +48,7 @@ pub fn legend() -> SemanticTokensLegend {
             SemanticTokenType::PARAMETER, // 4
             SemanticTokenType::PROPERTY,  // 5
             SemanticTokenType::TYPE,      // 6
+            SemanticTokenType::KEYWORD,   // 7
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION, // bit 0
@@ -119,6 +121,21 @@ pub fn compute(
 
     for idx in 0..n {
         let tok = meaningful[idx];
+
+        // Word-alias synonyms that lex as punctuation tokens:
+        // `also` → TokenKind::Comma  (span length 4; `,` span length 1)
+        // `sep`  → TokenKind::Semicolon (span length 3; `;` span length 1)
+        // Emit an explicit TT_KEYWORD so these are always coloured as keywords
+        // regardless of which TextMate scope happens to apply nearby.
+        let span_len = tok.span.end - tok.span.start;
+        if matches!(tok.kind, TokenKind::Comma | TokenKind::Semicolon) && span_len > 1 {
+            let (line1, col1) = file.line_col(tok.span.start);
+            let line = line1.saturating_sub(1);
+            let start = col1.saturating_sub(1);
+            raw.push((line, start, span_len, TT_KEYWORD, 0));
+            prev_emitted_tt = None;
+            continue;
+        }
 
         // We only emit semantic tokens for bare identifiers.
         let sym = match &tok.kind {

@@ -1936,6 +1936,26 @@ impl TypeChecker {
             args.iter().filter_map(|(n, _)| *n).collect();
         let positional_count = args.iter().filter(|(n, _)| n.is_none()).count();
 
+        // Count how many params will consume positional slots (those not covered
+        // by a named arg at this call site).
+        let positional_param_count = params.iter().filter(|p| !named.contains(&p.name)).count();
+
+        // ── E0305: too many positional arguments ─────────────────────────────
+        if positional_count > positional_param_count {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0305"),
+                format!(
+                    "expected {} argument{}, got {}",
+                    positional_param_count,
+                    if positional_param_count == 1 { "" } else { "s" },
+                    positional_count,
+                ),
+                span,
+            );
+            // Still check for missing required params below so callers get
+            // all relevant errors in one pass.
+        }
+
         // Walk params in declaration order, assigning positional slots to those
         // not covered by a name.  Any non-optional param left uncovered is an error.
         let mut pos_used = 0usize;

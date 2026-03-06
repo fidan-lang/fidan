@@ -133,6 +133,11 @@ pub static CODES: &[DiagnosticCode] = &[
         code: "E0304",
         title: "wrong number of extra arguments for decorator",
         category: "decorators",
+    },
+    DiagnosticCode {
+        code: "E0305",
+        title: "too many arguments provided to action",
+        category: "args",
     }, // ── Concurrency / safety ──────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0401",

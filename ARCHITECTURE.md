@@ -101,7 +101,7 @@ fidan/
     ├── fidan-codegen-llvm/      ← LLVM backend — AOT only (`fidan build`, release binaries)
     ├── fidan-stdlib/            ← Standard library (Rust implementations)
     ├── fidan-driver/            ← Pipeline orchestration, Session, CompileOptions
-    ├── fidan-fmt/               ← Canonical source formatter (`fidan fmt`, `format_source()`)
+    ├── fidan-fmt/               ← Canonical source formatter (`fidan format`, `format_source()`)
     ├── fidan-lsp/               ← Language Server Protocol server
     └── fidan-cli/               ← Main binary: `fidan` command
 ```
@@ -2043,7 +2043,7 @@ fidan build <file.fdn> [-o out]    # AOT compile to binary
 fidan build --emit mir <file.fdn>  # dump MIR as text
 fidan build --emit hir <file.fdn>  # dump HIR as text
 fidan check <file.fdn>             # typecheck only, no execution
-fidan fmt <file.fdn> [--in-place]  # format source code
+fidan format <file.fdn> [--in-place]  # format source code
 fidan test [pattern]               # run test blocks
 fidan repl                         # interactive REPL
 fidan new <project-name>           # scaffold a new project
@@ -2439,7 +2439,7 @@ Cranelift's **permanent, final role** in the architecture — it will never be r
 - [ ] REPL with history and multi-line input
 - [x] LSP server: diagnostics push, textDocument/formatting
 - [x] VS Code extension skeleton (TextMate grammar + TypeScript LSP client + format-on-save)
-- [ ] Formatter (`fidan fmt`)
+- [ ] Formatter (`fidan format`)
 
 ### Phase 11 – LLVM AOT Backend + Performance (4–6 weeks)
 **Goal:** `fidan build --release` produces C++-competitive native binaries.

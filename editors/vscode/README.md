@@ -8,7 +8,7 @@ First-class VS Code support for the [Fidan](https://github.com/fidan-lang/fidan)
 |---|---|
 | Syntax highlighting | ✅ |
 | Bracket / comment configuration | ✅ |
-| Format on save (`fidan fmt`) | ✅ via LSP |
+| Format on save (`fidan format`) | ✅ via LSP |
 | Error and warning diagnostics | ✅ via LSP |
 | Hover documentation | 🚧 planned |
 | Auto-completion | 🚧 planned |

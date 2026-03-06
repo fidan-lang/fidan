@@ -362,6 +362,31 @@ Fix: pass an argument of the correct type:
 "#,
         ),
 
+        "E0305" => Some(
+            r#"More arguments were passed to an action than it declares parameters.
+
+Erroneous example:
+
+    action greet with (certain name oftype string) {
+        print("Hello, " + name)
+    }
+
+    greet("Alice", 2, 3)   # error E0305: expected 1 argument, got 3
+
+Fix: remove the extra arguments:
+
+    greet("Alice")          # OK
+
+If the action should accept additional data, add the corresponding parameters:
+
+    action greet with (certain name oftype string, certain times oftype integer) {
+        for i in 1..times { print("Hello, " + name) }
+    }
+
+    greet("Alice", 3)       # OK
+"#,
+        ),
+
         // ── Concurrency / safety ──────────────────────────────────────────────
         "E0401" => Some(
             r#"A module-level variable is written by one parallel task and read or 

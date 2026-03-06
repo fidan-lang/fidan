@@ -94,7 +94,7 @@ enum Command {
         stdio: bool,
     },
     /// Format a Fidan source file
-    Fmt {
+    Format {
         /// Path to the .fdn source file
         file: PathBuf,
         /// Rewrite the file in place instead of printing to stdout
@@ -331,9 +331,10 @@ fn run_with_reload(opts: CompileOptions) -> Result<()> {
         match rx.recv() {
             Ok(Ok(event)) => {
                 // Only react to write/create/remove events on `.fdn` files.
-                let is_fdn = event.paths.iter().any(|p| {
-                    p.extension().and_then(|e| e.to_str()) == Some("fdn")
-                });
+                let is_fdn = event
+                    .paths
+                    .iter()
+                    .any(|p| p.extension().and_then(|e| e.to_str()) == Some("fdn"));
                 if !is_fdn {
                     continue;
                 }
@@ -348,7 +349,11 @@ fn run_with_reload(opts: CompileOptions) -> Result<()> {
                 let changed: Vec<String> = event
                     .paths
                     .iter()
-                    .filter_map(|p| p.file_name().and_then(|n| n.to_str()).map(|s| s.to_string()))
+                    .filter_map(|p| {
+                        p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.to_string())
+                    })
                     .collect();
                 eprintln!(
                     "\x1b[2m[reload] {} changed — re-running\x1b[0m",
@@ -434,7 +439,7 @@ fn run_fmt(
             Severity::Error,
             "fmt",
             &format!(
-                "{} is not formatted — run `fidan fmt {}` to fix",
+                "{} is not formatted — run `fidan format {}` to fix",
                 file.display(),
                 file.display()
             ),
@@ -531,7 +536,7 @@ fn main() -> Result<()> {
             run_pipeline(opts)
         }
         Command::Fix { file, dry_run } => run_fix(file, dry_run),
-        Command::Fmt {
+        Command::Format {
             file,
             in_place,
             check,
@@ -1281,7 +1286,11 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                 }
                 Err(e) => {
                     error_count += 1;
-                    eprintln!("error: cannot load import `{}`: {e}", import_path.display());
+                    render_message_to_stderr(
+                        Severity::Error,
+                        "",
+                        &format!("cannot load import `{}`: {e}", import_path.display()),
+                    );
                 }
             }
         }
@@ -1484,7 +1493,7 @@ fn run_pipeline(opts: CompileOptions) -> Result<()> {
                         fidan_passes::run_all(&mut mir);
                         let test_count = mir.test_functions.len();
                         if test_count == 0 {
-                            eprintln!("note: no test blocks found");
+                            render_message_to_stderr(Severity::Note, "", "no test blocks found");
                         } else {
                             match fidan_interp::run_tests(
                                 mir,
