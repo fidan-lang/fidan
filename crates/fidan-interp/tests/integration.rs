@@ -173,11 +173,11 @@ fn list_literal_ok() {
 // ── Runtime error paths (Err with correct code) ───────────────────────────────
 
 #[test]
-fn panic_returns_r0001() {
+fn panic_returns_r1002() {
     let err = run_src(r#"panic("deliberate")"#).expect_err("expected panic to produce RunError");
     assert_eq!(
-        err.code.0, "R0001",
-        "wrong code: expected R0001, got {}",
+        err.code.0, "R1002",
+        "wrong code: expected R1002, got {}",
         err.code
     );
     assert!(
@@ -188,10 +188,10 @@ fn panic_returns_r0001() {
 }
 
 #[test]
-fn uncaught_throw_returns_r0001() {
-    // `throw` / `panic` with a non-string value is also R0001
+fn uncaught_throw_returns_r1002() {
+    // `panic` with a non-string value is R1002 (user-thrown panic)
     let err = run_src("panic(42)").expect_err("expected panic to produce RunError");
-    assert_eq!(err.code.0, "R0001");
+    assert_eq!(err.code.0, "R1002");
 }
 
 // ── Parallel execution ────────────────────────────────────────────────────────
