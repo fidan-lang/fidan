@@ -278,15 +278,19 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     }
                 }
             }
-            Item::ActionDecl { name, params, .. } => {
+            Item::ActionDecl {
+                name, params, span, ..
+            } => {
                 let aname = res(*name);
                 if let Some(entry) = table.entries.get_mut(&aname) {
                     entry.param_names = params.iter().map(|p| (res(p.name), p.span)).collect();
                 }
-                // Add each parameter as a named, hover-able symbol entry so that
-                // hovering over a param name (or a qualified access like `fn.name`)
-                // shows its type and modifier inside the action body.
+                // Add each parameter as a hover-able symbol entry AND record a
+                // scope-keyed map so the hover handler can prefer the param over
+                // any same-named global variable when the cursor is inside this
+                // action's span.
                 if let Some(info) = typed.actions.get(name) {
+                    let mut scope_params: FxHashMap<String, SymbolEntry> = FxHashMap::default();
                     for (ast_p, typed_p) in params.iter().zip(info.params.iter()) {
                         let pname = res(ast_p.name);
                         let ty_s = type_name(&typed_p.ty, interner);
@@ -302,19 +306,22 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                         } else {
                             None
                         };
-                        table
-                            .entries
-                            .entry(pname.clone())
-                            .or_insert_with(|| SymbolEntry {
-                                kind: SymKind::Variable { is_const: false },
-                                span: ast_p.span,
-                                detail: format!("```fidan\n{}{} -> {}\n```", prefix, pname, ty_s),
-                                ty_name: ty_name_opt,
-                                param_types: vec![],
-                                param_required: vec![],
-                                return_type: None,
-                                param_names: vec![],
-                            });
+                        let entry = SymbolEntry {
+                            kind: SymKind::Variable { is_const: false },
+                            span: ast_p.span,
+                            detail: format!("```fidan\n{}{} -> {}\n```", prefix, pname, ty_s),
+                            ty_name: ty_name_opt,
+                            param_types: vec![],
+                            param_required: vec![],
+                            return_type: None,
+                            param_names: vec![],
+                        };
+                        scope_params.insert(pname.clone(), entry.clone());
+                        // Flat table fallback for files without name collisions.
+                        table.entries.entry(pname).or_insert(entry);
+                    }
+                    if !scope_params.is_empty() {
+                        table.action_param_scopes.push((*span, scope_params));
                     }
                 }
             }
