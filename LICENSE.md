@@ -137,7 +137,7 @@ If any provision of this License is found to be unenforceable, the remaining pro
 
 The Owner reserves the right to modify or change the terms of this License at any time.<br>
 Contributions and changes to the project will automatically be governed by the updated License terms.<br>
-You are responsible for reviewing the License periodically to stay informed of updates and to sensure compliance with the most current version.<br>
+You are responsible for reviewing the License periodically to stay informed of updates and to ensure compliance with the most current version.<br>
 Continued use of Fidan after modifications to the License constitutes acceptance of the updated terms.
 
 ### 15. No License to this License ###
@@ -152,3 +152,5 @@ By using Fidan, You acknowledge that You have read, understood, and agreed to be
 
 ### 17. Contact ###
 If You have any questions about this License or the use of Fidan, please contact The Owner at [contact@appsolves.dev](mailto:contact@appsolves.dev).
+
+Fidan™ is a trademark of Kaan Gönüldinc, operating as "AppSolves". All rights reserved. Unauthorized use of this trademark is prohibited.
