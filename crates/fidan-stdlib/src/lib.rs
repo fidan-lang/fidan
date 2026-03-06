@@ -17,10 +17,14 @@
 pub mod collections;
 pub mod io;
 pub mod math;
+pub mod sandbox;
 pub mod parallel;
 pub mod string;
 pub mod test_runner;
 pub mod time;
+
+/// A dispatched stdlib call result.
+pub use sandbox::{SandboxPolicy, SandboxViolation};
 
 /// A dispatched stdlib call result.
 pub enum StdlibResult {

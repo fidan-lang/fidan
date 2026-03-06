@@ -22,7 +22,7 @@ use fidan_runtime::{
     FunctionId as RuntimeFnId, OwnedRef, ParallelArgs, ParallelCapture, display as fidan_display,
 };
 use fidan_source::{SourceMap, Span};
-use fidan_stdlib::{StdlibResult, parallel::ParallelOp};
+use fidan_stdlib::{SandboxPolicy, SandboxViolation, StdlibResult, parallel::ParallelOp};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::builtins;
@@ -227,6 +227,8 @@ pub struct MirMachine {
     replay_inputs: Vec<String>,
     /// Next index into `replay_inputs` to return.
     replay_pos: usize,
+    /// Zero-config sandbox policy (`None` = no sandboxing).
+    sandbox: Option<Arc<SandboxPolicy>>,
 }
 
 /// A single test result recorded during `fidan test`.
@@ -361,6 +363,7 @@ impl MirMachine {
             stdin_capture: Vec::new(),
             replay_inputs: Vec::new(),
             replay_pos: 0,
+            sandbox: None,
         }
     }
 
@@ -398,7 +401,13 @@ impl MirMachine {
             stdin_capture: Vec::new(),
             replay_inputs: self.replay_inputs.clone(),
             replay_pos: self.replay_pos,
+            sandbox: self.sandbox.as_ref().map(Arc::clone),
         }
+    }
+
+    /// Activate sandbox policy on this machine.  Must be called before [`run`].
+    pub fn set_sandbox(&mut self, policy: SandboxPolicy) {
+        self.sandbox = Some(Arc::new(policy));
     }
 
     /// Enable per-function profiling.  Must be called before [`run`].
@@ -545,7 +554,7 @@ impl MirMachine {
                 Ok(_) => {}
                 Err(MirSignal::Throw(v)) => {
                     return Err(RunError {
-                        code: fidan_diagnostics::diag_code!("R0001"),
+                        code: fidan_diagnostics::diag_code!("R1002"),
                         message: format!(
                             "decorator: unhandled exception: {}",
                             builtins::display(&v)
@@ -567,6 +576,20 @@ impl MirMachine {
                         trace: std::mem::take(&mut self.panic_trace),
                     });
                 }
+                Err(MirSignal::RuntimeError(code, msg)) => {
+                    return Err(RunError {
+                        code,
+                        message: msg,
+                        trace: std::mem::take(&mut self.panic_trace),
+                    });
+                }
+                Err(MirSignal::SandboxViolation(code, msg)) => {
+                    return Err(RunError {
+                        code,
+                        message: msg,
+                        trace: std::mem::take(&mut self.panic_trace),
+                    });
+                }
             }
         }
 
@@ -574,7 +597,7 @@ impl MirMachine {
         match self.call_function(entry, vec![]) {
             Ok(_) => Ok(()),
             Err(MirSignal::Throw(v)) => Err(RunError {
-                code: fidan_diagnostics::diag_code!("R0001"),
+                code: fidan_diagnostics::diag_code!("R1002"),
                 message: format!("unhandled exception: {}", builtins::display(&v)),
                 trace: std::mem::take(&mut self.panic_trace),
             }),
@@ -585,6 +608,16 @@ impl MirMachine {
             }),
             Err(MirSignal::ParallelFail(msg)) => Err(RunError {
                 code: fidan_diagnostics::diag_code!("R9001"),
+                message: msg,
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
+            Err(MirSignal::RuntimeError(code, msg)) => Err(RunError {
+                code,
+                message: msg,
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
+            Err(MirSignal::SandboxViolation(code, msg)) => Err(RunError {
+                code,
                 message: msg,
                 trace: std::mem::take(&mut self.panic_trace),
             }),
@@ -1008,6 +1041,12 @@ impl MirMachine {
                             MirSignal::ParallelFail(m) => {
                                 format!("task `{}` failed: {}", task_name, m)
                             }
+                            MirSignal::RuntimeError(code, m) => {
+                                format!("task `{}` error [{code}]: {}", task_name, m)
+                            }
+                            MirSignal::SandboxViolation(code, m) => {
+                                format!("task `{}` sandbox violation [{code}]: {}", task_name, m)
+                            }
                         })
                 });
                 frame.store(*handle, FidanValue::Pending(pending));
@@ -1167,6 +1206,12 @@ impl MirMachine {
                                             )
                                         }
                                         MirSignal::ParallelFail(m) => m,
+                                        MirSignal::RuntimeError(code, m) => {
+                                            format!("error [{code}]: {m}")
+                                        }
+                                        MirSignal::SandboxViolation(code, m) => {
+                                            format!("sandbox violation [{code}]: {m}")
+                                        }
                                     };
                                     let mut slot = err_slot.lock().unwrap();
                                     if slot.is_none() {
@@ -1507,6 +1552,37 @@ impl MirMachine {
         name: &str,
         args: Vec<FidanValue>,
     ) -> Result<FidanValue, MirSignal> {
+        // Sandbox check: guard all `io` module calls before execution.
+        // Check sandbox first (Option branch) so non-sandbox runs skip the
+        // module string comparison entirely on every stdlib call.
+        if let Some(ref policy) = self.sandbox {
+            if module == "io" {
+                let first_arg = args
+                    .first()
+                    .and_then(|v| {
+                        if let FidanValue::String(s) = v {
+                            Some(s.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or("");
+                if let Err(violation) = policy.check_io_call(name, first_arg) {
+                    let (code, msg) = match &violation {
+                        SandboxViolation::ReadDenied { .. } => {
+                            (fidan_diagnostics::diag_code!("R4001"), violation.message())
+                        }
+                        SandboxViolation::WriteDenied { .. } => {
+                            (fidan_diagnostics::diag_code!("R4002"), violation.message())
+                        }
+                        SandboxViolation::EnvDenied { .. } => {
+                            (fidan_diagnostics::diag_code!("R4003"), violation.message())
+                        }
+                    };
+                    return Err(MirSignal::SandboxViolation(code, msg));
+                }
+            }
+        }
         match fidan_stdlib::dispatch_stdlib(module, name, args) {
             Some(StdlibResult::Value(v)) => {
                 // Check for test assertion failures encoded as `__test_fail__: msg`.
@@ -1752,9 +1828,12 @@ impl MirMachine {
                 let list = r.borrow();
                 let len = list.len() as i64;
                 let norm = if i < 0 { len + i } else { i };
-                list.get(norm as usize)
-                    .cloned()
-                    .ok_or_else(|| MirSignal::Panic(format!("list index {} out of range", i)))
+                list.get(norm as usize).cloned().ok_or_else(|| {
+                    MirSignal::RuntimeError(
+                        fidan_diagnostics::diag_code!("R2002"),
+                        format!("list index {} out of range", i),
+                    )
+                })
             }
             (FidanValue::Dict(r), key) => {
                 let key_str = FidanString::new(&builtins::display(&key));
@@ -1770,12 +1849,21 @@ impl MirMachine {
                 chars
                     .get(norm as usize)
                     .map(|c| FidanValue::String(FidanString::new(&c.to_string())))
-                    .ok_or_else(|| MirSignal::Panic(format!("string index {} out of range", i)))
+                    .ok_or_else(|| {
+                        MirSignal::RuntimeError(
+                            fidan_diagnostics::diag_code!("R2002"),
+                            format!("string index {} out of range", i),
+                        )
+                    })
             }
-            (FidanValue::Tuple(items), FidanValue::Integer(i)) => items
-                .into_iter()
-                .nth(i as usize)
-                .ok_or_else(|| MirSignal::Panic(format!("tuple index {} out of range", i))),
+            (FidanValue::Tuple(items), FidanValue::Integer(i)) => {
+                items.into_iter().nth(i as usize).ok_or_else(|| {
+                    MirSignal::RuntimeError(
+                        fidan_diagnostics::diag_code!("R2002"),
+                        format!("tuple index {} out of range", i),
+                    )
+                })
+            }
             (obj, idx) => Err(MirSignal::Panic(format!(
                 "cannot index `{}` with `{}`",
                 obj.type_name(),
@@ -1802,7 +1890,10 @@ impl MirMachine {
                     list.set_at(norm, val);
                     Ok(())
                 } else {
-                    Err(MirSignal::Panic(format!("list index {} out of range", i)))
+                    Err(MirSignal::RuntimeError(
+                        fidan_diagnostics::diag_code!("R2002"),
+                        format!("list index {} out of range", i),
+                    ))
                 }
             }
             (FidanValue::Dict(r), key) => {
@@ -1829,6 +1920,12 @@ enum MirSignal {
     /// One or more tasks failed inside a `parallel` / `concurrent` block (R9001).
     /// Not catchable by `attempt / catch` — the parallel block itself fails.
     ParallelFail(String),
+    /// A typed runtime error with a known [`DiagCode`] (e.g. `R2001` division-by-zero,
+    /// `R2002` out-of-bounds).  Carries a clean message with no embedded code prefix.
+    RuntimeError(fidan_diagnostics::DiagCode, String),
+    /// A sandbox policy violation — carries the exact [`DiagCode`] (`R4001`–`R4003`)
+    /// and a clean human-readable message (no embedded code prefix).
+    SandboxViolation(fidan_diagnostics::DiagCode, String),
 }
 
 type MirResult = Result<FidanValue, MirSignal>;
@@ -1879,13 +1976,19 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
         (BinOp::Mul, Integer(a), Integer(b)) => Integer(a * b),
         (BinOp::Div, Integer(a), Integer(b)) => {
             if *b == 0 {
-                return Err(MirSignal::Panic("division by zero".into()));
+                return Err(MirSignal::RuntimeError(
+                    fidan_diagnostics::diag_code!("R2001"),
+                    "division by zero".into(),
+                ));
             }
             Integer(a / b)
         }
         (BinOp::Rem, Integer(a), Integer(b)) => {
             if *b == 0 {
-                return Err(MirSignal::Panic("modulo by zero".into()));
+                return Err(MirSignal::RuntimeError(
+                    fidan_diagnostics::diag_code!("R2001"),
+                    "modulo by zero".into(),
+                ));
             }
             Integer(a % b)
         }
@@ -2122,7 +2225,7 @@ impl MirMachine {
         match result {
             Ok(_) => Ok(()),
             Err(MirSignal::Throw(v)) => Err(RunError {
-                code: fidan_diagnostics::diag_code!("R0001"),
+                code: fidan_diagnostics::diag_code!("R1002"),
                 message: format!("unhandled exception: {}", builtins::display(&v)),
                 trace: std::mem::take(&mut self.panic_trace),
             }),
@@ -2133,6 +2236,16 @@ impl MirMachine {
             }),
             Err(MirSignal::ParallelFail(msg)) => Err(RunError {
                 code: fidan_diagnostics::diag_code!("R9001"),
+                message: msg,
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
+            Err(MirSignal::RuntimeError(code, msg)) => Err(RunError {
+                code,
+                message: msg,
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
+            Err(MirSignal::SandboxViolation(code, msg)) => Err(RunError {
+                code,
                 message: msg,
                 trace: std::mem::take(&mut self.panic_trace),
             }),
@@ -2158,7 +2271,7 @@ impl MirMachine {
         match result {
             Ok(_) => Ok(()),
             Err(MirSignal::Throw(v)) => Err(RunError {
-                code: fidan_diagnostics::diag_code!("R0001"),
+                code: fidan_diagnostics::diag_code!("R1002"),
                 message: format!("unhandled exception: {}", builtins::display(&v)),
                 trace: std::mem::take(&mut self.panic_trace),
             }),
@@ -2169,6 +2282,16 @@ impl MirMachine {
             }),
             Err(MirSignal::ParallelFail(msg)) => Err(RunError {
                 code: fidan_diagnostics::diag_code!("R9001"),
+                message: msg,
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
+            Err(MirSignal::RuntimeError(code, msg)) => Err(RunError {
+                code,
+                message: msg,
+                trace: std::mem::take(&mut self.panic_trace),
+            }),
+            Err(MirSignal::SandboxViolation(code, msg)) => Err(RunError {
+                code,
                 message: msg,
                 trace: std::mem::take(&mut self.panic_trace),
             }),
@@ -2446,6 +2569,16 @@ impl MirMachine {
                     passed: false,
                     message: Some(msg),
                 },
+                Err(MirSignal::RuntimeError(code, msg)) => TestResult {
+                    name: name.clone(),
+                    passed: false,
+                    message: Some(format!("[{code}] {msg}")),
+                },
+                Err(MirSignal::SandboxViolation(code, msg)) => TestResult {
+                    name: name.clone(),
+                    passed: false,
+                    message: Some(format!("[{code}] {msg}")),
+                },
             };
             results.push(result);
         }
@@ -2555,11 +2688,15 @@ pub fn run_mir_with_replay(
     source_map: Arc<SourceMap>,
     jit_threshold: u32,
     replay_inputs: Vec<String>,
+    sandbox: Option<fidan_stdlib::SandboxPolicy>,
 ) -> (Result<(), RunError>, Vec<String>) {
     let mut machine = MirMachine::new(Arc::new(program), interner, source_map);
     machine.set_jit_threshold(jit_threshold);
     if !replay_inputs.is_empty() {
         machine.set_replay_inputs(replay_inputs);
+    }
+    if let Some(policy) = sandbox {
+        machine.set_sandbox(policy);
     }
     let result = machine.run();
     let captured = machine.get_stdin_capture().to_vec();

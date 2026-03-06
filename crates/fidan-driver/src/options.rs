@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+pub use fidan_stdlib::SandboxPolicy;
 
 /// How much of the runtime call stack to print on an uncaught panic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -36,6 +37,9 @@ pub struct CompileOptions {
     /// The diagnostic is still compiled and counted for errors — only its
     /// rendered output is suppressed.
     pub suppress: Vec<String>,
+    /// Zero-config sandbox policy for `fidan run --sandbox`.
+    /// `None` = no sandboxing (default).
+    pub sandbox: Option<SandboxPolicy>,
 }
 
 impl Default for CompileOptions {
@@ -51,6 +55,7 @@ impl Default for CompileOptions {
             strict_mode: false,
             replay_inputs: vec![],
             suppress: vec![],
+            sandbox: None,
         }
     }
 }

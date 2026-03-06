@@ -866,6 +866,75 @@ appropriate privileges.
 "#,
         ),
 
+        // ── Runtime: sandbox / security ──────────────────────────────────────
+        "R4001" => Some(
+            r#"A file-system **read** operation was blocked by the active sandbox policy.
+
+When a program is run with `fidan run --sandbox`, all file-system, environment,
+and network access is denied by default.  Use the allow-flags to grant specific
+permissions:
+
+    fidan run --sandbox --allow-read=./data  myprogram.fdn
+
+Erroneous example (run with `--sandbox`):
+
+    use std.io
+    var content = io.readFile("config.json")   # error R4001: read denied
+
+Fix — option A: grant read access to the required path:
+
+    fidan run --sandbox --allow-read=.  myprogram.fdn   # allow reads under .
+
+Fix — option B: grant unrestricted read access:
+
+    fidan run --sandbox --allow-read=*  myprogram.fdn
+
+Fix — option C: remove `--sandbox` if sandboxing is not required.
+"#,
+        ),
+
+        "R4002" => Some(
+            r#"A file-system **write** operation was blocked by the active sandbox policy.
+
+When a program is run with `fidan run --sandbox`, all file-system writes are
+denied by default.  Use `--allow-write` to grant write access to specific paths:
+
+    fidan run --sandbox --allow-write=./out  myprogram.fdn
+
+Erroneous example (run with `--sandbox`):
+
+    use std.io
+    io.writeFile("output.txt", "hello")    # error R4002: write denied
+
+Fix — option A: grant write access to the output directory:
+
+    fidan run --sandbox --allow-write=./out  myprogram.fdn
+
+Fix — option B: grant unrestricted write access:
+
+    fidan run --sandbox --allow-write=*  myprogram.fdn
+"#,
+        ),
+
+        "R4003" => Some(
+            r#"An **environment** access (`getEnv`, `setEnv`, `args`, `cwd`) was blocked
+by the active sandbox policy.
+
+When a program is run with `fidan run --sandbox`, environment-variable access is
+denied by default.  Pass `--allow-env` to enable it:
+
+    fidan run --sandbox --allow-env  myprogram.fdn
+
+Erroneous example (run with `--sandbox`):
+
+    use std.io
+    var home = io.getEnv("HOME")   # error R4003: environment access denied
+
+Fix: add `--allow-env` to the run command, or remove `--sandbox` if sandboxing
+is not required.
+"#,
+        ),
+
         // ── Runtime: parallel / concurrency ──────────────────────────────────
         "R9001" => Some(
             r#"One or more tasks inside a `parallel` block panicked or threw an

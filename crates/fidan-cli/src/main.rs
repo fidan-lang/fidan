@@ -4,7 +4,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use fidan_diagnostics::{Severity, render_message_to_stderr};
-use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, TraceMode};
+use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, SandboxPolicy, TraceMode};
 use std::path::PathBuf;
 
 // On Windows, PowerShell's default code page is CP1252 which corrupts the UTF-8
@@ -67,6 +67,30 @@ enum Command {
         /// Suppress specific diagnostic codes (comma-separated, e.g. `W5003,W1004`)
         #[arg(long, value_delimiter = ',')]
         suppress: Vec<String>,
+        /// Enable zero-config sandbox: deny all file, env, net, and spawn by default
+        #[arg(long)]
+        sandbox: bool,
+        /// Allow file-system reads from path prefix (repeatable; `*` = allow all)
+        #[arg(long, value_delimiter = ',')]
+        allow_read: Vec<String>,
+        /// Allow file-system writes to path prefix (repeatable; `*` = allow all)
+        #[arg(long, value_delimiter = ',')]
+        allow_write: Vec<String>,
+        /// Allow environment variable access (`getEnv`, `setEnv`, `args`, `cwd`)
+        #[arg(long)]
+        allow_env: bool,
+        /// Allow network access (reserved for a future `std.net` module)
+        #[arg(long)]
+        allow_net: bool,
+        /// Allow subprocess spawn (reserved for a future `std.process` module)
+        #[arg(long)]
+        allow_spawn: bool,
+        /// Wall-time limit in seconds when `--sandbox` is active (0 = no limit)
+        #[arg(long)]
+        time_limit: Option<u64>,
+        /// Memory limit in MB when `--sandbox` is active (0 = no limit)
+        #[arg(long)]
+        mem_limit: Option<u64>,
     },
     /// Compile a Fidan source file to a native binary
     Build {
@@ -1885,12 +1909,67 @@ fn main() -> Result<()> {
             reload,
             replay,
             suppress,
+            sandbox,
+            allow_read,
+            allow_write,
+            allow_env,
+            allow_net,
+            allow_spawn,
+            time_limit,
+            mem_limit,
         } => {
             let emit_kinds = parse_emit(&emit)?;
             let trace_mode = parse_trace(&trace)?;
             let replay_inputs = match replay {
                 Some(ref id_or_path) => load_replay_bundle(id_or_path)?,
                 None => vec![],
+            };
+            let sandbox_policy = if sandbox {
+                let mut policy = SandboxPolicy::default();
+                let mut read_all = false;
+                for p in &allow_read {
+                    if p == "*" {
+                        policy = policy.with_allow_read_all();
+                        read_all = true;
+                        break;
+                    }
+                }
+                if !read_all {
+                    for p in &allow_read {
+                        policy = policy.with_allow_read_prefix(p);
+                    }
+                }
+                let mut write_all = false;
+                for p in &allow_write {
+                    if p == "*" {
+                        policy = policy.with_allow_write_all();
+                        write_all = true;
+                        break;
+                    }
+                }
+                if !write_all {
+                    for p in &allow_write {
+                        policy = policy.with_allow_write_prefix(p);
+                    }
+                }
+                if allow_env {
+                    policy = policy.with_allow_env();
+                }
+                if allow_net {
+                    policy = policy.with_allow_net();
+                }
+                if allow_spawn {
+                    policy = policy.with_allow_spawn();
+                }
+                if let Some(t) = time_limit {
+                    policy = policy.with_time_limit(t);
+                }
+                if let Some(m) = mem_limit {
+                    policy = policy.with_mem_limit(m);
+                }
+                Some(policy)
+            } else {
+                None
             };
             let opts = CompileOptions {
                 input: file,
@@ -1907,6 +1986,7 @@ fn main() -> Result<()> {
                 strict_mode: strict,
                 replay_inputs,
                 suppress,
+                sandbox: sandbox_policy,
             };
             if reload {
                 run_with_reload(opts)
@@ -3003,12 +3083,14 @@ fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                         // ── Optimisation passes (Phase 6) ─────────────────────
                         fidan_passes::run_all(&mut mir);
                         let replay_inputs = std::mem::take(&mut opts.replay_inputs);
+                        let sandbox = opts.sandbox.take();
                         let (result, captured) = fidan_interp::run_mir_with_replay(
                             mir,
                             Arc::clone(&interner),
                             Arc::clone(&source_map),
                             opts.jit_threshold,
                             replay_inputs,
+                            sandbox,
                         );
                         if let Err(err) = result {
                             render_message_to_stderr(Severity::Error, err.code, &err.message);
@@ -3129,9 +3211,10 @@ fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                             ) {
                                 (Err(err), _) => {
                                     // Initialisation (top-level code) crashed before tests ran.
-                                    eprintln!(
-                                        "\x1b[1;31merror\x1b[0m: program initialisation failed: {}",
-                                        err.message
+                                    render_message_to_stderr(
+                                        Severity::Error,
+                                        err.code,
+                                        &format!("program initialisation failed: {}", err.message),
                                     );
                                     if !err.trace.is_empty() && opts.trace != TraceMode::None {
                                         render_trace_to_stderr(&err.trace, opts.trace);

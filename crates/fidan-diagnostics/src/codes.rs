@@ -17,6 +17,7 @@
 //! | R1xxx  | Runtime — execution / control     |
 //! | R2xxx  | Runtime — arithmetic / bounds     |
 //! | R3xxx  | Runtime — I/O                     |
+//! | R4xxx  | Runtime — sandbox / security      |
 //! | R9xxx  | Runtime — parallel / concurrency  |
 //!
 //! Use `fidan explain <code>` (Phase 10) for the full HTML/text description of
@@ -264,6 +265,22 @@ pub static CODES: &[DiagnosticCode] = &[
         code: "R3004",
         title: "permission denied",
         category: "io",
+    },
+    // ── Runtime: sandbox / security ──────────────────────────────────────────
+    DiagnosticCode {
+        code: "R4001",
+        title: "sandbox: file-system read denied",
+        category: "sandbox",
+    },
+    DiagnosticCode {
+        code: "R4002",
+        title: "sandbox: file-system write denied",
+        category: "sandbox",
+    },
+    DiagnosticCode {
+        code: "R4003",
+        title: "sandbox: environment access denied",
+        category: "sandbox",
     },
     // ── Runtime: parallel / concurrency ──────────────────────────────────────
     DiagnosticCode {

@@ -4,7 +4,7 @@
 //!   `use std.io`  → `io.readFile(path)`, `io.writeFile(path, content)`, `io.readLine()`, etc.
 //!   `use std.io.{readFile, writeFile}` → free names in scope.
 
-use fidan_runtime::{display as format_val, FidanString, FidanValue};
+use fidan_runtime::{FidanString, FidanValue, display as format_val};
 
 fn as_str(v: &FidanValue) -> String {
     match v {
@@ -61,10 +61,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             let path = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             match std::fs::read_to_string(&path) {
                 Ok(content) => Some(str_val(&content)),
-                Err(e) => {
-                    eprintln!("io.readFile error: {e}");
-                    Some(FidanValue::Nothing)
-                }
+                Err(_) => Some(FidanValue::Nothing),
             }
         }
         "writeFile" | "write_file" => {
@@ -72,10 +69,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             let content = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             match std::fs::write(&path, content) {
                 Ok(_) => Some(FidanValue::Boolean(true)),
-                Err(e) => {
-                    eprintln!("io.writeFile error: {e}");
-                    Some(FidanValue::Boolean(false))
-                }
+                Err(_) => Some(FidanValue::Boolean(false)),
             }
         }
         "appendFile" | "append_file" => {
@@ -91,10 +85,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                     let _ = f.write_all(content.as_bytes());
                     Some(FidanValue::Boolean(true))
                 }
-                Err(e) => {
-                    eprintln!("io.appendFile error: {e}");
-                    Some(FidanValue::Boolean(false))
-                }
+                Err(_) => Some(FidanValue::Boolean(false)),
             }
         }
         "deleteFile" | "delete_file" => {
