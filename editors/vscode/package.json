@@ -5,7 +5,7 @@
     "version": "1.0.0",
     "publisher": "AppSolves",
     "license": "Fidan Programming Language License (FPLL) 1.0.0",
-    "icon": "./icons/icon_transparent_128x128.png",
+    "icon": "./icons/icon_128x128.png",
     "repository": {
         "type": "git",
         "url": "https://github.com/AppSolves/fidan"
@@ -39,8 +39,8 @@
                 ],
                 "configuration": "./language-configuration.json",
                 "icon": {
-                    "light": "./icons/icon_transparent.png",
-                    "dark": "./icons/icon_transparent.png"
+                    "light": "./icons/icon.png",
+                    "dark": "./icons/icon.png"
                 }
             }
         ],
