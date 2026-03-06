@@ -213,6 +213,17 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             let _ = std::io::stdout().flush();
             Some(FidanValue::Nothing)
         }
+        "isatty" => {
+            use std::io::IsTerminal;
+            // Optional first arg: "stdin" | "stderr" — defaults to stdout.
+            let stream = args.first().map(|v| as_str(v)).unwrap_or_default();
+            let tty = match stream.as_str() {
+                "stdin" => std::io::stdin().is_terminal(),
+                "stderr" => std::io::stderr().is_terminal(),
+                _ => std::io::stdout().is_terminal(),
+            };
+            Some(FidanValue::Boolean(tty))
+        }
         _ => None,
     }
 }
@@ -274,5 +285,6 @@ pub fn exported_names() -> &'static [&'static str] {
         "args",
         "argv",
         "flush",
+        "isatty",
     ]
 }

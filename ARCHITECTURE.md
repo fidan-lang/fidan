@@ -2955,6 +2955,97 @@ design decision.  Estimated effort: 1–2 weeks.
 
 ---
 
+---
+
+### 22.12 – `Stream` / `Handle` & Stdio Manipulation
+
+**Elevator pitch:** First-class I/O handles — `io.stdout()`, `io.stdin()`, `io.stderr()` return
+a `Stream` value that can be passed around, written to, read from, and eventually redirected
+or piped.
+
+```fidan
+let out = io.stdout()
+out.write("hello\n")
+
+let f = io.openStream("output.log", "w")
+f.write("log entry\n")
+f.close()
+```
+
+**Why deferred:**
+The current interpreter stores all Fidan values as `FidanValue`, which has no `Handle`/`Stream`
+variant. Adding one requires:
+
+1. A new `FidanValue::Stream(Arc<Mutex<dyn Write + Send>>)` variant (or a handle-table
+   approach for the interpreter, keyed by integer ID).
+2. Method-call syntax on values (`handle.write(...)`) — currently there is no method dispatch
+   on `FidanValue`; this is part of the broader OOP/struct work.
+3. Lifetime + ownership semantics for handles: who closes the stream, what happens on drop.
+
+The current `io` stdlib functions (`print`, `flush`, `writeFile`, …) are **not replaced** —
+they remain as convenience wrappers for the common 90% case. `Stream` objects are the power
+user path.
+
+**Dependency:** Requires struct / method-dispatch work and a `FidanValue::Stream` variant.
+Deferred to the self-hosting phase; the stdlib will be rewritten in Fidan at that point and
+the `Stream` type can be expressed natively.
+
+---
+
+### 22.13 – Enums (Algebraic Data Types)
+
+**Elevator pitch:** First-class enum types with associated values — the missing piece for
+expressive, type-safe domain modelling and ergonomic error handling.
+
+```fidan
+enum Direction { North, South, East, West }
+
+enum Result {
+    Ok(value oftype dynamic),
+    Err(message oftype string),
+}
+
+action divide(a oftype float, b oftype float) -> Result {
+    if b == 0.0 { return Result.Err("division by zero") }
+    return Result.Ok(a / b)
+}
+
+match divide(10.0, 0.0) {
+    Result.Ok(v)  => println(v)
+    Result.Err(e) => println("Error: " + e)
+}
+```
+
+**Why this is high priority:**
+- Without enums, error-returning actions must use `throw`/`catch` (control-flow based) or
+  return sentinel values — both are footguns.
+- `match` on enum variants enables exhaustiveness checking (a static check the typeck pass
+  can enforce), giving users Rust-level safety over discriminated unions.
+- The `Result` / `Option` patterns are the idiomatic path to eliminating `nothing`-related
+  runtime crashes.
+
+**Design constraints:**
+- Enum variants with no payload are unit variants (zero-size, stored as integer discriminant).
+- Variants with payload store a `FidanValue` per field; discriminant + payload fit in the
+  existing `FidanValue::Enum { tag: u32, payload: Vec<FidanValue> }` variant (to be added).
+- Enum type names are capitalised (`Direction`, `Result`); variant access is `Direction.North`.
+- `match` already parses pattern arms; exhaustiveness checking is a new typeck pass.
+- Generic enums (`Result<T, E>`) are deferred until generics land; the dynamic-payload
+  form above works for all cases in the meantime.
+
+**Implementation notes:**
+- **Parser:** `enum Foo { Variant(type), ... }` declaration → new `Item::EnumDecl`.
+- **AST / HIR:** `EnumDecl { name, variants: Vec<EnumVariant> }`.
+- **Typeck:** registers enum type in scope; checks variant access; exhaustiveness check on `match`.
+- **MIR:** `FidanValue::Enum { tag: u32, payload: Vec<FidanValue> }` variant; variant
+  construction lowers to `MirInstr::ConstructEnum { tag, args }`.
+- **Interpreter:** evaluates `ConstructEnum` → `FidanValue::Enum`; `match` arms inspect `tag`.
+
+**Dependency:** Phase 3 (typeck) for type registration and exhaustiveness; Phase 5 (MIR) for
+lowering. High priority for the self-hosting phase. Estimated effort: 2–4 weeks.
+
+---
+
 ### Feature → Phase Dependency Map
 
 | Feature | Earliest schedulable after | Estimated effort |
@@ -2969,6 +3060,8 @@ design decision.  Estimated effort: 1–2 weeks.
 | 22.6 Sandboxing | Phase 7 (stdlib) | 2–3 weeks |
 | 22.2 Explain line | Phase 5 (MIR + typeck) | 2–3 weeks |
 | 22.9 `@extern` FFI (interpreter path) | Phase 5 (MIR interpreter) | 2–4 weeks |
+| 22.13 Enums (ADTs) | Phase 3 (typeck) + Phase 5 (MIR) | 2–4 weeks |
 | 22.1 Time-travel debug | Phase 9 (JIT tracing hooks) | 3–5 weeks |
 | 22.9 `@extern` FFI (zero-overhead AOT) | Phase 11 (LLVM AOT) | + 1 week on top of interpreter path |
+| 22.12 `Stream`/`Handle` & stdio manipulation | self-hosting phase | deferred (needs method dispatch) |
 | 22.10 Native GPU / CUDA (`@gpu`) | Phase 11 (LLVM AOT + NVPTX) | 4–8 weeks after Phase 11 |
