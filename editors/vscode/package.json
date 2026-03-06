@@ -142,6 +142,160 @@
                     "type": "string",
                     "default": "Fidan",
                     "description": "Name of the integrated terminal used by the 'Fidan: Run Current File' command."
+                },
+                "fidan.run.reload": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Pass `--reload` to `fidan run` (watch source files and re-run on change)."
+                },
+                "fidan.run.strict": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Pass `--strict` to `fidan run` (treat select warnings as errors)."
+                },
+                "fidan.run.trace": {
+                    "type": "string",
+                    "enum": [
+                        "none",
+                        "short",
+                        "full",
+                        "compact"
+                    ],
+                    "enumDescriptions": [
+                        "No call-stack trace on panic",
+                        "Short call-stack trace",
+                        "Full call-stack trace",
+                        "Compact call-stack trace"
+                    ],
+                    "default": "none",
+                    "description": "Pass `--trace <mode>` to `fidan run` and `fidan repl`."
+                },
+                "fidan.run.sandbox": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Pass `--sandbox` to `fidan run` (deny all file/env/net access by default)."
+                },
+                "fidan.run.sandbox.allowRead": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "Path prefixes passed via `--allow-read` when `fidan.run.sandbox` is enabled. Use `*` to allow all."
+                },
+                "fidan.run.sandbox.allowWrite": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "Path prefixes passed via `--allow-write` when `fidan.run.sandbox` is enabled."
+                },
+                "fidan.run.sandbox.allowEnv": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Pass `--allow-env` when `fidan.run.sandbox` is enabled."
+                },
+                "fidan.run.sandbox.allowNet": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Pass `--allow-net` when `fidan.run.sandbox` is enabled."
+                },
+                "fidan.run.sandbox.allowSpawn": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Pass `--allow-spawn` when `fidan.run.sandbox` is enabled."
+                },
+                "fidan.run.sandbox.timeLimit": {
+                    "type": "number",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Wall-time limit in seconds (`--time-limit`) when sandbox is active. 0 = no limit."
+                },
+                "fidan.run.sandbox.memLimit": {
+                    "type": "number",
+                    "minimum": 0,
+                    "default": 0,
+                    "description": "Memory limit in MB (`--mem-limit`) when sandbox is active. 0 = no limit."
+                },
+                "fidan.run.jitThreshold": {
+                    "type": "number",
+                    "default": 500,
+                    "description": "JIT compilation threshold (`--jit-threshold`). 0 = disable JIT."
+                },
+                "fidan.run.suppress": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "Diagnostic codes to suppress in `fidan run` (e.g. `[\"W5003\", \"W1004\"]`)."
+                },
+                "fidan.run.emit": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "tokens",
+                            "ast",
+                            "hir",
+                            "mir"
+                        ]
+                    },
+                    "default": [],
+                    "description": "Emit intermediate representations during `fidan run`."
+                },
+                "fidan.run.maxErrors": {
+                    "type": "number",
+                    "default": 0,
+                    "description": "Stop after this many errors in `fidan run`. 0 = no limit."
+                },
+                "fidan.check.strict": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Pass `--strict` to `fidan check`."
+                },
+                "fidan.check.maxErrors": {
+                    "type": "number",
+                    "default": 0,
+                    "description": "Stop after this many errors in `fidan check`. 0 = no limit."
+                },
+                "fidan.check.suppress": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "default": [],
+                    "description": "Diagnostic codes suppressed in `fidan check` and `fidan test`."
+                },
+                "fidan.build.release": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Pass `--release` to `fidan build`."
+                },
+                "fidan.build.outputPath": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Output binary path for `fidan build` (empty = default `out`)."
+                },
+                "fidan.build.emit": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": [
+                            "tokens",
+                            "ast",
+                            "hir",
+                            "mir"
+                        ]
+                    },
+                    "default": [],
+                    "description": "Emit intermediate representations during `fidan build`."
+                },
+                "fidan.profile.outputFile": {
+                    "type": "string",
+                    "default": "",
+                    "description": "Write profiling data to this JSON file path (empty = print to terminal)."
                 }
             }
         },
@@ -164,6 +318,47 @@
                 "command": "fidan.runFile",
                 "title": "Fidan: Run Current File",
                 "icon": "$(play)"
+            },
+            {
+                "command": "fidan.checkFile",
+                "title": "Fidan: Check File"
+            },
+            {
+                "command": "fidan.fixFile",
+                "title": "Fidan: Fix File"
+            },
+            {
+                "command": "fidan.formatFile",
+                "title": "Fidan: Format Current File"
+            },
+            {
+                "command": "fidan.buildFile",
+                "title": "Fidan: Build File"
+            },
+            {
+                "command": "fidan.testFile",
+                "title": "Fidan: Run Tests in Current File",
+                "icon": "$(beaker)"
+            },
+            {
+                "command": "fidan.profileFile",
+                "title": "Fidan: Profile Current File"
+            },
+            {
+                "command": "fidan.explainCode",
+                "title": "Fidan: Explain Diagnostic Code"
+            },
+            {
+                "command": "fidan.explainLine",
+                "title": "Fidan: Explain Current Line(s)"
+            },
+            {
+                "command": "fidan.newProject",
+                "title": "Fidan: New Project"
+            },
+            {
+                "command": "fidan.openRepl",
+                "title": "Fidan: Open REPL"
             }
         ],
         "menus": {
@@ -172,6 +367,60 @@
                     "command": "fidan.runFile",
                     "when": "resourceLangId == fidan",
                     "group": "navigation"
+                },
+                {
+                    "command": "fidan.testFile",
+                    "when": "resourceLangId == fidan",
+                    "group": "navigation"
+                }
+            ],
+            "editor/context": [
+                {
+                    "command": "fidan.runFile",
+                    "when": "resourceLangId == fidan",
+                    "group": "fidan@1"
+                },
+                {
+                    "command": "fidan.checkFile",
+                    "when": "resourceLangId == fidan",
+                    "group": "fidan@3"
+                },
+                {
+                    "command": "fidan.testFile",
+                    "when": "resourceLangId == fidan",
+                    "group": "fidan@4"
+                },
+                {
+                    "command": "fidan.fixFile",
+                    "when": "resourceLangId == fidan",
+                    "group": "fidan@5"
+                },
+                {
+                    "command": "fidan.explainLine",
+                    "when": "resourceLangId == fidan",
+                    "group": "fidan@6"
+                }
+            ],
+            "explorer/context": [
+                {
+                    "command": "fidan.runFile",
+                    "when": "resourceLangId == fidan",
+                    "group": "fidan@1"
+                },
+                {
+                    "command": "fidan.checkFile",
+                    "when": "resourceLangId == fidan",
+                    "group": "fidan@2"
+                },
+                {
+                    "command": "fidan.testFile",
+                    "when": "resourceLangId == fidan",
+                    "group": "fidan@3"
+                },
+                {
+                    "command": "fidan.fixFile",
+                    "when": "resourceLangId == fidan",
+                    "group": "fidan@4"
                 }
             ]
         },
