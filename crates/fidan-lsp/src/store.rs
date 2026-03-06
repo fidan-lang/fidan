@@ -55,6 +55,59 @@ impl DocumentStore {
         }
         None
     }
+
+    /// Collect all members (fields + methods) of a type by walking the
+    /// inheritance chain across all stored documents.  Child entries take
+    /// precedence over inherited ones (first-wins).
+    ///
+    /// No `DashMap Ref` may be held when calling this.
+    pub fn collect_type_members(&self, start_type: &str) -> Vec<(String, SymbolEntry)> {
+        let mut seen = std::collections::HashSet::<String>::new();
+        let mut result: Vec<(String, SymbolEntry)> = Vec::new();
+        let mut cur_type = start_type.to_string();
+
+        for _ in 0..8 {
+            let prefix = format!("{}.", cur_type);
+            let mut next_type: Option<String> = None;
+            for kv in self.inner.iter() {
+                let tbl = &kv.value().symbol_table;
+                for (name, entry) in tbl.all() {
+                    if name.starts_with(&prefix) {
+                        let member = name[prefix.len()..].to_string();
+                        if seen.insert(member.clone()) {
+                            result.push((member, entry.clone()));
+                        }
+                    }
+                }
+                if next_type.is_none() {
+                    if let Some(e) = tbl.get(&cur_type) {
+                        next_type = e.ty_name.clone();
+                    }
+                }
+            }
+            match next_type {
+                Some(p) if !p.is_empty() && p != cur_type => cur_type = p,
+                _ => break,
+            }
+        }
+        result
+    }
+
+    /// Collect all unqualified (top-level) symbol entries from the document at
+    /// `uri`.  Used for `module.` prefix completion when the dot-receiver is an
+    /// import alias.
+    pub fn get_doc_top_level(&self, uri: &Url) -> Vec<(String, SymbolEntry)> {
+        match self.inner.get(uri) {
+            Some(kv) => kv
+                .value()
+                .symbol_table
+                .all()
+                .filter(|(name, _)| !name.contains('.'))
+                .map(|(n, e)| (n.clone(), e.clone()))
+                .collect(),
+            None => vec![],
+        }
+    }
 }
 
 impl Default for DocumentStore {

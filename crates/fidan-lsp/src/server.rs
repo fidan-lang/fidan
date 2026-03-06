@@ -742,53 +742,93 @@ impl LanguageServer for FidanLsp {
             .as_ref()
             .and_then(|c| c.trigger_character.as_deref());
 
-        let doc = match self.store.get(uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
+        // ── Phase 1: all intra-document work while holding the DashMap lock ──
+        //
+        // We collect everything we need into owned values so that the
+        // DashMap `Ref` (`doc`) is dropped before any cross-document call.
 
-        // ── Dot-triggered member completion ────────────────────────────────
-        if trigger == Some(".") {
+        enum DotResolution {
+            /// Receiver is a variable/object — use `collect_type_members`.
+            TypeName(String),
+            /// Receiver is a module-alias import — show its top-level exports.
+            ModuleAlias(Url),
+        }
+
+        struct Phase1 {
+            dot_res: Option<DotResolution>,
+            /// Declared symbols (non-dot completion path).
+            local_items: Vec<CompletionItem>,
+            /// Named parameter entries found locally for the enclosing call.
+            named_param_entries: Vec<(String, Span)>,
+            /// When named params live in an imported doc: (recv_ty, method_name).
+            named_param_cross: Option<(String, String)>,
+        }
+
+        let phase1 = {
+            let doc = match self.store.get(uri) {
+                Some(d) => d,
+                None => return Ok(None),
+            };
             let file = SourceFile::new(FileId(0), uri.as_str(), doc.text.as_str());
-            let cursor = lsp_pos_to_offset(&file, pos);
-            // Find the identifier token immediately before the `.` at `cursor - 1`.
-            let dot_pos = cursor.saturating_sub(1);
-            let recv_name = doc
-                .identifier_spans
-                .iter()
-                .rev()
-                .find(|(span, _)| span.end <= dot_pos)
-                .map(|(_, name)| name.as_str());
+            let cursor = lsp_pos_to_offset(&file, pos) as usize;
+            let src = doc.text.as_bytes();
 
-            let ty_name = recv_name.and_then(|rn| {
-                doc.symbol_table
-                    .get(rn)
-                    .and_then(|e| e.ty_name.as_deref())
-                    .map(|s| s.to_string())
-            });
+            // ── Dot-triggered receiver resolution ────────────────────────────
+            let dot_res: Option<DotResolution> = if trigger == Some(".") {
+                let dot_pos = (cursor as u32).saturating_sub(1);
+                let recv = doc
+                    .identifier_spans
+                    .iter()
+                    .rev()
+                    .find(|(span, _)| span.end <= dot_pos)
+                    .map(|(_, name)| name.clone());
 
-            if let Some(ty) = ty_name {
-                let prefix = format!("{}.", ty);
-                let items: Vec<CompletionItem> = doc
+                if let Some(rn) = recv {
+                    if let Some(url) = doc.imports.get(rn.as_str()) {
+                        Some(DotResolution::ModuleAlias(url.clone()))
+                    } else {
+                        doc.symbol_table
+                            .get(rn.as_str())
+                            .and_then(|e| e.ty_name.as_deref())
+                            .map(|ty| DotResolution::TypeName(ty.to_string()))
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // If dot-triggered and resolved, skip standard items entirely.
+            if dot_res.is_some() {
+                Phase1 {
+                    dot_res,
+                    local_items: vec![],
+                    named_param_entries: vec![],
+                    named_param_cross: None,
+                }
+            } else {
+                // ── Standard (non-dot) symbol items ──────────────────────────────
+                let local_items: Vec<CompletionItem> = doc
                     .symbol_table
                     .all()
-                    .filter(|(name, _)| name.starts_with(&prefix))
+                    .filter(|(name, _)| !name.contains('.'))
                     .map(|(name, entry)| {
-                        let member = &name[prefix.len()..];
                         let kind = Some(match &entry.kind {
-                            SymKind::Method => CompletionItemKind::METHOD,
+                            SymKind::Action | SymKind::Method => CompletionItemKind::FUNCTION,
+                            SymKind::Object => CompletionItemKind::CLASS,
+                            SymKind::Variable { .. } => CompletionItemKind::VARIABLE,
                             SymKind::Field => CompletionItemKind::FIELD,
-                            _ => CompletionItemKind::FIELD,
                         });
-                        let insert_text = if matches!(entry.kind, SymKind::Method)
+                        let insert_text = if matches!(entry.kind, SymKind::Action | SymKind::Object)
                             && !entry.param_types.is_empty()
                         {
-                            Some(format!("{}($0)", member))
+                            Some(format!("{}($0)", name))
                         } else {
                             None
                         };
                         CompletionItem {
-                            label: member.to_string(),
+                            label: name.clone(),
                             kind,
                             insert_text_format: insert_text
                                 .as_ref()
@@ -802,45 +842,199 @@ impl LanguageServer for FidanLsp {
                         }
                     })
                     .collect();
-                return Ok(Some(CompletionResponse::Array(items)));
+
+                // ── Named-parameter detection ─────────────────────────────────────
+                // Walk backward to find if the cursor is inside a function call and
+                // collect parameter names for `paramName = ` suggestions.
+                let mut named_param_entries: Vec<(String, Span)> = vec![];
+                let mut named_param_cross: Option<(String, String)> = None;
+
+                let mut depth: i32 = 0;
+                let mut open_paren: Option<usize> = None;
+                let mut i = cursor.saturating_sub(1);
+                loop {
+                    match src.get(i) {
+                        Some(b')') | Some(b']') => depth += 1,
+                        Some(b'(') | Some(b'[') => {
+                            if depth == 0 {
+                                open_paren = Some(i);
+                                break;
+                            }
+                            depth -= 1;
+                        }
+                        None => break,
+                        _ => {}
+                    }
+                    if i == 0 {
+                        break;
+                    }
+                    i -= 1;
+                }
+
+                if let Some(open) = open_paren {
+                    if let Some((fn_span, fn_name)) = doc
+                        .identifier_spans
+                        .iter()
+                        .rev()
+                        .find(|(span, _)| span.end as usize <= open)
+                    {
+                        // Try direct lookup first, then dot-receiver-qualified.
+                        let entry_opt = doc.symbol_table.get(fn_name.as_str()).or_else(|| {
+                            let fn_start = fn_span.start as usize;
+                            if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
+                                let recv = doc
+                                    .identifier_spans
+                                    .iter()
+                                    .rev()
+                                    .find(|(span, _)| (span.end as usize) < fn_start)?;
+                                let ty = doc
+                                    .symbol_table
+                                    .get(recv.1.as_str())
+                                    .and_then(|e| e.ty_name.as_deref())?;
+                                doc.symbol_table.get(&format!("{}.{}", ty, fn_name))
+                            } else {
+                                None
+                            }
+                        });
+
+                        if let Some(entry) = entry_opt {
+                            named_param_entries = entry.param_names.clone();
+                        } else {
+                            // Record for cross-doc resolution in Phase 2.
+                            let fn_start = fn_span.start as usize;
+                            if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
+                                if let Some((_, recv_name)) = doc
+                                    .identifier_spans
+                                    .iter()
+                                    .rev()
+                                    .find(|(span, _)| (span.end as usize) < fn_start)
+                                {
+                                    if let Some(ty) = doc
+                                        .symbol_table
+                                        .get(recv_name.as_str())
+                                        .and_then(|e| e.ty_name.as_deref())
+                                        .map(|s| s.to_string())
+                                    {
+                                        named_param_cross = Some((ty, fn_name.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Phase1 {
+                    dot_res,
+                    local_items,
+                    named_param_entries,
+                    named_param_cross,
+                }
+            } // end else (standard path)
+            // `doc` (DashMap Ref) is dropped here.
+        };
+
+        // ── Phase 2: cross-document resolution + assemble response ────────────
+
+        // Dot-triggered: collect members (walking full cross-module chain).
+        if let Some(dot_res) = phase1.dot_res {
+            match dot_res {
+                DotResolution::TypeName(ty) => {
+                    let members = self.store.collect_type_members(&ty);
+                    let items: Vec<CompletionItem> = members
+                        .into_iter()
+                        .filter(|(name, _)| name != "new")
+                        .map(|(member, entry)| {
+                            let kind = Some(match &entry.kind {
+                                SymKind::Method => CompletionItemKind::METHOD,
+                                SymKind::Field => CompletionItemKind::FIELD,
+                                _ => CompletionItemKind::FIELD,
+                            });
+                            let insert_text = if matches!(entry.kind, SymKind::Method)
+                                && !entry.param_types.is_empty()
+                            {
+                                Some(format!("{}($0)", member))
+                            } else {
+                                None
+                            };
+                            CompletionItem {
+                                label: member,
+                                kind,
+                                insert_text_format: insert_text
+                                    .as_ref()
+                                    .map(|_| InsertTextFormat::SNIPPET),
+                                insert_text,
+                                documentation: Some(Documentation::MarkupContent(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: entry.detail,
+                                })),
+                                ..Default::default()
+                            }
+                        })
+                        .collect();
+                    return Ok(Some(CompletionResponse::Array(items)));
+                }
+                DotResolution::ModuleAlias(url) => {
+                    let syms = self.store.get_doc_top_level(&url);
+                    let items: Vec<CompletionItem> = syms
+                        .into_iter()
+                        .map(|(name, entry)| {
+                            let kind = Some(match &entry.kind {
+                                SymKind::Action | SymKind::Method => CompletionItemKind::FUNCTION,
+                                SymKind::Object => CompletionItemKind::CLASS,
+                                SymKind::Variable { .. } => CompletionItemKind::VARIABLE,
+                                SymKind::Field => CompletionItemKind::FIELD,
+                            });
+                            CompletionItem {
+                                label: name,
+                                kind,
+                                documentation: Some(Documentation::MarkupContent(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: entry.detail,
+                                })),
+                                ..Default::default()
+                            }
+                        })
+                        .collect();
+                    return Ok(Some(CompletionResponse::Array(items)));
+                }
             }
         }
 
-        // ── Standard (non-dot) completion ──────────────────────────────────
-
-        // Declared symbols — skip "ClassName.field" qualified entries from basic completion.
-        let mut items: Vec<CompletionItem> = doc
-            .symbol_table
-            .all()
-            .filter(|(name, _)| !name.contains('.'))
-            .map(|(name, entry)| {
-                let kind = Some(match &entry.kind {
-                    SymKind::Action | SymKind::Method => CompletionItemKind::FUNCTION,
-                    SymKind::Object => CompletionItemKind::CLASS,
-                    SymKind::Variable { .. } => CompletionItemKind::VARIABLE,
-                    SymKind::Field => CompletionItemKind::FIELD,
-                });
-                // For actions/objects with parameters, provide snippet insert text.
-                let insert_text = if matches!(entry.kind, SymKind::Action | SymKind::Object)
-                    && !entry.param_types.is_empty()
-                {
-                    Some(format!("{}($0)", name))
-                } else {
-                    None
-                };
-                CompletionItem {
-                    label: name.clone(),
-                    kind,
-                    insert_text_format: insert_text.as_ref().map(|_| InsertTextFormat::SNIPPET),
-                    insert_text,
-                    documentation: Some(Documentation::MarkupContent(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: entry.detail.clone(),
-                    })),
-                    ..Default::default()
-                }
+        // Named-param cross-doc resolution.
+        let mut named_param_items: Vec<CompletionItem> = phase1
+            .named_param_entries
+            .iter()
+            .map(|(name, _)| CompletionItem {
+                label: format!("{} = ", name),
+                kind: Some(CompletionItemKind::KEYWORD),
+                insert_text: Some(format!("{} = ", name)),
+                sort_text: Some(format!("0{}", name)),
+                ..Default::default()
             })
             .collect();
+
+        if named_param_items.is_empty() {
+            if let Some((recv_ty, method_name)) = phase1.named_param_cross {
+                if let Some((_, entry)) = self.resolve_member_cross_doc(&recv_ty, &method_name) {
+                    named_param_items = entry
+                        .param_names
+                        .iter()
+                        .map(|(name, _)| CompletionItem {
+                            label: format!("{} = ", name),
+                            kind: Some(CompletionItemKind::KEYWORD),
+                            insert_text: Some(format!("{} = ", name)),
+                            sort_text: Some(format!("0{}", name)),
+                            ..Default::default()
+                        })
+                        .collect();
+                }
+            }
+        }
+
+        // Assemble final list: named params first (sort_text "0…" keeps them
+        // at the top), then declared symbols, then keywords, then builtins.
+        let mut items = named_param_items;
+        items.extend(phase1.local_items);
 
         // Language keywords.
         for &kw in COMPLETION_KEYWORDS {
@@ -874,83 +1068,176 @@ impl LanguageServer for FidanLsp {
         let uri = &params.text_document_position_params.text_document.uri;
         let pos = &params.text_document_position_params.position;
 
-        let doc = match self.store.get(uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
-        let file = SourceFile::new(FileId(0), uri.as_str(), doc.text.as_str());
-        let cursor = lsp_pos_to_offset(&file, pos) as usize;
-        let src = doc.text.as_bytes();
+        // Phase 1: gather everything from the document while holding the lock.
+        enum SigPhase1 {
+            /// Entry resolved locally — ready to build the response.
+            Found {
+                fn_name: String,
+                param_types: Vec<String>,
+                detail: String,
+                active_param: u32,
+            },
+            /// Entry not found locally; try cross-doc resolution.
+            CrossDoc {
+                recv_ty: String,
+                method_name: String,
+                active_param: u32,
+            },
+            NotFound,
+        }
 
-        // Walk backward from cursor to locate the opening `(` of the current call.
-        let mut depth: i32 = 0;
-        let mut open_paren: Option<usize> = None;
-        let mut i = cursor.saturating_sub(1);
-        loop {
-            match src.get(i) {
-                Some(b')') | Some(b']') => depth += 1,
-                Some(b'(') | Some(b'[') => {
-                    if depth == 0 {
-                        open_paren = Some(i);
-                        break;
+        let phase1 = {
+            let doc = match self.store.get(uri) {
+                Some(d) => d,
+                None => return Ok(None),
+            };
+            let file = SourceFile::new(FileId(0), uri.as_str(), doc.text.as_str());
+            let cursor = lsp_pos_to_offset(&file, pos) as usize;
+            let src = doc.text.as_bytes();
+
+            // Walk backward from cursor to locate the opening `(` of the call.
+            let mut depth: i32 = 0;
+            let mut open_paren: Option<usize> = None;
+            let mut i = cursor.saturating_sub(1);
+            loop {
+                match src.get(i) {
+                    Some(b')') | Some(b']') => depth += 1,
+                    Some(b'(') | Some(b'[') => {
+                        if depth == 0 {
+                            open_paren = Some(i);
+                            break;
+                        }
+                        depth -= 1;
                     }
-                    depth -= 1;
+                    None => break,
+                    _ => {}
                 }
-                None => break,
-                _ => {}
+                if i == 0 {
+                    break;
+                }
+                i -= 1;
             }
-            if i == 0 {
-                break;
+            let open = match open_paren {
+                Some(o) => o,
+                None => {
+                    // doc dropped
+                    return Ok(None);
+                }
+            };
+
+            // Find function name: identifier ending just before `(`.
+            let (fn_span, fn_name) = match doc
+                .identifier_spans
+                .iter()
+                .rev()
+                .find(|(span, _)| span.end as usize <= open)
+            {
+                Some(x) => x,
+                None => return Ok(None),
+            };
+            let fn_name = fn_name.clone();
+            let fn_start = fn_span.start as usize;
+
+            // Count active parameter (comma depth at 0 from `(` to cursor).
+            let mut active_param = 0u32;
+            let mut pd: i32 = 0;
+            for &byte in &src[open + 1..cursor.min(src.len())] {
+                match byte {
+                    b'(' | b'[' => pd += 1,
+                    b')' | b']' => pd -= 1,
+                    b',' if pd == 0 => active_param += 1,
+                    _ => {}
+                }
             }
-            i -= 1;
-        }
-        let open = match open_paren {
-            Some(o) => o,
-            None => return Ok(None),
+
+            // Try local lookup: direct, then receiver-qualified ("TRex.roar").
+            let local_entry = doc.symbol_table.get(fn_name.as_str()).cloned().or_else(|| {
+                if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
+                    let recv = doc
+                        .identifier_spans
+                        .iter()
+                        .rev()
+                        .find(|(span, _)| (span.end as usize) < fn_start)?;
+                    let ty = doc
+                        .symbol_table
+                        .get(recv.1.as_str())
+                        .and_then(|e| e.ty_name.as_deref())?
+                        .to_string();
+                    doc.symbol_table
+                        .get(&format!("{}.{}", ty, fn_name))
+                        .cloned()
+                } else {
+                    None
+                }
+            });
+
+            if let Some(entry) = local_entry {
+                if entry.param_types.is_empty() {
+                    SigPhase1::NotFound
+                } else {
+                    SigPhase1::Found {
+                        fn_name,
+                        param_types: entry.param_types.clone(),
+                        detail: entry.detail.clone(),
+                        active_param,
+                    }
+                }
+            } else if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
+                // Cross-doc: identify receiver type.
+                let recv_ty = doc
+                    .identifier_spans
+                    .iter()
+                    .rev()
+                    .find(|(span, _)| (span.end as usize) < fn_start)
+                    .and_then(|(_, rn)| {
+                        doc.symbol_table
+                            .get(rn.as_str())
+                            .and_then(|e| e.ty_name.clone())
+                    });
+                match recv_ty {
+                    Some(ty) => SigPhase1::CrossDoc {
+                        recv_ty: ty,
+                        method_name: fn_name,
+                        active_param,
+                    },
+                    None => SigPhase1::NotFound,
+                }
+            } else {
+                SigPhase1::NotFound
+            }
+            // doc dropped here
         };
 
-        // Find the function name: the identifier ending just before the `(`.
-        let fn_name = doc
-            .identifier_spans
-            .iter()
-            .rev()
-            .find(|(span, _)| span.end as usize <= open)
-            .map(|(_, name)| name.as_str());
-        let fn_name = match fn_name {
-            Some(n) => n,
-            None => return Ok(None),
+        // Phase 2: finalise response (cross-doc lookup if needed).
+        let (fn_name, param_types, detail, active_param) = match phase1 {
+            SigPhase1::Found {
+                fn_name,
+                param_types,
+                detail,
+                active_param,
+            } => (fn_name, param_types, detail, active_param),
+            SigPhase1::CrossDoc {
+                recv_ty,
+                method_name,
+                active_param,
+            } => match self.resolve_member_cross_doc(&recv_ty, &method_name) {
+                Some((_, entry)) if !entry.param_types.is_empty() => (
+                    method_name,
+                    entry.param_types.clone(),
+                    entry.detail.clone(),
+                    active_param,
+                ),
+                _ => return Ok(None),
+            },
+            SigPhase1::NotFound => return Ok(None),
         };
 
-        // Look up the function/action in the symbol table.
-        let entry = match doc.symbol_table.get(fn_name) {
-            Some(e) => e,
-            None => return Ok(None),
-        };
-        if entry.param_types.is_empty() {
-            return Ok(None);
-        }
-
-        // Count commas at depth 0 between `open` and `cursor` to find the active param.
-        let mut active_param = 0u32;
-        let mut pd: i32 = 0;
-        for &byte in &src[open + 1..cursor.min(src.len())] {
-            match byte {
-                b'(' | b'[' => pd += 1,
-                b')' | b']' => pd -= 1,
-                b',' if pd == 0 => active_param += 1,
-                _ => {}
-            }
-        }
-
-        // Build parameter labels from the hover detail or param_types.
-        let params: Vec<ParameterInformation> = entry
-            .param_types
+        // Build parameter labels from the detail string or param_types.
+        let sig_params: Vec<ParameterInformation> = param_types
             .iter()
             .enumerate()
             .map(|(idx, ty)| {
-                // Try to get the parameter name from the signature in `detail`.
-                // detail looks like: `action foo with (x -> integer, y -> string) ...`
-                let label = extract_param_label_from_detail(&entry.detail, idx)
+                let label = extract_param_label_from_detail(&detail, idx)
                     .unwrap_or_else(|| format!("param{} -> {}", idx + 1, ty));
                 ParameterInformation {
                     label: ParameterLabel::Simple(label),
@@ -959,12 +1246,12 @@ impl LanguageServer for FidanLsp {
             })
             .collect();
 
-        let sig_label = build_signature_label(fn_name, &entry.detail);
+        let sig_label = build_signature_label(&fn_name, &detail);
         Ok(Some(SignatureHelp {
             signatures: vec![SignatureInformation {
                 label: sig_label,
                 documentation: None,
-                parameters: Some(params),
+                parameters: Some(sig_params),
                 active_parameter: Some(active_param),
             }],
             active_signature: Some(0),
