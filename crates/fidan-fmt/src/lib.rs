@@ -190,9 +190,28 @@ mod tests {
 
     #[test]
     fn blank_line_between_items() {
-        let src = "var a = 1\n\nvar b = 2\n";
-        let out = fmt(src);
-        assert_eq!(out, src);
+        // Consecutive simple items (var, use, expr-stmts) must NOT get a blank
+        // line inserted between them.
+        let src = "var a = 1\nvar b = 2\n";
+        assert_eq!(fmt(src), src);
+        assert_idempotent(src);
+
+        // Any blank lines the user wrote between simple items are stripped
+        // (formatter is the authority on spacing).
+        let src_with_blank = "var a = 1\n\nvar b = 2\n";
+        assert_eq!(fmt(src_with_blank), "var a = 1\nvar b = 2\n");
+
+        // Block-level items (actions, objects) get a blank line before and after.
+        let src_action = "var x = 1\naction foo {\n}\nvar y = 2\n";
+        let formatted = fmt(src_action);
+        assert!(
+            formatted.contains("\n\naction"),
+            "expected blank line before action block, got:\n{formatted}"
+        );
+        assert!(
+            formatted.contains("}\n\nvar"),
+            "expected blank line after action block, got:\n{formatted}"
+        );
     }
 
     // ── check_formatted ───────────────────────────────────────────────────

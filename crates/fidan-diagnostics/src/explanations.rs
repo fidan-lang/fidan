@@ -572,6 +572,41 @@ truly does not matter, assign to `_` to silence the warning:
 "#,
         ),
 
+        "W1005" => Some(
+            r#"A `use` statement imports a module or symbol that is never referenced
+anywhere in the file body.  The import has no effect and can be removed
+to reduce noise and improve build times.
+
+Erroneous example:
+
+    use std.io          # note W1005: `io` imported but never used
+    use std.math        # note W1005: `math` imported but never used
+
+    action main {
+        print("hello")
+    }
+
+Fix: remove the unused imports:
+
+    action main {
+        print("hello")
+    }
+
+or use them:
+
+    use std.io
+
+    action main {
+        var line = io.readLine()
+        print("you typed: " + line)
+    }
+
+Note: `fidan fix` can remove all unused imports automatically:
+
+    fidan fix myfile.fdn
+"#,
+        ),
+
         // ── Warnings: style ───────────────────────────────────────────────────
         "W2001" => Some(
             r#"The file passed to `fidan run` or `fidan build` does not end in `.fdn`.

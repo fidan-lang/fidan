@@ -182,6 +182,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "spawned `Pending` value is never awaited",
         category: "concurrency",
     },
+    DiagnosticCode {
+        code: "W1005",
+        title: "unused import",
+        category: "unused",
+    },
     // ── Warnings: style ───────────────────────────────────────────────────────
     DiagnosticCode {
         code: "W2001",

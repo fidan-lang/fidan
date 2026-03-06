@@ -72,6 +72,12 @@ pub struct TypeChecker {
     /// Method call sites where the method lives in a cross-module parent.
     /// The LSP validates argument types against the cross-document signature.
     pub cross_module_call_sites: Vec<crate::CrossModuleCallSite>,
+    /// Import bindings registered during Pass 1: (bound_symbol, item_span, is_grouped).
+    /// Checked after Pass 2 to detect unused imports.
+    import_bindings: Vec<(Symbol, Span, bool)>,
+    /// Every symbol that was successfully resolved by an `Expr::Ident` node.
+    /// Used to determine which import bindings are unreferenced.
+    referenced_names: rustc_hash::FxHashSet<Symbol>,
 }
 
 impl TypeChecker {
@@ -91,6 +97,8 @@ impl TypeChecker {
             deprecated_actions: rustc_hash::FxHashSet::default(),
             cross_module_field_accesses: vec![],
             cross_module_call_sites: vec![],
+            import_bindings: vec![],
+            referenced_names: rustc_hash::FxHashSet::default(),
         };
         tc.register_builtins();
         tc
@@ -238,6 +246,8 @@ impl TypeChecker {
         // Clear per-module state so that multi-module programs don't bleed
         // @deprecated registrations from one module into another.
         self.deprecated_actions.clear();
+        self.import_bindings.clear();
+        self.referenced_names.clear();
 
         // Pass 1: register every top-level declaration so forward references work.
         // Suppress E0105 diagnostics here — Pass 2 re-resolves and emits them.
@@ -271,6 +281,12 @@ impl TypeChecker {
         for &item_id in &module.items {
             let item = module.arena.get_item(item_id).clone();
             self.check_item(&item, module);
+        }
+
+        // Pass 3: detect unused imports (skipped in REPL — imports persist
+        // across lines and would spuriously fire on every input).
+        if !self.is_repl {
+            self.check_unused_imports();
         }
     }
 
@@ -473,7 +489,11 @@ impl TypeChecker {
             // Register stdlib namespace / free-function imports so the type
             // checker doesn't emit E0101 for `use std.io` → `io` usage.
             Item::Use {
-                path, alias, span, ..
+                path,
+                alias,
+                re_export,
+                grouped,
+                span,
             } => {
                 let std_sym = self.interner.intern("std");
                 if path.first() == Some(&std_sym) && path.len() >= 2 {
@@ -498,6 +518,9 @@ impl TypeChecker {
                             initialized: Initialized::Yes,
                         },
                     );
+                    if !re_export && !self.is_repl {
+                        self.import_bindings.push((binding_sym, *span, *grouped));
+                    }
                 } else if !path.is_empty() && path.first() != Some(&std_sym) {
                     // User module import: `use mymod` / `use mymod.sub` /
                     // `use mymod.{name}` (grouped, folded into path by parser).
@@ -531,6 +554,9 @@ impl TypeChecker {
                                     initialized: Initialized::Yes,
                                 },
                             );
+                            if !re_export && !self.is_repl {
+                                self.import_bindings.push((a, *span, false));
+                            }
                         }
                     } else {
                         self.table.define(
@@ -543,6 +569,9 @@ impl TypeChecker {
                                 initialized: Initialized::Yes,
                             },
                         );
+                        if !re_export && !self.is_repl {
+                            self.import_bindings.push((binding_sym, *span, *grouped));
+                        }
                     }
                 }
             }
@@ -579,9 +608,14 @@ impl TypeChecker {
                             format!("undefined object `{pname}` in `extends` clause"),
                             *span,
                         );
+                    } else if path.len() > 1 {
+                        // Qualified path (e.g. `module.Foo`): the leading segment is a
+                        // module alias imported via `use`.  Mark it as referenced so the
+                        // unused-import pass (W1005) doesn't false-positive on it.
+                        self.referenced_names.insert(path[0]);
                     }
-                    // Multi-segment qualified paths (e.g. `module.Foo`) cannot be
-                    // verified in single-file type checking — suppress E0100.
+                    // Single-segment qualified paths that match a known object are fine;
+                    // multi-segment cross-module extends cannot be fully verified.
                 }
 
                 let obj_ty = FidanType::Object(*name);
@@ -1157,12 +1191,22 @@ impl TypeChecker {
 
         let declared = ty.as_ref().map(|t| self.resolve_type_expr(t));
 
-        // Temporarily remove `name` from scope while evaluating the initializer.
-        // This prevents self-referential declarations like `var x = f(x)` from
-        // silently succeeding — without this, pass 1 pre-registers `x` and it
-        // would be found in scope during init evaluation. Outside REPL mode the
-        // user cannot intentionally refer to a not-yet-bound variable like this.
-        if !self.is_repl {
+        // Always hide `name` while evaluating its own initializer to prevent
+        // self-referential declarations like `var x = x` from silently returning
+        // `nothing`.
+        //
+        // REPL exception: if `x` is already `initialized: Yes` at this point it
+        // means a previous check_var_decl in the same pass already assigned a real
+        // value (e.g. `var x = 5` processed before `var x = x + 1` in the same
+        // accumulated source).  In that case we keep `x` in scope so the
+        // re-declaration can reference the old value.
+        let hide = !self.is_repl
+            || self
+                .table
+                .lookup_current_scope(name)
+                .map(|i| i.initialized != Initialized::Yes)
+                .unwrap_or(true);
+        if hide {
             let _ = self.table.remove_from_current_scope(name);
         }
 
@@ -1204,6 +1248,45 @@ impl TypeChecker {
                 },
             },
         );
+    }
+
+    // ── Unused import detection ───────────────────────────────────────────────
+
+    /// Called after Pass 2. Emits W1005 (Note) for every import binding that
+    /// was never referenced in any `Expr::Ident` node.
+    ///
+    /// Non-grouped imports get a `Confidence::High` machine-applicable fix
+    /// (delete the statement span).  Grouped-import members get a hint only,
+    /// since automatic removal would require rewriting the brace list.
+    fn check_unused_imports(&mut self) {
+        use fidan_diagnostics::{Confidence, Label, Suggestion};
+        // Drain import_bindings so we don't need to clone referenced_names.
+        let bindings = std::mem::take(&mut self.import_bindings);
+        for (sym, span, grouped) in bindings {
+            if self.referenced_names.contains(&sym) {
+                continue;
+            }
+            let name = self.interner.resolve(sym).to_string();
+            let mut diag = Diagnostic::note(
+                fidan_diagnostics::diag_code!("W1005"),
+                format!("unused import `{name}`"),
+                span,
+            )
+            .with_label(Label::primary(span, "imported here but never used"));
+            if !grouped {
+                diag.add_suggestion(Suggestion::fix(
+                    "remove unused import",
+                    span,
+                    "",
+                    Confidence::High,
+                ));
+            } else {
+                diag.add_suggestion(Suggestion::hint(
+                    "remove this member from the grouped import",
+                ));
+            }
+            self.diags.push(diag);
+        }
     }
 
     /// Emit E0103 if `target` resolves to an immutable (`const var`) symbol.
@@ -1253,7 +1336,11 @@ impl TypeChecker {
                     return FidanType::Dynamic;
                 }
                 match self.table.lookup(name) {
-                    Some(info) => info.ty.clone(),
+                    Some(info) => {
+                        // Record this name as referenced (for unused-import detection).
+                        self.referenced_names.insert(name);
+                        info.ty.clone()
+                    }
                     None => {
                         let s = resolved.to_string();
                         // Collect every known symbol name for "did you mean?" suggestion.

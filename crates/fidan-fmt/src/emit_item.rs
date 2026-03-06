@@ -7,14 +7,36 @@ use fidan_ast::{Item, ItemId, Module, Param};
 
 // ── Top-level module ──────────────────────────────────────────────────────────
 
-/// Emit all items in a `Module`, separated by blank lines.
+/// Returns `true` for items that warrant surrounding blank lines (actions,
+/// objects, tests).  Simple items (var, use, assignments, expression
+/// statements) are grouped together without extra spacing.
+fn is_block_item(item: &Item) -> bool {
+    matches!(
+        item,
+        Item::ActionDecl { .. }
+            | Item::ExtensionAction { .. }
+            | Item::ObjectDecl { .. }
+            | Item::TestDecl { .. }
+    )
+}
+
+/// Emit all items in a `Module`, inserting blank lines only around block-level
+/// items (actions, objects, tests).  Consecutive simple items (var, use,
+/// assignments) are emitted without blank lines between them.
 pub fn emit_module(p: &mut Printer<'_>, module: &Module) {
     let items: Vec<ItemId> = module.items.clone();
     for (i, &iid) in items.iter().enumerate() {
         if i > 0 {
-            // Insert the configured number of blank separator lines.
-            for _ in 0..p.opts.blank_lines_between_items {
-                p.blank();
+            let prev_is_block = is_block_item(module.arena.get_item(items[i - 1]));
+            let curr_is_block = is_block_item(module.arena.get_item(iid));
+            if prev_is_block || curr_is_block {
+                // `blank()` ends the current line then adds the blank separator.
+                for _ in 0..p.opts.blank_lines_between_items {
+                    p.blank();
+                }
+            } else {
+                // Simple items are separated by a single newline only.
+                p.nl();
             }
         }
         let item = module.arena.get_item(iid).clone();

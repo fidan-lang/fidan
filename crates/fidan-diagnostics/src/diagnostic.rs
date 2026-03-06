@@ -63,6 +63,19 @@ impl Diagnostic {
         }
     }
 
+    pub fn note(code: DiagCode, message: impl Into<String>, span: Span) -> Self {
+        Self {
+            severity: Severity::Note,
+            code: code.0.to_owned(),
+            message: message.into(),
+            span,
+            labels: vec![],
+            notes: vec![],
+            suggestions: vec![],
+            cause_chain: vec![],
+        }
+    }
+
     pub fn with_label(mut self, label: crate::Label) -> Self {
         self.labels.push(label);
         self
