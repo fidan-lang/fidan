@@ -124,7 +124,16 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "argument type mismatch",
         category: "args",
     },
-    // ── Concurrency / safety ──────────────────────────────────────────────────
+    DiagnosticCode {
+        code: "E0303",
+        title: "decorator first parameter must have type `action`",
+        category: "decorators",
+    },
+    DiagnosticCode {
+        code: "E0304",
+        title: "wrong number of extra arguments for decorator",
+        category: "decorators",
+    }, // ── Concurrency / safety ──────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0401",
         title: "data race: module-level variable mutated in concurrent tasks",

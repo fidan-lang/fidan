@@ -418,10 +418,13 @@ impl MirMachine {
                 if func.custom_decorators.is_empty() {
                     continue;
                 }
-                let fn_name = self.interner.resolve(func.name).to_string();
+                // Pass the function itself as the first argument — just like Python's
+                // `@decorator` protocol.  The decorator receives a callable
+                // `FidanValue::Function` it can store, call, or wrap.
+                let fn_val = FidanValue::Function(RuntimeFnId(func.id.0));
                 for (dec_fn_id, extra_args) in &func.custom_decorators {
                     let mut args: Vec<FidanValue> = Vec::with_capacity(extra_args.len() + 1);
-                    args.push(FidanValue::String(FidanString::new(&fn_name)));
+                    args.push(fn_val.clone());
                     args.extend(extra_args.iter().cloned().map(mir_lit_to_value));
                     entries.push((*dec_fn_id, args));
                 }
@@ -439,21 +442,21 @@ impl MirMachine {
                             builtins::display(&v)
                         ),
                         trace: std::mem::take(&mut self.panic_trace),
-                    })
+                    });
                 }
                 Err(MirSignal::Panic(msg)) => {
                     return Err(RunError {
                         code: fidan_diagnostics::diag_code!("R0001"),
                         message: format!("decorator panicked: {msg}"),
                         trace: std::mem::take(&mut self.panic_trace),
-                    })
+                    });
                 }
                 Err(MirSignal::ParallelFail(msg)) => {
                     return Err(RunError {
                         code: fidan_diagnostics::diag_code!("R9001"),
                         message: msg,
                         trace: std::mem::take(&mut self.panic_trace),
-                    })
+                    });
                 }
             }
         }
@@ -1448,6 +1451,17 @@ impl MirMachine {
                 .get_field(field)
                 .cloned()
                 .unwrap_or(FidanValue::Nothing),
+            // `.name` on a first-class action value returns its declared name.
+            FidanValue::Function(RuntimeFnId(id)) => {
+                let field_name = self.sym_str(field);
+                if field_name.as_ref() == "name" {
+                    if let Some(func) = self.program.functions.get(*id as usize) {
+                        let name = self.sym_str(func.name);
+                        return FidanValue::String(FidanString::new(name.as_ref()));
+                    }
+                }
+                FidanValue::Nothing
+            }
             // User namespace field access: e.g. `test2.math` where `test2` is a
             // user module namespace.  Resolve the field to a stdlib namespace value
             // only when the field name is a re-exported namespace (i.e. the imported

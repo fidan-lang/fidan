@@ -278,6 +278,40 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 if let Some(entry) = table.entries.get_mut(&aname) {
                     entry.param_names = params.iter().map(|p| (res(p.name), p.span)).collect();
                 }
+                // Add each parameter as a named, hover-able symbol entry so that
+                // hovering over a param name (or a qualified access like `fn.name`)
+                // shows its type and modifier inside the action body.
+                if let Some(info) = typed.actions.get(name) {
+                    for (ast_p, typed_p) in params.iter().zip(info.params.iter()) {
+                        let pname = res(ast_p.name);
+                        let ty_s = type_name(&typed_p.ty, interner);
+                        let prefix = if typed_p.certain {
+                            "certain "
+                        } else if typed_p.optional {
+                            "optional "
+                        } else {
+                            ""
+                        };
+                        let ty_name_opt = if ty_s == "action" {
+                            Some("action".to_string())
+                        } else {
+                            None
+                        };
+                        table
+                            .entries
+                            .entry(pname.clone())
+                            .or_insert_with(|| SymbolEntry {
+                                kind: SymKind::Variable { is_const: false },
+                                span: ast_p.span,
+                                detail: format!("```fidan\n{}{} -> {}\n```", prefix, pname, ty_s),
+                                ty_name: ty_name_opt,
+                                param_types: vec![],
+                                param_required: vec![],
+                                return_type: None,
+                                param_names: vec![],
+                            });
+                    }
+                }
             }
             Item::ExtensionAction {
                 name,
@@ -299,6 +333,24 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
     // and methods it inherits (e.g. `"TRex.name"` inherited from `"Dinosaur"`).
     // We collect (child, parent) pairs first so the main `typed.objects` map
     // can still be borrowed immutably inside the loop.
+    // ── Built-in `action` virtual members ─────────────────────────────────────
+    // `action.name` is a read-only string property available on every value of
+    // type `action`.  Adding a virtual entry lets the hover handler resolve
+    // `fn.name` for any parameter typed as `action`.
+    table.put(
+        "action.name".to_string(),
+        SymbolEntry {
+            kind: SymKind::Field,
+            span: Span::default(),
+            detail: "```fidan\naction.name -> string\n```\n\nThe name of the action as declared in source.".to_string(),
+            ty_name: None,
+            param_types: vec![],
+            param_required: vec![],
+            return_type: Some("string".to_string()),
+            param_names: vec![],
+        },
+    );
+
     let child_parent_pairs: Vec<(Symbol, Option<Symbol>)> = typed
         .objects
         .iter()

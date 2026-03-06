@@ -916,6 +916,68 @@ declaration or switch to a JIT / interpreter build target.
 "#,
         ),
 
+        "E0303" => Some(
+            r#"A decorator's first parameter must have type `action` (or `flexible` / `dynamic`).
+The decorated action is passed implicitly as the first argument at every decorated
+call site; if the first parameter is annotated with any concrete non-action type,
+the implicit argument will always type-mismatch.
+
+Erroneous example:
+
+    action tag with (certain name -> string) {   # error: first param is `string`, not `action`
+        print(name)
+    }
+
+    @tag                # error E0303
+    action greet with (name oftype string) {
+        print("Hello, " + name)
+    }
+
+Fix: change the first parameter's type annotation to `action`:
+
+    action tag with (certain fn -> action) {
+        print(fn.name)
+    }
+
+    @tag
+    action greet with (name oftype string) {
+        print("Hello, " + name)
+    }
+"#,
+        ),
+
+        "E0304" => Some(
+            r#"The number of extra arguments supplied to a decorator does not match the
+number of extra parameters the decorator action expects.  The first parameter
+of a decorator receives the decorated action implicitly; all remaining
+parameters must be provided explicitly inside the `@decorator(...)` call.
+
+Erroneous example:
+
+    action log with (certain fn -> action, certain prefix -> string) {
+        print(prefix + fn.name)
+    }
+
+    @log                # error E0304: expected 1 extra arg, got 0
+    action greet {  }
+
+Fix: pass the required extra arguments:
+
+    @log(">> ")
+    action greet {  }
+
+Alternatively, if no extra arguments are needed, remove the extra parameters
+from the decorator's declaration:
+
+    action log with (certain fn -> action) {
+        print(fn.name)
+    }
+
+    @log
+    action greet {  }
+"#,
+        ),
+
         _ => None,
     }
 }

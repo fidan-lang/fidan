@@ -15,7 +15,7 @@
 //!   bit 0 = declaration
 //!   bit 1 = readonly
 
-use fidan_lexer::{SymbolInterner, Token, TokenKind};
+use fidan_lexer::{Symbol, SymbolInterner, Token, TokenKind};
 use fidan_source::SourceFile;
 use tower_lsp::lsp_types::{
     SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend,
@@ -76,6 +76,39 @@ pub fn compute(
         .collect();
 
     let n = meaningful.len();
+
+    // Pre-pass: collect the set of symbols that appear in parameter-declaration
+    // position so that `ident(` can be coloured as TT_PARAMETER (red) rather
+    // than TT_FUNCTION (blue) when the callee is an action-typed parameter.
+    let mut param_syms = std::collections::HashSet::<Symbol>::new();
+    for i in 0..n {
+        let sym = match &meaningful[i].kind {
+            TokenKind::Ident(s) => *s,
+            _ => continue,
+        };
+        let prev = if i > 0 {
+            Some(&meaningful[i - 1].kind)
+        } else {
+            None
+        };
+        let next = if i + 1 < n {
+            Some(&meaningful[i + 1].kind)
+        } else {
+            None
+        };
+        let after_param_prefix = matches!(
+            prev,
+            Some(TokenKind::Certain)
+                | Some(TokenKind::Optional)
+                | Some(TokenKind::LParen)
+                | Some(TokenKind::Comma)
+        );
+        let before_type_ann = matches!(next, Some(TokenKind::Oftype) | Some(TokenKind::Arrow));
+        if after_param_prefix && before_type_ann {
+            param_syms.insert(sym);
+        }
+    }
+
     // Raw tokens before delta-encoding: (line, start_char, length, type, mods)
     // Both line and start_char are 0-based.
     let mut raw: Vec<(u32, u32, u32, u32, u32)> = Vec::new();
@@ -130,6 +163,11 @@ pub fn compute(
             } else {
                 (TT_TYPE, 0)
             }
+        } else if param_syms.contains(&sym) && matches!(next, Some(TokenKind::LParen)) {
+            // An action-typed parameter being invoked — keep the parameter
+            // colour (red) instead of falling through to the blue function-call
+            // classification.  E.g. `fn()` inside `action register with (fn oftype action)`.
+            (TT_PARAMETER, 0)
         } else if matches!(prev, Some(TokenKind::Dot)) && prev_emitted_tt == Some(TT_CLASS) {
             // Qualified type path after `extends`: `extends module.Foo` or `extends a.b.Foo`.
             // The preceding identifier was classified as TT_CLASS (e.g. the namespace

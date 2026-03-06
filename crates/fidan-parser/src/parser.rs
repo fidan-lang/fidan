@@ -768,6 +768,12 @@ impl<'t> Parser<'t> {
                 self.advance();
                 TypeExpr::Nothing { span }
             }
+            // `action` as a type — first-class callable type
+            TokenKind::Action => {
+                self.advance();
+                let name = self.interner.intern("action");
+                TypeExpr::Named { name, span }
+            }
             // `tuple` keyword — untyped tuple, elements unknown
             TokenKind::Tuple => {
                 self.advance();

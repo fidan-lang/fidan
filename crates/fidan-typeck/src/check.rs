@@ -1658,6 +1658,15 @@ impl TypeChecker {
                     FidanType::Dynamic
                 }
             }
+            // First-class action values expose `.name` (the declared action name).
+            FidanType::Function => {
+                let f = self.interner.resolve(field);
+                if f.as_ref() == "name" {
+                    FidanType::String
+                } else {
+                    FidanType::Dynamic
+                }
+            }
             FidanType::Dynamic | FidanType::Unknown | FidanType::Error => FidanType::Dynamic,
             _ => FidanType::Dynamic,
         }
@@ -2171,6 +2180,8 @@ impl TypeChecker {
             "string" | "text" => FidanType::String,
             "nothing" | "null" | "none" => FidanType::Nothing,
             "dynamic" | "any" | "flexible" => FidanType::Dynamic,
+            // First-class action/callable type
+            "action" | "callable" | "fn" => FidanType::Function,
             // Bare container keywords without `oftype` — treat as dynamic rather than erroring
             "list" | "dict" | "map" | "shared" | "pending" | "tuple" => FidanType::Dynamic,
             _ => {
@@ -2313,10 +2324,21 @@ impl TypeChecker {
     }
 
     /// Validate a list of decorators, emitting W2004 for any that are not
-    /// recognised by the compiler.
+    /// recognised by the compiler, and E0303 / E0304 for signature mismatches.
     ///
     /// Recognised decorators: `precompile`, `deprecated`, and any user-defined
     /// action that is in scope (custom decorator pattern from §22.11).
+    ///
+    /// For user-defined decorators the following are also checked:
+    ///
+    /// - **E0303**: the first parameter of the decorator action must be typed
+    ///   `action` (`FidanType::Function`) or `flexible` (`FidanType::Dynamic`).
+    ///   Any other concrete type (e.g. `string`, `integer`) is an error because
+    ///   the runtime will pass a callable value there.
+    ///
+    /// - **E0304**: extra arguments passed to the decorator (`@dec(arg1, …)`)
+    ///   must match the number of *remaining* parameters (params after the first
+    ///   `action` param).  Too many or too few is an error.
     fn check_decorators(&mut self, decorators: &[Decorator]) {
         const KNOWN: &[&str] = &["precompile", "deprecated"];
         for dec in decorators {
@@ -2336,6 +2358,49 @@ impl TypeChecker {
                     format!("unknown decorator `@{name}` — will be ignored at runtime"),
                     dec.span,
                 );
+                continue;
+            }
+
+            // ── Signature checks for user-defined decorators ──────────────
+            // Clone the ActionInfo to avoid a simultaneous borrow on &self.
+            let info_opt = self.actions.get(&dec.name).cloned();
+            if let Some(info) = info_opt {
+                // E0303 — first param must accept an `action` value.
+                if let Some(first) = info.params.first() {
+                    let ok = matches!(
+                        first.ty,
+                        FidanType::Function | FidanType::Dynamic | FidanType::Unknown
+                    );
+                    if !ok {
+                        let got = self.ty_name(&first.ty);
+                        self.emit_error(
+                            fidan_diagnostics::diag_code!("E0303"),
+                            format!(
+                                "decorator `@{name}` expects its first parameter to be `action` \
+                                 but it is typed `{got}` — the runtime will pass a callable here"
+                            ),
+                            dec.span,
+                        );
+                    }
+                    // E0304 — extra literal args must match remaining params.
+                    let expected_extra = info.params.len().saturating_sub(1);
+                    let got_extra = dec.args.len();
+                    if got_extra != expected_extra {
+                        self.emit_error(
+                            fidan_diagnostics::diag_code!("E0304"),
+                            format!(
+                                "decorator `@{name}` expects {expected_extra} extra argument{} \
+                                 after the `action` parameter, but {} {} provided",
+                                if expected_extra == 1 { "" } else { "s" },
+                                got_extra,
+                                if got_extra == 1 { "was" } else { "were" },
+                            ),
+                            dec.span,
+                        );
+                    }
+                } else {
+                    // Decorator has no params at all — treat as marker-only; no checks.
+                }
             }
         }
     }
