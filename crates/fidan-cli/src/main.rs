@@ -1610,26 +1610,106 @@ fn run_fix(file: PathBuf, dry_run: bool) -> Result<()> {
 /// because all pipeline state is freshly constructed per run.
 fn run_with_reload(opts: CompileOptions) -> Result<()> {
     use notify::{Event, RecursiveMode, Watcher, recommended_watcher};
+    use std::collections::HashSet;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
     let watch_path = opts.input.clone();
 
-    // Collect the initial set of files to watch.  After Phase 7 the import
-    // system is in place, so we watch the entry point + all `.fdn` siblings
-    // in the same directory as a pragmatic approximation.
-    let watch_dir = watch_path
+    let entry_dir = watch_path
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
 
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
     let mut watcher = recommended_watcher(tx)?;
-    watcher.watch(&watch_dir, RecursiveMode::NonRecursive)?;
+
+    // Watch the entry-point directory recursively so subdirectory imports are
+    // covered without any extra bookkeeping.
+    watcher.watch(&entry_dir, RecursiveMode::Recursive)?;
+
+    // Track extra directories (outside the entry dir) that are already watched,
+    // so we only call watcher.watch() once per directory.
+    let mut extra_watched: HashSet<std::path::PathBuf> = HashSet::new();
+
+    /// Quick lex+parse pass that transitively resolves every `use` statement
+    /// and returns the canonical parent directories of all imported `.fdn`
+    /// files that live *outside* `skip_dir`.
+    fn collect_external_import_dirs(
+        entry: &std::path::Path,
+        skip_dir: &std::path::Path,
+    ) -> HashSet<std::path::PathBuf> {
+        use fidan_lexer::{Lexer, SymbolInterner};
+        use fidan_source::SourceMap;
+        use std::collections::VecDeque;
+        use std::sync::Arc;
+
+        let interner = Arc::new(SymbolInterner::new());
+        let mut dirs: HashSet<std::path::PathBuf> = HashSet::new();
+        let mut visited: HashSet<std::path::PathBuf> = HashSet::new();
+        let mut queue: VecDeque<std::path::PathBuf> = VecDeque::new();
+        queue.push_back(entry.to_path_buf());
+
+        while let Some(path) = queue.pop_front() {
+            let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if !visited.insert(canon) {
+                continue;
+            }
+            let src = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let name = path.display().to_string();
+            let sm = Arc::new(SourceMap::new());
+            let file = sm.add_file(&*name, &*src);
+            let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, _) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+            let base = path
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            let (imports, _) = collect_file_import_paths(&module, &interner, &base);
+            for (imp_path, _, _) in imports {
+                if let Some(parent) = imp_path.parent() {
+                    let canon_parent = parent
+                        .canonicalize()
+                        .unwrap_or_else(|_| parent.to_path_buf());
+                    // Only register dirs that are outside the entry dir.
+                    if !canon_parent.starts_with(skip_dir) {
+                        dirs.insert(canon_parent);
+                    }
+                }
+                queue.push_back(imp_path);
+            }
+        }
+        dirs
+    }
+
+    // Helper: ensure we are watching `dir` (idempotent).
+    let entry_dir_canon = entry_dir
+        .canonicalize()
+        .unwrap_or_else(|_| entry_dir.clone());
+    let watch_extra = |watcher: &mut dyn Watcher,
+                       extra: HashSet<std::path::PathBuf>,
+                       watched: &mut HashSet<std::path::PathBuf>| {
+        for dir in extra {
+            if watched.insert(dir.clone()) {
+                if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+                    eprintln!("\x1b[2m[reload] cannot watch {}: {e}\x1b[0m", dir.display());
+                } else {
+                    eprintln!("\x1b[2m[reload] also watching {}\x1b[0m", dir.display());
+                }
+            }
+        }
+    };
+
+    // Seed external-import watchers based on what the entry file currently imports.
+    let initial_extra = collect_external_import_dirs(&watch_path, &entry_dir_canon);
+    watch_extra(&mut watcher, initial_extra, &mut extra_watched);
 
     eprintln!(
         "\x1b[2m[reload] watching {} — Ctrl+C to stop\x1b[0m",
-        watch_dir.display()
+        entry_dir.display()
     );
 
     // Run once immediately on startup.
@@ -1671,6 +1751,10 @@ fn run_with_reload(opts: CompileOptions) -> Result<()> {
                     "\x1b[2m[reload] {} changed — re-running\x1b[0m",
                     changed.join(", ")
                 );
+
+                // Re-collect external import dirs in case imports changed.
+                let new_extra = collect_external_import_dirs(&watch_path, &entry_dir_canon);
+                watch_extra(&mut watcher, new_extra, &mut extra_watched);
 
                 // Re-run — errors are printed but do not stop the watcher.
                 let _ = run_pipeline(opts.clone());
