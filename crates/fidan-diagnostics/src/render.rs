@@ -145,6 +145,41 @@ fn terminal_width() -> usize {
     80 // fallback
 }
 
+/// Split `text` into lines of at most `width` visible characters, breaking at
+/// word boundaries.  Words longer than `width` are kept on a line of their own
+/// rather than being truncated.
+fn word_wrap(text: &str, width: usize) -> Vec<String> {
+    if width == 0 || text.is_empty() {
+        return vec![text.to_string()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_len: usize = 0;
+    for word in text.split_whitespace() {
+        let wlen = word.chars().count();
+        if current_len == 0 {
+            current.push_str(word);
+            current_len = wlen;
+        } else if current_len + 1 + wlen <= width {
+            current.push(' ');
+            current.push_str(word);
+            current_len += 1 + wlen;
+        } else {
+            lines.push(std::mem::take(&mut current));
+            current.push_str(word);
+            current_len = wlen;
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
 // ── spanless badge renderer ───────────────────────────────────────────────────
 
 /// Render a spanless pipeline-level message to stderr.
@@ -184,19 +219,32 @@ pub fn render_message_to_stderr(severity: Severity, code: impl std::fmt::Display
             "─".repeat(dashes_top)
         );
 
-        // Body: optional bold "code  " prefix, then message.
-        let (body_styled, body_vis) = if code_s.is_empty() {
-            let v = message.chars().count();
-            (message.to_owned(), v)
+        // Body: optional bold "code  " prefix, then word-wrapped message.
+        let (prefix_styled, prefix_vis) = if code_s.is_empty() {
+            (String::new(), 0usize)
         } else {
-            let v = code_s.chars().count() + 2 + message.chars().count();
-            (format!("{bold}{code_s}{reset}  {message}"), v)
+            (
+                format!("{bold}{code_s}{reset}  "),
+                code_s.chars().count() + 2,
+            )
         };
-        let pad = cw.saturating_sub(body_vis.min(cw));
-        eprintln!(
-            " {sev_color}│{reset}  {body_styled}{}  {sev_color}│{reset}",
-            " ".repeat(pad)
-        );
+        let text_width = cw.saturating_sub(prefix_vis).max(cw / 2);
+        let wrapped = word_wrap(message, text_width);
+        for (i, chunk) in wrapped.iter().enumerate() {
+            let content = if i == 0 {
+                format!("{prefix_styled}{chunk}")
+            } else {
+                format!("{}{chunk}", " ".repeat(prefix_vis))
+            };
+            let content_vis =
+                (if i == 0 { prefix_vis } else { prefix_vis }) + chunk.chars().count();
+            let pad = cw.saturating_sub(content_vis.min(cw));
+            eprintln!(
+                " {sev_color}│{reset}  {}{}  {sev_color}│{reset}",
+                content,
+                " ".repeat(pad)
+            );
+        }
 
         // Bottom border.
         eprintln!(" {sev_color}╰{}╯{reset}", "─".repeat(w - 3));
@@ -265,14 +313,23 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
             "{dp} {hdr_c}\u{256d}\u{2500} {sym} {kind_label} {}\u{256e}{reset}",
             "\u{2500}".repeat(dashes_top)
         );
-        // Message body line
-        let msg_chars: String = diag.message.chars().take(cw).collect();
-        let msg_vis = msg_chars.chars().count();
-        let msg_pad = cw.saturating_sub(msg_vis);
-        eprintln!(
-            "{dp} {hdr_c}\u{2502}{reset}  {bold}{msg_chars}{reset}{}  {hdr_c}\u{2502}{reset}",
-            " ".repeat(msg_pad)
-        );
+        // Message body line - word-wrapped so long messages don't overflow the box
+        let wrapped_msg = word_wrap(&diag.message, cw);
+        for (i, chunk) in wrapped_msg.iter().enumerate() {
+            let chunk_vis = chunk.chars().count();
+            let chunk_pad = cw.saturating_sub(chunk_vis.min(cw));
+            if i == 0 {
+                eprintln!(
+                    "{dp} {hdr_c}\u{2502}{reset}  {bold}{chunk}{reset}{}  {hdr_c}\u{2502}{reset}",
+                    " ".repeat(chunk_pad)
+                );
+            } else {
+                eprintln!(
+                    "{dp} {hdr_c}\u{2502}{reset}  {chunk}{}  {hdr_c}\u{2502}{reset}",
+                    " ".repeat(chunk_pad)
+                );
+            }
+        }
         // Location line (dimmed)
         let loc_str = format!("{name}:{line}:{col}");
         let loc_chars: String = loc_str.chars().take(cw).collect();

@@ -320,16 +320,60 @@
 
 ---
 
-## Hot Reloading (`--reload`) — Future Feature 22.8
+## Hot Reloading (`--reload`) — Feature 22.8 ✅
 
 | Item | Status | Notes |
 |---|---|---|
-| `--reload` flag on `fidan run` | ⬜ | `fidan-driver/src/options.rs` |
-| `notify` crate file-system watcher integration | ⬜ | Cross-platform: `inotify`/FSEvents/ReadDirectoryChangesW |
-| Single-file watch (entry point only) | ⬜ | Schedulable now (Phase 5 complete) |
-| Re-run on change, diff printed to stderr | ⬜ | |
-| Multi-file watch (transitive `use` imports) | ⬜ | Requires Phase 7 (import system) |
+| `--reload` flag on `fidan run` | ✅ | `CompileOptions::reload: bool`; wired in `fidan-cli` |
+| `notify` crate file-system watcher integration | ✅ | `recommended_watcher` via `notify` workspace dep; cross-platform (inotify / FSEvents / ReadDirectoryChangesW) |
+| Single-file watch + sibling `.fdn` files | ✅ | `run_with_reload()` watches the entry-point directory (`NonRecursive`); reacts to any `.fdn` write/create/remove event |
+| Re-run on change, diff printed to stderr | ✅ | Prints `[reload] <filename> changed — re-running` before each re-run |
+| Debounce (100 ms) | ✅ | Drains queued events; ignores events within 100 ms of the last one |
+| Ctrl+C exits cleanly | ✅ | Channel close propagates from OS signal handler |
+| Multi-file watch (transitive `use` imports) | ⬜ | Currently watches the whole directory; per-import tracking deferred to Phase 7+ |
 | Incremental MIR reuse on reload | ⬜ | Requires salsa-style demand-driven recompilation — stretch goal |
+
+---
+
+## Explain Line (`fidan explain-line`) — Feature 22.2 ✅
+
+Static analysis report for one or more source lines — fully offline, zero AI.
+Pipeline: lex → parse → `typecheck_full()` → AST walk → render.
+
+| Item | Status | Notes |
+|---|---|---|
+| `ExplainLine` subcommand in CLI | ✅ | `fidan explain-line <file> --line N [--end-line M]` |
+| AST/item walker | ✅ | Walks `module.items` (ActionDecl, ExtensionAction, Stmt, ExprStmt, VarDecl); recurses into nested stmts (if/for/while/attempt/check/concurrent) |
+| Span → line-number mapping | ✅ | `offset_line(src, byte_offset)` counts newlines; `span_overlaps()` checks overlap with target range |
+| `what it does` field | ✅ | Plain-English description per `Stmt` variant and per `Expr` type |
+| `type` field | ✅ | Drawn from `TypedModule.expr_types: FxHashMap<ExprId, FidanType>` |
+| `reads` field | ✅ | Recursive `collect_reads()` over all `Expr::Ident` nodes reachable from the statement |
+| `writes` field | ✅ | `collect_writes()` — VarDecl name, Assign target, For/ParallelFor binding, Destructure bindings |
+| `could go wrong` field | ✅ | `binary_risks()` — Div/Rem → division by zero; Add/Sub/Mul/Pow → overflow; Index → out of bounds |
+| Colour output in TTY | ✅ | ANSI colour codes suppressed when `NO_COLOR` is set or stdout is not a terminal |
+| `depends on` field | ⬜ | Requires full def-use chains (SSA or use-def map) — deferred |
+
+---
+
+## Replayable Bugs (`--replay`) — Feature 22.3 ✅
+
+Captures `input()` calls during a failing run and lets you reproduce the exact
+stdin sequence with `fidan run <file> --replay <id>`.
+
+| Item | Status | Notes |
+|---|---|---|
+| `stdin_capture` in `MirMachine` | ✅ | `pub stdin_capture: Vec<String>` — every line read from real stdin appended in call order |
+| `replay_inputs` / `replay_pos` in `MirMachine` | ✅ | Pre-loaded list; `"input"` arm returns `replay_inputs[replay_pos++]` instead of blocking on stdin |
+| `"input"` intercept in `dispatch_call` | ✅ | Inserted before `_ => {}` in `Callee::Builtin` match; replay takes priority; falls back to real stdin + capture |
+| `set_replay_inputs()` / `get_stdin_capture()` | ✅ | Public setters / getters on `MirMachine` |
+| `run_mir_with_replay()` public function | ✅ | Returns `(Result<(), RunError>, Vec<String>)`; replaces `run_mir_with_jit` in the interpret pipeline |
+| `replay_inputs` in `CompileOptions` | ✅ | `Vec<String>`; default empty (= normal run) |
+| `--replay <id|path>` on `fidan run` | ✅ | Accepts 8-hex ID or explicit bundle path; loaded by `load_replay_bundle()` before `run_pipeline` |
+| Replay bundle save on error | ✅ | After `RunError`: if `stdin_capture` non-empty → `save_replay_bundle()` → prints `fidan run <file> --replay <id>` hint |
+| Bundle format | ✅ | `~/.fidan/replays/<id>.bundle`; plain text; header `fidan-replay-v1`; one captured line per line |
+| Replay ID | ✅ | 8 lowercase hex chars from `DefaultHasher(source_path + unix_timestamp_secs)` |
+| Thread isolation | ✅ | `clone_for_thread()` inherits `replay_inputs` but starts a fresh `stdin_capture` and resets `replay_pos` |
+| Replay in `--reload` mode | ⬜ | Hot-reload always uses a fresh `CompileOptions`; replay bundle not currently re-fed on each run |
 
 ---
 

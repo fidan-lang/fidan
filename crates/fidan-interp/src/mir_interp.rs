@@ -214,6 +214,15 @@ pub struct MirMachine {
     /// Stored here so `exec_drop_dispatch` can call `class.find_method(drop_sym)`
     /// in O(1) without re-interning the string on every drop site.
     drop_sym: Symbol,
+    /// Lines read from stdin during this run (in call order).
+    /// Populated only when `input()` is called while `replay_inputs` is empty.
+    pub stdin_capture: Vec<String>,
+    /// Pre-loaded stdin lines for a replay run.
+    /// When non-empty, `input()` returns entries from this list in order
+    /// instead of blocking on the real terminal.
+    replay_inputs: Vec<String>,
+    /// Next index into `replay_inputs` to return.
+    replay_pos: usize,
 }
 
 /// A single test result recorded during `fidan test`.
@@ -344,6 +353,9 @@ impl MirMachine {
             jit_flags,
             jit_threshold: 500,
             drop_sym,
+            stdin_capture: Vec::new(),
+            replay_inputs: Vec::new(),
+            replay_pos: 0,
         }
     }
 
@@ -374,6 +386,12 @@ impl MirMachine {
             jit_flags: Arc::clone(&self.jit_flags),
             jit_threshold: self.jit_threshold,
             drop_sym: self.drop_sym,
+            // Parallel threads get a fresh capture buffer.
+            // Replay inputs are inherited so forked subtasks can replay too,
+            // but each thread starts from a fresh position.
+            stdin_capture: Vec::new(),
+            replay_inputs: self.replay_inputs.clone(),
+            replay_pos: self.replay_pos,
         }
     }
 
@@ -400,6 +418,17 @@ impl MirMachine {
 
     fn sym_str(&self, sym: Symbol) -> Arc<str> {
         Arc::clone(&self.str_table[sym.0 as usize])
+    }
+
+    /// Pre-load stdin lines for a replay run.  Call before `run()`.
+    pub fn set_replay_inputs(&mut self, inputs: Vec<String>) {
+        self.replay_inputs = inputs;
+        self.replay_pos = 0;
+    }
+
+    /// Return all stdin lines captured during this run (in call order).
+    pub fn get_stdin_capture(&self) -> &[String] {
+        &self.stdin_capture
     }
 
     // ── Entry point ──────────────────────────────────────────────────────────
@@ -1264,6 +1293,21 @@ impl MirMachine {
                                 "assertion failed: expected {da} != {da}"
                             )))
                         };
+                    }
+                    "input" => {
+                        // Replay mode: return the next pre-recorded line.
+                        if self.replay_pos < self.replay_inputs.len() {
+                            let line = self.replay_inputs[self.replay_pos].clone();
+                            self.replay_pos += 1;
+                            return Ok(FidanValue::String(FidanString::new(&line)));
+                        }
+                        // Normal mode: delegate to the builtin (reads stdin) and capture.
+                        let v =
+                            builtins::call_builtin("input", args).unwrap_or(FidanValue::Nothing);
+                        if let FidanValue::String(ref s) = v {
+                            self.stdin_capture.push(s.as_str().to_string());
+                        }
+                        return Ok(v);
                     }
                     _ => {}
                 }
@@ -2387,6 +2431,32 @@ pub fn run_mir_with_jit(
     let mut machine = MirMachine::new(Arc::new(program), interner, source_map);
     machine.set_jit_threshold(jit_threshold);
     machine.run()
+}
+
+/// Run a `MirProgram`, optionally replaying pre-recorded stdin inputs.
+///
+/// Returns the run result alongside every stdin line that was actually read
+/// (i.e. lines from `input()` calls that consumed real stdin, not replay lines).
+/// The capture is populated even when the run fails, so the caller can decide
+/// whether to persist a replay bundle.
+///
+/// * `replay_inputs` — pass a non-empty `Vec` to replay; pass `vec![]` for a
+///   normal run that only captures stdin for potential later replay.
+pub fn run_mir_with_replay(
+    program: MirProgram,
+    interner: Arc<SymbolInterner>,
+    source_map: Arc<SourceMap>,
+    jit_threshold: u32,
+    replay_inputs: Vec<String>,
+) -> (Result<(), RunError>, Vec<String>) {
+    let mut machine = MirMachine::new(Arc::new(program), interner, source_map);
+    machine.set_jit_threshold(jit_threshold);
+    if !replay_inputs.is_empty() {
+        machine.set_replay_inputs(replay_inputs);
+    }
+    let result = machine.run();
+    let captured = machine.get_stdin_capture().to_vec();
+    (result, captured)
 }
 
 /// Run a `MirProgram` from its entry function (default JIT threshold: 500).

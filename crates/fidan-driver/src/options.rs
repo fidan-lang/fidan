@@ -29,6 +29,13 @@ pub struct CompileOptions {
     /// Treat select warnings (unused vars, null safety, deprecated, unknown
     /// decorator) as hard errors.  Mirrors `-Werror` in C compilers.
     pub strict_mode: bool,
+    /// Pre-loaded stdin lines for a replay run.  Empty = normal execution;
+    /// non-empty = replay every `input()` call from this list in order.
+    pub replay_inputs: Vec<String>,
+    /// Diagnostic codes to silence (e.g. `["W5003", "W1004"]`).
+    /// The diagnostic is still compiled and counted for errors — only its
+    /// rendered output is suppressed.
+    pub suppress: Vec<String>,
 }
 
 impl Default for CompileOptions {
@@ -42,6 +49,8 @@ impl Default for CompileOptions {
             max_errors: None,
             jit_threshold: 500,
             strict_mode: false,
+            replay_inputs: vec![],
+            suppress: vec![],
         }
     }
 }
