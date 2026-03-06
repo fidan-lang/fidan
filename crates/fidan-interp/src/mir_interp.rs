@@ -26,6 +26,7 @@ use fidan_stdlib::{StdlibResult, parallel::ParallelOp};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::builtins;
+use crate::profiler::{FnProfileEntry, FnProfileItem, ProfileReport};
 use fidan_codegen_cranelift::{JitCompiler, JitFnEntry, call_jit_fn};
 
 // ── Public error types ────────────────────────────────────────────────────────
@@ -214,6 +215,9 @@ pub struct MirMachine {
     /// Stored here so `exec_drop_dispatch` can call `class.find_method(drop_sym)`
     /// in O(1) without re-interning the string on every drop site.
     drop_sym: Symbol,
+    /// Per-function profiling counters (only populated in `fidan profile` mode).
+    /// `None` in normal/JIT runs — zero overhead when not profiling.
+    profile_data: Option<Arc<Vec<FnProfileEntry>>>,
     /// Lines read from stdin during this run (in call order).
     /// Populated only when `input()` is called while `replay_inputs` is empty.
     pub stdin_capture: Vec<String>,
@@ -353,6 +357,7 @@ impl MirMachine {
             jit_flags,
             jit_threshold: 500,
             drop_sym,
+            profile_data: None,
             stdin_capture: Vec::new(),
             replay_inputs: Vec::new(),
             replay_pos: 0,
@@ -386,6 +391,7 @@ impl MirMachine {
             jit_flags: Arc::clone(&self.jit_flags),
             jit_threshold: self.jit_threshold,
             drop_sym: self.drop_sym,
+            profile_data: self.profile_data.as_ref().map(Arc::clone),
             // Parallel threads get a fresh capture buffer.
             // Replay inputs are inherited so forked subtasks can replay too,
             // but each thread starts from a fresh position.
@@ -393,6 +399,80 @@ impl MirMachine {
             replay_inputs: self.replay_inputs.clone(),
             replay_pos: self.replay_pos,
         }
+    }
+
+    /// Enable per-function profiling.  Must be called before [`run`].
+    ///
+    /// Allocates one `FnProfileEntry` per function (atomic counters, zero cost
+    /// when not profiling).  The JIT is automatically disabled when this is
+    /// active so that every call passes through the interpreter timing hooks.
+    pub fn enable_profiling(&mut self) {
+        let fn_count = self.program.functions.len();
+        let entries: Vec<FnProfileEntry> =
+            (0..fn_count).map(|_| FnProfileEntry::default()).collect();
+        self.profile_data = Some(Arc::new(entries));
+    }
+
+    /// Build a [`ProfileReport`] from the accumulated profiling counters.
+    ///
+    /// `fn_names` must be pre-collected before calling `run()` (one name per
+    /// function, in `FunctionId` order).  `total_ns` is the wall time of the
+    /// full program run.
+    pub fn take_profile_report(
+        &self,
+        fn_names: &[String],
+        program_name: &str,
+        total_ns: u64,
+    ) -> Option<ProfileReport> {
+        let pd = self.profile_data.as_ref()?;
+
+        let total_ms = total_ns as f64 / 1_000_000.0;
+        let mut items: Vec<FnProfileItem> = pd
+            .iter()
+            .enumerate()
+            .filter_map(|(i, entry)| {
+                // Skip the init function (FunctionId 0) — it is not user-visible.
+                if i == 0 {
+                    return None;
+                }
+                let call_count = entry.call_count.load(Ordering::Relaxed);
+                if call_count == 0 {
+                    return None;
+                }
+                let fn_ns = entry.total_ns.load(Ordering::Relaxed);
+                let fn_ms = fn_ns as f64 / 1_000_000.0;
+                let avg_ms = fn_ms / call_count as f64;
+                let pct = if total_ms > 0.0 {
+                    fn_ms / total_ms * 100.0
+                } else {
+                    0.0
+                };
+                let name = fn_names
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| format!("<fn#{i}>"));
+                Some(FnProfileItem {
+                    name,
+                    call_count,
+                    total_ms: fn_ms,
+                    avg_ms,
+                    pct,
+                })
+            })
+            .collect();
+
+        // Sort by total time descending.
+        items.sort_by(|a, b| {
+            b.total_ms
+                .partial_cmp(&a.total_ms)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        Some(ProfileReport {
+            program_name: program_name.to_string(),
+            total_ms,
+            hot_paths: items,
+        })
     }
 
     /// Resolve a `Symbol` to its string.
@@ -517,6 +597,9 @@ impl MirMachine {
         let func = self.program.function(fn_id);
 
         // ── JIT hot-path check ────────────────────────────────────────────────
+        // NOTE: Profiling disables JIT (jit_threshold is set to 0 by
+        // `run_mir_with_profile`) so every call enters the interpreter path
+        // and the timing hooks below are always reachable.
         if self.jit_threshold > 0 {
             let idx = fn_id.0 as usize;
             // Fast-path: single atomic load — no lock acquired when not compiled.
@@ -548,6 +631,19 @@ impl MirMachine {
                 }
             }
         }
+
+        // ── Profiling: record call and start inclusive timer ─────────────────
+        let profile_start = if let Some(ref pd) = self.profile_data {
+            let idx = fn_id.0 as usize;
+            if idx < pd.len() {
+                pd[idx].call_count.fetch_add(1, Ordering::Relaxed);
+                Some(std::time::Instant::now())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let fn_name = self.sym_str(func.name).to_string();
         let local_count = func.local_count;
@@ -626,6 +722,17 @@ impl MirMachine {
         }
 
         self.call_stack.pop();
+
+        // ── Profiling: accumulate inclusive elapsed time ──────────────────────
+        if let Some(start) = profile_start {
+            if let Some(ref pd) = self.profile_data {
+                let idx = fn_id.0 as usize;
+                if idx < pd.len() {
+                    let ns = start.elapsed().as_nanos() as u64;
+                    pd[idx].total_ns.fetch_add(ns, Ordering::Relaxed);
+                }
+            }
+        }
 
         result.map(|v| v.unwrap_or(FidanValue::Nothing))
     }
@@ -2466,6 +2573,39 @@ pub fn run_mir(
     source_map: Arc<SourceMap>,
 ) -> Result<(), RunError> {
     run_mir_with_jit(program, interner, source_map, 500)
+}
+
+/// Run a `MirProgram` under the profiler and return a [`ProfileReport`].
+///
+/// The JIT is disabled so that every function call passes through the
+/// interpreter timing hooks.  The report is `None` only if `enable_profiling`
+/// failed internally (should never happen in practice).
+///
+/// `program_name` is used as the title line in the rendered report — pass
+/// the source file name (e.g. `"app.fdn"`).
+pub fn run_mir_with_profile(
+    program: MirProgram,
+    interner: Arc<SymbolInterner>,
+    source_map: Arc<SourceMap>,
+    program_name: &str,
+) -> (Result<(), RunError>, Option<ProfileReport>) {
+    // Collect function names before moving `program` into the machine.
+    let fn_names: Vec<String> = program
+        .functions
+        .iter()
+        .map(|f| interner.resolve(f.name).to_string())
+        .collect();
+
+    let mut machine = MirMachine::new(Arc::new(program), Arc::clone(&interner), source_map);
+    machine.set_jit_threshold(0); // disable JIT — all calls must hit the interpreter hooks
+    machine.enable_profiling();
+
+    let wall_start = std::time::Instant::now();
+    let result = machine.run();
+    let total_ns = wall_start.elapsed().as_nanos() as u64;
+
+    let report = machine.take_profile_report(&fn_names, program_name, total_ns);
+    (result, report)
 }
 
 /// Run all `test { … }` blocks in a `MirProgram` and return per-test results.

@@ -82,6 +82,17 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         emit: Vec<String>,
     },
+    /// Profile a Fidan source file: call counts, time per action, hot-path hints
+    Profile {
+        /// Path to the .fdn source file
+        file: PathBuf,
+        /// Write profiling data to a file in JSON format
+        #[arg(long)]
+        profile_out: Option<PathBuf>,
+        /// Suppress specific diagnostic codes (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        suppress: Vec<String>,
+    },
     /// Run `test { ... }` blocks in a Fidan source file
     Test {
         file: PathBuf,
@@ -1916,6 +1927,20 @@ fn main() -> Result<()> {
             };
             run_pipeline(opts)
         }
+        Command::Profile {
+            file,
+            profile_out,
+            suppress,
+        } => {
+            let opts = CompileOptions {
+                input: file,
+                output: profile_out,
+                mode: ExecutionMode::Profile,
+                suppress,
+                ..Default::default()
+            };
+            run_pipeline(opts)
+        }
         Command::Test { file, suppress } => {
             let opts = CompileOptions {
                 input: file,
@@ -3033,6 +3058,55 @@ fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                     "unimplemented",
                     "AOT backend not yet implemented (Phase 11 – LLVM)",
                 );
+            }
+        }
+        ExecutionMode::Profile => {
+            if error_count == 0 {
+                if let Some(ref hir) = merged_hir {
+                    let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                    // Safety analysis warns about potential issues — profile run
+                    // continues regardless (warnings don’t block profiling).
+                    emit_mir_safety_diags(&mir, &interner, false, &opts.suppress);
+                    fidan_passes::run_all(&mut mir);
+                    let prog_name = opts
+                        .input
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let (result, report) = fidan_interp::run_mir_with_profile(
+                        mir,
+                        Arc::clone(&interner),
+                        Arc::clone(&source_map),
+                        &prog_name,
+                    );
+                    if let Err(ref err) = result {
+                        render_message_to_stderr(Severity::Error, err.code, &err.message);
+                        if !err.trace.is_empty() {
+                            render_trace_to_stderr(&err.trace, TraceMode::Short);
+                        }
+                    }
+                    if let Some(ref rep) = report {
+                        print!("{}", rep.render());
+                        if let Some(ref out_path) = opts.output {
+                            match std::fs::write(out_path, rep.render_json()) {
+                                Ok(()) => render_message_to_stderr(
+                                    Severity::Note,
+                                    "profile",
+                                    &format!("JSON written to {}", out_path.display()),
+                                ),
+                                Err(e) => render_message_to_stderr(
+                                    Severity::Error,
+                                    fidan_diagnostics::diag_code!("R0001"),
+                                    &format!("could not write profile output: {e}"),
+                                ),
+                            }
+                        }
+                    }
+                    if result.is_err() {
+                        std::process::exit(1);
+                    }
+                }
             }
         }
         ExecutionMode::Test => {

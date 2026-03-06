@@ -61,6 +61,8 @@ pub enum ExecutionMode {
     Build,
     Check,
     Test,
+    /// `fidan profile` — run with interpreter timing hooks, then print report.
+    Profile,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
