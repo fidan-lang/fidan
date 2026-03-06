@@ -548,19 +548,29 @@ impl LanguageServer for FidanLsp {
             } else {
                 None
             };
-            // Direct in-doc lookups: plain → qualified → type-resolved.
-            let in_doc = doc.symbol_table.get(cur_name.as_str()).or_else(|| {
-                let pn = prev_name?;
-                if let Some(e) = doc.symbol_table.get(&format!("{}.{}", pn, cur_name)) {
-                    return Some(e);
-                }
-                if let Some(pe) = doc.symbol_table.get(pn) {
-                    if let Some(ty) = &pe.ty_name {
-                        return doc.symbol_table.get(&format!("{}.{}", ty, cur_name));
+            // Direct in-doc lookups: action-param scope first (prevents a
+            // same-named global from shadowing a parameter), then plain →
+            // qualified → type-resolved.
+            let scoped = doc
+                .symbol_table
+                .action_param_scopes
+                .iter()
+                .find(|(s, _)| offset >= s.start && offset < s.end)
+                .and_then(|(_, params)| params.get(cur_name.as_str()));
+            let in_doc = scoped
+                .or_else(|| doc.symbol_table.get(cur_name.as_str()))
+                .or_else(|| {
+                    let pn = prev_name?;
+                    if let Some(e) = doc.symbol_table.get(&format!("{}.{}", pn, cur_name)) {
+                        return Some(e);
                     }
-                }
-                None
-            });
+                    if let Some(pe) = doc.symbol_table.get(pn) {
+                        if let Some(ty) = &pe.ty_name {
+                            return doc.symbol_table.get(&format!("{}.{}", ty, cur_name));
+                        }
+                    }
+                    None
+                });
             if let Some(e) = in_doc {
                 Phase1::Found(e.detail.clone())
             } else if let Some(pn) = prev_name {

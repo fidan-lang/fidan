@@ -49,6 +49,11 @@ pub struct SymbolEntry {
 #[derive(Debug, Clone, Default)]
 pub struct SymbolTable {
     pub entries: FxHashMap<String, SymbolEntry>,
+    /// Per-action parameter scopes used for scope-aware hover.
+    /// Each entry is `(action_full_span, param_name → SymbolEntry)`.
+    /// The hover handler checks this before the flat name lookup so that
+    /// a parameter `x` is never shadowed by a same-named global variable.
+    pub action_param_scopes: Vec<(Span, FxHashMap<String, SymbolEntry>)>,
 }
 
 impl SymbolTable {
