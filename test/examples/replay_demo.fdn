@@ -2,7 +2,7 @@
 # If you enter 0 the program panics — and Fidan saves the inputs
 # so you can reproduce the crash instantly with --replay.
 
-var numerator   = integer(input("Enter numerator:   "))
+var numerator   = integer(input("Enter numerator: "))
 var denominator = integer(input("Enter denominator: "))
 
 var result = numerator / denominator
