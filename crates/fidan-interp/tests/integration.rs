@@ -608,3 +608,98 @@ assert_eq(double(6), 12)
         .is_ok()
     );
 }
+
+// ── Parameter semantics (certain / optional / default) ────────────────────────
+
+/// Helper: returns typeck diagnostics for a source snippet.
+fn typeck_diags(src: &str) -> Vec<fidan_diagnostics::Diagnostic> {
+    let source_map = Arc::new(SourceMap::new());
+    let interner = make_interner();
+    let file = source_map.add_file("<test>", src);
+    let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+    let (module, _) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+    fidan_typeck::typecheck_full(&module, interner).diagnostics
+}
+
+#[test]
+/// Case 1: plain param — must be passed, but `nothing` is allowed.
+/// No E0205 should fire inside the body because the type is `dynamic`.
+fn param_plain_nothing_allowed() {
+    // `y` is plain (no certain/optional): must be passed, may be nothing.
+    // Inside the body, using a dynamic param doesn't trigger E0205.
+    assert!(
+        run_src(
+            r#"
+action x with (y oftype dynamic) {
+    print(y)
+}
+x(nothing)
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+/// Case 2: `certain` param — CertainCheck fires at runtime if `nothing` is passed.
+fn param_certain_panics_on_nothing() {
+    let result = run_src(
+        r#"
+action x with (certain y oftype dynamic) {
+    print(y)
+}
+x(nothing)
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "expected runtime error when certain param receives nothing"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        err.message.contains("y")
+            || err.message.contains("certain")
+            || err.message.contains("nothing"),
+        "error message should mention the param: {}",
+        err.message
+    );
+}
+
+#[test]
+/// Case 3: `optional` param with no default — omitting it leaves it as `nothing`.
+/// E0205 should fire inside the body when the param is used as an arithmetic operand.
+fn param_optional_no_default_e0205() {
+    let diags = typeck_diags(
+        r#"
+action x with (optional y oftype integer) {
+    var z = y + 1
+}
+"#,
+    );
+    let has_e0205 = diags.iter().any(|d| d.code.as_str() == "E0205");
+    assert!(
+        has_e0205,
+        "expected E0205 for optional param without default used as arithmetic operand"
+    );
+}
+
+#[test]
+/// Case 4: `optional` param with a default — omitted OR passed as `nothing` both use the default.
+fn param_optional_with_default_fills_in() {
+    assert!(
+        run_src(
+            r#"
+action greet with (optional name oftype string = "World") {
+    return "Hello, " + name
+}
+# omitted → uses default
+assert_eq(greet(), "Hello, World")
+# explicit nothing → uses default
+assert_eq(greet(nothing), "Hello, World")
+# explicit value → uses that value
+assert_eq(greet("Alice"), "Hello, Alice")
+"#
+        )
+        .is_ok()
+    );
+}

@@ -700,8 +700,19 @@ impl MirMachine {
 
         // Bind parameters — defer all string formatting to the error path only.
         // On the happy path we do ZERO formatting/allocation per argument.
+        // For `optional` params with a default: if the caller passed `nothing`
+        // (or omitted the arg entirely), substitute the compile-time default.
         for (i, param) in func.params.iter().enumerate() {
             let val = args.get(i).cloned().unwrap_or(FidanValue::Nothing);
+            let val = if matches!(val, FidanValue::Nothing) {
+                if let Some(ref lit) = param.default {
+                    mir_lit_to_value(lit)
+                } else {
+                    val
+                }
+            } else {
+                val
+            };
             frame.store(param.local, val);
         }
 

@@ -13,8 +13,8 @@
 // clean up the resulting literals and dead temporaries.
 
 use fidan_mir::{
-    Callee, FunctionId, Instr, LocalId, MirFunction, MirProgram, MirStringPart, MirTy, Operand,
-    Rvalue, Terminator,
+    Callee, FunctionId, Instr, LocalId, MirFunction, MirLit, MirProgram, MirStringPart, MirTy,
+    Operand, Rvalue, Terminator,
 };
 use rustc_hash::FxHashMap;
 
@@ -152,6 +152,8 @@ fn call_target(instr: &Instr) -> Option<FunctionId> {
 struct CalleeData {
     /// LocalId of each parameter (in order).
     param_locals: Vec<LocalId>,
+    /// Default value for each parameter (None = no default).
+    param_defaults: Vec<Option<MirLit>>,
     /// Total local count (for offset calculation).
     local_count: u32,
     /// Return type (for the return-value assignment in the caller).
@@ -166,6 +168,7 @@ fn extract_callee(func: &MirFunction) -> CalleeData {
     let bb = &func.blocks[0];
     CalleeData {
         param_locals: func.params.iter().map(|p| p.local).collect(),
+        param_defaults: func.params.iter().map(|p| p.default.clone()).collect(),
         local_count: func.local_count,
         return_ty: func.return_ty.clone(),
         instructions: bb.instructions.clone(),
@@ -186,11 +189,26 @@ fn do_inline(
     let offset = caller.local_count;
 
     // Map each callee parameter local → the corresponding call argument.
+    // If an arg is missing or is the Nothing literal, substitute the param's
+    // compile-time default (if any) so optional-with-default params work
+    // correctly even after inlining.
     let mut param_map: FxHashMap<LocalId, Operand> = FxHashMap::default();
     for (i, &param_local) in callee.param_locals.iter().enumerate() {
-        if let Some(arg) = call_args.get(i) {
-            param_map.insert(param_local, arg.clone());
-        }
+        let arg = call_args.get(i).cloned();
+        let resolved = match arg {
+            Some(Operand::Const(MirLit::Nothing)) | None => {
+                // Use default if available, otherwise Nothing.
+                callee
+                    .param_defaults
+                    .get(i)
+                    .and_then(|d| d.as_ref())
+                    .map(|lit| Operand::Const(lit.clone()))
+                    .or_else(|| call_args.get(i).cloned())
+                    .unwrap_or(Operand::Const(MirLit::Nothing))
+            }
+            Some(op) => op,
+        };
+        param_map.insert(param_local, resolved);
     }
 
     // Remap and clone callee instructions.
@@ -420,7 +438,13 @@ fn remap_rvalue(rv: &Rvalue, r: &impl Fn(&Operand) -> Operand) -> Rvalue {
             fn_id: *fn_id,
             captures: captures.iter().map(|c| r(c)).collect(),
         },
-        Rvalue::Slice { target, start, end, inclusive, step } => Rvalue::Slice {
+        Rvalue::Slice {
+            target,
+            start,
+            end,
+            inclusive,
+            step,
+        } => Rvalue::Slice {
             target: r(target),
             start: start.as_ref().map(|o| r(o)),
             end: end.as_ref().map(|o| r(o)),
@@ -431,7 +455,10 @@ fn remap_rvalue(rv: &Rvalue, r: &impl Fn(&Operand) -> Operand) -> Rvalue {
             tag: *tag,
             payload: payload.iter().map(|p| r(p)).collect(),
         },
-        Rvalue::EnumTagCheck { value, expected_tag } => Rvalue::EnumTagCheck {
+        Rvalue::EnumTagCheck {
+            value,
+            expected_tag,
+        } => Rvalue::EnumTagCheck {
             value: r(value),
             expected_tag: *expected_tag,
         },

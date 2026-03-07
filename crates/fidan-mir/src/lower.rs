@@ -303,6 +303,19 @@ fn fidan_ty_to_mir(ty: &FidanType) -> MirTy {
     }
 }
 
+/// Convert a HIR literal expression to a `MirLit`, if it is a simple compile-time constant.
+/// Returns `None` for complex expressions (identifiers, calls, etc.).
+fn hir_lit_to_mir_lit(expr: &HirExpr) -> Option<MirLit> {
+    match &expr.kind {
+        HirExprKind::IntLit(n) => Some(MirLit::Int(*n)),
+        HirExprKind::FloatLit(f) => Some(MirLit::Float(*f)),
+        HirExprKind::StrLit(s) => Some(MirLit::Str(s.clone())),
+        HirExprKind::BoolLit(b) => Some(MirLit::Bool(*b)),
+        HirExprKind::Nothing => Some(MirLit::Nothing),
+        _ => None,
+    }
+}
+
 // ── Variable environment ──────────────────────────────────────────────────────
 
 /// Current SSA definitions: variable name → most recent `LocalId`.
@@ -3065,6 +3078,7 @@ pub fn lower_program(
                 name: this_name,
                 ty: MirTy::Dynamic,
                 certain: false,
+                default: None,
             });
         }
 
@@ -3072,11 +3086,13 @@ pub fn lower_program(
         for param in &func.params {
             let local = ctx.alloc_local();
             ctx.define_var(param.name, local);
+            let default = param.default.as_ref().and_then(hir_lit_to_mir_lit);
             ctx.func_mut().params.push(MirParam {
                 local,
                 name: param.name,
                 ty: fidan_ty_to_mir(&param.ty),
                 certain: param.certain,
+                default,
             });
             // Emit a certain-param null guard as a real MIR instruction so it
             // survives inlining without any special-casing in the inliner.
@@ -3339,6 +3355,7 @@ pub fn lower_program(
                 name: binding_sym,
                 ty: binding_ty,
                 certain: false,
+                default: None,
             });
         }
         // Subsequent params: captured env variables (parallel for + concurrent tasks).
@@ -3350,6 +3367,7 @@ pub fn lower_program(
                 name: sym,
                 ty,
                 certain: false,
+                default: None,
             });
         }
         ctx.lower_stmts(body);

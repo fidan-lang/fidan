@@ -585,9 +585,16 @@ impl TypeChecker {
                     }
                 }
             }
-            Item::EnumDecl { name, variants, span } => {
+            Item::EnumDecl {
+                name,
+                variants,
+                span,
+            } => {
                 let info = EnumInfo {
-                    variants: variants.iter().map(|v| (v.name, v.payload_types.len())).collect(),
+                    variants: variants
+                        .iter()
+                        .map(|v| (v.name, v.payload_types.len()))
+                        .collect(),
                     span: *span,
                 };
                 self.enums.insert(*name, info);
@@ -861,7 +868,7 @@ impl TypeChecker {
                     ty: param_ty,
                     span: param.span,
                     is_mutable: false,
-                    initialized: if param.certain {
+                    initialized: if param.certain || param.default.is_some() {
                         Initialized::Yes
                     } else {
                         Initialized::Maybe

@@ -14,8 +14,8 @@
 use std.time
 use std.math
 
-var N     = 800_000_000      # total work items
-var CHUNK = N / 4       # work items per parallel task
+var N     = 800_000_000   # total work items
+var CHUNK = N / 4         # work items per parallel task
 
 # ── Workload ──────────────────────────────────────────────────────────────────
 #
@@ -32,31 +32,65 @@ action compute_range with (from oftype integer, to oftype integer) returns float
     return acc
 }
 
+# ── Utility helpers ───────────────────────────────────────────────────────────
+#
+# Parallel floating-point sums are not bit-identical to sequential sums because
+# addition is not associative. Compare with a relative tolerance instead.
+action approx_equal with (
+    certain a oftype float,
+    certain b oftype float,
+    optional rel_tol oftype float = 0.000000000001,
+    optional abs_tol oftype float = 0.001
+) returns boolean {
+    var diff = math.abs(a - b)
+    var scale = math.max(math.abs(a), math.abs(b))
+    return diff <= abs_tol or diff <= scale * rel_tol
+}
+
+# Pretty-print a speedup only if both timings are positive.
+action print_speedup with (
+    certain label oftype string,
+    certain baseline_ms oftype integer,
+    certain candidate_ms oftype integer
+) returns nothing {
+    if baseline_ms > 0 and candidate_ms > 0 {
+        var speedup = float(baseline_ms) / float(candidate_ms)
+        print("{label} : {speedup}x")
+    } else {
+        print("{label} : n/a")
+    }
+}
+
+# Warm the JIT path before measurement so timing reflects execution rather than
+# first-call compilation overhead.
+var _warmup = compute_range(0, 16)
+
 # ── Sequential baseline ───────────────────────────────────────────────────────
 print("--- Sequential (N = {N}) ---")
-var t0      = time.now()
-var seq_res  = compute_range(0, N)
-var seq_ms  = time.elapsed(t0)
+var t0 = time.now()
+var seq_res = compute_range(0, N)
+var seq_ms = time.elapsed(t0)
 print("result : {seq_res}")
 print("time   : {seq_ms} ms")
 print("")
 
-# ── parallel { task } — 4 named OS-thread tasks ───────────────────────────────
+# ── parallel { task } — 4 named OS-thread tasks ──────────────────────────────
 # Each task writes ONLY to its own Shared slot (no race, no shared mutation).
 print("--- parallel block (4 named tasks) ---")
 var r1 = Shared(0.0)
 var r2 = Shared(0.0)
 var r3 = Shared(0.0)
 var r4 = Shared(0.0)
+
 var t1 = time.now()
 parallel {
-    task A { r1.set(compute_range(0,           CHUNK))     }
-    task B { r2.set(compute_range(CHUNK,       CHUNK * 2)) }
-    task C { r3.set(compute_range(CHUNK * 2,   CHUNK * 3)) }
-    task D { r4.set(compute_range(CHUNK * 3,   N))         }
+    task A { r1.set(compute_range(0,         CHUNK))     }
+    task B { r2.set(compute_range(CHUNK,     CHUNK * 2)) }
+    task C { r3.set(compute_range(CHUNK * 2, CHUNK * 3)) }
+    task D { r4.set(compute_range(CHUNK * 3, N))         }
 }
 var ptask_res = r1.get() + r2.get() + r3.get() + r4.get()
-var ptask_ms  = time.elapsed(t1)
+var ptask_ms = time.elapsed(t1)
 print("result : {ptask_res}")
 print("time   : {ptask_ms} ms")
 print("")
@@ -66,36 +100,32 @@ print("")
 # Total wall-clock time ≈ max(task_time) rather than sum(task_time).
 print("--- spawn / await (4 tasks) ---")
 var t2 = time.now()
-var h1 = spawn compute_range(0,           CHUNK)
-var h2 = spawn compute_range(CHUNK,       CHUNK * 2)
-var h3 = spawn compute_range(CHUNK * 2,   CHUNK * 3)
-var h4 = spawn compute_range(CHUNK * 3,   N)
+var h1 = spawn compute_range(0,         CHUNK)
+var h2 = spawn compute_range(CHUNK,     CHUNK * 2)
+var h3 = spawn compute_range(CHUNK * 2, CHUNK * 3)
+var h4 = spawn compute_range(CHUNK * 3, N)
 var s1 = await h1
 var s2 = await h2
 var s3 = await h3
 var s4 = await h4
 var spawn_res = s1 + s2 + s3 + s4
-var spawn_ms  = time.elapsed(t2)
+var spawn_ms = time.elapsed(t2)
 print("result : {spawn_res}")
 print("time   : {spawn_ms} ms")
 print("")
 
 # ── Summary ───────────────────────────────────────────────────────────────────
-var ok_ptask = math.abs(seq_res - ptask_res) < 0.001
-var ok_spawn = math.abs(seq_res - spawn_res) < 0.001
+var diff_ptask = math.abs(seq_res - ptask_res)
+var diff_spawn = math.abs(seq_res - spawn_res)
+var ok_ptask = approx_equal(seq_res, ptask_res)
+var ok_spawn = approx_equal(seq_res, spawn_res)
+
 print("=== Summary ===")
 print("sequential    : {seq_ms} ms")
-print("parallel task : {ptask_ms} ms  (correct={ok_ptask})")
-print("spawn / await : {spawn_ms} ms  (correct={ok_spawn})")
+print("parallel task : {ptask_ms} ms  (correct={ok_ptask}, diff={diff_ptask})")
+print("spawn / await : {spawn_ms} ms  (correct={ok_spawn}, diff={diff_spawn})")
 print("")
 
-if seq_ms > 0 and ptask_ms > 0 {
-    var sp1 = float(seq_ms) / float(ptask_ms)
-    print("parallel task speedup : {sp1}x")
-}
-if seq_ms > 0 and spawn_ms > 0 {
-    var sp2 = float(seq_ms) / float(spawn_ms)
-    print("spawn/await speedup   : {sp2}x")
-}
+print_speedup("parallel task speedup", seq_ms, ptask_ms)
+print_speedup("spawn/await speedup  ", seq_ms, spawn_ms)
 print("(expected: ~2-4x on a 4-core machine)")
-

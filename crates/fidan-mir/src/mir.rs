@@ -376,6 +376,9 @@ pub struct MirParam {
     pub ty: MirTy,
     /// If `true` the caller must not pass `nothing` for this parameter.
     pub certain: bool,
+    /// Default value to use when the caller passes `nothing` (or omits the arg).
+    /// Only populated for `optional` params whose default is a compile-time literal.
+    pub default: Option<MirLit>,
 }
 
 #[derive(Debug)]
