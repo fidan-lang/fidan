@@ -58,6 +58,8 @@ pub enum TokenKind {
     Weak, // WeakShared
     /// `test` — top-level test block declaration
     Test,
+    /// `enum` — enumeration type declaration
+    Enum,
     And,
     Or,
     Not,

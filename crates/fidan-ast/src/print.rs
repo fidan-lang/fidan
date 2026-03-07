@@ -257,6 +257,11 @@ impl<'a> Printer<'a> {
                     self.print_stmt(sid, depth + 1);
                 }
             }
+
+            Item::EnumDecl { name, variants, .. } => {
+                let vars: Vec<String> = variants.iter().map(|&s| self.sym(s)).collect();
+                println!("{p}EnumDecl  {} {{ {} }}", self.sym(*name), vars.join(", "));
+            }
         }
     }
 

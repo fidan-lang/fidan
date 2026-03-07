@@ -40,6 +40,10 @@ pub enum FidanValue {
     /// A first-class reference to a stdlib function (e.g. `use std.io.{readFile}`).
     /// `StdlibFn(module, name)` — callable via `Callee::Dynamic` or directly displayed.
     StdlibFn(Arc<str>, Arc<str>),
+    /// An enum type namespace (e.g. `Direction` itself — `Direction.North` is a field access).
+    EnumType(Arc<str>),
+    /// A concrete enum variant value (e.g. the result of `Direction.North`).
+    EnumVariant { tag: Arc<str> },
 }
 
 impl FidanValue {
@@ -59,6 +63,8 @@ impl FidanValue {
             FidanValue::Pending(_) => "pending",
             FidanValue::Namespace(_) => "namespace",
             FidanValue::StdlibFn(_, _) => "action",
+            FidanValue::EnumType(_) => "enum-type",
+            FidanValue::EnumVariant { .. } => "enum",
         }
     }
 
@@ -138,6 +144,10 @@ impl FidanValue {
             // StdlibFn is stateless — clone both Arc<str> pointers.
             FidanValue::StdlibFn(module, name) =>
                 FidanValue::StdlibFn(Arc::clone(module), Arc::clone(name)),
+
+            // EnumType and EnumVariant are stateless — clone Arc<str>.
+            FidanValue::EnumType(s) => FidanValue::EnumType(Arc::clone(s)),
+            FidanValue::EnumVariant { tag } => FidanValue::EnumVariant { tag: Arc::clone(tag) },
         }
     }
 }
@@ -181,5 +191,7 @@ pub fn display(val: &FidanValue) -> String {
         FidanValue::Function(id) => format!("<action#{}>", id.0),
         FidanValue::Namespace(m) => format!("<module:{}>", m),
         FidanValue::StdlibFn(module, name) => format!("<action:{}.{}>", module, name),
+        FidanValue::EnumType(s) => format!("<enum:{}>", s),
+        FidanValue::EnumVariant { tag } => tag.as_ref().to_string(),
     }
 }

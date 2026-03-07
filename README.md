@@ -808,7 +808,7 @@ The same MIR feeds all three backends — no behavioral divergence between run m
 | `fidan-runtime` | Value model, COW collections, object model, `Shared<T>` |
 | `fidan-interp` | MIR tree-walking interpreter |
 | `fidan-codegen-cranelift` | Cranelift JIT backend |
-| `fidan-codegen-llvm` | LLVM AOT backend *(in progress)* |
+| `fidan-codegen-llvm` | LLVM AOT backend *(planned)* |
 | `fidan-stdlib` | Rust-backed standard library |
 | `fidan-fmt` | Canonical source formatter |
 | `fidan-lsp` | Full LSP server |
@@ -832,7 +832,7 @@ The same MIR feeds all three backends — no behavioral divergence between run m
 | VS Code extension | ✅ Complete |
 | Hot reload (`--reload`) | ✅ Complete |
 | Replay-based crash reproduction (`--replay`) | ✅ Complete |
-| LLVM AOT backend (`fidan build --release`) | 🔨 In progress |
+| LLVM AOT backend (`fidan build --release`) | ⬜ Not started |
 | Package manager | 🔜 Planned |
 | Debug adapter (VS Code breakpoints) | 🔜 Planned |
 | Playground (browser WASM) | 🔜 Planned |
@@ -841,7 +841,7 @@ The same MIR feeds all three backends — no behavioral divergence between run m
 
 ## Contributing
 
-Contributions are welcome! By submitting a pull request or patch you agree to the [Contributor License Agreement](CLA.md) — your contribution becomes part of the Fidan project under its license terms.
+Contributions are welcome! By submitting a pull request or patch you acknowledge that you have read [CONTRIBUTING.md](CONTRIBUTING.md) and agree to the [Contributor License Agreement](CLA.md) — your contribution becomes part of the Fidan project under its license terms.
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-feature`)

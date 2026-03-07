@@ -85,6 +85,12 @@ pub enum Item {
         body: Vec<StmtId>,
         span: Span,
     },
+    /// `enum Name { Variant1, Variant2, ... }` — simple enumeration type.
+    EnumDecl {
+        name: Symbol,
+        variants: Vec<Symbol>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]

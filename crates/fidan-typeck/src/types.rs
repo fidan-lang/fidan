@@ -21,6 +21,8 @@ pub enum FidanType {
     Tuple(Vec<FidanType>),
     // User types
     Object(Symbol),
+    /// Simple enumeration type declared with `enum Name { Variant, ... }`.
+    Enum(Symbol),
     // Concurrency wrappers
     Shared(Box<FidanType>),
     Pending(Box<FidanType>),
@@ -115,6 +117,7 @@ impl FidanType {
             FidanType::Shared(inner)  => format!("Shared oftype {}",                   inner.display_name(resolve)),
             FidanType::Pending(inner) => format!("Pending oftype {}",                  inner.display_name(resolve)),
             FidanType::Object(sym)    => resolve(*sym),
+            FidanType::Enum(sym)      => resolve(*sym),
         }
     }
 }

@@ -240,6 +240,7 @@ impl<'t> Parser<'t> {
         self.skip_terminators(); // skip any newlines between decorator and declaration
         match self.peek().clone() {
             TokenKind::Object => Some(self.parse_object_decl()),
+            TokenKind::Enum => Some(self.parse_enum_decl()),
             TokenKind::Action => Some(self.parse_action_decl(false, decs)),
             TokenKind::Use => Some(self.parse_use_decl(false)),
             TokenKind::Test => Some(self.parse_test_decl()),
@@ -478,6 +479,41 @@ impl<'t> Parser<'t> {
     }
 
     // ── Object declaration ────────────────────────────────────────────────────
+
+    fn parse_enum_decl(&mut self) -> ItemId {
+        let start = self.current_span().start;
+        self.advance(); // eat `enum`
+        let name = self.expect_ident_sym("expected enum name");
+        self.skip_terminators();
+        self.expect_tok(&TokenKind::LBrace);
+
+        let mut variants: Vec<fidan_lexer::Symbol> = vec![];
+
+        loop {
+            self.skip_terminators();
+            match self.peek().clone() {
+                TokenKind::RBrace | TokenKind::Eof => break,
+                TokenKind::Ident(sym) => {
+                    variants.push(sym);
+                    self.advance();
+                    self.eat(&TokenKind::Comma);
+                }
+                _ => {
+                    let span = self.current_span();
+                    self.error("expected variant name in enum body", span);
+                    self.synchronize();
+                }
+            }
+        }
+
+        let end = self.current_span().end;
+        self.expect_tok(&TokenKind::RBrace);
+        self.module.arena.alloc_item(Item::EnumDecl {
+            name,
+            variants,
+            span: Span::new(self.module.file, start, end),
+        })
+    }
 
     fn parse_object_decl(&mut self) -> ItemId {
         let start = self.current_span().start;

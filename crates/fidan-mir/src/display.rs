@@ -245,6 +245,7 @@ fn fmt_ty(ty: &MirTy) -> String {
         MirTy::Dict(k, v) => format!("dict<{}, {}>", fmt_ty(k), fmt_ty(v)),
         MirTy::Tuple(ts) => format!("({})", ts.iter().map(fmt_ty).collect::<Vec<_>>().join(", ")),
         MirTy::Object(s) => sym_str(s.0),
+        MirTy::Enum(s) => format!("enum({})", sym_str(s.0)),
         MirTy::Shared(t) => format!("shared<{}>", fmt_ty(t)),
         MirTy::Pending(t) => format!("pending<{}>", fmt_ty(t)),
         MirTy::Function => "action".to_string(),
@@ -263,6 +264,7 @@ fn fmt_op(op: &Operand) -> String {
         Operand::Const(MirLit::FunctionRef(id)) => format!("fn#{}", id),
         Operand::Const(MirLit::Namespace(m)) => format!("std.{}", m),
         Operand::Const(MirLit::StdlibFn { module, name }) => format!("std.{}.{}", module, name),
+        Operand::Const(MirLit::EnumType(e)) => format!("enum:{}", e),
     }
 }
 

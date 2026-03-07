@@ -30,6 +30,12 @@ pub struct ActionInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct EnumInfo {
+    pub variants: Vec<Symbol>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct ObjectInfo {
     pub fields: FxHashMap<Symbol, FidanType>,
     pub methods: FxHashMap<Symbol, ActionInfo>,
@@ -43,6 +49,7 @@ pub struct TypeChecker {
     pub(crate) interner: Arc<SymbolInterner>,
     table: SymbolTable,
     objects: FxHashMap<Symbol, ObjectInfo>,
+    enums: FxHashMap<Symbol, EnumInfo>,
     diags: Vec<Diagnostic>,
     /// Expected return type of the action currently being checked.
     current_return_ty: Option<FidanType>,
@@ -86,6 +93,7 @@ impl TypeChecker {
             interner,
             table: SymbolTable::new(),
             objects: FxHashMap::default(),
+            enums: FxHashMap::default(),
             diags: vec![],
             current_return_ty: None,
             this_ty: None,
@@ -301,6 +309,7 @@ impl TypeChecker {
             diagnostics: self.diags,
             expr_types: self.expr_types,
             objects: self.objects,
+            enums: self.enums,
             actions: self.actions,
             cross_module_field_accesses: self.cross_module_field_accesses,
             cross_module_call_sites: self.cross_module_call_sites,
@@ -575,6 +584,20 @@ impl TypeChecker {
                     }
                 }
             }
+            Item::EnumDecl { name, variants, span } => {
+                let info = EnumInfo { variants: variants.clone(), span: *span };
+                self.enums.insert(*name, info);
+                self.table.define(
+                    *name,
+                    SymbolInfo {
+                        kind: SymbolKind::Object,
+                        ty: FidanType::Enum(*name),
+                        span: *span,
+                        is_mutable: false,
+                        initialized: Initialized::Yes,
+                    },
+                );
+            }
             Item::ExprStmt(_) | Item::Assign { .. } | Item::Stmt(_) | Item::Destructure { .. } => {}
             // Test blocks are not registered in the symbol table.
             Item::TestDecl { .. } => {}
@@ -732,6 +755,9 @@ impl TypeChecker {
             }
 
             Item::Use { .. } => {}
+
+            // Enum declarations are fully processed during Pass 1 (register_top_level).
+            Item::EnumDecl { .. } => {}
 
             // ── module-level statement (for, while, if, check, attempt, etc.) ──
             Item::Stmt(stmt_id) => {
@@ -2330,6 +2356,10 @@ impl TypeChecker {
                 // Might be a user-defined object type
                 if self.objects.contains_key(&sym) {
                     return FidanType::Object(sym);
+                }
+                // Might be a user-defined enum type
+                if self.enums.contains_key(&sym) {
+                    return FidanType::Enum(sym);
                 }
                 // Unknown type — emit a diagnostic and suppress cascades
                 let bad = s.to_string();

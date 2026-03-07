@@ -1472,6 +1472,39 @@ fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize) -> Result
                     }
                 }
             }
+            Item::EnumDecl {
+                name,
+                variants,
+                span,
+            } => {
+                let decl_lo = offset_line(&src, span.start as usize);
+                if span_overlaps(&src, *span, line_start, line_end) {
+                    let n = interner.resolve(*name);
+                    let var_names: Vec<String> = variants
+                        .iter()
+                        .map(|&v| interner.resolve(v).to_string())
+                        .collect();
+                    results.push(Expl {
+                        line_range: format!("line {decl_lo}"),
+                        source_text: all_src_lines
+                            .get(decl_lo.saturating_sub(1))
+                            .unwrap_or(&"")
+                            .chars()
+                            .take(120)
+                            .collect(),
+                        context: "at module level".to_string(),
+                        what: format!(
+                            "declares enum `{}` with variants: {}",
+                            n,
+                            var_names.join(", ")
+                        ),
+                        ty: None,
+                        reads: vec![],
+                        writes: vec![],
+                        risks: vec![],
+                    });
+                }
+            }
         }
     }
 

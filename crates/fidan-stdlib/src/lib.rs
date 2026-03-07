@@ -17,8 +17,9 @@
 pub mod collections;
 pub mod io;
 pub mod math;
-pub mod sandbox;
 pub mod parallel;
+pub mod regex;
+pub mod sandbox;
 pub mod string;
 pub mod test_runner;
 pub mod time;
@@ -75,6 +76,7 @@ pub fn dispatch_stdlib(
             ))),
         }),
         "time" => time::dispatch(name, args).map(StdlibResult::Value),
+        "regex" => regex::dispatch(name, args).map(StdlibResult::Value),
         _ => None,
     }
 }

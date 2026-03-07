@@ -556,6 +556,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
     let mut init_stmts: Vec<HirStmt> = vec![];
     let mut use_decls: Vec<HirUseDecl> = vec![];
     let mut tests: Vec<HirTestDecl> = vec![];
+    let mut enums: Vec<crate::hir::HirEnum> = vec![];
 
     for &item_id in &module.items {
         match ctx.arena.get_item(item_id).clone() {
@@ -778,6 +779,11 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 });
             }
 
+            // Enum declarations: lowered into HirEnum entries (MIR will create globals).
+            Item::EnumDecl { name, variants, span } => {
+                enums.push(crate::hir::HirEnum { name, variants, span });
+            }
+
             // Module imports: capture stdlib imports and propagate to the interpreter.
             Item::Use {
                 path,
@@ -859,6 +865,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
 
     HirModule {
         objects,
+        enums,
         functions,
         globals,
         init_stmts,
@@ -875,6 +882,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
 pub fn merge_module(base: HirModule, imported: HirModule) -> HirModule {
     let mut merged = imported;
     merged.objects.extend(base.objects);
+    merged.enums.extend(base.enums);
     merged.functions.extend(base.functions);
     merged.globals.extend(base.globals);
     merged.init_stmts.extend(base.init_stmts);

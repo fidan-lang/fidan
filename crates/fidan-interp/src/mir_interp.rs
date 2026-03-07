@@ -1715,6 +1715,11 @@ impl MirMachine {
                     FidanValue::Nothing
                 }
             }
+            // Enum type field access: `Direction.North` → EnumVariant { tag: "North" }.
+            FidanValue::EnumType(_) => {
+                let field_name = self.sym_str(field);
+                FidanValue::EnumVariant { tag: field_name }
+            }
             _ => FidanValue::Nothing,
         }
     }
@@ -1946,6 +1951,11 @@ fn fidan_values_equal(a: &FidanValue, b: &FidanValue) -> bool {
         (String(x), String(y)) => x.as_str() == y.as_str(),
         (Nothing, Nothing) => true,
         (Nothing, _) | (_, Nothing) => false,
+        (EnumVariant { tag: a }, EnumVariant { tag: b }) => a == b,
+        (EnumType(a), EnumType(b)) => a == b,
+        // Cross-type enum comparisons and object identity
+        (EnumVariant { .. }, EnumType(_)) | (EnumType(_), EnumVariant { .. }) => false,
+        (Object(a), Object(b)) => std::rc::Rc::ptr_eq(&a.0, &b.0),
         _ => false,
     }
 }
@@ -1964,6 +1974,7 @@ fn mir_lit_to_value(lit: MirLit) -> FidanValue {
         MirLit::StdlibFn { module, name } => {
             FidanValue::StdlibFn(Arc::from(module.as_str()), Arc::from(name.as_str()))
         }
+        MirLit::EnumType(s) => FidanValue::EnumType(Arc::from(s.as_str())),
     }
 }
 
@@ -2058,6 +2069,20 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
         (BinOp::NotEq, Nothing, Nothing) => Boolean(false),
         (BinOp::NotEq, Nothing, _) => Boolean(true),
         (BinOp::NotEq, _, Nothing) => Boolean(true),
+        // Enum variant equality
+        (BinOp::Eq, EnumVariant { tag: a }, EnumVariant { tag: b }) => Boolean(a == b),
+        (BinOp::NotEq, EnumVariant { tag: a }, EnumVariant { tag: b }) => Boolean(a != b),
+        // Enum type identity (two variables holding the same enum type are equal)
+        (BinOp::Eq, EnumType(a), EnumType(b)) => Boolean(a == b),
+        (BinOp::NotEq, EnumType(a), EnumType(b)) => Boolean(a != b),
+        // EnumVariant vs EnumType (and vice-versa) — always false/true
+        (BinOp::Eq, EnumVariant { .. }, EnumType(_))
+        | (BinOp::Eq, EnumType(_), EnumVariant { .. }) => Boolean(false),
+        (BinOp::NotEq, EnumVariant { .. }, EnumType(_))
+        | (BinOp::NotEq, EnumType(_), EnumVariant { .. }) => Boolean(true),
+        // Object identity: two references to the same instance are equal; distinct instances are not
+        (BinOp::Eq, Object(a), Object(b)) => Boolean(std::rc::Rc::ptr_eq(&a.0, &b.0)),
+        (BinOp::NotEq, Object(a), Object(b)) => Boolean(!std::rc::Rc::ptr_eq(&a.0, &b.0)),
         // Bitwise
         (BinOp::BitAnd, Integer(a), Integer(b)) => Integer(a & b),
         (BinOp::BitOr, Integer(a), Integer(b)) => Integer(a | b),

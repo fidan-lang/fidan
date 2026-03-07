@@ -19,11 +19,21 @@ use fidan_typeck::FidanType;
 
 // ── Module ─────────────────────────────────────────────────────────────────────
 
+/// An `enum Name { Variant, ... }` declaration in the HIR.
+#[derive(Debug)]
+pub struct HirEnum {
+    pub name: Symbol,
+    pub variants: Vec<Symbol>,
+    pub span: Span,
+}
+
 /// The HIR representation of a source module.
 #[derive(Debug)]
 pub struct HirModule {
     /// Object / class definitions.
     pub objects: Vec<HirObject>,
+    /// Enum type declarations.
+    pub enums: Vec<HirEnum>,
     /// All action declarations (top-level functions + extension actions).
     pub functions: Vec<HirFunction>,
     /// Top-level variable declarations (module-scoped globals).

@@ -21,9 +21,9 @@ use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_typeck::FidanType;
 
 use crate::mir::{
-    BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirFunction, MirGlobal, MirLit,
-    MirObjectInfo, MirParam, MirProgram, MirStringPart, MirTy, MirUseDecl, Operand, PhiNode,
-    Rvalue, Terminator,
+    BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirEnumInfo, MirFunction, MirGlobal,
+    MirLit, MirObjectInfo, MirParam, MirProgram, MirStringPart, MirTy, MirUseDecl, Operand,
+    PhiNode, Rvalue, Terminator,
 };
 
 // ── Parallel-for deferred body ───────────────────────────────────────────────
@@ -284,6 +284,7 @@ fn fidan_ty_to_mir(ty: &FidanType) -> MirTy {
         }
         FidanType::Tuple(elems) => MirTy::Tuple(elems.iter().map(fidan_ty_to_mir).collect()),
         FidanType::Object(s) => MirTy::Object(*s),
+        FidanType::Enum(s) => MirTy::Enum(*s),
         FidanType::Shared(t) => MirTy::Shared(Box::new(fidan_ty_to_mir(t))),
         FidanType::Pending(t) => MirTy::Pending(Box::new(fidan_ty_to_mir(t))),
         FidanType::Function => MirTy::Function,
@@ -2770,6 +2771,24 @@ pub fn lower_program(
     }
     prog.namespace_global_count = namespace_global_count;
 
+    // Register enum type globals (each enum name becomes a global holding an EnumType value).
+    // These are appended right after namespace globals so the REPL cursor boundary still works.
+    for hir_enum in &hir.enums {
+        let enum_sym = hir_enum.name;
+        if !global_map.contains_key(&enum_sym) {
+            let gid = GlobalId(prog.globals.len() as u32);
+            prog.globals.push(MirGlobal {
+                name: enum_sym,
+                ty: MirTy::Dynamic,
+            });
+            global_map.insert(enum_sym, gid);
+        }
+        prog.enums.push(MirEnumInfo {
+            name: enum_sym,
+            variants: hir_enum.variants.clone(),
+        });
+    }
+
     // Module-level `var` declarations -- registered after namespace globals.
     // With stable GIDs, symbols already in the registry are skipped.
     for stmt in &hir.init_stmts {
@@ -3030,6 +3049,25 @@ pub fn lower_program(
                         }
                     }
                 }
+            }
+        }
+
+        // ── Emit enum type globals ────────────────────────────────────────────
+        // Each `enum Direction { ... }` becomes a global holding `EnumType("Direction")`.
+        for hir_enum in &hir.enums {
+            let enum_sym = hir_enum.name;
+            let enum_name = interner.resolve(enum_sym).to_string();
+            let dest = ctx.alloc_local();
+            ctx.emit(Instr::Assign {
+                dest,
+                ty: MirTy::Dynamic,
+                rhs: Rvalue::Literal(MirLit::EnumType(enum_name)),
+            });
+            if let Some(&gid) = ctx.global_map.get(&enum_sym) {
+                ctx.emit(Instr::StoreGlobal {
+                    global: gid,
+                    value: Operand::Local(dest),
+                });
             }
         }
 

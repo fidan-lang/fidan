@@ -465,6 +465,7 @@ stdin sequence with `fidan run <file> --replay <id>`.
 | `--emit ast` | ✅ | Phase 2 — node-count summary; phase 3.5 — works cleanly on `syntax.fdn` |
 | `--emit hir/mir` | ✅ | `fidan run file.fdn --emit hir` and `--emit mir` both work |
 | REPL with history + multi-line | ✅ | `count_brace_delta()` string-literal-and-comment-aware; `open_braces` tracks depth; `...` continuation prompt; `:cancel` aborts block at any depth; Ctrl+C also cancels |
+| `:help` REPL command | ✅ | Prints all available REPL commands; banner directs users to `:help` on startup |
 | stdin support (`fidan run -`) | ✅ | Reads from stdin when file is `-` |
 | `fidan check` | ✅ | Parse + typecheck only; exits non-zero on any error; `--max-errors N` accepted |
 | `fidan fix` | ✅ | Collects `Confidence::High` `SourceEdit` suggestions; applies to file or `--dry-run` prints old/new lines |
@@ -509,8 +510,8 @@ stdin sequence with `fidan run <file> --replay <id>`.
 | List comprehension (`[x * 2 for x in items if x > 0]`) | ✅ | Parser production + HIR desugar to `for` loop that appends to a fresh list local; `if` guard as conditional append; nested comprehensions supported. |
 | Dict comprehension (`{k: v for k, v in pairs}`) | ✅ | Same desugaring as list comprehension; emits `Dict` insert calls; destructuring iteration over list-of-tuples or dict entries. |
 | `test{}` blocks | ✅ | `parse_test_decl()` → `HirTestDecl` → `MirProgram::test_functions`; `fidan test` command runs them; per-function pass/fail with coloured output. |
-| Enums / ADTs (§22.13) | ⬜ | `enum Direction { North, South }` / `enum Result { Ok(value), Err(msg) }` + `match` exhaustiveness check. Needs `Item::EnumDecl`, `FidanValue::Enum { tag, payload }`, `MirInstr::ConstructEnum`. Earliest: Phase 3 (typeck) + Phase 5 (MIR). |
-| Regex (§22.14) | ⬜ | `/pattern/flags` literals, `regex` stdlib module, DFA engine (linear time). Transparent Cranelift native DFA emit after Phase 9. Earliest: Phase 7 (stdlib). |
+| Enums / ADTs (§22.13) | ✅ | Simple enums implemented: `enum Direction { North, South, East, West }`. `Direction.North` field access returns `FidanValue::EnumVariant { tag }`. `check` pattern matching and `==`/`!=` comparison work. Phase 2 payload (e.g. `Result.Ok(value)`) deferred. |
+| Regex (§22.14) | ✅ | `std.regex` stdlib module: `isMatch`, `find`, `findAll`, `capture`, `captureAll`, `replace`, `replaceFirst`, `replaceAll`, `split`, `isValid`. Backed by the `regex` crate (NFA/DFA engine). Regex literal syntax (`/pattern/flags`) and Cranelift DFA emit deferred to a later phase. |
 
 ---
 

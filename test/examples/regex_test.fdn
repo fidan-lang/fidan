@@ -1,0 +1,39 @@
+use std.regex
+
+# Test basic pattern matching
+var matched = regex.isMatch("\\d+", "hello 42 world")
+print(matched)
+
+# Test no match
+var noMatch = regex.isMatch("\\d+", "no digits here")
+print(noMatch)
+
+# Find first match
+var first = regex.find("\\d+", "price: 99 dollars")
+print(first)
+
+# Find all matches
+var all = regex.findAll("\\d+", "a1 b22 c333")
+print(all)
+
+# Replace first
+var replaced = regex.replace("o", "hello world", "0")
+print(replaced)
+
+# Replace all
+var replacedAll = regex.replaceAll("o", "hello world", "0")
+print(replacedAll)
+
+# Split
+var parts = regex.split(",\\s*", "one, two, three")
+print(parts)
+
+# Capture groups
+var caps = regex.capture("(\\w+)@(\\w+\\.\\w+)", "user@example.com")
+print(caps)
+
+# isValid
+var valid = regex.isValid("\\d+")
+print(valid)
+var invalid = regex.isValid("[unclosed")
+print(invalid)

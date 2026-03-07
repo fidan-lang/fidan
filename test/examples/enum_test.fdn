@@ -1,0 +1,23 @@
+enum Direction {
+    North
+    South
+    East
+    West
+}
+
+var d = Direction.North
+print(d)
+
+check d {
+    Direction.North => print("going north")
+    Direction.South => print("going south")
+    Direction.East  => print("going east")
+    Direction.West  => print("going west")
+}
+
+# Equality comparison
+var same = d == Direction.North
+print(same)
+
+var diff = d == Direction.South
+print(diff)

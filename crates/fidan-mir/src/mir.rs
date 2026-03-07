@@ -49,6 +49,8 @@ pub enum MirTy {
     Dict(Box<MirTy>, Box<MirTy>),
     Tuple(Vec<MirTy>),
     Object(Symbol),
+    /// Enum type (variants declared in an `enum` block).
+    Enum(Symbol),
     Shared(Box<MirTy>),
     Pending(Box<MirTy>),
     Function,
@@ -79,6 +81,8 @@ pub enum MirLit {
         module: String,
         name: String,
     },
+    /// An enum type namespace sentinel (e.g. `Direction` as a value).
+    EnumType(String),
 }
 
 // ── Operands ───────────────────────────────────────────────────────────────────
@@ -450,6 +454,13 @@ pub struct MirUseDecl {
     pub is_stdlib: bool,
 }
 
+/// Metadata for an enum type: name + variant list.
+#[derive(Debug, Clone)]
+pub struct MirEnumInfo {
+    pub name: Symbol,
+    pub variants: Vec<Symbol>,
+}
+
 /// The entire program as a collection of MIR functions.
 ///
 /// `functions[0]` is conventionally the top-level initialisation function.
@@ -458,6 +469,8 @@ pub struct MirProgram {
     pub functions: Vec<MirFunction>,
     /// Object class metadata.  Empty if no objects are defined.
     pub objects: Vec<MirObjectInfo>,
+    /// Enum type metadata.
+    pub enums: Vec<MirEnumInfo>,
     /// Import declarations from `use std.*` statements.
     pub use_decls: Vec<MirUseDecl>,
     /// Module-level global variables.  Indexed by `GlobalId`.

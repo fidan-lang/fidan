@@ -21,7 +21,7 @@ mod parallel_check;
 mod scope;
 mod types;
 
-pub use check::{ActionInfo, ObjectInfo, ParamInfo, TypeChecker};
+pub use check::{ActionInfo, EnumInfo, ObjectInfo, ParamInfo, TypeChecker};
 pub use types::FidanType;
 
 use fidan_ast::{ExprId, Module};
@@ -58,6 +58,8 @@ pub struct TypedModule {
     pub expr_types: FxHashMap<ExprId, FidanType>,
     /// Class/object registry: layout (fields, methods, parent) per class name.
     pub objects: FxHashMap<Symbol, ObjectInfo>,
+    /// Enum registry: variants per enum name.
+    pub enums: FxHashMap<Symbol, EnumInfo>,
     /// Top-level action signatures (name → signature).
     pub actions: FxHashMap<Symbol, ActionInfo>,
     /// Non-call field / method accesses on types with cross-module parents.

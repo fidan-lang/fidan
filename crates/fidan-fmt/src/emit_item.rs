@@ -362,6 +362,23 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
             emit_block(p, body);
             p.w("}");
         }
+
+        // ── Enum declaration ──────────────────────────────────────────────
+        Item::EnumDecl { name, variants, .. } => {
+            p.w("enum ");
+            let n = p.sym_s(*name);
+            p.w(&n);
+            p.w(" {");
+            p.indent_in();
+            for &v in variants {
+                p.nl();
+                let vs = p.sym_s(v);
+                p.w(&vs);
+            }
+            p.indent_out();
+            p.nl();
+            p.w("}");
+        }
     }
 }
 
