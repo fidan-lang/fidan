@@ -8,9 +8,22 @@
 //! string as the second (except `replace` which also takes a `replacement`).
 //!
 //! Invalid patterns return `nothing` / `false` rather than panicking.
+//!
+//! ## Performance
+//! Compiled regex objects are cached in a process-wide `DashMap<String, Arc<Regex>>`.
+//! Each unique pattern string is compiled exactly once; subsequent calls with the
+//! same pattern return the cached `Arc<Regex>` with no recompilation.
 
+use std::sync::{Arc, LazyLock};
+
+use dashmap::DashMap;
 use fidan_runtime::{FidanList, FidanString, FidanValue, OwnedRef};
 use regex::Regex;
+
+/// Process-wide cache: pattern string → compiled `Regex`.
+/// `DashMap` allows concurrent reads without a global lock.
+static REGEX_CACHE: LazyLock<DashMap<String, Arc<Regex>>> =
+    LazyLock::new(DashMap::new);
 
 fn as_str(v: &FidanValue) -> String {
     match v {
@@ -27,9 +40,22 @@ fn str_val(s: &str) -> FidanValue {
     FidanValue::String(FidanString::new(s))
 }
 
-/// Try to compile a regex pattern; silently return `None` on invalid pattern.
-fn compile(pattern: &str) -> Option<Regex> {
-    Regex::new(pattern).ok()
+/// Compile a regex pattern, caching the result for reuse.
+/// Returns `None` for invalid patterns (silently; callers return `nothing`/`false`).
+fn compile(pattern: &str) -> Option<Arc<Regex>> {
+    // Fast path: pattern already in cache (shared read, no lock).
+    if let Some(cached) = REGEX_CACHE.get(pattern) {
+        return Some(Arc::clone(&*cached));
+    }
+    // Slow path: first time this pattern is seen — compile and insert.
+    match Regex::new(pattern) {
+        Ok(re) => {
+            let arc = Arc::new(re);
+            REGEX_CACHE.insert(pattern.to_string(), Arc::clone(&arc));
+            Some(arc)
+        }
+        Err(_) => None,
+    }
 }
 
 /// Dispatch a `regex.<name>(args)` free-function call.

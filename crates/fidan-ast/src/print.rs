@@ -260,7 +260,16 @@ impl<'a> Printer<'a> {
             }
 
             Item::EnumDecl { name, variants, .. } => {
-                let vars: Vec<String> = variants.iter().map(|&s| self.sym(s)).collect();
+                let vars: Vec<String> = variants
+                    .iter()
+                    .map(|v| {
+                        if v.payload_types.is_empty() {
+                            self.sym(v.name)
+                        } else {
+                            format!("{}({})", self.sym(v.name), v.payload_types.len())
+                        }
+                    })
+                    .collect();
                 println!("{p}EnumDecl  {} {{ {} }}", self.sym(*name), vars.join(", "));
             }
         }

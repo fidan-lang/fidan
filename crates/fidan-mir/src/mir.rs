@@ -175,6 +175,25 @@ pub enum Rvalue {
         inclusive: bool,
         step: Option<Operand>,
     },
+    /// Construct an enum variant with optional payload values.
+    /// `Result.Ok(x)` → `ConstructEnum { tag: "Ok", payload: [x_local] }`.
+    /// Unit variants have an empty `payload` vec.
+    ConstructEnum {
+        tag: Symbol,
+        payload: Vec<Operand>,
+    },
+    /// Check whether an `EnumVariant` value has the given tag string.
+    /// Produces a `Boolean` result (true = tag matches).
+    EnumTagCheck {
+        value: Operand,
+        expected_tag: Symbol,
+    },
+    /// Extract payload element at `index` from an `EnumVariant` value.
+    /// Produces a `Dynamic` value (the payload element).
+    EnumPayload {
+        value: Operand,
+        index: usize,
+    },
 }
 
 // ── Instructions ──────────────────────────────────────────────────────────────
@@ -467,7 +486,8 @@ pub struct MirUseDecl {
 #[derive(Debug, Clone)]
 pub struct MirEnumInfo {
     pub name: Symbol,
-    pub variants: Vec<Symbol>,
+    /// Each entry is `(variant_name, payload_arity)`. Arity 0 = unit variant.
+    pub variants: Vec<(Symbol, usize)>,
 }
 
 /// The entire program as a collection of MIR functions.

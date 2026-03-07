@@ -201,7 +201,7 @@ impl<'a> Ctx<'a> {
                 arms: arms
                     .iter()
                     .map(|arm| HirCheckExprArm {
-                        pattern: self.lower_expr(arm.pattern),
+                        pattern: self.lower_check_pattern(arm.pattern),
                         body: self.lower_stmts(&arm.body),
                         span: arm.span,
                     })
@@ -240,6 +240,42 @@ impl<'a> Ctx<'a> {
             value: self.lower_expr(arg.value),
             span: arg.span,
         }
+    }
+
+    /// Lower a `check` arm pattern expression.
+    ///
+    /// When the pattern has the form `EnumType.Variant(binding1, binding2, ...)`
+    /// (i.e. a call on a field of an enum-typed expression where all args are
+    /// plain identifiers), we produce `HirExprKind::EnumDestructure` so that
+    /// the MIR lowerer can emit `EnumTagCheck` + `EnumPayload` extractions.
+    /// Everything else is lowered normally.
+    fn lower_check_pattern(&self, id: ExprId) -> HirExpr {
+        let expr = self.arena.get_expr(id).clone();
+        let ty = self.ty(id);
+        let span = expr.span();
+
+        if let Expr::Call { callee: callee_id, args, .. } = &expr {
+            let callee_expr = self.arena.get_expr(*callee_id).clone();
+            if let Expr::Field { object: obj_id, field, .. } = callee_expr {
+                let obj_ty = self.ty(obj_id);
+                if let FidanType::Enum(enum_sym) = obj_ty {
+                    let bindings: Vec<Symbol> = args
+                        .iter()
+                        .filter_map(|arg| {
+                            let arg_expr = self.arena.get_expr(arg.value).clone();
+                            if let Expr::Ident { name, .. } = arg_expr { Some(name) } else { None }
+                        })
+                        .collect();
+                    return HirExpr {
+                        kind: HirExprKind::EnumDestructure { enum_sym, tag: field, bindings },
+                        ty,
+                        span,
+                    };
+                }
+            }
+        }
+
+        self.lower_expr(id)
     }
 
     fn lower_interp_part(&self, part: &InterpPart) -> HirInterpPart {
@@ -345,7 +381,7 @@ impl<'a> Ctx<'a> {
                 arms: arms
                     .iter()
                     .map(|arm| HirCheckArm {
-                        pattern: self.lower_expr(arm.pattern),
+                        pattern: self.lower_check_pattern(arm.pattern),
                         body: self.lower_stmts(&arm.body),
                         span: arm.span,
                     })
@@ -801,7 +837,11 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
 
             // Enum declarations: lowered into HirEnum entries (MIR will create globals).
             Item::EnumDecl { name, variants, span } => {
-                enums.push(crate::hir::HirEnum { name, variants, span });
+                enums.push(crate::hir::HirEnum {
+                    name,
+                    variants: variants.iter().map(|v| (v.name, v.payload_types.len())).collect(),
+                    span,
+                });
             }
 
             // Module imports: capture stdlib imports and propagate to the interpreter.

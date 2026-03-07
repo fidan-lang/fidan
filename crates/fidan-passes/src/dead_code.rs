@@ -201,6 +201,13 @@ fn count_rvalue_reads(rv: &Rvalue, add: &mut impl FnMut(&Operand)) {
                 add(st);
             }
         }
+        Rvalue::ConstructEnum { payload, .. } => {
+            for p in payload {
+                add(p);
+            }
+        }
+        Rvalue::EnumTagCheck { value, .. } => add(value),
+        Rvalue::EnumPayload { value, .. } => add(value),
     }
 }
 

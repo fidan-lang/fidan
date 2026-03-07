@@ -427,6 +427,18 @@ fn remap_rvalue(rv: &Rvalue, r: &impl Fn(&Operand) -> Operand) -> Rvalue {
             inclusive: *inclusive,
             step: step.as_ref().map(|o| r(o)),
         },
+        Rvalue::ConstructEnum { tag, payload } => Rvalue::ConstructEnum {
+            tag: *tag,
+            payload: payload.iter().map(|p| r(p)).collect(),
+        },
+        Rvalue::EnumTagCheck { value, expected_tag } => Rvalue::EnumTagCheck {
+            value: r(value),
+            expected_tag: *expected_tag,
+        },
+        Rvalue::EnumPayload { value, index } => Rvalue::EnumPayload {
+            value: r(value),
+            index: *index,
+        },
     }
 }
 

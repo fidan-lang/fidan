@@ -23,7 +23,8 @@ use fidan_typeck::FidanType;
 #[derive(Debug)]
 pub struct HirEnum {
     pub name: Symbol,
-    pub variants: Vec<Symbol>,
+    /// Each entry is `(variant_name, payload_arity)`. Arity 0 = unit variant.
+    pub variants: Vec<(Symbol, usize)>,
     pub span: Span,
 }
 
@@ -404,6 +405,19 @@ pub enum HirExprKind {
     Lambda {
         params: Vec<HirParam>,
         body: Vec<HirStmt>,
+    },
+
+    // ── Enum destructure pattern (used exclusively in `check` arm patterns) ──
+    /// `Enum.Variant(binding1, binding2)` — introduces new local bindings from payload.
+    /// Emitted by the HIR lowerer when it detects an enum constructor call in a
+    /// `check` arm pattern position.  Not a valid general expression.
+    EnumDestructure {
+        /// The enum type name (e.g. `Result`).
+        enum_sym: Symbol,
+        /// The variant being matched (e.g. `Ok`).
+        tag: Symbol,
+        /// Binding names introduced into the arm body scope.
+        bindings: Vec<Symbol>,
     },
 
     // ── Error recovery ────────────────────────────────────────────────────────

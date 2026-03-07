@@ -136,6 +136,13 @@ fn subst_rvalue(rv: &mut Rvalue, resolve: &impl Fn(&Operand) -> Operand) {
                 subst_op(st, resolve);
             }
         }
+        Rvalue::ConstructEnum { payload, .. } => {
+            for p in payload {
+                subst_op(p, resolve);
+            }
+        }
+        Rvalue::EnumTagCheck { value, .. } => subst_op(value, resolve),
+        Rvalue::EnumPayload { value, .. } => subst_op(value, resolve),
     }
 }
 

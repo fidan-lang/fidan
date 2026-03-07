@@ -43,8 +43,10 @@ pub enum FidanValue {
     /// An enum type namespace (e.g. `Direction` itself — `Direction.North` is a field access).
     EnumType(Arc<str>),
     /// A concrete enum variant value (e.g. the result of `Direction.North`).
+    /// `payload` is empty for unit variants and holds associated values for data variants.
     EnumVariant {
         tag: Arc<str>,
+        payload: Vec<FidanValue>,
     },
     /// A first-class reference to a class type (e.g. `Animal` used as a value).
     ClassType(Arc<str>),
@@ -160,10 +162,11 @@ impl FidanValue {
                 FidanValue::StdlibFn(Arc::clone(module), Arc::clone(name))
             }
 
-            // EnumType and EnumVariant are stateless — clone Arc<str>.
+            // EnumType and EnumVariant: clone Arc<str> and deep-clone payload.
             FidanValue::EnumType(s) => FidanValue::EnumType(Arc::clone(s)),
-            FidanValue::EnumVariant { tag } => FidanValue::EnumVariant {
+            FidanValue::EnumVariant { tag, payload } => FidanValue::EnumVariant {
                 tag: Arc::clone(tag),
+                payload: payload.iter().map(|v| v.parallel_capture()).collect(),
             },
             // ClassType is stateless — clone the Arc<str>.
             FidanValue::ClassType(s) => FidanValue::ClassType(Arc::clone(s)),
@@ -224,7 +227,7 @@ pub fn display(val: &FidanValue) -> String {
         FidanValue::Namespace(m) => format!("<module:{}>", m),
         FidanValue::StdlibFn(module, name) => format!("<action:{}.{}>", module, name),
         FidanValue::EnumType(s) => format!("<enum:{}>", s),
-        FidanValue::EnumVariant { tag } => tag.as_ref().to_string(),
+        FidanValue::EnumVariant { tag, .. } => tag.as_ref().to_string(),
         FidanValue::ClassType(s) => format!("<class:{}>", s),
     }
 }

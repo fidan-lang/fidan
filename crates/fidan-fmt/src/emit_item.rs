@@ -370,10 +370,13 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
             p.w(&n);
             p.w(" {");
             p.indent_in();
-            for &v in variants {
+            for v in variants {
                 p.nl();
-                let vs = p.sym_s(v);
+                let vs = p.sym_s(v.name);
                 p.w(&vs);
+                if !v.payload_types.is_empty() {
+                    p.w(&format!("({})", v.payload_types.len()));
+                }
             }
             p.indent_out();
             p.nl();

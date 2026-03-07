@@ -1395,6 +1395,31 @@ impl MirMachine {
                 let step = step.as_ref().map(|o| self.eval_operand(o, frame));
                 self.eval_slice(tgt, s, e, *inclusive, step)
             }
+
+            Rvalue::ConstructEnum { tag, payload } => {
+                let tag_str = self.sym_str(*tag);
+                let payload_vals: Vec<FidanValue> =
+                    payload.iter().map(|op| self.eval_operand(op, frame)).collect();
+                Ok(FidanValue::EnumVariant { tag: tag_str, payload: payload_vals })
+            }
+
+            Rvalue::EnumTagCheck { value, expected_tag } => {
+                let v = self.eval_operand(value, frame);
+                let expected = self.sym_str(*expected_tag);
+                let matches = matches!(&v,
+                    FidanValue::EnumVariant { tag, .. } if tag.as_ref() == expected.as_ref());
+                Ok(FidanValue::Boolean(matches))
+            }
+
+            Rvalue::EnumPayload { value, index } => {
+                let v = self.eval_operand(value, frame);
+                match v {
+                    FidanValue::EnumVariant { payload, .. } => {
+                        Ok(payload.into_iter().nth(*index).unwrap_or(FidanValue::Nothing))
+                    }
+                    _ => Ok(FidanValue::Nothing),
+                }
+            }
         }
     }
 
@@ -1532,6 +1557,11 @@ impl MirMachine {
         method: Symbol,
         args: Vec<FidanValue>,
     ) -> Result<FidanValue, MirSignal> {
+        // Enum payload variant construction: `Result.Ok(x)` → EnumVariant { tag: "Ok", payload: [x] }.
+        if let FidanValue::EnumType(_) = &receiver {
+            let tag = self.sym_str(method);
+            return Ok(FidanValue::EnumVariant { tag, payload: args });
+        }
         // Fast path: stdlib namespace dispatch — Symbol lookup, no re-intern.
         if let FidanValue::Namespace(ref module) = receiver {
             if !self.stdlib_modules.contains(module.as_ref()) {
@@ -1830,7 +1860,7 @@ impl MirMachine {
             // Enum type field access: `Direction.North` → EnumVariant { tag: "North" }.
             FidanValue::EnumType(_) => {
                 let field_name = self.sym_str(field);
-                FidanValue::EnumVariant { tag: field_name }
+                FidanValue::EnumVariant { tag: field_name, payload: vec![] }
             }
             _ => FidanValue::Nothing,
         }
@@ -2063,7 +2093,7 @@ fn fidan_values_equal(a: &FidanValue, b: &FidanValue) -> bool {
         (String(x), String(y)) => x.as_str() == y.as_str(),
         (Nothing, Nothing) => true,
         (Nothing, _) | (_, Nothing) => false,
-        (EnumVariant { tag: a }, EnumVariant { tag: b }) => a == b,
+        (EnumVariant { tag: a, .. }, EnumVariant { tag: b, .. }) => a == b,
         (EnumType(a), EnumType(b)) => a == b,
         // Cross-type enum comparisons and object identity
         (EnumVariant { .. }, EnumType(_)) | (EnumType(_), EnumVariant { .. }) => false,
@@ -2203,8 +2233,8 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
         (BinOp::NotEq, Nothing, _) => Boolean(true),
         (BinOp::NotEq, _, Nothing) => Boolean(true),
         // Enum variant equality
-        (BinOp::Eq, EnumVariant { tag: a }, EnumVariant { tag: b }) => Boolean(a == b),
-        (BinOp::NotEq, EnumVariant { tag: a }, EnumVariant { tag: b }) => Boolean(a != b),
+        (BinOp::Eq, EnumVariant { tag: a, .. }, EnumVariant { tag: b, .. }) => Boolean(a == b),
+        (BinOp::NotEq, EnumVariant { tag: a, .. }, EnumVariant { tag: b, .. }) => Boolean(a != b),
         // Enum type identity (two variables holding the same enum type are equal)
         (BinOp::Eq, EnumType(a), EnumType(b)) => Boolean(a == b),
         (BinOp::NotEq, EnumType(a), EnumType(b)) => Boolean(a != b),

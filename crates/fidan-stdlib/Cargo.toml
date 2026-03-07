@@ -10,3 +10,4 @@ repository.workspace = true
 fidan-source = { workspace = true }
 fidan-runtime = { workspace = true }
 regex = { workspace = true }
+dashmap = { workspace = true }

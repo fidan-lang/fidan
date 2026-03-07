@@ -341,6 +341,16 @@ fn fmt_rvalue(rv: &Rvalue) -> String {
             let st = step.as_ref().map(|x| format!(" step {}", fmt_op(x))).unwrap_or_default();
             format!("{}[{}{}{}{}]", fmt_op(target), s, op, e, st)
         }
+        Rvalue::ConstructEnum { tag, payload } => {
+            let ps = payload.iter().map(fmt_op).collect::<Vec<_>>().join(", ");
+            format!("ConstructEnum(sym#{})({})", tag.0, ps)
+        }
+        Rvalue::EnumTagCheck { value, expected_tag } => {
+            format!("{}.tag == sym#{}", fmt_op(value), expected_tag.0)
+        }
+        Rvalue::EnumPayload { value, index } => {
+            format!("{}.payload[{}]", fmt_op(value), index)
+        }
     }
 }
 

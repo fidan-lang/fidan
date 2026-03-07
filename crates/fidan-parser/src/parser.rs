@@ -2,8 +2,8 @@
 use std::sync::Arc;
 
 use fidan_ast::{
-    BinOp, CatchClause, CheckArm, Decorator, ElseIf, Expr, FieldDecl, Item, ItemId, Module, Param,
-    Stmt, StmtId, Task, TypeExpr,
+    BinOp, CatchClause, CheckArm, Decorator, ElseIf, EnumVariantDef, Expr, FieldDecl, Item,
+    ItemId, Module, Param, Stmt, StmtId, Task, TypeExpr,
 };
 use fidan_diagnostics::Diagnostic;
 use fidan_lexer::{Symbol, SymbolInterner, Token, TokenKind};
@@ -487,15 +487,33 @@ impl<'t> Parser<'t> {
         self.skip_terminators();
         self.expect_tok(&TokenKind::LBrace);
 
-        let mut variants: Vec<fidan_lexer::Symbol> = vec![];
+        let mut variants: Vec<EnumVariantDef> = vec![];
 
         loop {
             self.skip_terminators();
             match self.peek().clone() {
                 TokenKind::RBrace | TokenKind::Eof => break,
                 TokenKind::Ident(sym) => {
-                    variants.push(sym);
-                    self.advance();
+                    let var_start = self.current_span().start;
+                    self.advance(); // eat variant name
+                    // Optional payload: `Variant(Type, Type, ...)`
+                    let mut payload_types = vec![];
+                    if matches!(self.peek(), TokenKind::LParen) {
+                        self.advance(); // eat `(`
+                        while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+                            payload_types.push(self.parse_type_expr());
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                        }
+                        self.expect_tok(&TokenKind::RParen);
+                    }
+                    let var_end = self.current_span().end;
+                    variants.push(EnumVariantDef {
+                        name: sym,
+                        payload_types,
+                        span: Span::new(self.module.file, var_start, var_end),
+                    });
                     self.eat(&TokenKind::Comma);
                 }
                 _ => {

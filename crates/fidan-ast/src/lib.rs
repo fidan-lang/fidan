@@ -10,7 +10,7 @@ mod visitor;
 
 pub use arena::{AstArena, ExprId, ItemId, StmtId};
 pub use expr::{Arg, BinOp, Expr, InterpPart, UnOp};
-pub use item::{Decorator, FieldDecl, Item, Param};
+pub use item::{Decorator, EnumVariantDef, FieldDecl, Item, Param};
 pub use module::Module;
 pub use print::print_module;
 pub use stmt::{CatchClause, CheckArm, ElseIf, Stmt, Task, TypeExpr};

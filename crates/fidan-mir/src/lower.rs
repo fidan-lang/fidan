@@ -271,6 +271,8 @@ fn hir_walk_expr(e: &HirExpr, out: &mut HashSet<Symbol>) {
             // lambda itself appears inside a parallel-for body).
             hir_walk_stmts(body, out);
         }
+        // Enum destructure patterns have no subexpressions to walk.
+        HirExprKind::EnumDestructure { .. } => {}
     }
 }
 
@@ -1097,6 +1099,11 @@ impl<'p> FnCtx<'p> {
             }
 
             HirExprKind::Error => Operand::Const(MirLit::Nothing),
+
+            // EnumDestructure nodes only appear as check arm patterns; they are
+            // handled directly by lower_check_stmt / lower_check_expr and should
+            // never reach the general expression lowerer.
+            HirExprKind::EnumDestructure { .. } => Operand::Const(MirLit::Nothing),
         }
     }
 
@@ -1123,6 +1130,22 @@ impl<'p> FnCtx<'p> {
 
             if is_wildcard {
                 self.goto(arm_bb);
+            } else if let HirExprKind::EnumDestructure { tag, .. } = &arm.pattern.kind {
+                // Enum destructure pattern: emit a tag-check branch.
+                let cmp = self.alloc_local();
+                self.emit(Instr::Assign {
+                    dest: cmp,
+                    ty: MirTy::Boolean,
+                    rhs: Rvalue::EnumTagCheck {
+                        value: scrut.clone(),
+                        expected_tag: *tag,
+                    },
+                });
+                self.set_terminator(Terminator::Branch {
+                    cond: Operand::Local(cmp),
+                    then_bb: arm_bb,
+                    else_bb: next_bb,
+                });
             } else {
                 // Condition: scrutinee == pattern
                 let pat = self.lower_expr(&arm.pattern);
@@ -1145,6 +1168,21 @@ impl<'p> FnCtx<'p> {
 
             // Arm body — lower all stmts, capturing the last expression value.
             self.switch_to(arm_bb);
+            // If this arm is an enum destructure, bind payload elements before running the body.
+            if let HirExprKind::EnumDestructure { bindings, .. } = &arm.pattern.kind {
+                for (i, &sym) in bindings.iter().enumerate() {
+                    let local = self.alloc_local();
+                    self.emit(Instr::Assign {
+                        dest: local,
+                        ty: MirTy::Dynamic,
+                        rhs: Rvalue::EnumPayload {
+                            value: scrut.clone(),
+                            index: i,
+                        },
+                    });
+                    self.define_var(sym, local);
+                }
+            }
             let arm_val = if let Some((last, rest)) = arm.body.split_last() {
                 self.lower_stmts(rest);
                 match last {
@@ -1798,6 +1836,23 @@ impl<'p> FnCtx<'p> {
 
             if is_wildcard {
                 self.goto(arm_bb);
+            } else if let HirExprKind::EnumDestructure { tag, .. } = &arm.pattern.kind {
+                // Enum destructure pattern: emit a tag-check branch.
+                self.env = env_before.clone();
+                let cmp = self.alloc_local();
+                self.emit(Instr::Assign {
+                    dest: cmp,
+                    ty: MirTy::Boolean,
+                    rhs: Rvalue::EnumTagCheck {
+                        value: scrut.clone(),
+                        expected_tag: *tag,
+                    },
+                });
+                self.set_terminator(Terminator::Branch {
+                    cond: Operand::Local(cmp),
+                    then_bb: arm_bb,
+                    else_bb: next_bb,
+                });
             } else {
                 self.env = env_before.clone();
                 let pat = self.lower_expr(&arm.pattern);
@@ -1820,6 +1875,21 @@ impl<'p> FnCtx<'p> {
 
             self.env = env_before.clone();
             self.switch_to(arm_bb);
+            // If this arm is an enum destructure, bind payload elements before running the body.
+            if let HirExprKind::EnumDestructure { bindings, .. } = &arm.pattern.kind {
+                for (i, &sym) in bindings.iter().enumerate() {
+                    let local = self.alloc_local();
+                    self.emit(Instr::Assign {
+                        dest: local,
+                        ty: MirTy::Dynamic,
+                        rhs: Rvalue::EnumPayload {
+                            value: scrut.clone(),
+                            index: i,
+                        },
+                    });
+                    self.define_var(sym, local);
+                }
+            }
             self.lower_stmts(&arm.body);
             let arm_end = self.cur_bb;
             arm_end_envs.push((arm_end, self.env.clone()));

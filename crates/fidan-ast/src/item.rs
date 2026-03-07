@@ -85,12 +85,21 @@ pub enum Item {
         body: Vec<StmtId>,
         span: Span,
     },
-    /// `enum Name { Variant1, Variant2, ... }` — simple enumeration type.
+    /// `enum Name { Variant1, Variant2(Type, ...) }` — enumeration type with optional payloads.
     EnumDecl {
         name: Symbol,
-        variants: Vec<Symbol>,
+        variants: Vec<EnumVariantDef>,
         span: Span,
     },
+}
+
+/// One variant inside an `enum` declaration.
+#[derive(Debug, Clone)]
+pub struct EnumVariantDef {
+    pub name: Symbol,
+    /// Empty for unit variants; holds payload field types for data-carrying variants.
+    pub payload_types: Vec<TypeExpr>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]

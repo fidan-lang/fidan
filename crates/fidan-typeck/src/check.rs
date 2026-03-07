@@ -31,7 +31,8 @@ pub struct ActionInfo {
 
 #[derive(Debug, Clone)]
 pub struct EnumInfo {
-    pub variants: Vec<Symbol>,
+    /// `(variant_name, payload_arity)` pairs.
+    pub variants: Vec<(Symbol, usize)>,
     pub span: Span,
 }
 
@@ -585,7 +586,10 @@ impl TypeChecker {
                 }
             }
             Item::EnumDecl { name, variants, span } => {
-                let info = EnumInfo { variants: variants.clone(), span: *span };
+                let info = EnumInfo {
+                    variants: variants.iter().map(|v| (v.name, v.payload_types.len())).collect(),
+                    span: *span,
+                };
                 self.enums.insert(*name, info);
                 self.table.define(
                     *name,

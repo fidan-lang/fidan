@@ -410,6 +410,135 @@ assert_eq(add(), 10)
     );
 }
 
+// ── Enum payloads / ADTs ──────────────────────────────────────────────────────
+
+#[test]
+fn enum_unit_variants_ok() {
+    assert!(
+        run_src(
+            r#"
+enum Direction {
+    North,
+    South,
+    East,
+    West
+}
+var d = Direction.North
+assert_eq(d, Direction.North)
+assert_ne(d, Direction.South)
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn enum_payload_construct_ok() {
+    assert!(
+        run_src(
+            r#"
+enum Result {
+    Ok(dynamic),
+    Err(string)
+}
+var r = Result.Ok(42)
+assert_eq(type(r), "enum")
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn enum_payload_check_ok() {
+    assert!(
+        run_src(
+            r#"
+enum Result {
+    Ok(dynamic),
+    Err(string)
+}
+var r = Result.Ok(99)
+check r {
+    Result.Ok(val) => assert_eq(val, 99)
+    Result.Err(msg) => assert(false)
+    _ => assert(false)
+}
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn enum_payload_err_branch_ok() {
+    assert!(
+        run_src(
+            r#"
+enum Result {
+    Ok(dynamic),
+    Err(string)
+}
+var r = Result.Err("oops")
+check r {
+    Result.Ok(val) => assert(false)
+    Result.Err(msg) => assert_eq(msg, "oops")
+    _ => assert(false)
+}
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn enum_payload_check_expr_ok() {
+    assert!(
+        run_src(
+            r#"
+enum Option {
+    Some(dynamic),
+    None
+}
+var o = Option.Some(7)
+var v = check o {
+    Option.Some(x) => x
+    _ => 0
+}
+assert_eq(v, 7)
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn enum_mixed_unit_and_payload_ok() {
+    assert!(
+        run_src(
+            r#"
+enum Shape {
+    Circle(float),
+    Square(float),
+    Point
+}
+var s = Shape.Circle(3.14)
+check s {
+    Shape.Circle(r) => assert(r > 3.0)
+    Shape.Square(side) => assert(false)
+    _ => assert(false)
+}
+var p = Shape.Point
+check p {
+    Shape.Point => assert(true)
+    _ => assert(false)
+}
+"#
+        )
+        .is_ok()
+    );
+}
+
 #[test]
 fn lambda_capture_in_foreach_ok() {
     assert!(

@@ -1250,7 +1250,7 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
                     let n = interner.resolve(*name);
                     let var_names: Vec<String> = variants
                         .iter()
-                        .map(|&v| interner.resolve(v).to_string())
+                        .map(|v| interner.resolve(v.name).to_string())
                         .collect();
                     results.push(Expl {
                         line_range: format!("line {decl_lo}"),
