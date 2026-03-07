@@ -540,6 +540,32 @@ check p {
 }
 
 #[test]
+fn enum_variant_payload_equality_ok() {
+    // Regression guard: two variants with the same tag but *different* payloads
+    // must NOT be considered equal (BUG 1 — payload was previously ignored).
+    assert!(
+        run_src(
+            r#"
+enum Result {
+    Ok(dynamic),
+    Err(string)
+}
+var a = Result.Ok(1)
+var b = Result.Ok(2)
+var c = Result.Ok(1)
+assert_ne(a, b)
+assert_eq(a, c)
+var e1 = Result.Err("x")
+var e2 = Result.Err("y")
+assert_ne(e1, e2)
+assert_ne(a, e1)
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn lambda_capture_in_foreach_ok() {
     assert!(
         run_src(

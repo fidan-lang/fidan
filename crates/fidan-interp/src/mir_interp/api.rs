@@ -678,6 +678,10 @@ pub fn run_tests(
         return (Err(e), vec![]);
     }
 
+    // Freeze globals after init: all subsequent LoadGlobal instructions will
+    // use the lock-free snapshot, skipping the RwLock on every read.
+    machine.freeze_globals();
+
     let results = machine.run_test_suite(&test_fns);
     (Ok(()), results)
 }

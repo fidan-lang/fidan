@@ -50,6 +50,14 @@ pub enum FidanValue {
     },
     /// A first-class reference to a class type (e.g. `Animal` used as a value).
     ClassType(Arc<str>),
+    /// A lazy integer range produced by `a..b` or `a...b`.
+    /// Iteration and indexing are performed on-the-fly — no heap allocation
+    /// until elements are actually materialised (e.g. via `collect` or `append`).
+    Range {
+        start: i64,
+        end: i64,
+        inclusive: bool,
+    },
     /// A closure: a lambda with captured outer-scope values.
     /// `captured` holds a snapshot of each captured variable at the time the
     /// closure was created.  At call time the interpreter prepends these to
@@ -81,6 +89,7 @@ impl FidanValue {
             FidanValue::EnumType(_) => "enum-type",
             FidanValue::EnumVariant { .. } => "enum",
             FidanValue::ClassType(_) => "class-type",
+            FidanValue::Range { .. } => "range",
         }
     }
 
@@ -95,6 +104,18 @@ impl FidanValue {
             FidanValue::Integer(n) => *n != 0,
             FidanValue::Float(f) => *f != 0.0,
             FidanValue::String(s) => !s.is_empty(),
+            // A Range is truthy when it contains at least one element.
+            FidanValue::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                if *inclusive {
+                    start <= end
+                } else {
+                    start < end
+                }
+            }
             _ => true,
         }
     }
@@ -171,6 +192,17 @@ impl FidanValue {
             // ClassType is stateless — clone the Arc<str>.
             FidanValue::ClassType(s) => FidanValue::ClassType(Arc::clone(s)),
 
+            // Range is plain data — copy start/end/inclusive.
+            FidanValue::Range {
+                start,
+                end,
+                inclusive,
+            } => FidanValue::Range {
+                start: *start,
+                end: *end,
+                inclusive: *inclusive,
+            },
+
             // Recurse on each captured element.
             FidanValue::Closure { fn_id, captured } => FidanValue::Closure {
                 fn_id: *fn_id,
@@ -227,7 +259,25 @@ pub fn display(val: &FidanValue) -> String {
         FidanValue::Namespace(m) => format!("<module:{}>", m),
         FidanValue::StdlibFn(module, name) => format!("<action:{}.{}>", module, name),
         FidanValue::EnumType(s) => format!("<enum:{}>", s),
-        FidanValue::EnumVariant { tag, .. } => tag.as_ref().to_string(),
+        FidanValue::EnumVariant { tag, payload } => {
+            if payload.is_empty() {
+                tag.as_ref().to_string()
+            } else {
+                let args: Vec<String> = payload.iter().map(display).collect();
+                format!("{}({})", tag, args.join(", "))
+            }
+        }
         FidanValue::ClassType(s) => format!("<class:{}>", s),
+        FidanValue::Range {
+            start,
+            end,
+            inclusive,
+        } => {
+            if *inclusive {
+                format!("{}...{}", start, end)
+            } else {
+                format!("{}..{}", start, end)
+            }
+        }
     }
 }

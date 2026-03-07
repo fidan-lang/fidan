@@ -190,6 +190,11 @@ pub struct MirMachine {
     /// the user program explicitly mutates a global at runtime.  `RwLock` allows
     /// concurrent reads (parallel tasks) while still supporting write access.
     globals: Arc<parking_lot::RwLock<Vec<FidanValue>>>,
+    /// Frozen snapshot of globals taken after the init function completes.
+    /// When set, `LoadGlobal` reads from this lock-free `Arc<[FidanValue]>` slice
+    /// instead of acquiring the `RwLock` on every access — a measurable speedup
+    /// for read-heavy test suites and programs with many global constants.
+    frozen_globals: Option<Arc<[FidanValue]>>,
     /// Snapshot of all interned strings taken once after parsing.
     /// Allows O(1) symbol → &str resolution with a single `Arc::clone` and
     /// NO `RwLock` acquisition — critical for the hot method-dispatch path.
@@ -350,6 +355,7 @@ impl MirMachine {
                 FidanValue::Nothing;
                 globals_count
             ])),
+            frozen_globals: None,
             str_table,
             test_results: Vec::new(),
             call_counters,
@@ -384,6 +390,7 @@ impl MirMachine {
             reexported_namespaces: self.reexported_namespaces.clone(),
             user_fn_map: self.user_fn_map.clone(),
             globals: Arc::clone(&self.globals),
+            frozen_globals: self.frozen_globals.as_ref().map(Arc::clone),
             // One atomic bump on the outer Arc; all Arc<str> entries are shared.
             str_table: Arc::clone(&self.str_table),
             test_results: Vec::new(),
@@ -418,6 +425,17 @@ impl MirMachine {
         let entries: Vec<FnProfileEntry> =
             (0..fn_count).map(|_| FnProfileEntry::default()).collect();
         self.profile_data = Some(Arc::new(entries));
+    }
+
+    /// Freeze the current global values into a lock-free `Arc<[FidanValue]>` snapshot.
+    ///
+    /// Call this immediately after the init function (`run()`) returns so that
+    /// all subsequent `LoadGlobal` instructions bypass the `RwLock` entirely.
+    /// Child machines spawned via `clone_for_thread` inherit the snapshot
+    /// automatically.
+    pub fn freeze_globals(&mut self) {
+        let snapshot: Arc<[FidanValue]> = Arc::from(self.globals.read().clone().into_boxed_slice());
+        self.frozen_globals = Some(snapshot);
     }
 
     /// Build a [`ProfileReport`] from the accumulated profiling counters.
@@ -966,12 +984,20 @@ impl MirMachine {
             }
             // ── Module-level globals ──────────────────────────────────────────
             Instr::LoadGlobal { dest, global } => {
-                let val = self
-                    .globals
-                    .read()
-                    .get(global.0 as usize)
-                    .cloned()
-                    .unwrap_or(FidanValue::Nothing);
+                // Fast path: read directly from the frozen, lock-free snapshot
+                // when it is available (after the init function completes).
+                let val = if let Some(ref frozen) = self.frozen_globals {
+                    frozen
+                        .get(global.0 as usize)
+                        .cloned()
+                        .unwrap_or(FidanValue::Nothing)
+                } else {
+                    self.globals
+                        .read()
+                        .get(global.0 as usize)
+                        .cloned()
+                        .unwrap_or(FidanValue::Nothing)
+                };
                 frame.store(*dest, val);
             }
             Instr::StoreGlobal { global, value } => {
@@ -1398,12 +1424,20 @@ impl MirMachine {
 
             Rvalue::ConstructEnum { tag, payload } => {
                 let tag_str = self.sym_str(*tag);
-                let payload_vals: Vec<FidanValue> =
-                    payload.iter().map(|op| self.eval_operand(op, frame)).collect();
-                Ok(FidanValue::EnumVariant { tag: tag_str, payload: payload_vals })
+                let payload_vals: Vec<FidanValue> = payload
+                    .iter()
+                    .map(|op| self.eval_operand(op, frame))
+                    .collect();
+                Ok(FidanValue::EnumVariant {
+                    tag: tag_str,
+                    payload: payload_vals,
+                })
             }
 
-            Rvalue::EnumTagCheck { value, expected_tag } => {
+            Rvalue::EnumTagCheck {
+                value,
+                expected_tag,
+            } => {
                 let v = self.eval_operand(value, frame);
                 let expected = self.sym_str(*expected_tag);
                 let matches = matches!(&v,
@@ -1414,9 +1448,10 @@ impl MirMachine {
             Rvalue::EnumPayload { value, index } => {
                 let v = self.eval_operand(value, frame);
                 match v {
-                    FidanValue::EnumVariant { payload, .. } => {
-                        Ok(payload.into_iter().nth(*index).unwrap_or(FidanValue::Nothing))
-                    }
+                    FidanValue::EnumVariant { payload, .. } => Ok(payload
+                        .into_iter()
+                        .nth(*index)
+                        .unwrap_or(FidanValue::Nothing)),
                     _ => Ok(FidanValue::Nothing),
                 }
             }
@@ -1485,8 +1520,9 @@ impl MirMachine {
                             Ok(FidanValue::Nothing)
                         } else {
                             let da = builtins::display(&a);
+                            let db = builtins::display(&b);
                             Err(MirSignal::Panic(format!(
-                                "assertion failed: expected {da} != {da}"
+                                "assertion failed: expected {da} != {db}"
                             )))
                         };
                     }
@@ -1860,7 +1896,10 @@ impl MirMachine {
             // Enum type field access: `Direction.North` → EnumVariant { tag: "North" }.
             FidanValue::EnumType(_) => {
                 let field_name = self.sym_str(field);
-                FidanValue::EnumVariant { tag: field_name, payload: vec![] }
+                FidanValue::EnumVariant {
+                    tag: field_name,
+                    payload: vec![],
+                }
             }
             _ => FidanValue::Nothing,
         }
@@ -1939,8 +1978,8 @@ impl MirMachine {
                 Ok(FidanValue::List(OwnedRef::new(out)))
             }
             FidanValue::String(s) => {
-                let chars: Vec<char> = s.as_str().chars().collect();
-                let len = chars.len() as i64;
+                let str_ref = s.as_str();
+                let len = str_ref.chars().count() as i64;
                 let norm = |i: i64| if i < 0 { (len + i).max(0) } else { i.min(len) };
                 let si = start_raw
                     .map(norm)
@@ -1952,6 +1991,18 @@ impl MirMachine {
                     })
                     .unwrap_or(if step_i > 0 { len } else { -1 });
 
+                // Fast path: contiguous forward slice — skip + take, no Vec.
+                if step_i == 1 && si >= 0 && ei >= si {
+                    let out: String = str_ref
+                        .chars()
+                        .skip(si as usize)
+                        .take((ei - si) as usize)
+                        .collect();
+                    return Ok(FidanValue::String(FidanString::new(&out)));
+                }
+
+                // General path: arbitrary step \u2014 collect once then index.
+                let chars: Vec<char> = str_ref.chars().collect();
                 let mut out = String::new();
                 let mut idx = si;
                 while (step_i > 0 && idx < ei) || (step_i < 0 && idx > ei) {
@@ -1961,6 +2012,44 @@ impl MirMachine {
                     idx += step_i;
                 }
                 Ok(FidanValue::String(FidanString::new(&out)))
+            }
+            FidanValue::Range {
+                start,
+                end,
+                inclusive: range_inclusive,
+            } => {
+                // Materialise a sub-slice of a lazy range into a List.
+                let range_len = if range_inclusive {
+                    (end - start + 1).max(0)
+                } else {
+                    (end - start).max(0)
+                };
+                let norm = |i: i64| {
+                    if i < 0 {
+                        (range_len + i).max(0)
+                    } else {
+                        i.min(range_len)
+                    }
+                };
+                let si = start_raw
+                    .map(norm)
+                    .unwrap_or(if step_i > 0 { 0 } else { range_len - 1 });
+                let ei = end_raw
+                    .map(|e| {
+                        let n = norm(e);
+                        if inclusive { n + 1 } else { n }
+                    })
+                    .unwrap_or(if step_i > 0 { range_len } else { -1 });
+
+                let mut out = FidanList::new();
+                let mut idx = si;
+                while (step_i > 0 && idx < ei) || (step_i < 0 && idx > ei) {
+                    if idx >= 0 && idx < range_len {
+                        out.append(FidanValue::Integer(start + idx));
+                    }
+                    idx += step_i;
+                }
+                Ok(FidanValue::List(OwnedRef::new(out)))
             }
             other => Err(MirSignal::Panic(format!(
                 "cannot slice `{}`",
@@ -1990,18 +2079,41 @@ impl MirMachine {
                     .unwrap_or(FidanValue::Nothing))
             }
             (FidanValue::String(s), FidanValue::Integer(i)) => {
-                let chars: Vec<char> = s.as_str().chars().collect();
-                let len = chars.len() as i64;
+                // Avoid materialising a Vec<char> — walk with an iterator instead.
+                let str_ref = s.as_str();
+                let len = str_ref.chars().count() as i64;
                 let norm = if i < 0 { len + i } else { i };
-                chars
-                    .get(norm as usize)
-                    .map(|c| FidanValue::String(FidanString::new(&c.to_string())))
-                    .ok_or_else(|| {
-                        MirSignal::RuntimeError(
-                            fidan_diagnostics::diag_code!("R2002"),
-                            format!("string index {} out of range", i),
-                        )
-                    })
+                if norm < 0 || norm >= len {
+                    return Err(MirSignal::RuntimeError(
+                        fidan_diagnostics::diag_code!("R2002"),
+                        format!("string index {} out of range", i),
+                    ));
+                }
+                let c = str_ref.chars().nth(norm as usize).unwrap();
+                Ok(FidanValue::String(FidanString::new(&c.to_string())))
+            }
+            (
+                FidanValue::Range {
+                    start,
+                    end,
+                    inclusive,
+                },
+                FidanValue::Integer(i),
+            ) => {
+                // Index into a lazy range without materialising it.
+                let len = if inclusive {
+                    (end - start + 1).max(0)
+                } else {
+                    (end - start).max(0)
+                };
+                let norm = if i < 0 { len + i } else { i };
+                if norm < 0 || norm >= len {
+                    return Err(MirSignal::RuntimeError(
+                        fidan_diagnostics::diag_code!("R2002"),
+                        format!("range index {} out of range", i),
+                    ));
+                }
+                Ok(FidanValue::Integer(start + norm))
             }
             (FidanValue::Tuple(items), FidanValue::Integer(i)) => {
                 items.into_iter().nth(i as usize).ok_or_else(|| {
@@ -2093,13 +2205,42 @@ fn fidan_values_equal(a: &FidanValue, b: &FidanValue) -> bool {
         (String(x), String(y)) => x.as_str() == y.as_str(),
         (Nothing, Nothing) => true,
         (Nothing, _) | (_, Nothing) => false,
-        (EnumVariant { tag: a, .. }, EnumVariant { tag: b, .. }) => a == b,
+        (
+            EnumVariant {
+                tag: a,
+                payload: pa,
+            },
+            EnumVariant {
+                tag: b,
+                payload: pb,
+            },
+        ) => {
+            a == b
+                && pa.len() == pb.len()
+                && pa
+                    .iter()
+                    .zip(pb.iter())
+                    .all(|(x, y)| fidan_values_equal(x, y))
+        }
         (EnumType(a), EnumType(b)) => a == b,
         // Cross-type enum comparisons and object identity
         (EnumVariant { .. }, EnumType(_)) | (EnumType(_), EnumVariant { .. }) => false,
         (Object(a), Object(b)) => std::rc::Rc::ptr_eq(&a.0, &b.0),
         // ClassType identity
         (ClassType(a), ClassType(b)) => a == b,
+        // Lazy range equality — two ranges are equal iff they represent the same sequence.
+        (
+            FidanValue::Range {
+                start: as_,
+                end: ae,
+                inclusive: ai,
+            },
+            FidanValue::Range {
+                start: bs,
+                end: be,
+                inclusive: bi,
+            },
+        ) => as_ == bs && ae == be && ai == bi,
         // Structural list equality
         (List(a), List(b)) => {
             let la = a.borrow();
@@ -2232,9 +2373,11 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
         (BinOp::NotEq, Nothing, Nothing) => Boolean(false),
         (BinOp::NotEq, Nothing, _) => Boolean(true),
         (BinOp::NotEq, _, Nothing) => Boolean(true),
-        // Enum variant equality
-        (BinOp::Eq, EnumVariant { tag: a, .. }, EnumVariant { tag: b, .. }) => Boolean(a == b),
-        (BinOp::NotEq, EnumVariant { tag: a, .. }, EnumVariant { tag: b, .. }) => Boolean(a != b),
+        // Enum variant equality — delegates to fidan_values_equal so payloads are compared too.
+        (BinOp::Eq, EnumVariant { .. }, EnumVariant { .. }) => Boolean(fidan_values_equal(&l, &r)),
+        (BinOp::NotEq, EnumVariant { .. }, EnumVariant { .. }) => {
+            Boolean(!fidan_values_equal(&l, &r))
+        }
         // Enum type identity (two variables holding the same enum type are equal)
         (BinOp::Eq, EnumType(a), EnumType(b)) => Boolean(a == b),
         (BinOp::NotEq, EnumType(a), EnumType(b)) => Boolean(a != b),
@@ -2255,21 +2398,18 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
         (BinOp::BitXor, Integer(a), Integer(b)) => Integer(a ^ b),
         (BinOp::Shl, Integer(a), Integer(b)) => Integer(a << (b & 63)),
         (BinOp::Shr, Integer(a), Integer(b)) => Integer(a >> (b & 63)),
-        // Ranges produce a list of integers
-        (BinOp::Range, Integer(a), Integer(b)) => {
-            let mut list = FidanList::new();
-            for n in *a..*b {
-                list.append(Integer(n));
-            }
-            List(OwnedRef::new(list))
-        }
-        (BinOp::RangeInclusive, Integer(a), Integer(b)) => {
-            let mut list = FidanList::new();
-            for n in *a..=*b {
-                list.append(Integer(n));
-            }
-            List(OwnedRef::new(list))
-        }
+        // Ranges produce a lazy sentinel — no heap allocation until elements
+        // are actually needed (e.g. materialised via append/collect).
+        (BinOp::Range, Integer(a), Integer(b)) => FidanValue::Range {
+            start: *a,
+            end: *b,
+            inclusive: false,
+        },
+        (BinOp::RangeInclusive, Integer(a), Integer(b)) => FidanValue::Range {
+            start: *a,
+            end: *b,
+            inclusive: true,
+        },
         _ => {
             return Err(MirSignal::Panic(format!(
                 "type error: `{:?}` on {} and {}",

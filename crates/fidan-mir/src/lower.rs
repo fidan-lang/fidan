@@ -9,8 +9,10 @@
 // back-patched after the body is lowered).
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 use std::rc::Rc;
+
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use fidan_ast::BinOp;
 use fidan_hir::{
@@ -51,19 +53,19 @@ unsafe impl Send for PendingParallelFor {}
 
 /// Collect every `Var` symbol referenced in `stmts` (not necessarily free:
 /// the caller filters to symbols live in the current scope).
-fn collect_hir_used_vars(stmts: &[HirStmt]) -> HashSet<Symbol> {
-    let mut out = HashSet::new();
+fn collect_hir_used_vars(stmts: &[HirStmt]) -> FxHashSet<Symbol> {
+    let mut out = FxHashSet::default();
     hir_walk_stmts(stmts, &mut out);
     out
 }
 
-fn hir_walk_stmts(stmts: &[HirStmt], out: &mut HashSet<Symbol>) {
+fn hir_walk_stmts(stmts: &[HirStmt], out: &mut FxHashSet<Symbol>) {
     for s in stmts {
         hir_walk_stmt(s, out);
     }
 }
 
-fn hir_walk_stmt(s: &HirStmt, out: &mut HashSet<Symbol>) {
+fn hir_walk_stmt(s: &HirStmt, out: &mut FxHashSet<Symbol>) {
     match s {
         HirStmt::VarDecl { init, .. } => {
             if let Some(e) = init {
@@ -144,7 +146,7 @@ fn hir_walk_stmt(s: &HirStmt, out: &mut HashSet<Symbol>) {
     }
 }
 
-fn hir_walk_expr(e: &HirExpr, out: &mut HashSet<Symbol>) {
+fn hir_walk_expr(e: &HirExpr, out: &mut FxHashSet<Symbol>) {
     match &e.kind {
         HirExprKind::Var(sym) => {
             out.insert(*sym);
@@ -304,7 +306,7 @@ fn fidan_ty_to_mir(ty: &FidanType) -> MirTy {
 // ── Variable environment ──────────────────────────────────────────────────────
 
 /// Current SSA definitions: variable name → most recent `LocalId`.
-type VarEnv = HashMap<Symbol, LocalId>;
+type VarEnv = FxHashMap<Symbol, LocalId>;
 
 /// Clone + diff: returns (`new_env`, `changed`) where `changed` lists symbols
 /// that differ between `before` and `after`.
@@ -328,11 +330,11 @@ struct FnCtx<'p> {
     /// Current variable→local mapping (the "SSA current-def" table).
     env: VarEnv,
     /// Maps module-level global names → `GlobalId` (for `LoadGlobal`/`StoreGlobal`).
-    global_map: HashMap<Symbol, GlobalId>,
+    global_map: FxHashMap<Symbol, GlobalId>,
     /// Maps function name → `FunctionId` (populated by pre-pass; top-level fns only).
-    fn_map: HashMap<Symbol, FunctionId>,
+    fn_map: FxHashMap<Symbol, FunctionId>,
     /// Maps class name → `FunctionId` of its `new` constructor (for `ClassName(args)` calls).
-    obj_map: HashMap<Symbol, FunctionId>,
+    obj_map: FxHashMap<Symbol, FunctionId>,
     /// Whether the current block has been terminated (Return / Goto etc.).
     terminated: bool,
     /// The local that holds `this` inside a method body (None for free functions).
@@ -340,9 +342,9 @@ struct FnCtx<'p> {
     /// The class this method belongs to (None for free functions).
     owner_class: Option<Symbol>,
     /// Maps class → its parent class (for `parent.method()` resolution).
-    parent_map: HashMap<Symbol, Symbol>,
+    parent_map: FxHashMap<Symbol, Symbol>,
     /// Maps (class, method_name) → FunctionId (for direct parent method calls).
-    method_ids: HashMap<(Symbol, Symbol), FunctionId>,
+    method_ids: FxHashMap<(Symbol, Symbol), FunctionId>,
     /// Symbol for `"new"` — the constructor method name.
     new_sym: Symbol,
     /// Symbol for `"len"` — used in for-loop length queries.
@@ -353,7 +355,7 @@ struct FnCtx<'p> {
     type_sym: Symbol,
     /// Set of function names that are extension actions.
     /// Free calls to these need an implicit-`this` = nothing prepended.
-    fn_is_extension: HashSet<Symbol>,
+    fn_is_extension: FxHashSet<Symbol>,
     /// Pending parallel-for bodies discovered while lowering this function.
     /// Drained by lower_program after all named functions are done.
     par_for_pending: Rc<RefCell<VecDeque<PendingParallelFor>>>,
@@ -362,7 +364,7 @@ struct FnCtx<'p> {
     loop_stack: Vec<(BlockId, BlockId)>,
     /// Records all `continue` sites: maps continue_target_bb to a list of
     /// (source_bb, env_snapshot_at_that_point).
-    continue_sites: HashMap<BlockId, Vec<(BlockId, HashMap<Symbol, LocalId>)>>,
+    continue_sites: FxHashMap<BlockId, Vec<(BlockId, FxHashMap<Symbol, LocalId>)>>,
     /// Symbol for `"_"` — the wildcard pattern in `check` arms.
     wildcard_sym: Symbol,
     /// Symbol for `"__lambda__"` — used as the debug name for synthetic lambda functions.
@@ -372,7 +374,7 @@ struct FnCtx<'p> {
     is_init_fn: bool,
     /// Maps FunctionId → explicit-param names in declaration order.  Used at
     /// call sites to reorder named args before emitting `Instr::Call`.
-    fn_param_names: HashMap<FunctionId, Vec<Symbol>>,
+    fn_param_names: FxHashMap<FunctionId, Vec<Symbol>>,
 }
 
 impl<'p> FnCtx<'p> {
@@ -457,7 +459,7 @@ impl<'p> FnCtx<'p> {
         }
         let param_names = self.fn_param_names.get(&fid).cloned().unwrap_or_default();
         // Named args keyed by their label symbol.
-        let named: HashMap<Symbol, &HirExpr> = args
+        let named: FxHashMap<Symbol, &HirExpr> = args
             .iter()
             .filter_map(|a| a.name.map(|n| (n, &a.value)))
             .collect();
@@ -2675,13 +2677,13 @@ fn fidan_type_tag(ty: &FidanType) -> Option<&'static str> {
 // ── Helper: collect all directly-assigned variable names in a stmt list ────────
 //
 // Used to compute loop phi-node candidates (Braun et al. two-pass approach).
-fn collect_assigned_vars(stmts: &[HirStmt]) -> HashSet<Symbol> {
-    let mut result = HashSet::new();
+fn collect_assigned_vars(stmts: &[HirStmt]) -> FxHashSet<Symbol> {
+    let mut result = FxHashSet::default();
     collect_assigned_vars_impl(stmts, &mut result);
     result
 }
 
-fn collect_assigned_vars_impl(stmts: &[HirStmt], out: &mut HashSet<Symbol>) {
+fn collect_assigned_vars_impl(stmts: &[HirStmt], out: &mut FxHashSet<Symbol>) {
     for stmt in stmts {
         match stmt {
             HirStmt::Assign { target, .. } => {
@@ -2779,9 +2781,9 @@ pub fn lower_program(
         .push(MirFunction::new(FunctionId(0), init_sym, MirTy::Nothing));
 
     // ── Pre-pass ②: allocate FunctionIds for top-level / extension functions ─
-    let mut fn_map: HashMap<Symbol, FunctionId> = HashMap::new();
+    let mut fn_map: FxHashMap<Symbol, FunctionId> = FxHashMap::default();
     // fn_name → class it extends (extension actions only)
-    let mut ext_fn_map: HashMap<Symbol, Symbol> = HashMap::new();
+    let mut ext_fn_map: FxHashMap<Symbol, Symbol> = FxHashMap::default();
 
     for func in &hir.functions {
         let id = FunctionId(prog.functions.len() as u32);
@@ -2797,12 +2799,12 @@ pub fn lower_program(
         }
     }
 
-    let fn_is_extension: HashSet<Symbol> = ext_fn_map.keys().copied().collect();
+    let fn_is_extension: FxHashSet<Symbol> = ext_fn_map.keys().copied().collect();
 
     // ── Pre-pass ③: object methods + per-class metadata ─────────────────────
-    let mut obj_map: HashMap<Symbol, FunctionId> = HashMap::new();
-    let mut method_ids: HashMap<(Symbol, Symbol), FunctionId> = HashMap::new();
-    let mut parent_map: HashMap<Symbol, Symbol> = HashMap::new();
+    let mut obj_map: FxHashMap<Symbol, FunctionId> = FxHashMap::default();
+    let mut method_ids: FxHashMap<(Symbol, Symbol), FunctionId> = FxHashMap::default();
+    let mut parent_map: FxHashMap<Symbol, Symbol> = FxHashMap::default();
 
     for obj in &hir.objects {
         if let Some(p) = obj.parent {
@@ -2812,7 +2814,7 @@ pub fn lower_program(
             name: obj.name,
             parent: obj.parent,
             field_names: obj.fields.iter().map(|f| f.name).collect(),
-            methods: HashMap::new(),
+            methods: std::collections::HashMap::new(),
             init_fn: None,
         };
 
@@ -2882,7 +2884,7 @@ pub fn lower_program(
     // Stable GID assignment: pre-populate from the persistent REPL registry
     // first so every symbol retains its GID across recompilations.
     // For non-REPL compilation `existing_globals` is empty and this is a no-op.
-    let mut global_map: HashMap<Symbol, GlobalId> = HashMap::new();
+    let mut global_map: FxHashMap<Symbol, GlobalId> = FxHashMap::default();
     for (i, name) in existing_globals.iter().enumerate() {
         let sym = interner.intern(name.as_str());
         let gid = GlobalId(i as u32);
@@ -2994,7 +2996,7 @@ pub fn lower_program(
         }
     }
     // Build FunctionId → param-name-order map for sorting named call args.
-    let mut fn_param_names: HashMap<FunctionId, Vec<Symbol>> = HashMap::new();
+    let mut fn_param_names: FxHashMap<FunctionId, Vec<Symbol>> = FxHashMap::default();
     for func in &hir.functions {
         if let Some(&fid) = fn_map.get(&func.name) {
             fn_param_names.insert(fid, func.params.iter().map(|p| p.name).collect());
@@ -3012,18 +3014,18 @@ pub fn lower_program(
     // ── Closure: lower one HirFunction body into an already-allocated fn ─────
     // `pending_par_fors` is captured by clone (Rc is cheap to clone).
     let lower_hir_fn = |prog: &mut MirProgram,
-                        fn_map: &HashMap<Symbol, FunctionId>,
-                        obj_map: &HashMap<Symbol, FunctionId>,
-                        parent_map: &HashMap<Symbol, Symbol>,
-                        method_ids: &HashMap<(Symbol, Symbol), FunctionId>,
-                        fn_is_extension: &HashSet<Symbol>,
+                        fn_map: &FxHashMap<Symbol, FunctionId>,
+                        obj_map: &FxHashMap<Symbol, FunctionId>,
+                        parent_map: &FxHashMap<Symbol, Symbol>,
+                        method_ids: &FxHashMap<(Symbol, Symbol), FunctionId>,
+                        fn_is_extension: &FxHashSet<Symbol>,
                         new_sym: Symbol,
                         len_sym: Symbol,
                         append_sym: Symbol,
                         type_sym: Symbol,
                         wildcard_sym: Symbol,
                         lambda_sym: Symbol,
-                        global_map: &HashMap<Symbol, GlobalId>,
+                        global_map: &FxHashMap<Symbol, GlobalId>,
                         func: &HirFunction,
                         fn_id: FunctionId,
                         owner_class: Option<Symbol>,
@@ -3033,7 +3035,7 @@ pub fn lower_program(
             prog,
             fn_id,
             cur_bb: entry_bb,
-            env: VarEnv::new(),
+            env: VarEnv::default(),
             global_map: global_map.clone(),
             fn_map: fn_map.clone(),
             obj_map: obj_map.clone(),
@@ -3048,7 +3050,7 @@ pub fn lower_program(
             type_sym,
             fn_is_extension: fn_is_extension.clone(),
             loop_stack: vec![],
-            continue_sites: HashMap::new(),
+            continue_sites: FxHashMap::default(),
             wildcard_sym,
             lambda_sym,
             par_for_pending: pending,
@@ -3150,7 +3152,7 @@ pub fn lower_program(
             prog: &mut prog,
             fn_id,
             cur_bb: entry_bb,
-            env: VarEnv::new(),
+            env: VarEnv::default(),
             global_map: global_map.clone(),
             fn_map: fn_map.clone(),
             obj_map: obj_map.clone(),
@@ -3165,7 +3167,7 @@ pub fn lower_program(
             type_sym,
             fn_is_extension: fn_is_extension.clone(),
             loop_stack: vec![],
-            continue_sites: HashMap::new(),
+            continue_sites: FxHashMap::default(),
             wildcard_sym,
             lambda_sym,
             par_for_pending: Rc::clone(&pending_par_fors),
@@ -3306,7 +3308,7 @@ pub fn lower_program(
             prog: &mut prog,
             fn_id: pf.fn_id,
             cur_bb: entry_bb,
-            env: VarEnv::new(),
+            env: VarEnv::default(),
             global_map: global_map.clone(),
             fn_map: fn_map.clone(),
             obj_map: obj_map.clone(),
@@ -3321,7 +3323,7 @@ pub fn lower_program(
             type_sym,
             fn_is_extension: fn_is_extension.clone(),
             loop_stack: vec![],
-            continue_sites: HashMap::new(),
+            continue_sites: FxHashMap::default(),
             wildcard_sym,
             lambda_sym,
             par_for_pending: Rc::clone(&pending_par_fors),
@@ -3375,7 +3377,7 @@ pub fn lower_program(
             prog: &mut prog,
             fn_id: test_fn_id,
             cur_bb: entry_bb,
-            env: VarEnv::new(),
+            env: VarEnv::default(),
             global_map: global_map.clone(),
             fn_map: fn_map.clone(),
             obj_map: obj_map.clone(),
@@ -3390,7 +3392,7 @@ pub fn lower_program(
             type_sym,
             fn_is_extension: fn_is_extension.clone(),
             loop_stack: vec![],
-            continue_sites: HashMap::new(),
+            continue_sites: FxHashMap::default(),
             wildcard_sym,
             lambda_sym,
             par_for_pending: Rc::clone(&pending_par_fors),

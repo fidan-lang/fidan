@@ -90,6 +90,9 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 FidanValue::List(l) => l.borrow().len() as i64,
                 FidanValue::Dict(d) => d.borrow().len() as i64,
                 FidanValue::Tuple(t) => t.len() as i64,
+                FidanValue::Range { start, end, inclusive } => {
+                    if *inclusive { (end - start + 1).max(0) } else { (end - start).max(0) }
+                }
                 _ => return Some(FidanValue::Nothing),
             };
             Some(FidanValue::Integer(n))

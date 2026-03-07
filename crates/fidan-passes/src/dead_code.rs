@@ -227,5 +227,8 @@ fn is_pure_rvalue(rv: &Rvalue) -> bool {
             | Rvalue::MakeClosure { .. }
             | Rvalue::CatchException
             | Rvalue::Slice { .. }
+            | Rvalue::ConstructEnum { .. }
+            | Rvalue::EnumTagCheck { .. }
+            | Rvalue::EnumPayload { .. }
     )
 }
