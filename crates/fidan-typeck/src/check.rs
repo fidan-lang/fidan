@@ -507,29 +507,57 @@ impl TypeChecker {
             } => {
                 let std_sym = self.interner.intern("std");
                 if path.first() == Some(&std_sym) && path.len() >= 2 {
-                    // Determine which symbol to bind in the user's scope:
-                    //   `use std.io`          → bind `io`  (namespace)
-                    //   `use std.io.readFile`  → bind `readFile` (free fn)
-                    //   `use std.io as myIo`  → bind `myIo`
-                    let binding_sym = if let Some(&a) = alias.as_ref() {
-                        a
-                    } else if path.len() == 2 {
-                        path[1]
+                    // Validate specific-name imports: `use std.io.{name}` or `use std.io.name`.
+                    // If the module is known but the name is not exported, emit E0108.
+                    let is_valid_export = if path.len() >= 3 {
+                        let module_str = self.interner.resolve(path[1]).to_string();
+                        let export_str = self.interner.resolve(*path.last().unwrap()).to_string();
+                        let exports = fidan_stdlib::module_exports(&module_str);
+                        if !exports.is_empty() && !exports.iter().any(|&e| e == export_str.as_str())
+                        {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    fidan_diagnostics::diag_code!("E0108"),
+                                    format!(
+                                        "`{}` is not exported by `std.{}`",
+                                        export_str, module_str
+                                    ),
+                                    *span,
+                                )
+                                .with_label(Label::primary(*span, "no such export")),
+                            );
+                            false
+                        } else {
+                            true
+                        }
                     } else {
-                        *path.last().unwrap()
+                        true
                     };
-                    self.table.define(
-                        binding_sym,
-                        SymbolInfo {
-                            kind: SymbolKind::Var,
-                            ty: FidanType::Dynamic,
-                            span: *span,
-                            is_mutable: false,
-                            initialized: Initialized::Yes,
-                        },
-                    );
-                    if !re_export && !self.is_repl {
-                        self.import_bindings.push((binding_sym, *span, *grouped));
+                    if is_valid_export {
+                        // Determine which symbol to bind in the user's scope:
+                        //   `use std.io`          → bind `io`  (namespace)
+                        //   `use std.io.readFile`  → bind `readFile` (free fn)
+                        //   `use std.io as myIo`  → bind `myIo`
+                        let binding_sym = if let Some(&a) = alias.as_ref() {
+                            a
+                        } else if path.len() == 2 {
+                            path[1]
+                        } else {
+                            *path.last().unwrap()
+                        };
+                        self.table.define(
+                            binding_sym,
+                            SymbolInfo {
+                                kind: SymbolKind::Var,
+                                ty: FidanType::Dynamic,
+                                span: *span,
+                                is_mutable: false,
+                                initialized: Initialized::Yes,
+                            },
+                        );
+                        if !re_export && !self.is_repl {
+                            self.import_bindings.push((binding_sym, *span, *grouped));
+                        }
                     }
                 } else if !path.is_empty() && path.first() != Some(&std_sym) {
                     // User module import: `use mymod` / `use mymod.sub` /
@@ -1132,13 +1160,19 @@ impl TypeChecker {
                     "parallel-for iterable (requires list or string)",
                     module,
                 );
-                self.infer_expr(iterable, module);
+                let iter_ty = self.infer_expr(iterable, module);
+                let elem_ty = match iter_ty {
+                    FidanType::List(inner) => *inner,
+                    FidanType::String | FidanType::Dynamic => FidanType::Dynamic,
+                    FidanType::Unknown | FidanType::Error => FidanType::Unknown,
+                    _ => FidanType::Dynamic,
+                };
                 self.table.push_scope(ScopeKind::Block);
                 self.table.define(
                     binding,
                     SymbolInfo {
                         kind: SymbolKind::Var,
-                        ty: FidanType::Dynamic,
+                        ty: elem_ty,
                         span,
                         is_mutable: false,
                         initialized: Initialized::Yes,

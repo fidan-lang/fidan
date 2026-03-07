@@ -3,7 +3,7 @@
 //!
 //! Consumed by hover, go-to-definition and completion handlers.
 
-use fidan_ast::{Item, Module, TypeExpr};
+use fidan_ast::{AstArena, Item, Module, Stmt, StmtId, TypeExpr};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::Span;
 use fidan_typeck::{ActionInfo, FidanType, ObjectInfo, TypedModule};
@@ -74,6 +74,80 @@ impl SymbolTable {
         // First declaration wins — avoids overwriting with re-declarations.
         self.entries.entry(name).or_insert(entry);
     }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Recursively collect every for-loop / parallel-for binding across all nested
+/// statements in a function body. Returns `(symbol, stmt_span)` pairs.
+fn collect_body_loop_bindings(
+    stmts: &[StmtId],
+    arena: &AstArena,
+) -> Vec<(Symbol, Span, fidan_ast::ExprId)> {
+    let mut result = Vec::new();
+    for &sid in stmts {
+        match arena.get_stmt(sid) {
+            Stmt::For {
+                binding,
+                iterable,
+                body,
+                span,
+                ..
+            }
+            | Stmt::ParallelFor {
+                binding,
+                iterable,
+                body,
+                span,
+                ..
+            } => {
+                result.push((*binding, *span, *iterable));
+                result.extend(collect_body_loop_bindings(body, arena));
+            }
+            Stmt::While { body, .. } => {
+                result.extend(collect_body_loop_bindings(body, arena));
+            }
+            Stmt::If {
+                then_body,
+                else_ifs,
+                else_body,
+                ..
+            } => {
+                result.extend(collect_body_loop_bindings(then_body, arena));
+                for ei in else_ifs {
+                    result.extend(collect_body_loop_bindings(&ei.body, arena));
+                }
+                if let Some(eb) = else_body {
+                    result.extend(collect_body_loop_bindings(eb, arena));
+                }
+            }
+            Stmt::Attempt {
+                body,
+                catches,
+                otherwise,
+                finally,
+                ..
+            } => {
+                result.extend(collect_body_loop_bindings(body, arena));
+                for c in catches {
+                    result.extend(collect_body_loop_bindings(&c.body, arena));
+                }
+                if let Some(ob) = otherwise {
+                    result.extend(collect_body_loop_bindings(ob, arena));
+                }
+                if let Some(fb) = finally {
+                    result.extend(collect_body_loop_bindings(fb, arena));
+                }
+            }
+            Stmt::Check { arms, .. } => {
+                for arm in arms {
+                    result.extend(collect_body_loop_bindings(&arm.body, arena));
+                }
+            }
+            _ => {}
+        }
+    }
+    result
 }
 
 // ── Builder ───────────────────────────────────────────────────────────────────
@@ -271,10 +345,14 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     }
                 }
                 // Patch method parameter spans from AST so named-arg goto-def works.
+                // Also build action_param_scopes for each method so parameters and
+                // loop variables inside methods are hoverable.
                 for &mid in methods {
                     if let Item::ActionDecl {
                         name: mname,
                         params,
+                        body,
+                        span: method_span,
                         ..
                     } = module.arena.get_item(mid)
                     {
@@ -283,11 +361,91 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                             entry.param_names =
                                 params.iter().map(|p| (res(p.name), p.span)).collect();
                         }
+                        // Build param scope for hover inside method bodies.
+                        let method_info = typed
+                            .objects
+                            .get(name)
+                            .and_then(|obj| obj.methods.get(mname));
+                        if let Some(minfo) = method_info {
+                            let mut scope_params: FxHashMap<String, SymbolEntry> =
+                                FxHashMap::default();
+                            for (ast_p, typed_p) in params.iter().zip(minfo.params.iter()) {
+                                let pname = res(ast_p.name);
+                                let ty_s = type_name(&typed_p.ty, interner);
+                                let prefix = if typed_p.certain {
+                                    "certain "
+                                } else if typed_p.optional {
+                                    "optional "
+                                } else {
+                                    ""
+                                };
+                                let ty_name_opt = if ty_s == "action" {
+                                    Some("action".to_string())
+                                } else {
+                                    None
+                                };
+                                let entry = SymbolEntry {
+                                    kind: SymKind::Variable { is_const: false },
+                                    span: ast_p.span,
+                                    detail: format!(
+                                        "```fidan\n{}{} -> {}\n```",
+                                        prefix, pname, ty_s
+                                    ),
+                                    ty_name: ty_name_opt,
+                                    param_types: vec![],
+                                    param_required: vec![],
+                                    return_type: None,
+                                    param_names: vec![],
+                                    is_param: true,
+                                };
+                                scope_params.insert(pname.clone(), entry.clone());
+                                table.entries.entry(pname).or_insert(entry);
+                            }
+                            // Loop bindings inside method bodies.
+                            for (sym, loop_span, iterable_eid) in
+                                collect_body_loop_bindings(body, &module.arena)
+                            {
+                                let lname = res(sym);
+                                let elem_ty_s = typed
+                                    .expr_types
+                                    .get(&iterable_eid)
+                                    .map(|iter_ty| match iter_ty {
+                                        FidanType::List(inner) => type_name(inner, interner),
+                                        _ => type_name(iter_ty, interner),
+                                    })
+                                    .unwrap_or_else(|| "dynamic".to_string());
+                                let entry = SymbolEntry {
+                                    kind: SymKind::Variable { is_const: false },
+                                    span: loop_span,
+                                    detail: format!(
+                                        "```fidan\nfor {} -> {}\n```",
+                                        lname, elem_ty_s
+                                    ),
+                                    ty_name: None,
+                                    param_types: vec![],
+                                    param_required: vec![],
+                                    return_type: None,
+                                    param_names: vec![],
+                                    is_param: false,
+                                };
+                                scope_params
+                                    .entry(lname.clone())
+                                    .or_insert_with(|| entry.clone());
+                                table.entries.entry(lname).or_insert(entry);
+                            }
+                            if !scope_params.is_empty() {
+                                table.action_param_scopes.push((*method_span, scope_params));
+                            }
+                        }
                     }
                 }
             }
             Item::ActionDecl {
-                name, params, span, ..
+                name,
+                params,
+                body,
+                span,
+                ..
             } => {
                 let aname = res(*name);
                 if let Some(entry) = table.entries.get_mut(&aname) {
@@ -328,6 +486,35 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                         scope_params.insert(pname.clone(), entry.clone());
                         // Flat table fallback for files without name collisions.
                         table.entries.entry(pname).or_insert(entry);
+                    }
+                    // Also add for-loop / parallel-for iteration variables.
+                    for (sym, loop_span, iterable_eid) in
+                        collect_body_loop_bindings(body, &module.arena)
+                    {
+                        let lname = res(sym);
+                        let elem_ty_s = typed
+                            .expr_types
+                            .get(&iterable_eid)
+                            .map(|iter_ty| match iter_ty {
+                                FidanType::List(inner) => type_name(inner, interner),
+                                _ => type_name(iter_ty, interner),
+                            })
+                            .unwrap_or_else(|| "dynamic".to_string());
+                        let entry = SymbolEntry {
+                            kind: SymKind::Variable { is_const: false },
+                            span: loop_span,
+                            detail: format!("```fidan\nfor {} -> {}\n```", lname, elem_ty_s),
+                            ty_name: None,
+                            param_types: vec![],
+                            param_required: vec![],
+                            return_type: None,
+                            param_names: vec![],
+                            is_param: false,
+                        };
+                        scope_params
+                            .entry(lname.clone())
+                            .or_insert_with(|| entry.clone());
+                        table.entries.entry(lname).or_insert(entry);
                     }
                     if !scope_params.is_empty() {
                         table.action_param_scopes.push((*span, scope_params));

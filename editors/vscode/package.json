@@ -426,7 +426,10 @@
         },
         "configurationDefaults": {
             "[fidan]": {
-                "editor.semanticHighlighting.enabled": true
+                "editor.semanticHighlighting.enabled": true,
+                "editor.codeActionsOnSave": {
+                    "source.organizeImports": "explicit"
+                }
             }
         }
     },

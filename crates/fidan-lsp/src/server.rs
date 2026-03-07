@@ -690,6 +690,47 @@ impl FidanLsp {
             || matches!(expected, "dynamic" | "?")
             || matches!(actual, "dynamic" | "?")
     }
+
+    /// Build `TextEdit` deletions for every W1005 (unused import) diagnostic in `uri`.
+    fn build_remove_unused_imports_edits(&self, uri: &Url) -> Vec<TextEdit> {
+        let doc = match self.store.get(uri) {
+            Some(d) => d,
+            None => return vec![],
+        };
+        let text = doc.text.clone();
+        let diags: Vec<_> = doc
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == Some(NumberOrString::String("W1005".to_string())))
+            .cloned()
+            .collect();
+        drop(doc);
+
+        let mut edits = Vec::new();
+        let src_lines: Vec<&str> = text.lines().collect();
+        for diag in diags {
+            let line = diag.range.start.line as usize;
+            let delete_range = if line + 1 < src_lines.len() {
+                Range {
+                    start: Position {
+                        line: line as u32,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: line as u32 + 1,
+                        character: 0,
+                    },
+                }
+            } else {
+                diag.range
+            };
+            edits.push(TextEdit {
+                range: delete_range,
+                new_text: String::new(),
+            });
+        }
+        edits
+    }
 }
 
 // ── LanguageServer implementation ─────────────────────────────────────────────
@@ -711,7 +752,16 @@ impl LanguageServer for FidanLsp {
                 document_symbol_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 inlay_hint_provider: Some(OneOf::Left(true)),
-                code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![
+                            CodeActionKind::QUICKFIX,
+                            CodeActionKind::SOURCE_ORGANIZE_IMPORTS,
+                        ]),
+                        resolve_provider: Some(false),
+                        work_done_progress_options: Default::default(),
+                    },
+                )),
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![
                         ".".to_string(),
@@ -2176,6 +2226,31 @@ impl LanguageServer for FidanLsp {
                     title: message,
                     kind: Some(CodeActionKind::QUICKFIX),
                     diagnostics: Some(vec![diag.clone()]),
+                    edit: Some(WorkspaceEdit {
+                        changes: Some(changes),
+                        ..Default::default()
+                    }),
+                    is_preferred: Some(true),
+                    ..Default::default()
+                }));
+            }
+        }
+
+        // ── source.organizeImports: delete all unused-import spans ──────────────
+        let only = params.context.only.as_deref().unwrap_or(&[]);
+        let wants_organize = only.is_empty()
+            || only
+                .iter()
+                .any(|k| k == &CodeActionKind::SOURCE_ORGANIZE_IMPORTS);
+        if wants_organize {
+            let all_edits = self.build_remove_unused_imports_edits(uri);
+            if !all_edits.is_empty() {
+                let mut changes = std::collections::HashMap::new();
+                changes.insert(uri.clone(), all_edits);
+                actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                    title: "Remove unused imports".to_string(),
+                    kind: Some(CodeActionKind::SOURCE_ORGANIZE_IMPORTS),
+                    diagnostics: None,
                     edit: Some(WorkspaceEdit {
                         changes: Some(changes),
                         ..Default::default()

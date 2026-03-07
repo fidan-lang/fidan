@@ -88,6 +88,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "object cannot extend itself",
         category: "names",
     },
+    DiagnosticCode {
+        code: "E0108",
+        title: "unknown export from stdlib module",
+        category: "imports",
+    },
     // ── Type system ───────────────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0201",

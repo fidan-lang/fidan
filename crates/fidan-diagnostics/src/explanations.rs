@@ -182,6 +182,32 @@ Fix: extend a different object, or remove the `extends` clause entirely.
 "#,
         ),
 
+        "E0108" => Some(
+            r#"A grouped or specific-name stdlib import refers to a name that the
+module does not export.  Fidan validates these names at compile time
+using each module's known export list.
+
+This diagnostic only fires for specific-name imports (three or more path
+segments):  `use std.io.{name}` or `use std.io.name`.  Plain namespace
+imports (`use std.io`) are always allowed.
+
+Erroneous example:
+
+    use std.io.{dir_namewwwuowuwoi}   # error: `dir_namewwwuowuwoi` is not exported by `std.io`
+    use std.math.{squirt}             # error: `squirt` is not exported by `std.math`
+
+Fix: use a name that the module actually exports.  Hover over the module
+path in your editor to see valid exports, or consult the standard library
+documentation:
+
+    use std.io.{read_file}    # OK
+    use std.math.{sqrt}       # OK
+
+Note: `fidan explain E0108` lists valid exports for each stdlib module
+if you need a quick reference.
+"#,
+        ),
+
         "E0105" => Some(
             r#"A type annotation refers to a name that is not a built-in type and has
 not been declared as an `object` in the current scope.  This usually
