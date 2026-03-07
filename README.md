@@ -1,7 +1,6 @@
 <div align="center">
 
-<!-- PLACEHOLDER: replace with actual banner image -->
-![Fidan Banner](https://via.placeholder.com/1200x300/1a1a2e/e0e0ff?text=Fidan+Programming+Language)
+![Fidan Banner](https://github.com/AppSolves/Fidan/blob/2faf27f51dd51123a53a47360921dcbe6fe5cbfc/editors/vscode/icons/icon.png)
 
 # Fidan
 
