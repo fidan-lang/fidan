@@ -49,11 +49,11 @@ npm run compile
 
 ## License
 
-This project uses a custom license file based on Apache License 2.0,
-with additional terms regarding trademark use and commercial distribution
-of the Fidan language itself.
+This extension is licensed under **Apache License 2.0** with additional
+terms regarding trademark use and commercial distribution of the Fidan
+language itself.
 
-See [LICENSE](../../LICENSE) for full license text.
+See [LICENSE](LICENSE) for full license text.
 
 Copyright © 2026 Kaan Gönüldinc. All rights reserved.
 
