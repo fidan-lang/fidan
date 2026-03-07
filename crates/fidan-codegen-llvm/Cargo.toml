@@ -2,6 +2,9 @@
 name = "fidan-codegen-llvm"
 version.workspace = true
 edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 # inkwell (safe LLVM bindings) added in Phase 11 only.
 # Gated behind a feature flag so the workspace builds without LLVM installed.
