@@ -330,6 +330,10 @@ fn fmt_rvalue(rv: &Rvalue) -> String {
         }
         Rvalue::Literal(lit) => fmt_op(&Operand::Const(lit.clone())),
         Rvalue::CatchException => "catch_exception".to_string(),
+        Rvalue::MakeClosure { fn_id, captures } => {
+            let caps = captures.iter().map(fmt_op).collect::<Vec<_>>().join(", ");
+            format!("make_closure(fn#{}, [{}])", fn_id, caps)
+        }
         Rvalue::Slice { target, start, end, inclusive, step } => {
             let op = if *inclusive { "..." } else { ".." };
             let s  = start.as_ref().map(fmt_op).unwrap_or_default();

@@ -158,6 +158,13 @@ pub enum Rvalue {
     /// Read the exception that caused the current catch-block to be entered.
     /// Placed by the lowerer as the initialiser of each `catch err {` binding.
     CatchException,
+    /// Bundle a function reference with captured outer-scope values.
+    /// `captures` holds the operands whose current values are snapshotted at
+    /// closure-creation time and prepended to explicit args at call time.
+    MakeClosure {
+        fn_id: u32,
+        captures: Vec<Operand>,
+    },
     /// Slice: `target[start..end]`, `target[start..]`, `target[..end]`, `target[..]`,
     /// optionally with `step`. Always produces a new value (copy semantics).
     /// `inclusive` means `...` (inclusive upper bound).

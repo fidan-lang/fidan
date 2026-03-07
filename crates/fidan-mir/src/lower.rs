@@ -265,8 +265,11 @@ fn hir_walk_expr(e: &HirExpr, out: &mut HashSet<Symbol>) {
                 hir_walk_expr(f, out);
             }
         }
-        HirExprKind::Lambda { .. } => {
-            // Phase 1: lambdas do not capture outer variables — body is not walked.
+        HirExprKind::Lambda { body, .. } => {
+            // Walk the body so outer-scope variables referenced inside it are
+            // included in the enclosing scope's used-vars set (needed when the
+            // lambda itself appears inside a parallel-for body).
+            hir_walk_stmts(body, out);
         }
     }
 }
@@ -1014,7 +1017,8 @@ impl<'p> FnCtx<'p> {
 
             // ── Inline lambda ─────────────────────────────────────────────────
             // Lift the lambda body into a fresh synthetic `MirFunction` and
-            // return a `FunctionRef` literal that points to it at runtime.
+            // emit a `MakeClosure` that bundles the function with any outer-
+            // scope variables it references.
             HirExprKind::Lambda { params, body } => {
                 // 1. Pre-allocate a FunctionId for the lambda body.
                 let lambda_fn_id = FunctionId(self.prog.functions.len() as u32);
@@ -1024,14 +1028,46 @@ impl<'p> FnCtx<'p> {
                     MirTy::Dynamic,
                 ));
 
-                // 2. Build env_params from the lambda's declared params.
-                //    Phase 1: lambdas only see their own params (no outer capture).
-                let env_params: Vec<(Symbol, MirTy)> = params
+                // 2. Discover which outer-scope variables the body actually uses.
+                let used_in_body = collect_hir_used_vars(body);
+                // Captures: symbols used in the body that are live in the current env
+                // AND are NOT module-level globals.
+                //
+                // Global-backed variables (top-level `var` declarations) are
+                // intentionally excluded: the lambda body's FnCtx already has
+                // `global_map`, so every read emits `LoadGlobal` (always the
+                // current value) and every write emits `StoreGlobal`.  This
+                // gives reference semantics for module-level variables for free.
+                //
+                // Only stack-local variables (function params, for-loop
+                // bindings, etc.) need value capture, because they live in a
+                // call frame that may be gone by the time the closure is called.
+                let mut capture_syms: Vec<Symbol> = used_in_body
+                    .into_iter()
+                    .filter(|sym| self.env.contains_key(sym) && !self.global_map.contains_key(sym))
+                    .collect();
+                capture_syms.sort_unstable();
+
+                // 3. Build env_params: captured vars (prepended) then explicit params.
+                //    The lambda's MirFunction will receive them in this order.
+                let capture_params: Vec<(Symbol, MirTy)> = capture_syms
+                    .iter()
+                    .map(|&sym| (sym, MirTy::Dynamic))
+                    .collect();
+                let explicit_params: Vec<(Symbol, MirTy)> = params
                     .iter()
                     .map(|p| (p.name, fidan_ty_to_mir(&p.ty)))
                     .collect();
+                let env_params: Vec<(Symbol, MirTy)> =
+                    capture_params.into_iter().chain(explicit_params).collect();
 
-                // 3. Defer lowering the body using the existing PendingParallelFor mechanism.
+                // 4. Build capture operands: current SSA locals for each captured symbol.
+                let capture_ops: Vec<Operand> = capture_syms
+                    .iter()
+                    .map(|&sym| Operand::Local(*self.env.get(&sym).unwrap()))
+                    .collect();
+
+                // 5. Defer lowering the body using the existing PendingParallelFor mechanism.
                 self.par_for_pending
                     .borrow_mut()
                     .push_back(PendingParallelFor {
@@ -1042,8 +1078,22 @@ impl<'p> FnCtx<'p> {
                         body_len: body.len(),
                     });
 
-                // 4. Return the function identity as a literal operand.
-                Operand::Const(MirLit::FunctionRef(lambda_fn_id.0))
+                // 6. Emit MakeClosure and return the local holding the closure.
+                if capture_ops.is_empty() {
+                    // No captures: plain function reference suffices.
+                    Operand::Const(MirLit::FunctionRef(lambda_fn_id.0))
+                } else {
+                    let dest = self.alloc_local();
+                    self.emit(Instr::Assign {
+                        dest,
+                        ty: MirTy::Function,
+                        rhs: Rvalue::MakeClosure {
+                            fn_id: lambda_fn_id.0,
+                            captures: capture_ops,
+                        },
+                    });
+                    Operand::Local(dest)
+                }
             }
 
             HirExprKind::Error => Operand::Const(MirLit::Nothing),

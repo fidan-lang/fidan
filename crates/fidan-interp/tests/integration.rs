@@ -337,16 +337,119 @@ fn lambda_no_param_ok() {
 
 #[test]
 fn lambda_with_param_foreach_ok() {
-    assert!(run_src(r#"
+    assert!(
+        run_src(
+            r#"
 var nums = [1, 2, 3]
 nums.forEach(action with (x) { print(x) })
-"#).is_ok());
+"#
+        )
+        .is_ok()
+    );
 }
 
 #[test]
 fn lambda_first_where_ok() {
-    assert!(run_src(r#"
+    assert!(
+        run_src(
+            r#"
 var nums = [1, 2, 3, 4]
 var first_even = nums.firstWhere(action with (x) { return x % 2 == 0 })
-"#).is_ok());
+"#
+        )
+        .is_ok()
+    );
+}
+
+// ── Lambda capture (closure) ──────────────────────────────────────────────────
+
+#[test]
+fn lambda_captures_outer_var_ok() {
+    assert!(
+        run_src(
+            r#"
+var x = 10
+var f = action with (n) { return n + x }
+assert_eq(f(5), 15)
+assert_eq(f(0), 10)
+"#
+        )
+        .is_ok()
+    );
+}
+
+// Module-level variables are captured by reference: mutations after the
+// lambda is created are visible to the lambda.
+#[test]
+fn lambda_capture_sees_outer_mutation_ok() {
+    assert!(
+        run_src(
+            r#"
+var x = 10
+var f = action with () { return x }
+x = 99
+assert_eq(f(), 99)
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn lambda_captures_multiple_vars_ok() {
+    assert!(
+        run_src(
+            r#"
+var a = 3
+var b = 7
+var add = action with () { return a + b }
+assert_eq(add(), 10)
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn lambda_capture_in_foreach_ok() {
+    assert!(
+        run_src(
+            r#"
+var multiplier = 3
+var nums = [1, 2, 4]
+var results = []
+nums.forEach(action with (x) { results.append(x * multiplier) })
+assert_eq(results, [3, 6, 12])
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn lambda_capture_in_first_where_ok() {
+    assert!(
+        run_src(
+            r#"
+var threshold = 5
+var nums = [1, 3, 7, 9]
+var found = nums.firstWhere(action with (x) { return x > threshold })
+assert_eq(found, 7)
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn lambda_no_capture_still_works_ok() {
+    assert!(
+        run_src(
+            r#"
+var double = action with (n) { return n * 2 }
+assert_eq(double(6), 12)
+"#
+        )
+        .is_ok()
+    );
 }

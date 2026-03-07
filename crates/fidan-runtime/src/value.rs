@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use crate::{FidanDict, FidanList, FidanObject, FidanString, OwnedRef, SharedRef};
 use crate::parallel::FidanPending;
+use crate::{FidanDict, FidanList, FidanObject, FidanString, OwnedRef, SharedRef};
 
 /// Opaque function identifier — same as fidan-mir's FunctionId but re-exported here
 /// so fidan-runtime doesn't depend on fidan-mir (no circular dep).
@@ -43,9 +43,19 @@ pub enum FidanValue {
     /// An enum type namespace (e.g. `Direction` itself — `Direction.North` is a field access).
     EnumType(Arc<str>),
     /// A concrete enum variant value (e.g. the result of `Direction.North`).
-    EnumVariant { tag: Arc<str> },
+    EnumVariant {
+        tag: Arc<str>,
+    },
     /// A first-class reference to a class type (e.g. `Animal` used as a value).
     ClassType(Arc<str>),
+    /// A closure: a lambda with captured outer-scope values.
+    /// `captured` holds a snapshot of each captured variable at the time the
+    /// closure was created.  At call time the interpreter prepends these to
+    /// the explicit arguments.
+    Closure {
+        fn_id: FunctionId,
+        captured: Vec<FidanValue>,
+    },
 }
 
 impl FidanValue {
@@ -61,6 +71,7 @@ impl FidanValue {
             FidanValue::Object(_) => "object",
             FidanValue::Shared(_) => "Shared",
             FidanValue::Function(_) => "action",
+            FidanValue::Closure { .. } => "action",
             FidanValue::Tuple(_) => "tuple",
             FidanValue::Pending(_) => "pending",
             FidanValue::Namespace(_) => "namespace",
@@ -98,10 +109,10 @@ impl FidanValue {
     /// - **Tuple** — recurse per element.
     pub fn parallel_capture(&self) -> FidanValue {
         match self {
-            FidanValue::Integer(n)   => FidanValue::Integer(*n),
-            FidanValue::Float(f)     => FidanValue::Float(*f),
-            FidanValue::Boolean(b)   => FidanValue::Boolean(*b),
-            FidanValue::Nothing      => FidanValue::Nothing,
+            FidanValue::Integer(n) => FidanValue::Integer(*n),
+            FidanValue::Float(f) => FidanValue::Float(*f),
+            FidanValue::Boolean(b) => FidanValue::Boolean(*b),
+            FidanValue::Nothing => FidanValue::Nothing,
             FidanValue::Function(id) => FidanValue::Function(*id),
 
             // Arc<str> — single atomic refcount bump, no data copy.
@@ -145,14 +156,23 @@ impl FidanValue {
             FidanValue::Namespace(m) => FidanValue::Namespace(Arc::clone(m)),
 
             // StdlibFn is stateless — clone both Arc<str> pointers.
-            FidanValue::StdlibFn(module, name) =>
-                FidanValue::StdlibFn(Arc::clone(module), Arc::clone(name)),
+            FidanValue::StdlibFn(module, name) => {
+                FidanValue::StdlibFn(Arc::clone(module), Arc::clone(name))
+            }
 
             // EnumType and EnumVariant are stateless — clone Arc<str>.
             FidanValue::EnumType(s) => FidanValue::EnumType(Arc::clone(s)),
-            FidanValue::EnumVariant { tag } => FidanValue::EnumVariant { tag: Arc::clone(tag) },
+            FidanValue::EnumVariant { tag } => FidanValue::EnumVariant {
+                tag: Arc::clone(tag),
+            },
             // ClassType is stateless — clone the Arc<str>.
             FidanValue::ClassType(s) => FidanValue::ClassType(Arc::clone(s)),
+
+            // Recurse on each captured element.
+            FidanValue::Closure { fn_id, captured } => FidanValue::Closure {
+                fn_id: *fn_id,
+                captured: captured.iter().map(|v| v.parallel_capture()).collect(),
+            },
         }
     }
 }
@@ -165,7 +185,11 @@ pub fn display(val: &FidanValue) -> String {
     match val {
         FidanValue::Integer(n) => n.to_string(),
         FidanValue::Float(f) => {
-            if f.fract() == 0.0 { format!("{:.1}", f) } else { f.to_string() }
+            if f.fract() == 0.0 {
+                format!("{:.1}", f)
+            } else {
+                f.to_string()
+            }
         }
         FidanValue::Boolean(b) => b.to_string(),
         FidanValue::Nothing => "nothing".to_string(),
@@ -175,7 +199,9 @@ pub fn display(val: &FidanValue) -> String {
             format!("[{}]", items.join(", "))
         }
         FidanValue::Dict(d) => {
-            let pairs: Vec<String> = d.borrow().iter()
+            let pairs: Vec<String> = d
+                .borrow()
+                .iter()
                 .map(|(k, v)| format!("{}: {}", k.as_str(), display(v)))
                 .collect();
             format!("{{{}}}", pairs.join(", "))
@@ -194,6 +220,7 @@ pub fn display(val: &FidanValue) -> String {
         }
         FidanValue::Pending(_) => "<pending>".to_string(),
         FidanValue::Function(id) => format!("<action#{}>", id.0),
+        FidanValue::Closure { fn_id, .. } => format!("<action#{}>", fn_id.0),
         FidanValue::Namespace(m) => format!("<module:{}>", m),
         FidanValue::StdlibFn(module, name) => format!("<action:{}.{}>", module, name),
         FidanValue::EnumType(s) => format!("<enum:{}>", s),

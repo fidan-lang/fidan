@@ -416,6 +416,10 @@ fn remap_rvalue(rv: &Rvalue, r: &impl Fn(&Operand) -> Operand) -> Rvalue {
         ),
         Rvalue::Literal(lit) => Rvalue::Literal(lit.clone()),
         Rvalue::CatchException => Rvalue::CatchException,
+        Rvalue::MakeClosure { fn_id, captures } => Rvalue::MakeClosure {
+            fn_id: *fn_id,
+            captures: captures.iter().map(|c| r(c)).collect(),
+        },
         Rvalue::Slice { target, start, end, inclusive, step } => Rvalue::Slice {
             target: r(target),
             start: start.as_ref().map(|o| r(o)),

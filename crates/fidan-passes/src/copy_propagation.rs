@@ -113,6 +113,11 @@ fn subst_rvalue(rv: &mut Rvalue, resolve: &impl Fn(&Operand) -> Operand) {
             }
         }
         Rvalue::Literal(_) | Rvalue::CatchException => {}
+        Rvalue::MakeClosure { captures, .. } => {
+            for c in captures {
+                subst_op(c, resolve);
+            }
+        }
         Rvalue::Slice {
             target,
             start,
