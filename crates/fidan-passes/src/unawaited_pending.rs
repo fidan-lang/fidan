@@ -17,8 +17,7 @@
 
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{GlobalId, Instr, LocalId, MirProgram, Operand, Rvalue};
-use std::collections::HashMap;
-use std::collections::HashSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// One detected unawaited-Pending diagnostic.
 pub struct UnawaitedPendingDiag {
@@ -43,8 +42,8 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<UnawaitedPendi
         // This handles the common pattern `var h = spawn foo()` where `h` is a
         // module-level global — the spawn result goes through a StoreGlobal /
         // LoadGlobal pair before reaching the AwaitPending instruction.
-        let mut copy_of: HashMap<LocalId, LocalId> = HashMap::new();
-        let mut global_origin: HashMap<GlobalId, LocalId> = HashMap::new();
+        let mut copy_of: FxHashMap<LocalId, LocalId> = FxHashMap::default();
+        let mut global_origin: FxHashMap<GlobalId, LocalId> = FxHashMap::default();
 
         for block in &func.blocks {
             for instr in &block.instructions {
@@ -76,8 +75,8 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<UnawaitedPendi
         }
 
         // ── Collect pending-producing and awaited locals ───────────────────────
-        let mut pending_locals: HashSet<LocalId> = HashSet::new();
-        let mut awaited_locals: HashSet<LocalId> = HashSet::new();
+        let mut pending_locals: FxHashSet<LocalId> = FxHashSet::default();
+        let mut awaited_locals: FxHashSet<LocalId> = FxHashSet::default();
 
         for block in &func.blocks {
             for instr in &block.instructions {
@@ -117,7 +116,7 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<UnawaitedPendi
 /// Chase the copy-alias chain to find the root local that a given local
 /// was ultimately copied from.  Cuts off after 32 hops to avoid cycles
 /// (which cannot occur in valid SSA, but defensive programming costs nothing).
-fn chase(mut l: LocalId, copy_of: &HashMap<LocalId, LocalId>) -> LocalId {
+fn chase(mut l: LocalId, copy_of: &FxHashMap<LocalId, LocalId>) -> LocalId {
     for _ in 0..32 {
         match copy_of.get(&l) {
             Some(&src) => l = src,

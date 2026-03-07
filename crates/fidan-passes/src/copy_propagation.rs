@@ -4,7 +4,7 @@
 // when that copy was a simple assignment (`dest = Use(src)`).
 
 use fidan_mir::{Callee, Instr, LocalId, MirProgram, MirStringPart, Operand, Rvalue, Terminator};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 pub struct CopyPropagation;
 
@@ -14,7 +14,7 @@ impl crate::Pass for CopyPropagation {
             // Build copy map: local -> what it copies from.
             // We only forward one level (chains are resolved by running the pass
             // twice, but a single pass already handles most cases).
-            let mut copy_map: HashMap<LocalId, Operand> = HashMap::new();
+            let mut copy_map: FxHashMap<LocalId, Operand> = FxHashMap::default();
             for bb in &func.blocks {
                 for instr in &bb.instructions {
                     if let Instr::Assign {

@@ -1,6 +1,6 @@
 use crate::FidanValue;
 use fidan_lexer::Symbol;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -16,7 +16,9 @@ pub struct FidanClass {
     pub name_str: Arc<str>,
     pub parent: Option<Arc<FidanClass>>,
     pub fields: Vec<FieldDef>,
-    pub methods: HashMap<Symbol, crate::FunctionId>,
+    /// Fast symbol → slot-index lookup (mirrors `fields` but O(1)).
+    pub field_index: FxHashMap<Symbol, usize>,
+    pub methods: FxHashMap<Symbol, crate::FunctionId>,
     /// `true` when the class (or any ancestor) defines a method named `drop`.
     ///
     /// Cached by `build_class_table` at startup so `Instr::Drop` dispatch
@@ -71,12 +73,12 @@ impl FidanObject {
         }
     }
     pub fn get_field(&self, name: Symbol) -> Option<&FidanValue> {
-        let idx = self.class.fields.iter().find(|f| f.name == name)?.index;
+        let idx = *self.class.field_index.get(&name)?;
         self.fields.get(idx)
     }
     pub fn set_field(&mut self, name: Symbol, value: FidanValue) {
-        if let Some(f) = self.class.fields.iter().find(|f| f.name == name) {
-            self.fields[f.index] = value;
+        if let Some(&idx) = self.class.field_index.get(&name) {
+            self.fields[idx] = value;
         }
     }
 }

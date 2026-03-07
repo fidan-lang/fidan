@@ -58,6 +58,7 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 anyhow = "1"
 rustc-hash = "2"
+parking_lot = "0.12"
 regex = "1"
 indexmap = "2"
 smol_str = "0.3.6"

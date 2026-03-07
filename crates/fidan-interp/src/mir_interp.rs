@@ -91,7 +91,9 @@ fn build_class_table(
                 index: i,
             })
             .collect();
-        let mut method_map = std::collections::HashMap::new();
+        let field_index: FxHashMap<fidan_lexer::Symbol, usize> =
+            field_defs.iter().map(|fd| (fd.name, fd.index)).collect();
+        let mut method_map = FxHashMap::default();
         for (&sym, &fid) in &obj.methods {
             method_map.insert(sym, RuntimeFnId(fid.0));
         }
@@ -107,6 +109,7 @@ fn build_class_table(
             name_str,
             parent,
             fields: field_defs,
+            field_index,
             methods: method_map,
             has_drop_action: own_has_drop || parent_has_drop,
         });
@@ -124,18 +127,14 @@ struct CallFrame {
     catch_stack: Vec<BlockId>,
     /// Set by `Terminator::Throw` before jumping to a catch block.
     current_exception: Option<FidanValue>,
-    /// Name for stack-trace messages.
-    #[allow(dead_code)]
-    fn_name: String,
 }
 
 impl CallFrame {
-    fn new(local_count: u32, fn_name: String) -> Self {
+    fn new(local_count: u32) -> Self {
         Self {
             locals: vec![FidanValue::Nothing; local_count as usize],
             catch_stack: vec![],
             current_exception: None,
-            fn_name,
         }
     }
 
@@ -176,21 +175,21 @@ pub struct MirMachine {
     panic_trace: Vec<TraceFrame>,
     /// Maps free-imported function names (e.g. `readFile`) to their stdlib module
     /// (e.g. `"io"`).  Populated from `use std.io.{readFile}` declarations.
-    stdlib_free_fns: FxHashMap<Arc<str>, Arc<str>>,
+    stdlib_free_fns: Arc<FxHashMap<Arc<str>, Arc<str>>>,
     /// Set of stdlib module names/aliases known in this program (e.g. `"io"`, `"math"`).
     /// O(1) lookup used by `dispatch_method` to distinguish stdlib vs user namespaces.
-    stdlib_modules: FxHashSet<Arc<str>>,
+    stdlib_modules: Arc<FxHashSet<Arc<str>>>,
     /// Set of namespace aliases that were re-exported (`export use mod`) — used by
     /// `get_field` for O(1) chaining lookup (e.g. `lib.math.sqrt`).
-    reexported_namespaces: FxHashSet<Arc<str>>,
+    reexported_namespaces: Arc<FxHashSet<Arc<str>>>,
     /// Maps merged free-function names to their `FunctionId`.
     /// Used for `use mymod` / `test2.add(...)` user-module namespace dispatch.
-    user_fn_map: FxHashMap<Symbol, FunctionId>,
+    user_fn_map: Arc<FxHashMap<Symbol, FunctionId>>,
     /// Module-level global variables, shared across all threads.
     /// Init function writes (single-threaded); all other accesses are reads unless
     /// the user program explicitly mutates a global at runtime.  `RwLock` allows
     /// concurrent reads (parallel tasks) while still supporting write access.
-    globals: Arc<std::sync::RwLock<Vec<FidanValue>>>,
+    globals: Arc<parking_lot::RwLock<Vec<FidanValue>>>,
     /// Snapshot of all interned strings taken once after parsing.
     /// Allows O(1) symbol → &str resolution with a single `Arc::clone` and
     /// NO `RwLock` acquisition — critical for the hot method-dispatch path.
@@ -203,7 +202,7 @@ pub struct MirMachine {
     call_counters: Arc<Vec<AtomicU32>>,
     /// JIT-compiled function entries, one slot per function.
     /// `None` → not yet compiled; `Some(entry)` → ready to use.
-    jit_fns: Arc<std::sync::RwLock<Vec<Option<JitFnEntry>>>>,
+    jit_fns: Arc<parking_lot::RwLock<Vec<Option<JitFnEntry>>>>,
     /// `true` per slot once the JIT has successfully compiled that function.
     /// Checked with a bare `Acquire` load — no lock needed for the fast path.
     jit_flags: Arc<Vec<AtomicBool>>,
@@ -330,8 +329,8 @@ impl MirMachine {
             }
             Arc::new(counters)
         };
-        let jit_fns: Arc<std::sync::RwLock<Vec<Option<JitFnEntry>>>> =
-            Arc::new(std::sync::RwLock::new(vec![None; fn_count]));
+        let jit_fns: Arc<parking_lot::RwLock<Vec<Option<JitFnEntry>>>> =
+            Arc::new(parking_lot::RwLock::new(vec![None; fn_count]));
         let jit_flags: Arc<Vec<AtomicBool>> =
             Arc::new((0..fn_count).map(|_| AtomicBool::new(false)).collect());
 
@@ -343,11 +342,11 @@ impl MirMachine {
             call_stack: Vec::new(),
             pending_call_span: None,
             panic_trace: Vec::new(),
-            stdlib_free_fns,
-            stdlib_modules,
-            reexported_namespaces,
-            user_fn_map,
-            globals: Arc::new(std::sync::RwLock::new(vec![
+            stdlib_free_fns: Arc::new(stdlib_free_fns),
+            stdlib_modules: Arc::new(stdlib_modules),
+            reexported_namespaces: Arc::new(reexported_namespaces),
+            user_fn_map: Arc::new(user_fn_map),
+            globals: Arc::new(parking_lot::RwLock::new(vec![
                 FidanValue::Nothing;
                 globals_count
             ])),
@@ -542,7 +541,7 @@ impl MirMachine {
                 for (dec_fn_id, extra_args) in &func.custom_decorators {
                     let mut args: Vec<FidanValue> = Vec::with_capacity(extra_args.len() + 1);
                     args.push(fn_val.clone());
-                    args.extend(extra_args.iter().cloned().map(mir_lit_to_value));
+                    args.extend(extra_args.iter().map(mir_lit_to_value));
                     entries.push((*dec_fn_id, args));
                 }
             }
@@ -636,7 +635,7 @@ impl MirMachine {
             let idx = fn_id.0 as usize;
             // Fast-path: single atomic load — no lock acquired when not compiled.
             if self.jit_flags[idx].load(Ordering::Acquire) {
-                let guard = self.jit_fns.read().unwrap();
+                let guard = self.jit_fns.read();
                 if let Some(ref entry) = guard[idx] {
                     return Ok(call_jit_fn(entry, &args));
                 }
@@ -648,11 +647,11 @@ impl MirMachine {
                     if let Some(entry) =
                         compiler.compile_function(func, &self.program, &self.interner)
                     {
-                        self.jit_fns.write().unwrap()[idx] = Some(entry);
+                        self.jit_fns.write()[idx] = Some(entry);
                         // Publish the compiled flag AFTER the function is stored.
                         self.jit_flags[idx].store(true, Ordering::Release);
                         // Dispatch immediately — including this very (compilation-trigger) call.
-                        let guard = self.jit_fns.read().unwrap();
+                        let guard = self.jit_fns.read();
                         if let Some(ref e) = guard[idx] {
                             return Ok(call_jit_fn(e, &args));
                         }
@@ -677,10 +676,9 @@ impl MirMachine {
             None
         };
 
-        let fn_name = self.sym_str(func.name).to_string();
         let local_count = func.local_count;
 
-        let mut frame = CallFrame::new(local_count, fn_name);
+        let mut frame = CallFrame::new(local_count);
 
         // Bind parameters — defer all string formatting to the error path only.
         // On the happy path we do ZERO formatting/allocation per argument.
@@ -884,10 +882,7 @@ impl MirMachine {
     ) -> Result<Option<FidanValue>, MirSignal> {
         match instr {
             Instr::Assign { dest, rhs, .. } => {
-                // Clone only the Rvalue, not the encompassing Instr.
-                // For BinOp / Use (the hot cases) Rvalue::clone is a stack
-                // copy with no heap allocation.
-                let val = self.eval_rvalue(rhs.clone(), frame)?;
+                let val = self.eval_rvalue(rhs, frame)?;
                 frame.store(*dest, val);
             }
             Instr::Call {
@@ -974,7 +969,6 @@ impl MirMachine {
                 let val = self
                     .globals
                     .read()
-                    .unwrap()
                     .get(global.0 as usize)
                     .cloned()
                     .unwrap_or(FidanValue::Nothing);
@@ -982,7 +976,7 @@ impl MirMachine {
             }
             Instr::StoreGlobal { global, value } => {
                 let val = self.eval_operand(value, frame);
-                if let Some(slot) = self.globals.write().unwrap().get_mut(global.0 as usize) {
+                if let Some(slot) = self.globals.write().get_mut(global.0 as usize) {
                     *slot = val;
                 }
             }
@@ -1077,8 +1071,8 @@ impl MirMachine {
                     .iter()
                     .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture()))
                     .collect();
-                // Look up the method name before moving `self` into the closure.
-                let method_name: Option<Arc<str>> = (*method).map(|sym| self.sym_str(sym));
+                // Look up the method symbol before moving `self` into the closure.
+                let method_sym: Option<Symbol> = *method; // Copy, no allocation
                 let bundle = ParallelArgs::from_captures(caps);
                 let mut child = self.clone_for_thread();
                 let pending = FidanPending::spawn_with_args(bundle, move |bundle| {
@@ -1087,11 +1081,11 @@ impl MirMachine {
                         return FidanValue::Nothing;
                     }
                     let first = vals.remove(0);
-                    match method_name {
-                        Some(ref name) => {
+                    match method_sym {
+                        Some(sym) => {
                             // Method dispatch: first value is the receiver.
                             child
-                                .dispatch_method(first, name, vals)
+                                .dispatch_method_sym(first, sym, vals)
                                 .unwrap_or(FidanValue::Nothing)
                         }
                         None => match first {
@@ -1099,7 +1093,10 @@ impl MirMachine {
                             FidanValue::Function(RuntimeFnId(id)) => child
                                 .call_function(FunctionId(id), vals)
                                 .unwrap_or(FidanValue::Nothing),
-                            FidanValue::Closure { fn_id: RuntimeFnId(id), captured } => {
+                            FidanValue::Closure {
+                                fn_id: RuntimeFnId(id),
+                                captured,
+                            } => {
                                 let mut full_args: Vec<FidanValue> =
                                     captured.iter().map(|v| v.parallel_capture()).collect();
                                 full_args.extend(vals);
@@ -1297,23 +1294,27 @@ impl MirMachine {
 
     // ── Rvalue evaluation ─────────────────────────────────────────────────────
 
-    fn eval_rvalue(&mut self, rhs: Rvalue, frame: &mut CallFrame) -> Result<FidanValue, MirSignal> {
+    fn eval_rvalue(
+        &mut self,
+        rhs: &Rvalue,
+        frame: &mut CallFrame,
+    ) -> Result<FidanValue, MirSignal> {
         match rhs {
-            Rvalue::Use(op) => Ok(self.eval_operand(&op, frame)),
+            Rvalue::Use(op) => Ok(self.eval_operand(op, frame)),
             Rvalue::Literal(lit) => Ok(mir_lit_to_value(lit)),
             Rvalue::Binary { op, lhs, rhs } => {
-                let l = self.eval_operand(&lhs, frame);
-                let r = self.eval_operand(&rhs, frame);
-                eval_binary(op, l, r)
+                let l = self.eval_operand(lhs, frame);
+                let r = self.eval_operand(rhs, frame);
+                eval_binary(*op, l, r)
             }
             Rvalue::Unary { op, operand } => {
-                let v = self.eval_operand(&operand, frame);
-                eval_unary(op, v)
+                let v = self.eval_operand(operand, frame);
+                eval_unary(*op, v)
             }
             Rvalue::NullCoalesce { lhs, rhs } => {
-                let l = self.eval_operand(&lhs, frame);
+                let l = self.eval_operand(lhs, frame);
                 if l.is_nothing() {
-                    Ok(self.eval_operand(&rhs, frame))
+                    Ok(self.eval_operand(rhs, frame))
                 } else {
                     Ok(l)
                 }
@@ -1321,25 +1322,25 @@ impl MirMachine {
             Rvalue::Call { callee, args } => {
                 let arg_vals: Vec<FidanValue> =
                     args.iter().map(|a| self.eval_operand(a, frame)).collect();
-                self.dispatch_call(&callee, arg_vals, frame)
+                self.dispatch_call(callee, arg_vals, frame)
             }
             Rvalue::Construct { ty, fields } => {
                 let field_vals: Vec<(Symbol, FidanValue)> = fields
                     .iter()
                     .map(|(sym, op)| (*sym, self.eval_operand(op, frame)))
                     .collect();
-                self.construct_object(ty, field_vals)
+                self.construct_object(*ty, field_vals)
             }
             Rvalue::List(elems) => {
                 let mut list = FidanList::new();
-                for e in &elems {
+                for e in elems {
                     list.append(self.eval_operand(e, frame));
                 }
                 Ok(FidanValue::List(OwnedRef::new(list)))
             }
             Rvalue::Dict(pairs) => {
                 let mut dict = FidanDict::new();
-                for (k, v) in &pairs {
+                for (k, v) in pairs {
                     let key = self.eval_operand(k, frame);
                     let val = self.eval_operand(v, frame);
                     let key_str = FidanString::new(&builtins::display(&key));
@@ -1354,7 +1355,7 @@ impl MirMachine {
             }
             Rvalue::StringInterp(parts) => {
                 let mut s = String::new();
-                for part in &parts {
+                for part in parts {
                     match part {
                         MirStringPart::Literal(lit) => s.push_str(lit),
                         MirStringPart::Operand(op) => {
@@ -1371,10 +1372,12 @@ impl MirMachine {
                 .unwrap_or(FidanValue::Nothing)),
 
             Rvalue::MakeClosure { fn_id, captures } => {
-                let captured: Vec<FidanValue> =
-                    captures.iter().map(|op| self.eval_operand(op, frame)).collect();
+                let captured: Vec<FidanValue> = captures
+                    .iter()
+                    .map(|op| self.eval_operand(op, frame))
+                    .collect();
                 Ok(FidanValue::Closure {
-                    fn_id: RuntimeFnId(fn_id),
+                    fn_id: RuntimeFnId(*fn_id),
                     captured,
                 })
             }
@@ -1386,11 +1389,11 @@ impl MirMachine {
                 inclusive,
                 step,
             } => {
-                let tgt = self.eval_operand(&target, frame);
+                let tgt = self.eval_operand(target, frame);
                 let s = start.as_ref().map(|o| self.eval_operand(o, frame));
                 let e = end.as_ref().map(|o| self.eval_operand(o, frame));
                 let step = step.as_ref().map(|o| self.eval_operand(o, frame));
-                self.eval_slice(tgt, s, e, inclusive, step)
+                self.eval_slice(tgt, s, e, *inclusive, step)
             }
         }
     }
@@ -1400,7 +1403,7 @@ impl MirMachine {
     fn eval_operand(&self, op: &Operand, frame: &CallFrame) -> FidanValue {
         match op {
             Operand::Local(l) => frame.load(*l),
-            Operand::Const(lit) => mir_lit_to_value(lit.clone()),
+            Operand::Const(lit) => mir_lit_to_value(lit),
         }
     }
 
@@ -1489,8 +1492,7 @@ impl MirMachine {
             }
             Callee::Method { receiver, method } => {
                 let recv = self.eval_operand(receiver, frame);
-                let method_name = self.sym_str(*method);
-                self.dispatch_method(recv, &method_name, args)
+                self.dispatch_method_sym(recv, *method, args)
             }
             Callee::Dynamic(op) => {
                 let v = self.eval_operand(op, frame);
@@ -1498,7 +1500,10 @@ impl MirMachine {
                     FidanValue::Function(RuntimeFnId(id)) => {
                         self.call_function(FunctionId(id), args)
                     }
-                    FidanValue::Closure { fn_id: RuntimeFnId(id), captured } => {
+                    FidanValue::Closure {
+                        fn_id: RuntimeFnId(id),
+                        captured,
+                    } => {
                         let mut full_args = captured.clone();
                         full_args.extend(args);
                         self.call_function(FunctionId(id), full_args)
@@ -1517,30 +1522,35 @@ impl MirMachine {
         }
     }
 
-    fn dispatch_method(
+    /// Fast-path method dispatch using a pre-resolved `Symbol`, avoiding the
+    /// `&str → Symbol` re-intern round-trip (and its RwLock acquisition) that
+    /// `dispatch_method` requires.  Called from `Callee::Method` and
+    /// `Instr::SpawnDynamic`, both of which already have the `Symbol` from MIR.
+    fn dispatch_method_sym(
         &mut self,
         receiver: FidanValue,
-        method: &str,
+        method: Symbol,
         args: Vec<FidanValue>,
     ) -> Result<FidanValue, MirSignal> {
-        // Stdlib namespace dispatch: `io.readFile(...)`, `math.sin(...)`, etc.
+        // Fast path: stdlib namespace dispatch — Symbol lookup, no re-intern.
         if let FidanValue::Namespace(ref module) = receiver {
-            // O(1) lookup: is this a stdlib module or a user-defined namespace?
             if !self.stdlib_modules.contains(module.as_ref()) {
-                let method_sym = self.interner.intern(method);
-                if let Some(&fn_id) = self.user_fn_map.get(&method_sym) {
+                if let Some(&fn_id) = self.user_fn_map.get(&method) {
                     return self.call_function(fn_id, args);
                 }
+                let method_name = self.sym_str(method);
                 return Err(MirSignal::Panic(format!(
                     "no function `{}` in user module `{}`",
-                    method, module
+                    method_name, module
                 )));
             }
-            return self.dispatch_stdlib_call(module, method, args);
+            let method_name = self.sym_str(method);
+            return self.dispatch_stdlib_call(module, &method_name, args);
         }
-        // Shared<T> built-in methods.
+        // Shared<T> built-in methods (small fixed set — resolve string lazily).
         if let FidanValue::Shared(ref sr) = receiver {
-            match method {
+            let method_name = self.sym_str(method);
+            match method_name.as_ref() {
                 "get" => return Ok(sr.0.lock().unwrap().clone()),
                 "set" => {
                     let val = args.into_iter().next().unwrap_or(FidanValue::Nothing);
@@ -1550,25 +1560,26 @@ impl MirMachine {
                 _ => {}
             }
         }
-        // Check user-defined methods on objects first.
+        // Fast path: user-defined object methods — Symbol lookup, no re-intern.
         if let FidanValue::Object(ref obj_ref) = receiver {
             let class = obj_ref.borrow().class.clone();
-            let method_sym = self.interner.intern(method);
-            if let Some(RuntimeFnId(id)) = class.find_method(method_sym) {
+            if let Some(RuntimeFnId(id)) = class.find_method(method) {
                 let mut fn_args = vec![receiver];
                 fn_args.extend(args);
                 return self.call_function(FunctionId(id), fn_args);
             }
         }
-        // Callback-based list methods that require interpreter access.
+        // For list callbacks and bootstrap, resolve the string lazily (O(1) Arc clone).
+        let method_name = self.sym_str(method);
         if let FidanValue::List(ref list_ref) = receiver {
-            if let Some(result) = self.dispatch_list_callbacks(list_ref, method, args.clone())? {
+            if let Some(result) =
+                self.dispatch_list_callbacks(list_ref, &method_name, args.clone())?
+            {
                 return Ok(result);
             }
         }
-        // Fall through: bootstrap stdlib methods (pre-Phase 7 stdlib).
-        crate::bootstrap::call_bootstrap_method(receiver, method, args)
-            .ok_or_else(|| MirSignal::Panic(format!("no method `{}` found", method)))
+        crate::bootstrap::call_bootstrap_method(receiver, &method_name, args)
+            .ok_or_else(|| MirSignal::Panic(format!("no method `{}` found", method_name)))
     }
 
     /// Dispatch list receiver methods that require a callback (access to `call_function`).
@@ -1589,7 +1600,10 @@ impl MirMachine {
                             self.call_function(FunctionId(id), vec![item])?;
                         }
                     }
-                    Some(FidanValue::Closure { fn_id: RuntimeFnId(id), captured }) => {
+                    Some(FidanValue::Closure {
+                        fn_id: RuntimeFnId(id),
+                        captured,
+                    }) => {
                         for item in items {
                             let mut call_args = captured.clone();
                             call_args.push(item);
@@ -1615,7 +1629,10 @@ impl MirMachine {
                         }
                         found
                     }
-                    Some(FidanValue::Closure { fn_id: RuntimeFnId(id), captured }) => {
+                    Some(FidanValue::Closure {
+                        fn_id: RuntimeFnId(id),
+                        captured,
+                    }) => {
                         let mut found = None;
                         for item in items {
                             let mut call_args = captured.clone();
@@ -1752,12 +1769,15 @@ impl MirMachine {
                     index: i,
                 })
                 .collect();
+            let field_index: FxHashMap<fidan_lexer::Symbol, usize> =
+                field_defs.iter().map(|fd| (fd.name, fd.index)).collect();
             let name_str = self.interner.resolve(ty);
             let class = Arc::new(FidanClass {
                 name: ty,
                 name_str,
                 parent: None,
                 fields: field_defs,
+                field_index,
                 methods: Default::default(),
                 has_drop_action: false,
             });
@@ -2055,11 +2075,17 @@ fn fidan_values_equal(a: &FidanValue, b: &FidanValue) -> bool {
             let la = a.borrow();
             let lb = b.borrow();
             la.len() == lb.len()
-                && la.iter().zip(lb.iter()).all(|(x, y)| fidan_values_equal(x, y))
+                && la
+                    .iter()
+                    .zip(lb.iter())
+                    .all(|(x, y)| fidan_values_equal(x, y))
         }
         // Structural tuple equality
         (Tuple(a), Tuple(b)) => {
-            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| fidan_values_equal(x, y))
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b.iter())
+                    .all(|(x, y)| fidan_values_equal(x, y))
         }
         _ => false,
     }
@@ -2067,14 +2093,14 @@ fn fidan_values_equal(a: &FidanValue, b: &FidanValue) -> bool {
 
 // ── Arithmetic / logic helpers ────────────────────────────────────────────────
 
-fn mir_lit_to_value(lit: MirLit) -> FidanValue {
+fn mir_lit_to_value(lit: &MirLit) -> FidanValue {
     match lit {
-        MirLit::Int(n) => FidanValue::Integer(n),
-        MirLit::Float(f) => FidanValue::Float(f),
-        MirLit::Bool(b) => FidanValue::Boolean(b),
-        MirLit::Str(s) => FidanValue::String(FidanString::new(&s)),
+        MirLit::Int(n) => FidanValue::Integer(*n),
+        MirLit::Float(f) => FidanValue::Float(*f),
+        MirLit::Bool(b) => FidanValue::Boolean(*b),
+        MirLit::Str(s) => FidanValue::String(FidanString::new(s)),
         MirLit::Nothing => FidanValue::Nothing,
-        MirLit::FunctionRef(id) => FidanValue::Function(RuntimeFnId(id)),
+        MirLit::FunctionRef(id) => FidanValue::Function(RuntimeFnId(*id)),
         MirLit::Namespace(m) => FidanValue::Namespace(Arc::from(m.as_str())),
         MirLit::StdlibFn { module, name } => {
             FidanValue::StdlibFn(Arc::from(module.as_str()), Arc::from(name.as_str()))
@@ -2130,7 +2156,8 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
         (BinOp::Div, Float(a), Integer(b)) => Float(a / *b as f64),
         // String concatenation — any value on either side coerces to string
         (BinOp::Add, String(a), String(b)) => {
-            let mut s = a.as_str().to_string();
+            let mut s = std::string::String::with_capacity(a.len() + b.len());
+            s.push_str(a.as_str());
             s.push_str(b.as_str());
             String(FidanString::new(&s))
         }
@@ -2241,6 +2268,8 @@ fn eval_unary(op: UnOp, v: FidanValue) -> Result<FidanValue, MirSignal> {
     })
 }
 
-
 mod api;
-pub use api::{MirReplState, run_mir, run_mir_repl_line, run_mir_with_jit, run_mir_with_profile, run_mir_with_replay, run_tests};
+pub use api::{
+    MirReplState, run_mir, run_mir_repl_line, run_mir_with_jit, run_mir_with_profile,
+    run_mir_with_replay, run_tests,
+};

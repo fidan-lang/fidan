@@ -16,7 +16,7 @@ use fidan_mir::{
     Callee, FunctionId, Instr, LocalId, MirFunction, MirProgram, MirStringPart, MirTy, Operand,
     Rvalue, Terminator,
 };
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 pub struct Inlining;
 
@@ -186,7 +186,7 @@ fn do_inline(
     let offset = caller.local_count;
 
     // Map each callee parameter local → the corresponding call argument.
-    let mut param_map: HashMap<LocalId, Operand> = HashMap::new();
+    let mut param_map: FxHashMap<LocalId, Operand> = FxHashMap::default();
     for (i, &param_local) in callee.param_locals.iter().enumerate() {
         if let Some(arg) = call_args.get(i) {
             param_map.insert(param_local, arg.clone());
@@ -235,7 +235,7 @@ fn do_inline(
 
 // ── Local remapping ────────────────────────────────────────────────────────
 
-fn remap_op(op: &Operand, param_map: &HashMap<LocalId, Operand>, offset: u32) -> Operand {
+fn remap_op(op: &Operand, param_map: &FxHashMap<LocalId, Operand>, offset: u32) -> Operand {
     match op {
         Operand::Local(l) => {
             if let Some(mapped) = param_map.get(l) {
@@ -253,7 +253,7 @@ fn remap_lit(l: LocalId, offset: u32) -> LocalId {
 }
 
 /// Clone + remap a single instruction: both operands (reads) and dest locals (writes).
-fn remap_instr(instr: &Instr, param_map: &HashMap<LocalId, Operand>, offset: u32) -> Instr {
+fn remap_instr(instr: &Instr, param_map: &FxHashMap<LocalId, Operand>, offset: u32) -> Instr {
     let r = |op: &Operand| remap_op(op, param_map, offset);
     let d = |l: LocalId| remap_lit(l, offset);
 

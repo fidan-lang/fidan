@@ -1,7 +1,7 @@
+use crate::pipeline::{emit_mir_safety_diags, render_trace_to_stderr};
 use anyhow::Result;
 use fidan_diagnostics::{Severity, render_message_to_stderr};
 use fidan_driver::TraceMode;
-use crate::pipeline::{emit_mir_safety_diags, render_trace_to_stderr};
 
 // ── REPL helper ─────────────────────────────────────────────────────────────────────
 //
@@ -105,6 +105,58 @@ fn count_brace_delta(line: &str) -> i32 {
 /// [`TypeChecker`] accumulates symbol definitions across lines so names defined
 /// on line N are visible on line N+1.  The interpreter runs after every clean
 /// type-check so side effects (print, etc.) are visible immediately.
+/// Re-run the full lex → parse → typecheck pipeline on `plain_src` and
+/// render any resulting diagnostics to stderr, adding each to `error_history`.
+/// Returns `true` if at least one diagnostic was emitted.
+///
+/// Used by the REPL to produce user-visible errors that don't mention the
+/// internal `__repl_echo__` wrapper variable.
+fn render_plain_diagnostics(
+    plain_src: &str,
+    interner: &std::sync::Arc<fidan_lexer::SymbolInterner>,
+    boot_fid: fidan_source::FileId,
+    error_history: &mut Vec<String>,
+) -> bool {
+    use fidan_diagnostics::render_to_stderr;
+    use fidan_lexer::Lexer;
+    use fidan_source::SourceMap;
+    use std::sync::Arc;
+
+    let ps = Arc::new(SourceMap::new());
+    let pf = ps.add_file("<repl>", plain_src);
+
+    let (pt, ld) = Lexer::new(&pf, Arc::clone(interner)).tokenise();
+    if !ld.is_empty() {
+        for d in &ld {
+            render_to_stderr(d, &ps);
+            error_history.push(format!("[{}]: {}", d.code, d.message));
+        }
+        return true;
+    }
+
+    let (pm, pd) = fidan_parser::parse(&pt, pf.id, Arc::clone(interner));
+    if !pd.is_empty() {
+        for d in &pd {
+            render_to_stderr(d, &ps);
+            error_history.push(format!("[{}]: {}", d.code, d.message));
+        }
+        return true;
+    }
+
+    let mut tc = fidan_typeck::TypeChecker::new(Arc::clone(interner), boot_fid);
+    tc.set_repl(true);
+    tc.check_module(&pm);
+    let ty = tc.finish_typed();
+    if !ty.diagnostics.is_empty() {
+        for d in &ty.diagnostics {
+            render_to_stderr(d, &ps);
+            error_history.push(format!("[{}]: {}", d.code, d.message));
+        }
+        return true;
+    }
+    false
+}
+
 pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
@@ -343,6 +395,19 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
         // ── Complete input ready — compile full accumulated source ──────────
         let complete_input = std::mem::take(&mut pending_input);
 
+        // Plain source (without any echo-wrap) kept for user-visible error
+        // messages; spans in diagnostics from the wrapped candidate source
+        // would otherwise expose the internal `__repl_echo__` variable.
+        let plain_source = {
+            let mut s = mir_repl_state.accumulated_source.clone();
+            if !s.is_empty() {
+                s.push('\n');
+            }
+            s.push_str(&complete_input);
+            s.push('\n');
+            s
+        };
+
         // ── Auto-echo: mini-parse just the new input to see if its last item
         //   is a bare expression.  If so we wrap it as
         //   `var __repl_echo__ set <expr>` so the value is preserved in a
@@ -401,21 +466,29 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
         let exec_smap = Arc::new(SourceMap::new());
         let exec_file = exec_smap.add_file("<repl>", &*candidate_source);
         let (exec_toks, lex_diags) = Lexer::new(&exec_file, Arc::clone(&interner)).tokenise();
-        for d in &lex_diags {
-            fidan_diagnostics::render_to_stderr(d, &exec_smap);
-            error_history.push(format!("[{}]: {}", d.code, d.message));
-        }
         if !lex_diags.is_empty() {
+            let used_plain = echo_sym_opt.is_some()
+                && render_plain_diagnostics(&plain_source, &interner, boot_fid, &mut error_history);
+            if !used_plain {
+                for d in &lex_diags {
+                    fidan_diagnostics::render_to_stderr(d, &exec_smap);
+                    error_history.push(format!("[{}]: {}", d.code, d.message));
+                }
+            }
             continue;
         }
 
         let (full_module, parse_diags) =
             fidan_parser::parse(&exec_toks, exec_file.id, Arc::clone(&interner));
-        for d in &parse_diags {
-            fidan_diagnostics::render_to_stderr(d, &exec_smap);
-            error_history.push(format!("[{}]: {}", d.code, d.message));
-        }
         if !parse_diags.is_empty() {
+            let used_plain = echo_sym_opt.is_some()
+                && render_plain_diagnostics(&plain_source, &interner, boot_fid, &mut error_history);
+            if !used_plain {
+                for d in &parse_diags {
+                    fidan_diagnostics::render_to_stderr(d, &exec_smap);
+                    error_history.push(format!("[{}]: {}", d.code, d.message));
+                }
+            }
             continue;
         }
 
@@ -425,9 +498,13 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
         exec_tc.check_module(&full_module);
         let typed = exec_tc.finish_typed();
         if !typed.diagnostics.is_empty() {
-            for d in &typed.diagnostics {
-                fidan_diagnostics::render_to_stderr(d, &exec_smap);
-                error_history.push(format!("[{}]: {}", d.code, d.message));
+            let used_plain = echo_sym_opt.is_some()
+                && render_plain_diagnostics(&plain_source, &interner, boot_fid, &mut error_history);
+            if !used_plain {
+                for d in &typed.diagnostics {
+                    fidan_diagnostics::render_to_stderr(d, &exec_smap);
+                    error_history.push(format!("[{}]: {}", d.code, d.message));
+                }
             }
             continue;
         }

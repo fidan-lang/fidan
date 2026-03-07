@@ -11,12 +11,12 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use crate::builtins;
+use crate::profiler::ProfileReport;
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{BlockId, FunctionId, LocalId, MirProgram, Terminator};
 use fidan_runtime::FidanValue;
 use fidan_source::SourceMap;
-use crate::builtins;
-use crate::profiler::ProfileReport;
 
 use super::{CallFrame, MirMachine, MirSignal, RunError, TestResult};
 
@@ -100,14 +100,14 @@ impl MirMachine {
 
     /// Snapshot all global values (used to preserve state between REPL lines).
     pub fn snapshot_globals(&self) -> Vec<FidanValue> {
-        self.globals.read().unwrap().clone()
+        self.globals.read().clone()
     }
 
     /// Pre-fill globals from `snapshot`.
     /// Slots that were added by new declarations (beyond the snapshot length)
     /// keep their default `Nothing` value.
     pub fn restore_globals(&mut self, snapshot: &[FidanValue]) {
-        let mut g = self.globals.write().unwrap();
+        let mut g = self.globals.write();
         for (i, v) in snapshot.iter().enumerate() {
             if i < g.len() {
                 g[i] = v.clone();
@@ -130,8 +130,7 @@ impl MirMachine {
         let entry = FunctionId(0);
         let func = self.program.function(entry);
         let local_count = func.local_count;
-        let fn_name = self.sym_str(func.name).to_string();
-        let mut frame = CallFrame::new(local_count, fn_name);
+        let mut frame = CallFrame::new(local_count);
         self.call_stack.push((entry, None, vec![]));
         let result = self.run_init_split_inner(&mut frame, ns_cursor, ns_instr_count, body_cursor);
         self.call_stack.pop();
@@ -176,8 +175,7 @@ impl MirMachine {
         let entry = FunctionId(0);
         let func = self.program.function(entry);
         let local_count = func.local_count;
-        let fn_name = self.sym_str(func.name).to_string();
-        let mut frame = CallFrame::new(local_count, fn_name);
+        let mut frame = CallFrame::new(local_count);
         self.call_stack.push((entry, None, vec![]));
         let result = self.run_init_from_offset(&mut frame, start_offset);
         self.call_stack.pop();

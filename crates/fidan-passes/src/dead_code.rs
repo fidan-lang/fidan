@@ -6,7 +6,7 @@
 use fidan_mir::{
     Callee, Instr, LocalId, MirFunction, MirProgram, MirStringPart, Operand, Rvalue, Terminator,
 };
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 pub struct DeadCodeElimination;
 
@@ -38,8 +38,8 @@ impl crate::Pass for DeadCodeElimination {
 }
 
 /// Count how many times each local is read (appears as an operand, not a dest).
-fn count_uses(func: &MirFunction) -> HashMap<LocalId, usize> {
-    let mut uses: HashMap<LocalId, usize> = HashMap::new();
+fn count_uses(func: &MirFunction) -> FxHashMap<LocalId, usize> {
+    let mut uses: FxHashMap<LocalId, usize> = FxHashMap::default();
     let mut add = |op: &Operand| {
         if let Operand::Local(l) = op {
             *uses.entry(*l).or_insert(0) += 1;
@@ -183,11 +183,23 @@ fn count_rvalue_reads(rv: &Rvalue, add: &mut impl FnMut(&Operand)) {
                 add(c);
             }
         }
-        Rvalue::Slice { target, start, end, step, .. } => {
+        Rvalue::Slice {
+            target,
+            start,
+            end,
+            step,
+            ..
+        } => {
             add(target);
-            if let Some(s) = start { add(s); }
-            if let Some(e) = end   { add(e); }
-            if let Some(st) = step { add(st); }
+            if let Some(s) = start {
+                add(s);
+            }
+            if let Some(e) = end {
+                add(e);
+            }
+            if let Some(st) = step {
+                add(st);
+            }
         }
     }
 }

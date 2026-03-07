@@ -11,3 +11,4 @@ fidan-source = { workspace = true }
 fidan-ast = { workspace = true }
 fidan-mir = { workspace = true }
 fidan-lexer = { workspace = true }
+rustc-hash = { workspace = true }

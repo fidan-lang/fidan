@@ -32,7 +32,7 @@
 
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{BlockId, Callee, FunctionId, Instr, LocalId, MirProgram, MirTy, Operand, Rvalue};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 // ── Public diagnostic type ────────────────────────────────────────────────────
 
@@ -53,7 +53,7 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<SlowHintDiag> 
     let mut diags = Vec::new();
 
     // Build a map from FunctionId → name for W5003 messages.
-    let fn_names: HashMap<FunctionId, String> = prog
+    let fn_names: FxHashMap<FunctionId, String> = prog
         .functions
         .iter()
         .map(|f| (f.id, interner.resolve(f.name).to_string()))
@@ -71,7 +71,7 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<SlowHintDiag> 
         // ── Step 2: collect dynamic SSA locals defined in loop blocks ─────────
         // A local is "hot-dynamic" if it is assigned `MirTy::Dynamic` inside a
         // loop block via an `Rvalue::Call` (dynamic-returning call).
-        let mut hot_dynamic: HashSet<LocalId> = HashSet::new();
+        let mut hot_dynamic: FxHashSet<LocalId> = FxHashSet::default();
 
         for bb in &func.blocks {
             if !loop_blocks.contains(&bb.id) {
@@ -157,7 +157,7 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<SlowHintDiag> 
         }
 
         // ── Step 4: W5003 — direct call in hot path to non-@precompile fn ────
-        let mut w5003_reported: HashSet<FunctionId> = HashSet::new();
+        let mut w5003_reported: FxHashSet<FunctionId> = FxHashSet::default();
         for bb in &func.blocks {
             if !loop_blocks.contains(&bb.id) {
                 continue;
@@ -221,8 +221,8 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<SlowHintDiag> 
 ///
 /// A *back-edge* is any terminator successor `S` where `S.0 ≤ current_block.0`.
 /// The loop body is the inclusive range of blocks `[S .. current]`.
-fn find_loop_blocks(func: &fidan_mir::MirFunction) -> HashSet<BlockId> {
-    let mut loop_blocks: HashSet<BlockId> = HashSet::new();
+fn find_loop_blocks(func: &fidan_mir::MirFunction) -> FxHashSet<BlockId> {
+    let mut loop_blocks: FxHashSet<BlockId> = FxHashSet::default();
 
     // Inline successor matching using stack-allocated arrays — no heap allocation
     // per block.  A `Goto` has one successor; a `Branch` has two; all exit

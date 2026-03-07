@@ -24,7 +24,7 @@
 
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{FunctionId, GlobalId, Instr, LocalId, MirProgram};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// One detected data-race diagnostic.
 pub struct ParallelRaceDiag {
@@ -43,13 +43,17 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<ParallelRaceDi
 
     for func in &prog.functions {
         // ── Map: spawned-handle local → task FunctionId ───────────────────────
-        let mut handle_map: HashMap<LocalId, FunctionId> = HashMap::new();
+        let mut handle_map: FxHashMap<LocalId, FunctionId> = FxHashMap::default();
 
         for block in &func.blocks {
             for instr in &block.instructions {
                 match instr {
-                    Instr::SpawnParallel { handle, task_fn, .. }
-                    | Instr::SpawnConcurrent { handle, task_fn, .. } => {
+                    Instr::SpawnParallel {
+                        handle, task_fn, ..
+                    }
+                    | Instr::SpawnConcurrent {
+                        handle, task_fn, ..
+                    } => {
                         handle_map.insert(*handle, *task_fn);
                     }
                     _ => {}
@@ -84,12 +88,9 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<ParallelRaceDi
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-fn global_sets(
-    prog: &MirProgram,
-    fn_id: FunctionId,
-) -> (HashSet<GlobalId>, HashSet<GlobalId>) {
-    let mut writes: HashSet<GlobalId> = HashSet::new();
-    let mut accesses: HashSet<GlobalId> = HashSet::new();
+fn global_sets(prog: &MirProgram, fn_id: FunctionId) -> (FxHashSet<GlobalId>, FxHashSet<GlobalId>) {
+    let mut writes: FxHashSet<GlobalId> = FxHashSet::default();
+    let mut accesses: FxHashSet<GlobalId> = FxHashSet::default();
 
     if fn_id.0 as usize >= prog.functions.len() {
         return (writes, accesses);
@@ -114,7 +115,9 @@ fn global_sets(
 
 fn resolve_global_name(prog: &MirProgram, gid: GlobalId, interner: &SymbolInterner) -> String {
     if (gid.0 as usize) < prog.globals.len() {
-        interner.resolve(prog.globals[gid.0 as usize].name).to_string()
+        interner
+            .resolve(prog.globals[gid.0 as usize].name)
+            .to_string()
     } else {
         format!("global#{}", gid.0)
     }
@@ -127,10 +130,10 @@ fn check_task_group(
     diags: &mut Vec<ParallelRaceDiag>,
 ) {
     // Build per-task sets.
-    let sets: Vec<(HashSet<GlobalId>, HashSet<GlobalId>)> =
+    let sets: Vec<(FxHashSet<GlobalId>, FxHashSet<GlobalId>)> =
         tasks.iter().map(|&fid| global_sets(prog, fid)).collect();
 
-    let mut reported: HashSet<GlobalId> = HashSet::new();
+    let mut reported: FxHashSet<GlobalId> = FxHashSet::default();
 
     for i in 0..tasks.len() {
         for j in 0..tasks.len() {
@@ -172,7 +175,7 @@ fn check_parallel_for_body(
         return;
     }
     let body = &prog.functions[body_fn.0 as usize];
-    let mut reported: HashSet<GlobalId> = HashSet::new();
+    let mut reported: FxHashSet<GlobalId> = FxHashSet::default();
 
     for block in &body.blocks {
         for instr in &block.instructions {
