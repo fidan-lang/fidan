@@ -24,7 +24,7 @@ members = [
 [workspace.package]
 version = "1.0.0"
 edition = "2024"
-authors = ["Fidan Contributors"]
+authors = ["Fidan Contributors", "Kaan Gönüldinc <contact@appsolves.dev>"]
 license-file = "LICENSE"
 repository = "https://github.com/AppSolves/Fidan"
 
