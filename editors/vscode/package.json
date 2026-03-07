@@ -4,7 +4,7 @@
     "description": "Syntax highlighting, formatting and language server support for the Fidan programming language.",
     "version": "1.0.0",
     "publisher": "AppSolves",
-    "license": "Fidan Programming Language License (FPLL) 1.0.0",
+    "license": "SEE LICENSE IN LICENSE",
     "icon": "./icons/icon_128x128.png",
     "repository": {
         "type": "git",

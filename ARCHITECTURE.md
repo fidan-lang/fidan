@@ -82,7 +82,7 @@ behavioral divergence between modes.
 fidan/
 ├── Cargo.toml                   ← workspace root
 ├── ARCHITECTURE.md
-├── LICENSE.md
+├── LICENSE
 ├── scripts/
 ├── test/
 └── crates/

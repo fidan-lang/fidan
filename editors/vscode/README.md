@@ -49,4 +49,12 @@ npm run compile
 
 ## License
 
-MIT — see [LICENSE.md](../../LICENSE.md).
+This project uses a custom license file based on Apache License 2.0,
+with additional terms regarding trademark use and commercial distribution
+of the Fidan language itself.
+
+See [LICENSE](../../LICENSE) for full license text.
+
+Copyright © 2026 Kaan Gönüldinc. All rights reserved.
+
+Fidan™ is a trademark of Kaan Gönüldinc (AppSolves).
