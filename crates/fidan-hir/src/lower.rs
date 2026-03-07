@@ -209,6 +209,26 @@ impl<'a> Ctx<'a> {
             },
 
             Expr::Error { .. } => HirExprKind::Error,
+
+            Expr::Lambda { params, body, .. } => {
+                // Lower lambda params using the same simple type resolver as regular params.
+                let hir_params = params
+                    .iter()
+                    .map(|p| HirParam {
+                        name: p.name,
+                        ty: resolve_type_expr_simple(&p.ty, self.interner),
+                        certain: p.certain,
+                        optional: p.optional,
+                        default: p.default.map(|e| self.lower_expr(e)),
+                        span: p.span,
+                    })
+                    .collect();
+                let hir_body = self.lower_stmts(&body);
+                HirExprKind::Lambda {
+                    params: hir_params,
+                    body: hir_body,
+                }
+            }
         };
 
         HirExpr { kind, ty, span }

@@ -265,6 +265,9 @@ fn hir_walk_expr(e: &HirExpr, out: &mut HashSet<Symbol>) {
                 hir_walk_expr(f, out);
             }
         }
+        HirExprKind::Lambda { .. } => {
+            // Phase 1: lambdas do not capture outer variables — body is not walked.
+        }
     }
 }
 
@@ -285,6 +288,7 @@ fn fidan_ty_to_mir(ty: &FidanType) -> MirTy {
         FidanType::Tuple(elems) => MirTy::Tuple(elems.iter().map(fidan_ty_to_mir).collect()),
         FidanType::Object(s) => MirTy::Object(*s),
         FidanType::Enum(s) => MirTy::Enum(*s),
+        FidanType::ClassType(_) => MirTy::Dynamic,
         FidanType::Shared(t) => MirTy::Shared(Box::new(fidan_ty_to_mir(t))),
         FidanType::Pending(t) => MirTy::Pending(Box::new(fidan_ty_to_mir(t))),
         FidanType::Function => MirTy::Function,
@@ -356,6 +360,8 @@ struct FnCtx<'p> {
     continue_sites: HashMap<BlockId, Vec<(BlockId, HashMap<Symbol, LocalId>)>>,
     /// Symbol for `"_"` — the wildcard pattern in `check` arms.
     wildcard_sym: Symbol,
+    /// Symbol for `"__lambda__"` — used as the debug name for synthetic lambda functions.
+    lambda_sym: Symbol,
     /// True only for the top-level init function (FunctionId(0)).  Used to
     /// decide whether a `VarDecl` should also write to the global table.
     is_init_fn: bool,
@@ -777,6 +783,14 @@ impl<'p> FnCtx<'p> {
                         } else if let Some(&local) = self.env.get(name) {
                             // Local variable holding a function/action value — call dynamically.
                             Callee::Dynamic(Operand::Local(local))
+                        } else if let Some(&gid) = self.global_map.get(name) {
+                            // Global variable holding a function/action value — load then call.
+                            let loaded = self.alloc_local();
+                            self.emit(Instr::LoadGlobal {
+                                dest: loaded,
+                                global: gid,
+                            });
+                            Callee::Dynamic(Operand::Local(loaded))
                         } else {
                             Callee::Builtin(*name)
                         }
@@ -996,6 +1010,40 @@ impl<'p> FnCtx<'p> {
             // ── Check expression ──────────────────────────────────────────────
             HirExprKind::CheckExpr { scrutinee, arms } => {
                 self.lower_check_expr(scrutinee, arms, &expr.ty)
+            }
+
+            // ── Inline lambda ─────────────────────────────────────────────────
+            // Lift the lambda body into a fresh synthetic `MirFunction` and
+            // return a `FunctionRef` literal that points to it at runtime.
+            HirExprKind::Lambda { params, body } => {
+                // 1. Pre-allocate a FunctionId for the lambda body.
+                let lambda_fn_id = FunctionId(self.prog.functions.len() as u32);
+                self.prog.functions.push(MirFunction::new(
+                    lambda_fn_id,
+                    self.lambda_sym,
+                    MirTy::Dynamic,
+                ));
+
+                // 2. Build env_params from the lambda's declared params.
+                //    Phase 1: lambdas only see their own params (no outer capture).
+                let env_params: Vec<(Symbol, MirTy)> = params
+                    .iter()
+                    .map(|p| (p.name, fidan_ty_to_mir(&p.ty)))
+                    .collect();
+
+                // 3. Defer lowering the body using the existing PendingParallelFor mechanism.
+                self.par_for_pending
+                    .borrow_mut()
+                    .push_back(PendingParallelFor {
+                        fn_id: lambda_fn_id,
+                        binding: None,
+                        env_params,
+                        body_ptr: body.as_ptr(),
+                        body_len: body.len(),
+                    });
+
+                // 4. Return the function identity as a literal operand.
+                Operand::Const(MirLit::FunctionRef(lambda_fn_id.0))
             }
 
             HirExprKind::Error => Operand::Const(MirLit::Nothing),
@@ -1354,6 +1402,14 @@ impl<'p> FnCtx<'p> {
                                 } else if let Some(&local) = self.env.get(name) {
                                     // Local variable holding a function/action value — call dynamically.
                                     Callee::Dynamic(Operand::Local(local))
+                                } else if let Some(&gid) = self.global_map.get(name) {
+                                    // Global variable holding a function/action value — load then call.
+                                    let loaded = self.alloc_local();
+                                    self.emit(Instr::LoadGlobal {
+                                        dest: loaded,
+                                        global: gid,
+                                    });
+                                    Callee::Dynamic(Operand::Local(loaded))
                                 } else {
                                     Callee::Builtin(*name)
                                 }
@@ -2594,6 +2650,7 @@ pub fn lower_program(
     let append_sym = interner.intern("append");
     let type_sym = interner.intern("type");
     let wildcard_sym = interner.intern("_");
+    let lambda_sym = interner.intern("__lambda__");
     let this_name = interner.intern("this");
 
     // ── Pre-pass ①: sentinel top-level init fn ───────────────────────────────
@@ -2845,6 +2902,7 @@ pub fn lower_program(
                         append_sym: Symbol,
                         type_sym: Symbol,
                         wildcard_sym: Symbol,
+                        lambda_sym: Symbol,
                         global_map: &HashMap<Symbol, GlobalId>,
                         func: &HirFunction,
                         fn_id: FunctionId,
@@ -2872,6 +2930,7 @@ pub fn lower_program(
             loop_stack: vec![],
             continue_sites: HashMap::new(),
             wildcard_sym,
+            lambda_sym,
             par_for_pending: pending,
             is_init_fn: false,
             fn_param_names: fn_param_names.clone(),
@@ -2929,6 +2988,7 @@ pub fn lower_program(
             append_sym,
             type_sym,
             wildcard_sym,
+            lambda_sym,
             &global_map,
             func,
             fn_id,
@@ -2952,6 +3012,7 @@ pub fn lower_program(
                 append_sym,
                 type_sym,
                 wildcard_sym,
+                lambda_sym,
                 &global_map,
                 method,
                 fn_id,
@@ -2986,6 +3047,7 @@ pub fn lower_program(
             loop_stack: vec![],
             continue_sites: HashMap::new(),
             wildcard_sym,
+            lambda_sym,
             par_for_pending: Rc::clone(&pending_par_fors),
             is_init_fn: true,
             fn_param_names: fn_param_names.clone(),
@@ -3141,6 +3203,7 @@ pub fn lower_program(
             loop_stack: vec![],
             continue_sites: HashMap::new(),
             wildcard_sym,
+            lambda_sym,
             par_for_pending: Rc::clone(&pending_par_fors),
             is_init_fn: false,
             fn_param_names: fn_param_names.clone(),
@@ -3209,6 +3272,7 @@ pub fn lower_program(
             loop_stack: vec![],
             continue_sites: HashMap::new(),
             wildcard_sym,
+            lambda_sym,
             par_for_pending: Rc::clone(&pending_par_fors),
             is_init_fn: false,
             fn_param_names: fn_param_names.clone(),

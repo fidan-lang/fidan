@@ -399,6 +399,13 @@ pub enum HirExprKind {
         arms: Vec<HirCheckExprArm>,
     },
 
+    // ── Inline lambda ─────────────────────────────────────────────────────────
+    /// `action with (params) { body }` — anonymous action used as a value.
+    Lambda {
+        params: Vec<HirParam>,
+        body: Vec<HirStmt>,
+    },
+
     // ── Error recovery ────────────────────────────────────────────────────────
     Error,
 }

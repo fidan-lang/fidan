@@ -327,3 +327,26 @@ fn w1004_no_warn_when_awaited() {
         "unexpected W1004 when spawn is correctly awaited"
     );
 }
+
+// ── Lambda (inline anonymous action) ─────────────────────────────────────────
+
+#[test]
+fn lambda_no_param_ok() {
+    assert!(run_src(r#"var f = action { }"#).is_ok());
+}
+
+#[test]
+fn lambda_with_param_foreach_ok() {
+    assert!(run_src(r#"
+var nums = [1, 2, 3]
+nums.forEach(action with (x) { print(x) })
+"#).is_ok());
+}
+
+#[test]
+fn lambda_first_where_ok() {
+    assert!(run_src(r#"
+var nums = [1, 2, 3, 4]
+var first_even = nums.firstWhere(action with (x) { return x % 2 == 0 })
+"#).is_ok());
+}

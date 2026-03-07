@@ -632,6 +632,32 @@ impl<'t> Parser<'t> {
                 let name = self.interner.intern(name_str);
                 self.module.arena.alloc_expr(Expr::Ident { name, span })
             }
+            // Inline anonymous action: `action [with (params)] [returns T] { body }`
+            // Used as a first-class value in expression position.
+            TokenKind::Action => {
+                self.advance(); // eat `action`
+                let params = if self.at_ident(self.sym_with) {
+                    self.advance(); // eat `with`
+                    self.parse_params()
+                } else {
+                    vec![]
+                };
+                let return_ty = if self.at_ident(self.sym_returns) {
+                    self.advance(); // eat `returns`
+                    Some(self.parse_type_expr())
+                } else {
+                    None
+                };
+                self.skip_terminators();
+                let body = self.parse_block();
+                let end = self.current_span().end;
+                self.module.arena.alloc_expr(Expr::Lambda {
+                    params,
+                    return_ty,
+                    body,
+                    span: Span::new(self.module.file, span.start, end),
+                })
+            }
             _ => {
                 // Always advance so callers never loop on an unrecognised token.
                 self.error(

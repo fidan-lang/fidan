@@ -184,7 +184,7 @@ impl TypeChecker {
             name,
             SymbolInfo {
                 kind: SymbolKind::Object,
-                ty: FidanType::Object(name),
+                ty: FidanType::ClassType(name),
                 span: dummy,
                 is_mutable: false,
                 initialized: Initialized::Yes,
@@ -399,7 +399,7 @@ impl TypeChecker {
                     *name,
                     SymbolInfo {
                         kind: SymbolKind::Object,
-                        ty: FidanType::Object(*name),
+                        ty: FidanType::ClassType(*name),
                         span: *span,
                         is_mutable: false,
                         initialized: Initialized::Yes,
@@ -1721,6 +1721,17 @@ impl TypeChecker {
                 }
                 self.table.pop_scope();
                 FidanType::Dynamic
+            }
+
+            Expr::Lambda {
+                params,
+                return_ty,
+                body,
+                span,
+            } => {
+                // Typecheck the lambda body in its own action scope.
+                self.check_action_body(&params, &return_ty, &body, None, None, span, module);
+                FidanType::Function
             }
         }
     }

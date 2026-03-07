@@ -1,0 +1,25 @@
+# Lambda (inline anonymous action) demo
+
+# ── No-parameter lambda ───────────────────────────────────────────────────────
+var greet = action { print("Hello from a lambda!") }
+greet()
+
+# ── Lambda with one parameter ─────────────────────────────────────────────────
+var double = action with (certain x oftype integer) { return x * 2 }
+print(type(double) also double(7))
+
+# ── forEach with a lambda ─────────────────────────────────────────────────────
+var nums = [1, 2, 3, 4, 5]
+nums.forEach(action with (n) { print(n) })
+
+# ── firstWhere with a predicate lambda ────────────────────────────────────────
+var first_even = nums.firstWhere(action with (n) { return n % 2 == 0 })
+print(first_even)
+
+# ── Passing a lambda to a named action ───────────────────────────────────────
+action apply with (value oftype integer, fn) returns integer {
+    return fn(value)
+}
+
+var triple = action with (certain x oftype integer) { return x * 3 }
+print(apply(4, triple))

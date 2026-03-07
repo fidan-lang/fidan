@@ -374,6 +374,12 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
         Expr::Error { .. } => {
             p.w("<error>");
         }
+
+        // ── Inline lambda ─────────────────────────────────────────────────
+        Expr::Lambda { .. } => {
+            // Lambda formatting is not yet fully implemented; emit a placeholder.
+            p.w("action { … }");
+        }
     }
 }
 

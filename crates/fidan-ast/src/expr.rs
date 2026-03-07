@@ -167,6 +167,15 @@ pub enum Expr {
         span: Span,
     },
 
+    /// Inline anonymous action expression: `action with (params) { body }`.
+    /// Used as a first-class value (e.g. passed to `forEach` or `Shared.update`).
+    Lambda {
+        params: Vec<crate::item::Param>,
+        return_ty: Option<crate::TypeExpr>,
+        body: Vec<crate::StmtId>,
+        span: Span,
+    },
+
     // Error recovery placeholder
     Error {
         span: Span,
@@ -204,6 +213,7 @@ impl Expr {
             Expr::Slice { span, .. } => *span,
             Expr::ListComp { span, .. } => *span,
             Expr::DictComp { span, .. } => *span,
+            Expr::Lambda { span, .. } => *span,
             Expr::Error { span } => *span,
         }
     }
