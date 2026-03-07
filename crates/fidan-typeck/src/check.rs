@@ -1296,7 +1296,7 @@ impl TypeChecker {
     /// (delete the statement span).  Grouped-import members get a hint only,
     /// since automatic removal would require rewriting the brace list.
     fn check_unused_imports(&mut self) {
-        use fidan_diagnostics::{Confidence, Label, Suggestion};
+        use fidan_diagnostics::{Label, Suggestion};
         // Drain import_bindings so we don't need to clone referenced_names.
         let bindings = std::mem::take(&mut self.import_bindings);
         for (sym, span, grouped) in bindings {
@@ -1311,12 +1311,7 @@ impl TypeChecker {
             )
             .with_label(Label::primary(span, "imported here but never used"));
             if !grouped {
-                diag.add_suggestion(Suggestion::fix(
-                    "remove unused import",
-                    span,
-                    "",
-                    Confidence::High,
-                ));
+                diag.add_suggestion(Suggestion::hint("remove unused import"));
             } else {
                 diag.add_suggestion(Suggestion::hint(
                     "remove this member from the grouped import",
