@@ -37,12 +37,12 @@ fn list_of_strings(v: Vec<&str>) -> FidanValue {
 pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
     match name {
         // ── Case ─────────────────────────────────────────────────────────
-        "toUpper" | "upper" => {
-            Some(str_val(&as_str(args.first().unwrap_or(&FidanValue::Nothing)).to_uppercase()))
-        }
-        "toLower" | "lower" => {
-            Some(str_val(&as_str(args.first().unwrap_or(&FidanValue::Nothing)).to_lowercase()))
-        }
+        "toUpper" | "upper" | "to_upper" => Some(str_val(
+            &as_str(args.first().unwrap_or(&FidanValue::Nothing)).to_uppercase(),
+        )),
+        "toLower" | "lower" | "to_lower" => Some(str_val(
+            &as_str(args.first().unwrap_or(&FidanValue::Nothing)).to_lowercase(),
+        )),
         "capitalize" => {
             let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let mut c = s.chars();
@@ -54,18 +54,23 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
 
         // ── Trim ─────────────────────────────────────────────────────────
-        "trim"        => Some(str_val(as_str(args.first().unwrap_or(&FidanValue::Nothing)).trim())),
-        "trimStart"   | "ltrim" | "trim_start" => {
-            Some(str_val(as_str(args.first().unwrap_or(&FidanValue::Nothing)).trim_start()))
-        }
-        "trimEnd"     | "rtrim" | "trim_end" => {
-            Some(str_val(as_str(args.first().unwrap_or(&FidanValue::Nothing)).trim_end()))
-        }
+        "trim" => Some(str_val(
+            as_str(args.first().unwrap_or(&FidanValue::Nothing)).trim(),
+        )),
+        "trimStart" | "ltrim" | "trim_start" => Some(str_val(
+            as_str(args.first().unwrap_or(&FidanValue::Nothing)).trim_start(),
+        )),
+        "trimEnd" | "rtrim" | "trim_end" => Some(str_val(
+            as_str(args.first().unwrap_or(&FidanValue::Nothing)).trim_end(),
+        )),
 
         // ── Split / join ─────────────────────────────────────────────────
         "split" => {
             let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
-            let sep = args.get(1).map(|v| as_str(v)).unwrap_or_else(|| " ".to_string());
+            let sep = args
+                .get(1)
+                .map(|v| as_str(v))
+                .unwrap_or_else(|| " ".to_string());
             let parts: Vec<&str> = s.split(sep.as_str()).collect();
             // Can't easily use list_of_strings because str lifetimes differ, so reborrow:
             let mut list = FidanList::new();
@@ -77,7 +82,9 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "join" => {
             let sep = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let list = match args.get(1) {
-                Some(FidanValue::List(l)) => l.borrow().iter().map(|v| as_str(v)).collect::<Vec<_>>(),
+                Some(FidanValue::List(l)) => {
+                    l.borrow().iter().map(|v| as_str(v)).collect::<Vec<_>>()
+                }
                 _ => return Some(str_val("")),
             };
             Some(str_val(&list.join(&sep)))
@@ -86,34 +93,36 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let parts: Vec<&str> = s.lines().collect();
             let mut list = FidanList::new();
-            for p in parts { list.append(str_val(p)); }
+            for p in parts {
+                list.append(str_val(p));
+            }
             Some(FidanValue::List(OwnedRef::new(list)))
         }
 
         // ── Search ───────────────────────────────────────────────────────
         "contains" => {
-            let s   = as_str(args.first().unwrap_or(&FidanValue::Nothing));
+            let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let pat = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             Some(FidanValue::Boolean(s.contains(pat.as_str())))
         }
         "startsWith" | "starts_with" => {
-            let s   = as_str(args.first().unwrap_or(&FidanValue::Nothing));
+            let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let pat = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             Some(FidanValue::Boolean(s.starts_with(pat.as_str())))
         }
         "endsWith" | "ends_with" => {
-            let s   = as_str(args.first().unwrap_or(&FidanValue::Nothing));
+            let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let pat = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             Some(FidanValue::Boolean(s.ends_with(pat.as_str())))
         }
         "indexOf" | "index_of" => {
-            let s   = as_str(args.first().unwrap_or(&FidanValue::Nothing));
+            let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let pat = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             let idx = s.find(pat.as_str()).map(|i| i as i64).unwrap_or(-1);
             Some(FidanValue::Integer(idx))
         }
         "lastIndexOf" | "last_index_of" => {
-            let s   = as_str(args.first().unwrap_or(&FidanValue::Nothing));
+            let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let pat = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             let idx = s.rfind(pat.as_str()).map(|i| i as i64).unwrap_or(-1);
             Some(FidanValue::Integer(idx))
@@ -121,15 +130,15 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
 
         // ── Replace ───────────────────────────────────────────────────────
         "replace" => {
-            let s    = as_str(args.first().unwrap_or(&FidanValue::Nothing));
+            let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let from = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
-            let to   = as_str(args.get(2).unwrap_or(&FidanValue::Nothing));
+            let to = as_str(args.get(2).unwrap_or(&FidanValue::Nothing));
             Some(str_val(&s.replace(from.as_str(), to.as_str())))
         }
         "replaceFirst" | "replace_first" => {
-            let s    = as_str(args.first().unwrap_or(&FidanValue::Nothing));
+            let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let from = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
-            let to   = as_str(args.get(2).unwrap_or(&FidanValue::Nothing));
+            let to = as_str(args.get(2).unwrap_or(&FidanValue::Nothing));
             Some(str_val(&s.replacen(from.as_str(), to.as_str(), 1)))
         }
 
@@ -152,9 +161,15 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
 
         // ── Padding ───────────────────────────────────────────────────────
         "padStart" | "pad_start" => {
-            let s   = as_str(args.first().unwrap_or(&FidanValue::Nothing));
-            let width = match args.get(1) { Some(FidanValue::Integer(n)) => *n as usize, _ => 0 };
-            let pad = args.get(2).map(|v| as_str(v)).unwrap_or_else(|| " ".to_string());
+            let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
+            let width = match args.get(1) {
+                Some(FidanValue::Integer(n)) => *n as usize,
+                _ => 0,
+            };
+            let pad = args
+                .get(2)
+                .map(|v| as_str(v))
+                .unwrap_or_else(|| " ".to_string());
             let pad_char = pad.chars().next().unwrap_or(' ');
             if s.len() >= width {
                 Some(str_val(&s))
@@ -164,9 +179,15 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             }
         }
         "padEnd" | "pad_end" => {
-            let s   = as_str(args.first().unwrap_or(&FidanValue::Nothing));
-            let width = match args.get(1) { Some(FidanValue::Integer(n)) => *n as usize, _ => 0 };
-            let pad = args.get(2).map(|v| as_str(v)).unwrap_or_else(|| " ".to_string());
+            let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
+            let width = match args.get(1) {
+                Some(FidanValue::Integer(n)) => *n as usize,
+                _ => 0,
+            };
+            let pad = args
+                .get(2)
+                .map(|v| as_str(v))
+                .unwrap_or_else(|| " ".to_string());
             let pad_char = pad.chars().next().unwrap_or(' ');
             if s.len() >= width {
                 Some(str_val(&s))
@@ -179,7 +200,10 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         // ── Misc ──────────────────────────────────────────────────────────
         "repeat" => {
             let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
-            let n = match args.get(1) { Some(FidanValue::Integer(n)) => *n as usize, _ => 0 };
+            let n = match args.get(1) {
+                Some(FidanValue::Integer(n)) => *n as usize,
+                _ => 0,
+            };
             Some(str_val(&s.repeat(n)))
         }
         "reverse" => {
@@ -205,13 +229,23 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             }
             Some(str_val(&result))
         }
-        "parseInt"   | "parse_int"   => {
+        "parseInt" | "parse_int" => {
             let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
-            Some(s.trim().parse::<i64>().map(FidanValue::Integer).unwrap_or(FidanValue::Nothing))
+            Some(
+                s.trim()
+                    .parse::<i64>()
+                    .map(FidanValue::Integer)
+                    .unwrap_or(FidanValue::Nothing),
+            )
         }
         "parseFloat" | "parse_float" => {
             let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
-            Some(s.trim().parse::<f64>().map(FidanValue::Float).unwrap_or(FidanValue::Nothing))
+            Some(
+                s.trim()
+                    .parse::<f64>()
+                    .map(FidanValue::Float)
+                    .unwrap_or(FidanValue::Nothing),
+            )
         }
         "chars" => {
             let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
@@ -232,25 +266,32 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "fromChars" | "from_chars" => {
             let list_val = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             if let FidanValue::List(l) = list_val {
-                let s: String = l.borrow().iter().filter_map(|v| {
-                    if let FidanValue::String(cs) = v {
-                        cs.as_str().chars().next()
-                    } else {
-                        None
-                    }
-                }).collect();
+                let s: String = l
+                    .borrow()
+                    .iter()
+                    .filter_map(|v| {
+                        if let FidanValue::String(cs) = v {
+                            cs.as_str().chars().next()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 Some(str_val(&s))
             } else {
                 Some(str_val(""))
             }
         }
-        "charCode"   | "char_code"  => {
+        "charCode" | "char_code" => {
             let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let code = s.chars().next().map(|c| c as i64).unwrap_or(0);
             Some(FidanValue::Integer(code))
         }
         "fromCharCode" | "from_char_code" => {
-            let code = match args.first() { Some(FidanValue::Integer(n)) => *n as u32, _ => 0 };
+            let code = match args.first() {
+                Some(FidanValue::Integer(n)) => *n as u32,
+                _ => 0,
+            };
             let ch = char::from_u32(code).unwrap_or('\0');
             Some(str_val(&ch.to_string()))
         }
@@ -260,17 +301,59 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
 
 pub fn exported_names() -> &'static [&'static str] {
     &[
-        "toUpper", "upper", "toLower", "lower", "capitalize",
-        "trim", "trimStart", "ltrim", "trim_start", "trimEnd", "rtrim", "trim_end",
-        "split", "join", "lines",
-        "contains", "startsWith", "starts_with", "endsWith", "ends_with",
-        "indexOf", "index_of", "lastIndexOf", "last_index_of",
-        "replace", "replaceFirst", "replace_first",
-        "slice", "substr",
-        "padStart", "pad_start", "padEnd", "pad_end",
-        "repeat", "reverse", "len", "length", "isEmpty", "is_empty",
-        "format", "parseInt", "parse_int", "parseFloat", "parse_float",
-        "chars", "bytes", "fromChars", "from_chars",
-        "charCode", "char_code", "fromCharCode", "from_char_code",
+        "toUpper",
+        "upper",
+        "to_upper",
+        "toLower",
+        "lower",
+        "to_lower",
+        "capitalize",
+        "trim",
+        "trimStart",
+        "ltrim",
+        "trim_start",
+        "trimEnd",
+        "rtrim",
+        "trim_end",
+        "split",
+        "join",
+        "lines",
+        "contains",
+        "startsWith",
+        "starts_with",
+        "endsWith",
+        "ends_with",
+        "indexOf",
+        "index_of",
+        "lastIndexOf",
+        "last_index_of",
+        "replace",
+        "replaceFirst",
+        "replace_first",
+        "slice",
+        "substr",
+        "padStart",
+        "pad_start",
+        "padEnd",
+        "pad_end",
+        "repeat",
+        "reverse",
+        "len",
+        "length",
+        "isEmpty",
+        "is_empty",
+        "format",
+        "parseInt",
+        "parse_int",
+        "parseFloat",
+        "parse_float",
+        "chars",
+        "bytes",
+        "fromChars",
+        "from_chars",
+        "charCode",
+        "char_code",
+        "fromCharCode",
+        "from_char_code",
     ]
 }

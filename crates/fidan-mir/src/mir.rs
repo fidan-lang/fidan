@@ -83,6 +83,8 @@ pub enum MirLit {
     },
     /// An enum type namespace sentinel (e.g. `Direction` as a value).
     EnumType(String),
+    /// A class type sentinel (e.g. `Animal` used as a first-class value).
+    ClassType(String),
 }
 
 // ── Operands ───────────────────────────────────────────────────────────────────

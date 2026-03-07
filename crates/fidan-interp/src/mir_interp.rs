@@ -1539,9 +1539,49 @@ impl MirMachine {
                 return self.call_function(FunctionId(id), fn_args);
             }
         }
+        // Callback-based list methods that require interpreter access.
+        if let FidanValue::List(ref list_ref) = receiver {
+            if let Some(result) = self.dispatch_list_callbacks(list_ref, method, args.clone())? {
+                return Ok(result);
+            }
+        }
         // Fall through: bootstrap stdlib methods (pre-Phase 7 stdlib).
         crate::bootstrap::call_bootstrap_method(receiver, method, args)
             .ok_or_else(|| MirSignal::Panic(format!("no method `{}` found", method)))
+    }
+
+    /// Dispatch list receiver methods that require a callback (access to `call_function`).
+    /// Returns `Ok(Some(v))` when handled, `Ok(None)` to fall through to bootstrap.
+    fn dispatch_list_callbacks(
+        &mut self,
+        list_ref: &OwnedRef<FidanList>,
+        method: &str,
+        args: Vec<FidanValue>,
+    ) -> Result<Option<FidanValue>, MirSignal> {
+        match method {
+            "forEach" | "for_each" => {
+                if let Some(FidanValue::Function(RuntimeFnId(id))) = args.into_iter().next() {
+                    let items: Vec<FidanValue> = list_ref.borrow().iter().cloned().collect();
+                    for item in items {
+                        self.call_function(FunctionId(id), vec![item])?;
+                    }
+                }
+                Ok(Some(FidanValue::Nothing))
+            }
+            "firstWhere" | "first_where" => {
+                if let Some(FidanValue::Function(RuntimeFnId(id))) = args.into_iter().next() {
+                    let items: Vec<FidanValue> = list_ref.borrow().iter().cloned().collect();
+                    for item in items {
+                        let result = self.call_function(FunctionId(id), vec![item.clone()])?;
+                        if result.truthy() {
+                            return Ok(Some(item));
+                        }
+                    }
+                }
+                Ok(Some(FidanValue::Nothing))
+            }
+            _ => Ok(None),
+        }
     }
 
     // ── Stdlib dispatch ───────────────────────────────────────────────────────
@@ -1956,6 +1996,8 @@ fn fidan_values_equal(a: &FidanValue, b: &FidanValue) -> bool {
         // Cross-type enum comparisons and object identity
         (EnumVariant { .. }, EnumType(_)) | (EnumType(_), EnumVariant { .. }) => false,
         (Object(a), Object(b)) => std::rc::Rc::ptr_eq(&a.0, &b.0),
+        // ClassType identity
+        (ClassType(a), ClassType(b)) => a == b,
         _ => false,
     }
 }
@@ -1975,6 +2017,7 @@ fn mir_lit_to_value(lit: MirLit) -> FidanValue {
             FidanValue::StdlibFn(Arc::from(module.as_str()), Arc::from(name.as_str()))
         }
         MirLit::EnumType(s) => FidanValue::EnumType(Arc::from(s.as_str())),
+        MirLit::ClassType(s) => FidanValue::ClassType(Arc::from(s.as_str())),
     }
 }
 
@@ -2083,6 +2126,9 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
         // Object identity: two references to the same instance are equal; distinct instances are not
         (BinOp::Eq, Object(a), Object(b)) => Boolean(std::rc::Rc::ptr_eq(&a.0, &b.0)),
         (BinOp::NotEq, Object(a), Object(b)) => Boolean(!std::rc::Rc::ptr_eq(&a.0, &b.0)),
+        // ClassType identity
+        (BinOp::Eq, ClassType(a), ClassType(b)) => Boolean(a == b),
+        (BinOp::NotEq, ClassType(a), ClassType(b)) => Boolean(a != b),
         // Bitwise
         (BinOp::BitAnd, Integer(a), Integer(b)) => Integer(a & b),
         (BinOp::BitOr, Integer(a), Integer(b)) => Integer(a | b),

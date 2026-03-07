@@ -265,6 +265,7 @@ fn fmt_op(op: &Operand) -> String {
         Operand::Const(MirLit::Namespace(m)) => format!("std.{}", m),
         Operand::Const(MirLit::StdlibFn { module, name }) => format!("std.{}.{}", module, name),
         Operand::Const(MirLit::EnumType(e)) => format!("enum:{}", e),
+        Operand::Const(MirLit::ClassType(c)) => format!("class:{}", c),
     }
 }
 

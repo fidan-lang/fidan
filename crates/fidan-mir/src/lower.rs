@@ -2789,6 +2789,19 @@ pub fn lower_program(
         });
     }
 
+    // Register class type globals (each object name becomes a global holding a ClassType value).
+    for obj in &hir.objects {
+        let obj_sym = obj.name;
+        if !global_map.contains_key(&obj_sym) {
+            let gid = GlobalId(prog.globals.len() as u32);
+            prog.globals.push(MirGlobal {
+                name: obj_sym,
+                ty: MirTy::Dynamic,
+            });
+            global_map.insert(obj_sym, gid);
+        }
+    }
+
     // Module-level `var` declarations -- registered after namespace globals.
     // With stable GIDs, symbols already in the registry are skipped.
     for stmt in &hir.init_stmts {
@@ -3064,6 +3077,25 @@ pub fn lower_program(
                 rhs: Rvalue::Literal(MirLit::EnumType(enum_name)),
             });
             if let Some(&gid) = ctx.global_map.get(&enum_sym) {
+                ctx.emit(Instr::StoreGlobal {
+                    global: gid,
+                    value: Operand::Local(dest),
+                });
+            }
+        }
+
+        // Emit class type globals.
+        // Each `object Animal { ... }` becomes a global holding `ClassType("Animal")`.
+        for obj in &hir.objects {
+            let obj_sym = obj.name;
+            let class_name = interner.resolve(obj_sym).to_string();
+            let dest = ctx.alloc_local();
+            ctx.emit(Instr::Assign {
+                dest,
+                ty: MirTy::Dynamic,
+                rhs: Rvalue::Literal(MirLit::ClassType(class_name)),
+            });
+            if let Some(&gid) = ctx.global_map.get(&obj_sym) {
                 ctx.emit(Instr::StoreGlobal {
                     global: gid,
                     value: Operand::Local(dest),

@@ -196,7 +196,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 Some(top)
             } else { Some(FidanValue::Nothing) }
         }
-        "stackPeek" | "top" => {
+        "stackPeek" | "top" | "stack_peek" => {
             if let Some(FidanValue::List(l)) = args.first() {
                 let borrow = l.borrow();
                 let len = borrow.len();
@@ -391,7 +391,7 @@ pub fn exported_names() -> &'static [&'static str] {
         "setToList", "set_to_list", "setLen", "set_len",
         "setUnion", "set_union", "setIntersect", "set_intersect", "setDiff", "set_diff",
         "Queue", "enqueue", "dequeue", "peek",
-        "Stack", "push", "pop", "top", "stackPeek",
+        "Stack", "push", "pop", "top", "stackPeek", "stack_peek",
         "flatten", "zip", "unique", "dedup", "reverse", "sort",
         "count", "length", "len", "isEmpty", "is_empty",
         "concat", "slice", "first", "last", "join",

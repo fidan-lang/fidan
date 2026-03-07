@@ -50,7 +50,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
 
         // `regex.match(pattern, subject)` → string | nothing
         // Returns the first match as a string, or `nothing` if no match.
-        "match" | "find" => {
+        "match" | "find" | "find_first" => {
             let pattern = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let subject = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             match compile(&pattern).and_then(|re| re.find(&subject).map(|m| m.as_str().to_string()))
@@ -103,7 +103,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
 
         // `regex.captureAll(pattern, subject)` → list[list[string]]
         // Returns all matches with their capture groups.
-        "captureAll" | "capture_all" | "execAll" => {
+        "captureAll" | "capture_all" | "execAll" | "exec_all" => {
             let pattern = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let subject = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             let mut outer = FidanList::new();
@@ -127,7 +127,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         // `regex.replace(pattern, subject, replacement)` → string
         // Replaces the first occurrence of the pattern with `replacement`.
         // Use `$1`, `$2`, ... to refer to capture groups in `replacement`.
-        "replace" | "replaceFirst" => {
+        "replace" | "replaceFirst" | "replace_first" => {
             let pattern = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let subject = as_str(args.get(1).unwrap_or(&FidanValue::Nothing));
             let replacement = as_str(args.get(2).unwrap_or(&FidanValue::Nothing));

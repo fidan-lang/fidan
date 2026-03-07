@@ -6,7 +6,7 @@
 
 **A modern, expressive, human-readable programming language built for clarity, safety, and real-world performance.**
 
-[![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; [![Build](https://img.shields.io/badge/build-passing-brightgreen.svg)]() &nbsp; [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)]() &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](editors/vscode)
+[![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; ![Build](https://img.shields.io/badge/build-passing-brightgreen.svg) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](editors/vscode)
 
 [Getting Started](#-getting-started) • [Language Tour](#-language-tour) • [CLI Reference](#-cli-reference) • [Standard Library](#-standard-library) • [VS Code Extension](#-vs-code-extension) • [Contributing](#-contributing)
 
@@ -841,7 +841,7 @@ The same MIR feeds all three backends — no behavioral divergence between run m
 
 ## Contributing
 
-Contributions are welcome! By submitting a pull request or patch you acknowledge that you have read [CONTRIBUTING.md](CONTRIBUTING.md) and agree to the [Contributor License Agreement](CLA.md) — your contribution becomes part of the Fidan project under its license terms.
+Contributions are welcome! By submitting a pull request or patch you acknowledge that you have read [CONTRIBUTING.md](CONTRIBUTING.md) — your contribution becomes part of the Fidan project under its license terms.
 
 1. Fork the repository
 2. Create a feature branch (`git checkout -b feature/my-feature`)

@@ -44,6 +44,8 @@ pub enum FidanValue {
     EnumType(Arc<str>),
     /// A concrete enum variant value (e.g. the result of `Direction.North`).
     EnumVariant { tag: Arc<str> },
+    /// A first-class reference to a class type (e.g. `Animal` used as a value).
+    ClassType(Arc<str>),
 }
 
 impl FidanValue {
@@ -65,6 +67,7 @@ impl FidanValue {
             FidanValue::StdlibFn(_, _) => "action",
             FidanValue::EnumType(_) => "enum-type",
             FidanValue::EnumVariant { .. } => "enum",
+            FidanValue::ClassType(_) => "class-type",
         }
     }
 
@@ -148,6 +151,8 @@ impl FidanValue {
             // EnumType and EnumVariant are stateless — clone Arc<str>.
             FidanValue::EnumType(s) => FidanValue::EnumType(Arc::clone(s)),
             FidanValue::EnumVariant { tag } => FidanValue::EnumVariant { tag: Arc::clone(tag) },
+            // ClassType is stateless — clone the Arc<str>.
+            FidanValue::ClassType(s) => FidanValue::ClassType(Arc::clone(s)),
         }
     }
 }
@@ -193,5 +198,6 @@ pub fn display(val: &FidanValue) -> String {
         FidanValue::StdlibFn(module, name) => format!("<action:{}.{}>", module, name),
         FidanValue::EnumType(s) => format!("<enum:{}>", s),
         FidanValue::EnumVariant { tag } => tag.as_ref().to_string(),
+        FidanValue::ClassType(s) => format!("<class:{}>", s),
     }
 }
