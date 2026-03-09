@@ -1,6 +1,6 @@
 <div align="center">
 
-![Fidan Banner](https://github.com/AppSolves/Fidan/blob/2faf27f51dd51123a53a47360921dcbe6fe5cbfc/editors/vscode/icons/icon.png)
+![Fidan Banner](https://github.com/fidan-lang/fidan/blob/2c03644d2047e2bc1a42b301ff1df9c8e475a262/assets/icons/icon.png)
 
 # Fidan
 
