@@ -17,3 +17,5 @@ cranelift-codegen = { workspace = true }
 cranelift-frontend = { workspace = true }
 cranelift-native = { workspace = true }
 cranelift-module = { workspace = true }
+cranelift-object = { workspace = true }
+anyhow = { workspace = true }

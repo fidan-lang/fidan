@@ -3,7 +3,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
-use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, SandboxPolicy, TraceMode};
+use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, OptLevel, SandboxPolicy, TraceMode};
 use std::path::PathBuf;
 
 mod explain;
@@ -105,12 +105,40 @@ enum Command {
         /// Output binary path
         #[arg(short, long, default_value = "out")]
         output: PathBuf,
-        /// Enable release optimisations (requires LLVM)
-        #[arg(long)]
+        /// Optimisation level: O0, O1, O2 (default), O3, Os, Oz
+        #[arg(long, default_value = "O2")]
+        opt: String,
+        /// Shorthand for --opt O3 (release mode)
+        #[arg(long, conflicts_with = "opt")]
         release: bool,
-        /// Emit intermediate representation: tokens | ast | hir | mir
+        /// Emit intermediate representation: tokens | ast | hir | mir | obj
+        /// (`obj` keeps the intermediate .o/.obj file alongside the binary)
         #[arg(long, value_delimiter = ',')]
         emit: Vec<String>,
+        /// Additional library search directories for the system linker (repeatable)
+        #[arg(long)]
+        lib_dir: Vec<PathBuf>,
+        /// How to link the Fidan runtime into the compiled binary:
+        /// `static` (default) — embed libfidan_runtime.a for a self-contained binary;
+        /// `dynamic` — link libfidan_runtime.so/.dll (smaller binary, but the
+        /// runtime shared library must be present at the Fidan install path at run time.
+        #[arg(long, value_name = "static|dynamic", default_value = "static")]
+        link_runtime: String,
+        /// Override the system linker for this build.  Accepts a bare executable
+        /// name (resolved via PATH) or an absolute path.  Equivalent to setting
+        /// the FIDAN_LINKER environment variable, but applies to this invocation
+        /// only.  Example: `--linker lld-link` or `--linker /usr/bin/clang`.
+        #[arg(long)]
+        linker: Option<String>,
+        /// Treat select warnings (W1001–W1003, W2004–W2006) as errors
+        #[arg(long)]
+        strict: bool,
+        /// Suppress specific diagnostic codes (comma-separated, e.g. `W5003,W1004`)
+        #[arg(long, value_delimiter = ',')]
+        suppress: Vec<String>,
+        /// AOT codegen backend: `cranelift` (default) or `llvm`
+        #[arg(long, default_value = "cranelift")]
+        backend: String,
     },
     /// Profile a Fidan source file: call counts, time per action, hot-path hints
     Profile {
@@ -218,8 +246,9 @@ fn parse_emit(raw: &[String]) -> Result<Vec<EmitKind>> {
             "ast" => Ok(EmitKind::Ast),
             "hir" => Ok(EmitKind::Hir),
             "mir" => Ok(EmitKind::Mir),
+            "obj" | "object" => Ok(EmitKind::Obj),
             other => bail!(
-                "unknown --emit target {:?}  (valid: tokens, ast, hir, mir)",
+                "unknown --emit target {:?}  (valid: tokens, ast, hir, mir, obj)",
                 other
             ),
         })
@@ -234,6 +263,22 @@ fn parse_trace(raw: &str) -> Result<TraceMode> {
         "compact" => Ok(TraceMode::Compact),
         other => bail!(
             "unknown --trace mode {:?}  (valid: none, short, full, compact)",
+            other
+        ),
+    }
+}
+
+fn parse_opt_level(raw: &str) -> Result<fidan_driver::OptLevel> {
+    use fidan_driver::OptLevel;
+    match raw.trim() {
+        "O0" | "o0" | "0" => Ok(OptLevel::O0),
+        "O1" | "o1" | "1" => Ok(OptLevel::O1),
+        "O2" | "o2" | "2" => Ok(OptLevel::O2),
+        "O3" | "o3" | "3" => Ok(OptLevel::O3),
+        "Os" | "os" | "s" => Ok(OptLevel::Os),
+        "Oz" | "oz" | "z" => Ok(OptLevel::Oz),
+        other => bail!(
+            "unknown optimisation level {:?}  (valid: O0, O1, O2, O3, Os, Oz)",
             other
         ),
     }
@@ -332,6 +377,10 @@ fn main() -> Result<()> {
                 replay_inputs,
                 suppress,
                 sandbox: sandbox_policy,
+                opt_level: Default::default(),
+                extra_lib_dirs: vec![],
+                link_dynamic: false,
+                ..Default::default()
             };
             if reload {
                 pipeline::run_with_reload(opts)
@@ -340,14 +389,56 @@ fn main() -> Result<()> {
             }
         }
         Command::Build {
-            file, output, emit, ..
+            file,
+            output,
+            opt,
+            release,
+            emit,
+            lib_dir,
+            link_runtime,
+            linker,
+            strict,
+            suppress,
+            backend,
         } => {
+            // Apply --linker before the pipeline so FIDAN_LINKER is set for
+            // the Cranelift codegen backend.  This takes priority over any
+            // pre-existing FIDAN_LINKER env var.
+            if let Some(ref l) = linker {
+                // SAFETY: single-threaded at this point; no other threads
+                // read env vars concurrently.
+                unsafe { std::env::set_var("FIDAN_LINKER", l) };
+            }
             let emit_kinds = parse_emit(&emit)?;
+            let opt_level = if release {
+                OptLevel::O3
+            } else {
+                parse_opt_level(&opt)?
+            };
+            let link_dynamic = match link_runtime.trim().to_lowercase().as_str() {
+                "static" | "s" => false,
+                "dynamic" | "dyn" | "d" => true,
+                other => bail!(
+                    "unknown --link-runtime {:?}  (valid: static, dynamic)",
+                    other
+                ),
+            };
+            let backend = match backend.trim().to_lowercase().as_str() {
+                "cranelift" | "cl" => fidan_driver::Backend::Cranelift,
+                "llvm" => fidan_driver::Backend::Llvm,
+                other => bail!("unknown --backend {:?}  (valid: cranelift, llvm)", other),
+            };
             let opts = CompileOptions {
                 input: file,
                 output: Some(output),
                 mode: ExecutionMode::Build,
                 emit: emit_kinds,
+                opt_level,
+                extra_lib_dirs: lib_dir,
+                link_dynamic,
+                strict_mode: strict,
+                suppress,
+                backend,
                 ..Default::default()
             };
             pipeline::run_pipeline(opts)

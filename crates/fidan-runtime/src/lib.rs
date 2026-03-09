@@ -1,6 +1,7 @@
 //! `fidan-runtime` — Value types, memory model (OwnedRef/SharedRef/COW), object model.
 
 mod dict;
+pub mod ffi;
 mod list;
 mod object;
 mod owned_ref;

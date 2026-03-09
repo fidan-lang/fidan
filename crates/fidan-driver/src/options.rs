@@ -1,5 +1,5 @@
-use std::path::PathBuf;
 pub use fidan_stdlib::SandboxPolicy;
+use std::path::PathBuf;
 
 /// How much of the runtime call stack to print on an uncaught panic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,6 +40,16 @@ pub struct CompileOptions {
     /// Zero-config sandbox policy for `fidan run --sandbox`.
     /// `None` = no sandboxing (default).
     pub sandbox: Option<SandboxPolicy>,
+    /// Optimisation level for AOT compilation.
+    pub opt_level: OptLevel,
+    /// Additional library search directories for the system linker.
+    pub extra_lib_dirs: Vec<std::path::PathBuf>,
+    /// Link the Fidan runtime dynamically (`libfidan_runtime.so` / `.dll`) instead
+    /// of embedding `libfidan_runtime.a` into the binary.  Corresponds to
+    /// `fidan build --link-runtime dynamic`.
+    pub link_dynamic: bool,
+    /// AOT codegen backend.  Defaults to Cranelift.
+    pub backend: Backend,
 }
 
 impl Default for CompileOptions {
@@ -56,6 +66,10 @@ impl Default for CompileOptions {
             replay_inputs: vec![],
             suppress: vec![],
             sandbox: None,
+            opt_level: OptLevel::O2,
+            extra_lib_dirs: vec![],
+            link_dynamic: false,
+            backend: Backend::Cranelift,
         }
     }
 }
@@ -76,4 +90,28 @@ pub enum EmitKind {
     Ast,
     Hir,
     Mir,
+    /// Keep the intermediate object file (`.o` / `.obj`) alongside the binary.
+    Obj,
+}
+
+/// Which AOT codegen backend to use for `fidan build`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Backend {
+    /// Pure-Rust Cranelift backend — no system LLVM required (default).
+    #[default]
+    Cranelift,
+    /// LLVM backend — higher-quality code, requires LLVM to be installed.
+    Llvm,
+}
+
+/// Optimisation level for AOT compilation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OptLevel {
+    O0,
+    O1,
+    #[default]
+    O2,
+    O3,
+    Os,
+    Oz,
 }

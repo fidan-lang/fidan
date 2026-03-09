@@ -477,29 +477,63 @@ stdin sequence with `fidan run <file> --replay <id>`.
 
 ---
 
-## Phase 11 – LLVM AOT + Performance
+## Phase 11 – Cranelift AOT + Performance
 
-> **Note:** All static AOT compilation lives here (LLVM `ObjectModule`, system linker, `.a` file).
-> Cranelift handles JIT only (Phase 8).
+> **Note:** Cranelift AOT is complete and production-ready.
+> LLVM backend is a future phase (stub crate exists; no code yet).
+> Cranelift AOT uses `cranelift-object` to emit native object files.
+>
+> **LLVM backend (deferred):** Will be implemented in a later phase with an
+> optional `fidan toolchain add llvm` command and a `--backend llvm|cranelift`
+> flag on `fidan build`. Nothing LLVM-related is active today.
 
 | Item | Status | Notes |
 |---|---|---|
-| `fidan-codegen-llvm` crate (`inkwell`) | ⬜ | |
-| MIR → LLVM IR (all instructions) | ⬜ | |
-| `fidan-runtime` as static `.a` | ⬜ | Linked into every AOT binary |
-| System linker invocation | ⬜ | `cc` / `lld` depending on platform |
-| Stack root tracking (unwind maps) | ⬜ | |
-| DWARF / SEH unwind info | ⬜ | |
-| Binary output matches interpreter output | ⬜ | Golden-file correctness suite |
-| LLVM `-O2` / `-O3` pass pipeline | ⬜ | |
-| Auto-vectorisation | ⬜ | |
-| LTO | ⬜ | |
-| Monomorphisation collector | ⬜ | |
-| Specialised function emission | ⬜ | |
-| Escape analysis MIR pass | ⬜ | |
-| PGO instrumentation mode | ⬜ | |
-| All Phase 8 JIT correctness tests pass under AOT | ⬜ | |
-| C++ benchmark comparison | ⬜ | |
+| `fidan-codegen-cranelift` AOT crate | ✅ | `CraneliftAotCompiler` via `cranelift-object` |
+| MIR → Cranelift IR (all instructions) | ✅ | Boxed-value C-ABI model, native int/float ops |
+| `fidan-runtime` as static `.a` | ✅ | Linked into every AOT binary via system linker |
+| System linker invocation | ✅ | `cc`/`lld` on Unix; `link.exe`/`lld-link` on Windows |
+| Frontend pipeline wired into `fidan build` | ✅ | lex→parse→typecheck→HIR→MIR→passes→AOT |
+| Cranelift `speed` / `speed_and_size` opt presets | ✅ | `CraneliftOptLevel` wired via `AotOptions::opt_level` |
+| Escape analysis MIR pass | ✅ | `fidan-passes/src/escape_analysis.rs`; tags non-escaping locals for future clone-elision and stack-alloc optimisations |
+| Binary output matches interpreter output | ✅ | Golden-file correctness suite: `test/golden/*.expected`; verified via `scripts/test_aot.bat` / `test_aot.sh` |
+| All correctness examples pass under AOT | ✅ | `test/examples/test.fdn` + additional examples; all 7 output lines match |
+| C++ benchmark comparison | ✅ | `test/cpp_benchmark/benchmark.cpp` + `scripts/cpp_benchmark.bat` / `cpp_benchmark.sh` |
+| `fidan-codegen-llvm` crate stub | ⬜ | 3-line stub (`#[cfg(feature = "llvm")]`); not compiled; deferred |
+| MIR → LLVM IR | ⬜ | Deferred; requires `inkwell` + full lowering pass |
+| LLVM as default, Cranelift as fallback | ⬜ | Deferred; driver only uses Cranelift today |
+| `fidan toolchain add llvm` on-demand | ⬜ | Deferred; no toolchain subcommand yet |
+| LLVM `-O2` / `-O3` pass pipeline | ⬜ | Deferred (LLVM backend) |
+| Stack root tracking (unwind maps) | ⬜ | Deferred; requires GC-safe-point infrastructure |
+| DWARF / SEH unwind info | ⬜ | Deferred; frame pointers can be enabled via Cranelift flag; full DWARF requires `gimli` writer |
+| Auto-vectorisation | ⬜ | Deferred; requires LLVM or explicit Cranelift SIMD lowering |
+| LTO | ⬜ | Deferred; requires LLVM or Cranelift multi-module merge |
+| Monomorphisation collector | ⬜ | Deferred; MIR pass to specialise generic actions for known types |
+| Specialised function emission | ⬜ | Deferred; depends on monomorphisation collector |
+| PGO instrumentation mode | ⬜ | Deferred; requires LLVM PGO hooks |
+
+---
+
+## Phase 12 – Embedding API (`libfidan`)
+
+> **Separate build artifact** — not a dependency of `fidan.exe`. Same source
+> code, different entry point. Ships alongside `fidan.exe` for game engines,
+> editors, scripting runtimes, and other embedders.
+>
+> Dependency: Phase 11 (working AOT/interpreter) must be functional first.
+
+| Item | Status | Notes |
+|---|---|---|
+| C-ABI header (`fidan.h`) | ⬜ | Declares `fidan_vm_new`, `fidan_eval`, `fidan_eval_file`, `fidan_vm_free`, `fidan_value_*` helpers |
+| `libfidan` crate (`crate-type = ["cdylib", "staticlib"]`) | ⬜ | Wraps fidan-interp + fidan-runtime; deliberately excludes CLI frontend (no parser/typeck/formatter in the public API surface) |
+| `fidan_vm_new() -> *mut FidanVm` | ⬜ | Allocates interpreter + runtime state |
+| `fidan_eval(vm, source, len) -> FidanValue` | ⬜ | Full pipeline: lex → parse → typecheck → MIR → interp |
+| `fidan_eval_file(vm, path) -> FidanValue` | ⬜ | Convenience wrapper over `fidan_eval` |
+| `fidan_value_*` type/extract helpers | ⬜ | `fidan_value_type`, `fidan_value_as_int`, `fidan_value_as_str`, `fidan_value_as_float`, `fidan_value_is_nothing` |
+| `fidan_vm_free(vm)` | ⬜ | Drops all VM state; safe to call with null |
+| CI artifact: `libfidan-{os}-{arch}.{so,dll,dylib}` | ⬜ | Published alongside `fidan.exe` in GitHub Releases |
+| Example: embed in C program | ⬜ | `examples/embed_c/main.c` |
+| Example: embed in Rust crate | ⬜ | `fidan-embed` crate with a safe Rust wrapper |
 
 ---
 
@@ -532,7 +566,7 @@ stdin sequence with `fidan run <file> --replay <id>`.
 | Typeck unit tests | ✅ | 12/12 passing in `fidan-typeck/src/lib.rs` — var inference, action return types, object field/method resolution, certain/optional params, decorator validation, null-safety escalation |
 | HIR unit tests | ✅ | 9/9 passing in `fidan-hir/src/lib.rs` (action lowering, object fields/methods, test{} blocks, for-loops, multi-action modules) |
 | MIR unit tests | ✅ | 7/7 passing in `fidan-mir/src/lib.rs` (global registration, function lowering, test_functions vec, object construction, multi-action programs) |
-| AOT integration (`test.fdn` binary) | ⬜ | |
+| AOT integration (`test.fdn` binary) | ✅ | Golden-file suite: `scripts/test_aot.bat` / `test_aot.sh` compile & run each example, diff against `test/golden/*.expected` |
 | Parallel benchmark suite | ✅ | `test/examples/parallel_benchmark.fdn` + `scripts/performance_bm.bat` |
 
 ---

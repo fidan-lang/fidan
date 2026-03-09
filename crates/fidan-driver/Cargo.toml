@@ -19,4 +19,5 @@ fidan-passes = { workspace = true }
 fidan-runtime = { workspace = true }
 fidan-interp = { workspace = true }
 fidan-stdlib = { workspace = true }
+fidan-codegen-cranelift = { workspace = true }
 anyhow = { workspace = true }

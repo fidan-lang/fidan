@@ -1,9 +1,9 @@
+use crate::imports::{collect_file_import_paths, filter_hir_module, pre_register_hir_into_tc};
+use crate::replay::save_replay_bundle;
 use anyhow::{Context, Result, bail};
 use fidan_diagnostics::{Severity, render_message_to_stderr};
 use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, TraceMode};
 use std::path::PathBuf;
-use crate::imports::{collect_file_import_paths, filter_hir_module, pre_register_hir_into_tc};
-use crate::replay::save_replay_bundle;
 
 // ── Hot Reload ────────────────────────────────────────────────────────────────
 
@@ -874,12 +874,25 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             }
         }
         ExecutionMode::Build => {
-            if !opts.emit.iter().any(|e| *e == EmitKind::Tokens) {
-                render_message_to_stderr(
-                    Severity::Note,
-                    "unimplemented",
-                    "AOT backend not yet implemented (Phase 11 – LLVM)",
-                );
+            if error_count == 0 {
+                if let Some(ref hir) = merged_hir {
+                    let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                    error_count +=
+                        emit_mir_safety_diags(&mir, &interner, opts.strict_mode, &opts.suppress);
+                    if error_count == 0 {
+                        fidan_passes::run_all(&mut mir);
+                        let session = fidan_driver::Session::new();
+                        if let Err(e) =
+                            fidan_driver::compile(&session, mir, Arc::clone(&interner), &opts)
+                        {
+                            render_message_to_stderr(
+                                Severity::Error,
+                                "",
+                                &format!("AOT compilation failed: {e:#}"),
+                            );
+                        }
+                    }
+                }
             }
         }
         ExecutionMode::Profile => {

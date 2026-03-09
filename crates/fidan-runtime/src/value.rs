@@ -234,8 +234,13 @@ pub fn display(val: &FidanValue) -> String {
             format!("[{}]", items.join(", "))
         }
         FidanValue::Dict(d) => {
-            let pairs: Vec<String> = d
-                .borrow()
+            let borrowed = d.borrow();
+            // If the dict has a "__class__" entry it's an AOT object — display as <ClassName>.
+            let class_key = FidanString::new("__class__");
+            if let Some(FidanValue::String(cn)) = borrowed.get(&class_key) {
+                return format!("<{}>", cn.as_str());
+            }
+            let pairs: Vec<String> = borrowed
                 .iter()
                 .map(|(k, v)| format!("{}: {}", k.as_str(), display(v)))
                 .collect();

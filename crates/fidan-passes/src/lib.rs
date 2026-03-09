@@ -10,6 +10,7 @@ pub trait Pass {
 mod constant_folding;
 mod copy_propagation;
 mod dead_code;
+pub mod escape_analysis;
 mod inlining;
 pub mod null_safety;
 pub mod parallel_check;
@@ -20,6 +21,7 @@ mod unreachable_pruning;
 pub use constant_folding::ConstantFolding;
 pub use copy_propagation::CopyPropagation;
 pub use dead_code::DeadCodeElimination;
+pub use escape_analysis::EscapeInfo;
 pub use inlining::Inlining;
 pub use null_safety::NullSafetyDiag;
 pub use parallel_check::ParallelRaceDiag;
@@ -57,6 +59,16 @@ pub fn check_slow_hints(
     interner: &fidan_lexer::SymbolInterner,
 ) -> Vec<SlowHintDiag> {
     precompile_hints::check(prog, interner)
+}
+
+/// Run escape analysis on all functions in `program`.
+///
+/// Returns one `EscapeInfo` per function (indexed by `FunctionId.0`).
+/// The analysis identifies locals that provably do not outlive the current
+/// stack frame; these are candidates for clone-elision and future stack
+/// allocation.
+pub fn run_escape_analysis(program: &MirProgram) -> Vec<EscapeInfo> {
+    escape_analysis::analyze(program)
 }
 
 /// Run all optimisation passes in the standard order.

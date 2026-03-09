@@ -6,7 +6,15 @@ license-file.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[lib]
+# rlib   — Rust consumers (fidan interpreter, tests)
+# staticlib — default AOT link mode: libfidan_runtime.a baked into the output binary
+# cdylib   — dynamic AOT link mode: libfidan_runtime.so / .dll loaded at runtime
+crate-type = ["rlib", "staticlib", "cdylib"]
+
 [dependencies]
 fidan-source = { workspace = true }
 fidan-lexer = { workspace = true }
 rustc-hash = { workspace = true }
+regex = { workspace = true }
+dashmap = { workspace = true }
