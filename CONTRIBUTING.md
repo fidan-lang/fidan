@@ -43,12 +43,12 @@ crates/
     compiler
     runtime
 
-editors/
-    vscode
+test/
+    ...
 ```
 
 Core language components live inside `crates/`.  
-Editor integrations and developer tooling live inside `editors/`.
+Tests and examples live inside `test/`.
 
 As the project evolves, additional crates and tooling may be added. Please try to keep contributions aligned with the existing project structure.
 

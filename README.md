@@ -722,7 +722,8 @@ print(PI)            # 3.141592653589793
 Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=AppSolves.fidan) *(coming soon)* or build locally:
 
 ```bash
-cd editors/vscode
+git clone https://github.com/fidan-lang/fidan-editors.git
+cd fidan-editors/vscode
 npm install
 npm run compile
 # Press F5 to launch the Extension Development Host
@@ -866,7 +867,8 @@ cargo run -- run test/examples/test.fdn
 cargo run -- run test/examples/test.fdn --emit mir
 
 # Build the VS Code extension
-cd editors/vscode && npm install && npm run compile
+git clone https://github.com/fidan-lang/fidan-editors.git
+cd fidan-editors/vscode && npm install && npm run compile
 ```
 
 ---
