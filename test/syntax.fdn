@@ -38,7 +38,6 @@ use std.io.{print, readFile, writeFile}
 
 ### Aliasing
 
-use std.collections.list as List
 use std.math as math
 
 ### Re-exporting (important for libraries)
