@@ -2795,12 +2795,19 @@ pub fn lower_program(
 
     // ── Pre-pass ②: allocate FunctionIds for top-level / extension functions ─
     let mut fn_map: FxHashMap<Symbol, FunctionId> = FxHashMap::default();
+    // Parallel Vec: fn_ids_per_hir_fn[i] is the FunctionId allocated for hir.functions[i].
+    // Using a Vec (not fn_map) in the lowering loop ensures that every pre-allocated
+    // MirFunction gets a body even when two top-level actions share the same name
+    // (e.g. overloaded `action greetUser` with different param certainty).
+    // fn_map still maps name → last-allocated ID for call-site resolution.
+    let mut fn_ids_per_hir_fn: Vec<FunctionId> = Vec::with_capacity(hir.functions.len());
     // fn_name → class it extends (extension actions only)
     let mut ext_fn_map: FxHashMap<Symbol, Symbol> = FxHashMap::default();
 
     for func in &hir.functions {
         let id = FunctionId(prog.functions.len() as u32);
         fn_map.insert(func.name, id);
+        fn_ids_per_hir_fn.push(id);
         prog.functions.push(MirFunction::new(
             id,
             func.name,
@@ -3111,8 +3118,9 @@ pub fn lower_program(
     };
 
     // ── Lower top-level functions ─────────────────────────────────────────────
-    for func in &hir.functions {
-        let fn_id = fn_map[&func.name];
+    // Zip with fn_ids_per_hir_fn so each HirFunction lowers into the exact
+    // FunctionId pre-allocated for it, even when two actions share a name.
+    for (func, fn_id) in hir.functions.iter().zip(fn_ids_per_hir_fn) {
         let owner_class = ext_fn_map.get(&func.name).copied();
         lower_hir_fn(
             &mut prog,

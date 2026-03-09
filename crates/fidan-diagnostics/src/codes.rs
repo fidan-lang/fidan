@@ -93,6 +93,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "unknown export from stdlib module",
         category: "imports",
     },
+    DiagnosticCode {
+        code: "E0109",
+        title: "duplicate top-level declaration (name)",
+        category: "names",
+    },
     // ── Type system ───────────────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0201",

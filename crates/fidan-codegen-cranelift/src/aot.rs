@@ -704,6 +704,19 @@ fn lower_function(
     let cl_blocks: Vec<cranelift_codegen::ir::Block> =
         mf.blocks.iter().map(|_| builder.create_block()).collect();
 
+    // Guard: a MirFunction with no basic blocks indicates a compiler bug
+    // (most commonly: two top-level actions with the same name where the first
+    // pre-allocation never got its body lowered).  Return a clean error instead
+    // of panicking with an opaque index-out-of-bounds.
+    if cl_blocks.is_empty() {
+        anyhow::bail!(
+            "function `{}` (id {:?}) has no basic blocks — \
+            this is a compiler bug; please report it",
+            interner.resolve(mf.name),
+            mf.id
+        );
+    }
+
     // ── Phase 0b: block params for phi nodes (non-entry blocks) ───────────────
     let mut phi_param_vals: HashMap<(usize, usize), cranelift_codegen::ir::Value> = HashMap::new();
     builder.append_block_params_for_function_params(cl_blocks[0]);

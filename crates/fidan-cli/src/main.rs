@@ -3,6 +3,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+use fidan_diagnostics::{Severity, render_backtrace_to_stderr, render_message_to_stderr};
 use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, OptLevel, SandboxPolicy, TraceMode};
 use std::path::PathBuf;
 
@@ -286,6 +287,35 @@ fn parse_opt_level(raw: &str) -> Result<fidan_driver::OptLevel> {
 
 fn main() -> Result<()> {
     ensure_utf8_console();
+
+    // Catch all Rust panics and render them as Fidan-style boxed error messages
+    // instead of the default Rust backtrace.
+    std::panic::set_hook(Box::new(|info| {
+        // Capture the backtrace immediately so all call frames are present.
+        let bt = std::backtrace::Backtrace::force_capture();
+        let payload = info.payload();
+        let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unexpected internal error".to_string()
+        };
+        let loc = info
+            .location()
+            .map(|l| format!(" [{}:{}]", l.file(), l.line()))
+            .unwrap_or_default();
+        render_message_to_stderr(
+            Severity::Error,
+            "internal",
+            &format!(
+                "compiler crashed: {msg}{loc}\n  This is a bug — please report it at https://github.com/AppSolves/Fidan/issues"
+            ),
+        );
+        // Render filtered Fidan-only stack frames below the crash box.
+        render_backtrace_to_stderr(&bt);
+    }));
+
     let cli = Cli::parse();
 
     match cli.command {

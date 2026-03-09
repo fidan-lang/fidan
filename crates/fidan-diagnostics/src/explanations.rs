@@ -182,6 +182,46 @@ Fix: extend a different object, or remove the `extends` clause entirely.
 "#,
         ),
 
+        "E0109" => Some(
+            r#"A top-level name (action, object, or enum) is used more than once in
+the same module scope.  This can happen in two distinct ways:
+
+── Case 1: duplicate declaration ────────────────────────────────────────
+Two top-level declarations share the same name.  Fidan does not support
+overloading — each name must be unique within a module.
+
+    action greet with (name oftype string) { ... }
+    action greet with (name oftype string) { ... }   # error: `greet` already defined
+
+    object Point { x oftype float, y oftype float }
+    object Point { x oftype integer }                # error: `Point` already defined
+
+Fix: rename one of the declarations, or remove the duplicate.
+
+── Case 2: import conflicts with a local declaration ────────────────────
+An import (`use`) binds a name that is also declared as a top-level
+action, object, or enum in the same file.  Because both would resolve to
+the same symbol, the compiler cannot determine which one a call site
+should reach.
+
+    use somelib.{greet}
+
+    action greet with (...) { ... }   # error: conflicts with the import above
+
+This also triggers when the import comes after the declaration:
+
+    action greet with (...) { ... }
+
+    use somelib.{greet}               # error: conflicts with the declaration above
+
+Fix: give the import an alias so the two names no longer clash:
+
+    use somelib.{greet as lib_greet}
+
+    action greet with (...) { ... }   # OK — `greet` is the local one, `lib_greet` is the import
+"#,
+        ),
+
         "E0108" => Some(
             r#"A grouped or specific-name stdlib import refers to a name that the
 module does not export.  Fidan validates these names at compile time

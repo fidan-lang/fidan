@@ -258,6 +258,110 @@ pub fn render_message_to_stderr(severity: Severity, code: impl std::fmt::Display
     }
 }
 
+// ── backtrace renderer ──────────────────────────────────────────────────────
+
+/// Render a compiler-crash stack trace to stderr, keeping only the frames
+/// that belong to Fidan compiler code (function names starting with `fidan`).
+///
+/// Intended to be called from the global panic hook immediately after
+/// [`render_message_to_stderr`] has displayed the crash box.
+pub fn render_backtrace_to_stderr(bt: &std::backtrace::Backtrace) {
+    let raw = bt.to_string();
+    let raw = raw.trim();
+    if raw.is_empty() || matches!(raw, "disabled" | "unsupported") {
+        return;
+    }
+
+    // ── Parse frames ─────────────────────────────────────────────────────────
+    // Each frame spans one or two lines:
+    //   "   N: fn_name"
+    //   "             at file:line"   ← optional location continuation
+    struct Frame {
+        func: String,
+        location: Option<String>,
+    }
+
+    let mut frames: Vec<Frame> = Vec::new();
+    let mut pending: Option<String> = None;
+
+    for line in raw.lines() {
+        let t = line.trim_start();
+        if t.is_empty() {
+            continue;
+        }
+        // Frame-start: an all-digit prefix before the first ':'
+        if let Some(colon) = t.find(':') {
+            let prefix = &t[..colon];
+            if !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()) {
+                if let Some(func) = pending.take() {
+                    frames.push(Frame {
+                        func,
+                        location: None,
+                    });
+                }
+                pending = Some(t[colon + 1..].trim().to_string());
+                continue;
+            }
+        }
+        // Location continuation: "at <path>"
+        if t.starts_with("at ") {
+            if let Some(func) = pending.take() {
+                frames.push(Frame {
+                    func,
+                    location: Some(t[3..].trim().to_string()),
+                });
+                continue;
+            }
+        }
+    }
+    if let Some(func) = pending {
+        frames.push(Frame {
+            func,
+            location: None,
+        });
+    }
+
+    // ── Filter to Fidan frames only ───────────────────────────────────────────
+    // Also drop the panic-hook closure itself (fidan::main::closure$N) since
+    // it is implementation noise, not a meaningful compiler frame.
+    let fidan: Vec<&Frame> = frames
+        .iter()
+        .filter(|f| {
+            let lower = f.func.to_lowercase();
+            lower.starts_with("fidan") && !lower.contains("closure")
+        })
+        .collect();
+
+    if fidan.is_empty() {
+        return;
+    }
+
+    // ── Render ────────────────────────────────────────────────────────────────
+    if is_color_enabled() {
+        let dim = "\x1b[2m";
+        let bold = "\x1b[1m";
+        let reset = "\x1b[0m";
+        eprintln!();
+        eprintln!("   {dim}stack trace{reset}");
+        for (i, frame) in fidan.iter().enumerate() {
+            eprintln!("   {dim}{:>3}.{reset} {bold}{}{reset}", i + 1, frame.func);
+            if let Some(loc) = &frame.location {
+                eprintln!("        {dim}at {loc}{reset}");
+            }
+        }
+        eprintln!();
+    } else {
+        eprintln!("\n   stack trace:");
+        for (i, frame) in fidan.iter().enumerate() {
+            eprintln!("   {:>3}. {}", i + 1, frame.func);
+            if let Some(loc) = &frame.location {
+                eprintln!("        at {loc}");
+            }
+        }
+        eprintln!();
+    }
+}
+
 // ── span-anchored renderer ────────────────────────────────────────────────────
 
 /// Render a span-anchored diagnostic to stderr.

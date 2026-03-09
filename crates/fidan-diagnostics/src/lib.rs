@@ -30,5 +30,5 @@ macro_rules! diag_code {
 pub use diagnostic::{Diagnostic, DiagnosticKind, Severity};
 pub use fix_engine::FixEngine;
 pub use label::Label;
-pub use render::{render_message_to_stderr, render_to_stderr};
+pub use render::{render_backtrace_to_stderr, render_message_to_stderr, render_to_stderr};
 pub use suggestion::{Confidence, SourceEdit, Suggestion};

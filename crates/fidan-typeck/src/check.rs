@@ -83,6 +83,9 @@ pub struct TypeChecker {
     /// Import bindings registered during Pass 1: (bound_symbol, item_span, is_grouped).
     /// Checked after Pass 2 to detect unused imports.
     import_bindings: Vec<(Symbol, Span, bool)>,
+    /// Set of all symbols bound by import statements — kept in sync with
+    /// `import_bindings` for O(1) "was this symbol imported?" checks.
+    import_syms: rustc_hash::FxHashSet<Symbol>,
     /// Every symbol that was successfully resolved by an `Expr::Ident` node.
     /// Used to determine which import bindings are unreferenced.
     referenced_names: rustc_hash::FxHashSet<Symbol>,
@@ -107,6 +110,7 @@ impl TypeChecker {
             cross_module_field_accesses: vec![],
             cross_module_call_sites: vec![],
             import_bindings: vec![],
+            import_syms: rustc_hash::FxHashSet::default(),
             referenced_names: rustc_hash::FxHashSet::default(),
         };
         tc.register_builtins();
@@ -256,6 +260,7 @@ impl TypeChecker {
         // @deprecated registrations from one module into another.
         self.deprecated_actions.clear();
         self.import_bindings.clear();
+        self.import_syms.clear();
         self.referenced_names.clear();
 
         // Pass 1: register every top-level declaration so forward references work.
@@ -395,6 +400,37 @@ impl TypeChecker {
                         obj.methods.insert(*mname, info);
                     }
                 }
+                // Duplicate / import-conflict check (E0109).
+                if let Some(existing) = self.objects.get(name) {
+                    let n = self.interner.resolve(*name).to_string();
+                    let first_span = existing.span;
+                    self.diags.push(
+                        Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0109"),
+                            format!("object `{n}` is already defined"),
+                            *span,
+                        )
+                        .with_label(Label::secondary(first_span, "first defined here")),
+                    );
+                } else if let Some(prev) = self.table.lookup_current_scope(*name) {
+                    let n = self.interner.resolve(*name).to_string();
+                    let is_import = self.import_syms.contains(name);
+                    let note = if is_import {
+                        "imported here — use an alias: `use ... as other_name`"
+                    } else {
+                        "first bound here"
+                    };
+                    self.diags.push(
+                        Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0109"),
+                            format!(
+                                "object `{n}` conflicts with an existing binding in this scope"
+                            ),
+                            *span,
+                        )
+                        .with_label(Label::secondary(prev.span, note)),
+                    );
+                }
                 self.objects.insert(*name, obj);
                 self.table.define(
                     *name,
@@ -416,6 +452,37 @@ impl TypeChecker {
             } => {
                 // Record the action's full signature for HIR lowering.
                 let info = self.build_action_info(params, return_ty, *span);
+                // Duplicate / import-conflict check (E0109).
+                if let Some(existing) = self.actions.get(name) {
+                    let n = self.interner.resolve(*name).to_string();
+                    let first_span = existing.span;
+                    self.diags.push(
+                        Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0109"),
+                            format!("action `{n}` is already defined"),
+                            *span,
+                        )
+                        .with_label(Label::secondary(first_span, "first defined here")),
+                    );
+                } else if let Some(prev) = self.table.lookup_current_scope(*name) {
+                    let n = self.interner.resolve(*name).to_string();
+                    let is_import = self.import_syms.contains(name);
+                    let note = if is_import {
+                        "imported here — use an alias: `use ... as other_name`"
+                    } else {
+                        "first bound here"
+                    };
+                    self.diags.push(
+                        Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0109"),
+                            format!(
+                                "action `{n}` conflicts with an existing binding in this scope"
+                            ),
+                            *span,
+                        )
+                        .with_label(Label::secondary(prev.span, note)),
+                    );
+                }
                 self.actions.insert(*name, info);
                 self.table.define(
                     *name,
@@ -545,6 +612,25 @@ impl TypeChecker {
                         } else {
                             *path.last().unwrap()
                         };
+                        // Import-vs-declaration conflict check (E0109, Case B).
+                        if let Some(prev) = self.table.lookup_current_scope(binding_sym) {
+                            if matches!(prev.kind, SymbolKind::Object | SymbolKind::Action) {
+                                let n = self.interner.resolve(binding_sym).to_string();
+                                let kind_word = if prev.kind == SymbolKind::Object {
+                                    "object"
+                                } else {
+                                    "action"
+                                };
+                                self.diags.push(
+                                    Diagnostic::error(
+                                        fidan_diagnostics::diag_code!("E0109"),
+                                        format!("import `{n}` conflicts with a top-level {kind_word} declaration — use an alias: `use ... as other_name`"),
+                                        *span,
+                                    )
+                                    .with_label(Label::secondary(prev.span, "declared here")),
+                                );
+                            }
+                        }
                         self.table.define(
                             binding_sym,
                             SymbolInfo {
@@ -557,6 +643,7 @@ impl TypeChecker {
                         );
                         if !re_export && !self.is_repl {
                             self.import_bindings.push((binding_sym, *span, *grouped));
+                            self.import_syms.insert(binding_sym);
                         }
                     }
                 } else if !path.is_empty() && path.first() != Some(&std_sym) {
@@ -582,6 +669,24 @@ impl TypeChecker {
                         // `use "./utils.fdn" as utils` → bind `utils` as Dynamic.
                         // Plain `use "./utils.fdn"` exposes everything flat — no binding.
                         if let Some(&a) = alias.as_ref() {
+                            if let Some(prev) = self.table.lookup_current_scope(a) {
+                                if matches!(prev.kind, SymbolKind::Object | SymbolKind::Action) {
+                                    let n = self.interner.resolve(a).to_string();
+                                    let kind_word = if prev.kind == SymbolKind::Object {
+                                        "object"
+                                    } else {
+                                        "action"
+                                    };
+                                    self.diags.push(
+                                        Diagnostic::error(
+                                            fidan_diagnostics::diag_code!("E0109"),
+                                            format!("import `{n}` conflicts with a top-level {kind_word} declaration — use a different alias"),
+                                            *span,
+                                        )
+                                        .with_label(Label::secondary(prev.span, "declared here")),
+                                    );
+                                }
+                            }
                             self.table.define(
                                 a,
                                 SymbolInfo {
@@ -594,9 +699,29 @@ impl TypeChecker {
                             );
                             if !re_export && !self.is_repl {
                                 self.import_bindings.push((a, *span, false));
+                                self.import_syms.insert(a);
                             }
                         }
                     } else {
+                        // Import-vs-declaration conflict check (E0109, Case B).
+                        if let Some(prev) = self.table.lookup_current_scope(binding_sym) {
+                            if matches!(prev.kind, SymbolKind::Object | SymbolKind::Action) {
+                                let n = self.interner.resolve(binding_sym).to_string();
+                                let kind_word = if prev.kind == SymbolKind::Object {
+                                    "object"
+                                } else {
+                                    "action"
+                                };
+                                self.diags.push(
+                                    Diagnostic::error(
+                                        fidan_diagnostics::diag_code!("E0109"),
+                                        format!("import `{n}` conflicts with a top-level {kind_word} declaration — use an alias: `use ... as other_name`"),
+                                        *span,
+                                    )
+                                    .with_label(Label::secondary(prev.span, "declared here")),
+                                );
+                            }
+                        }
                         self.table.define(
                             binding_sym,
                             SymbolInfo {
@@ -609,6 +734,7 @@ impl TypeChecker {
                         );
                         if !re_export && !self.is_repl {
                             self.import_bindings.push((binding_sym, *span, *grouped));
+                            self.import_syms.insert(binding_sym);
                         }
                     }
                 }
@@ -625,6 +751,35 @@ impl TypeChecker {
                         .collect(),
                     span: *span,
                 };
+                // Duplicate / import-conflict check (E0109).
+                if let Some(existing) = self.enums.get(name) {
+                    let n = self.interner.resolve(*name).to_string();
+                    let first_span = existing.span;
+                    self.diags.push(
+                        Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0109"),
+                            format!("enum `{n}` is already defined"),
+                            *span,
+                        )
+                        .with_label(Label::secondary(first_span, "first defined here")),
+                    );
+                } else if let Some(prev) = self.table.lookup_current_scope(*name) {
+                    let n = self.interner.resolve(*name).to_string();
+                    let is_import = self.import_syms.contains(name);
+                    let note = if is_import {
+                        "imported here — use an alias: `use ... as other_name`"
+                    } else {
+                        "first bound here"
+                    };
+                    self.diags.push(
+                        Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0109"),
+                            format!("enum `{n}` conflicts with an existing binding in this scope"),
+                            *span,
+                        )
+                        .with_label(Label::secondary(prev.span, note)),
+                    );
+                }
                 self.enums.insert(*name, info);
                 self.table.define(
                     *name,
