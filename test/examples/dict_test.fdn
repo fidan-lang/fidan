@@ -1,0 +1,4 @@
+var scores = {"Alice": 95, "Bob": 87}
+var key = "Alice"
+var val = scores[key]
+print("{val}")

@@ -1,0 +1,8 @@
+var day = 3
+var day_name = check day {
+    1 => "Monday"
+    2 => "Tuesday"
+    3 => "Wednesday"
+    _ => "Weekend"
+}
+print("{day_name}")
