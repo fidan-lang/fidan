@@ -1,0 +1,81 @@
+§1 vars: 10 20 3.14159 hello true nothing
+§2 compound assign: 7
+§2 sum 1..9 = 45
+§3 simple: Hello, Alice! You are 30 years old.
+§3 expr in var: 7
+§3 inline expr: 7
+§3 inline bool: true
+§4 trim: 'Hello, World!'
+§4 lower: fidan
+§4 upper: FIDAN
+§4 contains 'quick': true
+§4 contains 'slow': false
+§4 starts_with 'the': true
+§4 ends_with 'fox': true
+§4 replace: the quick brown cat
+§4 split len: 3
+§4 split[0]: one
+§4 split[2]: three
+§4 join: Hello, World, Fidan
+§5 after append len: 9
+§5 sorted[0]: 1
+§5 sorted[-1]: 9
+§5 reversed[0]: 9
+§5 contains 5: true
+§5 contains 99: false
+§5 find 5 idx: 3
+§5 removed[0] = 9
+§6 Alice: 95
+§6 Bob: 87
+§6 Dave: 88
+§7 destruct: 10 20 30
+§8 abs(-7): 7
+§8 sqrt(16.0): 4.0
+§8 floor(3.7): 3
+§8 ceil(3.2): 4
+§8 round(2.5): 3
+§8 max(3,7): 7
+§8 min(3,7): 3
+§9 evens: 2, 4, 6, 8, 10
+§9 5! = 120
+§9 break+continue sum even 1..10 = 30
+§9 matrix sum: 36
+§10 grade B = good
+§10 wildcard: other grade
+§10 day_name: Wednesday
+§11 Dog.greet: Hi, I am Fido! I am a Dog and I say 'Woof'.
+§11 obj display: <Dog>
+§12 caught: test error
+§12 finally ran
+§12 otherwise ran
+§12 finally ran (no error)
+§12 inner finally
+§12 outer caught: deep error
+§12 rethrow_caught: true
+§13 pow: 1024
+§13 rem: 2
+§13 bitand: 2
+§13 bitor: 15
+§13 bitxor: 6
+§13 shl: 16
+§13 shr: 8
+§13 and: false
+§13 or: true
+§13 not: false
+§14 int('42'): 42
+§14 float('3.14'): 3.14
+§14 string(99): 99
+§14 boolean(0): false
+§14 boolean(1): true
+§15 ternary: pass
+§15 null-coalesce: default
+§15 coalesce present: real
+§16 inclusive sum 1..5 = 15
+§17 p1: (0.0, 0.0)
+§17 p2: (3.0, 4.0)
+§17 dist: 5.0
+§18 first-class action: 42
+§19 counter (nested loops): 6
+§20 string catch: string exception
+§20 type caught: string
+All comprehensive tests done!

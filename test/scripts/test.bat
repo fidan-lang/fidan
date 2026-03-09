@@ -1,5 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
+cd /d "%~dp0..\.."
 
 cargo build -q 2>&1
 cargo test -q 2>&1

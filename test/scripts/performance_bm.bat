@@ -4,10 +4,11 @@
 :: Runs test/examples/parallel_benchmark.fdn in release mode and prints the
 :: sequential vs parallel speedup numbers.
 ::
-:: Usage (from workspace root):
-::   scripts\performance_bm.bat
+:: Usage:
+::   test\scripts\performance_bm.bat
 
 setlocal
+cd /d "%~dp0..\.."
 
 echo === Fidan Parallel Benchmark ===
 echo.
