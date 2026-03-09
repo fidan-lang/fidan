@@ -11,8 +11,8 @@ Please read this document before submitting a contribution.
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/AppSolves/Fidan
-cd Fidan
+git clone https://github.com/fidan-lang/fidan.git
+cd fidan
 ```
 
 ### 2. Build the workspace
