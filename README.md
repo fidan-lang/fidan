@@ -70,22 +70,22 @@ Most languages make a trade-off: either **readable** (Python) or **fast** (C++/R
 | English-like readable syntax | ✅ | ⚠️ partial | ❌ | ❌ | ❌ |
 | Static typing + full inference | ✅ | ❌ | ✅ | ✅ | ✅ |
 | Null safety (compile-time) | ✅ | ❌ | ⚠️ opt-in | ⚠️ partial | ✅ |
-| `certain` non-null parameter contract | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Data-race detection (compile-time) | ✅ | N/A | N/A | ❌ | ✅ |
+| `certain` non-null parameter contract | ✅ | ❌ | ❌ | ❌ | ⚠️ (via type system) |
+| Data-race detection (compile-time) | ✅ | N/A | N/A | ⚠️ runtime | ✅ |
 | Real OS thread parallelism | ✅ | ❌ (GIL) | ❌ | ✅ | ✅ |
 | Built-in `spawn`/`await` model | ✅ | ⚠️ asyncio | ✅ | ✅ goroutines | ✅ |
 | JIT compilation (`@precompile`) | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Built-in formatter | ✅ | ❌ (black) | ❌ (prettier) | ✅ | ✅ |
-| Built-in linter + auto-fixer | ✅ | ❌ (ruff) | ❌ | ❌ | ⚠️ clippy |
+| Built-in linter + auto-fixer | ✅ | ❌ (ruff) | ❌ | ⚠️ | ⚠️ clippy |
 | Built-in REPL | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Built-in LSP server | ✅ | ❌ (pylsp) | ✅ (tsserver) | ❌ | ❌ (rust-analyzer) |
+| Built-in LSP server | ✅ | ❌ (pylsp) | ✅ (tsserver) | ⚠️ | ⚠️ (rust-analyzer) |
 | Replay-based crash reproduction | ✅ | ❌ | ❌ | ❌ | ❌ |
 | `explain-line` static analysis | ✅ | ❌ | ❌ | ❌ | ❌ |
 | First-class test blocks | ✅ | ❌ (unittest) | ❌ (jest) | ✅ | ✅ |
 | Hot reload (`--reload`) | ✅ | ❌ | ❌ | ❌ | ❌ |
 | String synonyms (`is`, `equals`, `and`, …) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `check` pattern matching | ✅ | ❌ (match 3.10+) | ❌ | ❌ | ✅ |
-| Multi-line comments (nested) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `check` pattern matching | ✅ | ⚠️ (match 3.10+) | ❌ | ❌ | ✅ |
+| Multi-line comments (nested) | ✅ | ❌ | ❌ | ❌ | ✅ |
 
 ---
 
