@@ -8,7 +8,7 @@
 
 **A modern, expressive, human-readable programming language built for clarity, safety, and real-world performance.**
 
-[![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; ![Build](https://img.shields.io/badge/build-passing-brightgreen.svg) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](editors/vscode)
+[![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; ![Build](https://img.shields.io/badge/build-passing-brightgreen.svg) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://github.com/fidan-lang/fidan-editors/tree/main/vscode)
 
 [Getting Started](#-getting-started) • [Language Tour](#-language-tour) • [CLI Reference](#-cli-reference) • [Standard Library](#-standard-library) • [VS Code Extension](#-vs-code-extension) • [Contributing](#-contributing)
 
