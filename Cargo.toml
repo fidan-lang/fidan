@@ -80,6 +80,7 @@ cranelift-object = "0.129.1"
 
 [profile.dev]
 opt-level = 1 # faster builds in dev without being fully unoptimised
+debug = true
 
 [profile.release]
 opt-level = 3
