@@ -309,7 +309,7 @@ fn main() -> Result<()> {
             Severity::Error,
             "internal",
             &format!(
-                "compiler crashed: {msg}{loc}\n  This is a bug — please report it at https://github.com/AppSolves/Fidan/issues"
+                "compiler crashed: {msg}{loc}\n  This is a bug — please report it at https://github.com/fidan-lang/fidan/issues"
             ),
         );
         // Render filtered Fidan-only stack frames below the crash box.

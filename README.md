@@ -96,7 +96,7 @@ Most languages make a trade-off: either **readable** (Python) or **fast** (C++/R
 ### Build from source
 
 ```bash
-git clone https://github.com/AppSolves/Fidan.git
+git clone https://github.com/fidan-lang/fidan.git
 cd Fidan
 cargo build --release
 ```
@@ -719,7 +719,7 @@ print(PI)            # 3.141592653589793
 <!-- PLACEHOLDER: screenshot of extension in action -->
 ![VS Code Extension](https://via.placeholder.com/800x400/1a1a2e/e0e0ff?text=VS+Code+Extension+screenshot)
 
-Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=AppSolves.fidan) *(coming soon)* or build locally:
+Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=fidan.fidan) *(coming soon)* or build locally:
 
 ```bash
 git clone https://github.com/fidan-lang/fidan-editors.git
@@ -896,6 +896,6 @@ See [LICENSE](LICENSE) for the full text.
 
 Made with ❤️ by [Kaan Gönüldinc (AppSolves)](https://github.com/AppSolves).
 
-[⭐ Star this repo](https://github.com/AppSolves/Fidan) if you find Fidan interesting!
+[⭐ Star this repo](https://github.com/fidan-lang/fidan) if you find Fidan interesting!
 
 </div>
