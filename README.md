@@ -55,7 +55,7 @@ Most languages make a trade-off: either **readable** (Python) or **fast** (C++/R
 |---|---|
 | **Readable code** | English-like syntax (`and`, `or`, `not`, `is`, `certain`, `otherwise when`…) |
 | **Safety without ceremony** | Null-safety analysis, `certain` non-null guarantees, data-race detection at compile time |
-| **Performance** | MIR-level optimization passes + Cranelift JIT (`@precompile`, auto hot-path), LLVM AOT on the roadmap |
+| **Performance** | MIR-level optimization passes + Cranelift JIT (`@precompile`, auto hot-path) + AOT, LLVM on the roadmap |
 | **Real concurrency** | `parallel`, `concurrent`, `spawn`/`await` — backed by real OS threads, not green threads |
 | **Great tooling** | Formatter, linter, fixer, REPL, LSP, VS Code extension — all built-in, not plugins |
 | **Reproducible debugging** | `--replay` captures stdin and replays crashes exactly |
