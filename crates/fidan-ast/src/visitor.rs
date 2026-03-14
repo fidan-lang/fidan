@@ -1,4 +1,4 @@
-use crate::{Expr, Stmt, Item, ExprId, StmtId, ItemId};
+use crate::{Expr, ExprId, Item, ItemId, Stmt, StmtId};
 
 /// Visitor trait for AST traversal. Override only the methods you need.
 pub trait AstVisitor {

@@ -20,9 +20,9 @@ const DECORATOR_PRECOMPILE: &str = "precompile";
 const BUILTIN_DECORATORS: &[&str] = &[DECORATOR_PRECOMPILE, "deprecated"];
 
 use crate::hir::{
-    CustomDecorator, DecoratorArg, HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm,
-    HirElseIf, HirExpr, HirExprKind, HirField, HirFunction, HirGlobal, HirInterpPart, HirModule,
-    HirObject, HirParam, HirStmt, HirTask, HirTestDecl, HirUseDecl,
+    CustomDecorator, DecoratorArg, HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf,
+    HirExpr, HirExprKind, HirField, HirFunction, HirGlobal, HirInterpPart, HirModule, HirObject,
+    HirParam, HirStmt, HirTask, HirTestDecl, HirUseDecl,
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -134,7 +134,14 @@ impl<'a> Ctx<'a> {
                 object: Box::new(self.lower_expr(object)),
                 index: Box::new(self.lower_expr(index)),
             },
-            Expr::Slice { target, start, end, inclusive, step, .. } => HirExprKind::Slice {
+            Expr::Slice {
+                target,
+                start,
+                end,
+                inclusive,
+                step,
+                ..
+            } => HirExprKind::Slice {
                 target: Box::new(self.lower_expr(target)),
                 start: start.map(|e| Box::new(self.lower_expr(e))),
                 end: end.map(|e| Box::new(self.lower_expr(e))),
@@ -155,23 +162,32 @@ impl<'a> Ctx<'a> {
                 HirExprKind::Tuple(elements.iter().map(|&e| self.lower_expr(e)).collect())
             }
 
-            Expr::ListComp { element, binding, iterable, filter, .. } => {
-                HirExprKind::ListComp {
-                    element: Box::new(self.lower_expr(element)),
-                    binding,
-                    iterable: Box::new(self.lower_expr(iterable)),
-                    filter: filter.map(|f| Box::new(self.lower_expr(f))),
-                }
-            }
-            Expr::DictComp { key, value, binding, iterable, filter, .. } => {
-                HirExprKind::DictComp {
-                    key: Box::new(self.lower_expr(key)),
-                    value: Box::new(self.lower_expr(value)),
-                    binding,
-                    iterable: Box::new(self.lower_expr(iterable)),
-                    filter: filter.map(|f| Box::new(self.lower_expr(f))),
-                }
-            }
+            Expr::ListComp {
+                element,
+                binding,
+                iterable,
+                filter,
+                ..
+            } => HirExprKind::ListComp {
+                element: Box::new(self.lower_expr(element)),
+                binding,
+                iterable: Box::new(self.lower_expr(iterable)),
+                filter: filter.map(|f| Box::new(self.lower_expr(f))),
+            },
+            Expr::DictComp {
+                key,
+                value,
+                binding,
+                iterable,
+                filter,
+                ..
+            } => HirExprKind::DictComp {
+                key: Box::new(self.lower_expr(key)),
+                value: Box::new(self.lower_expr(value)),
+                binding,
+                iterable: Box::new(self.lower_expr(iterable)),
+                filter: filter.map(|f| Box::new(self.lower_expr(f))),
+            },
 
             Expr::StringInterp { parts, .. } => {
                 HirExprKind::StringInterp(parts.iter().map(|p| self.lower_interp_part(p)).collect())
@@ -254,20 +270,38 @@ impl<'a> Ctx<'a> {
         let ty = self.ty(id);
         let span = expr.span();
 
-        if let Expr::Call { callee: callee_id, args, .. } = &expr {
+        if let Expr::Call {
+            callee: callee_id,
+            args,
+            ..
+        } = &expr
+        {
             let callee_expr = self.arena.get_expr(*callee_id).clone();
-            if let Expr::Field { object: obj_id, field, .. } = callee_expr {
+            if let Expr::Field {
+                object: obj_id,
+                field,
+                ..
+            } = callee_expr
+            {
                 let obj_ty = self.ty(obj_id);
                 if let FidanType::Enum(enum_sym) = obj_ty {
                     let bindings: Vec<Symbol> = args
                         .iter()
                         .filter_map(|arg| {
                             let arg_expr = self.arena.get_expr(arg.value).clone();
-                            if let Expr::Ident { name, .. } = arg_expr { Some(name) } else { None }
+                            if let Expr::Ident { name, .. } = arg_expr {
+                                Some(name)
+                            } else {
+                                None
+                            }
                         })
                         .collect();
                     return HirExpr {
-                        kind: HirExprKind::EnumDestructure { enum_sym, tag: field, bindings },
+                        kind: HirExprKind::EnumDestructure {
+                            enum_sym,
+                            tag: field,
+                            bindings,
+                        },
                         ty,
                         span,
                     };
@@ -669,11 +703,8 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                             let precompile = decorators.iter().any(|d| {
                                 ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE
                             });
-                            let custom_decs = extract_custom_decorators(
-                                ctx.arena,
-                                &decorators,
-                                ctx.interner,
-                            );
+                            let custom_decs =
+                                extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
                             Some(ctx.lower_function(
                                 mname,
                                 None,
@@ -718,8 +749,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 let precompile = decorators
                     .iter()
                     .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
-                let custom_decs =
-                    extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
+                let custom_decs = extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
                 functions.push(ctx.lower_function(
                     name,
                     None,
@@ -753,8 +783,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 let precompile = decorators
                     .iter()
                     .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
-                let custom_decs =
-                    extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
+                let custom_decs = extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
                 functions.push(ctx.lower_function(
                     name,
                     Some(extends),
@@ -836,10 +865,17 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
             }
 
             // Enum declarations: lowered into HirEnum entries (MIR will create globals).
-            Item::EnumDecl { name, variants, span } => {
+            Item::EnumDecl {
+                name,
+                variants,
+                span,
+            } => {
                 enums.push(crate::hir::HirEnum {
                     name,
-                    variants: variants.iter().map(|v| (v.name, v.payload_types.len())).collect(),
+                    variants: variants
+                        .iter()
+                        .map(|v| (v.name, v.payload_types.len()))
+                        .collect(),
                     span,
                 });
             }

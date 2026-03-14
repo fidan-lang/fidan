@@ -334,18 +334,30 @@ fn fmt_rvalue(rv: &Rvalue) -> String {
             let caps = captures.iter().map(fmt_op).collect::<Vec<_>>().join(", ");
             format!("make_closure(fn#{}, [{}])", fn_id, caps)
         }
-        Rvalue::Slice { target, start, end, inclusive, step } => {
+        Rvalue::Slice {
+            target,
+            start,
+            end,
+            inclusive,
+            step,
+        } => {
             let op = if *inclusive { "..." } else { ".." };
-            let s  = start.as_ref().map(fmt_op).unwrap_or_default();
-            let e  = end.as_ref().map(fmt_op).unwrap_or_default();
-            let st = step.as_ref().map(|x| format!(" step {}", fmt_op(x))).unwrap_or_default();
+            let s = start.as_ref().map(fmt_op).unwrap_or_default();
+            let e = end.as_ref().map(fmt_op).unwrap_or_default();
+            let st = step
+                .as_ref()
+                .map(|x| format!(" step {}", fmt_op(x)))
+                .unwrap_or_default();
             format!("{}[{}{}{}{}]", fmt_op(target), s, op, e, st)
         }
         Rvalue::ConstructEnum { tag, payload } => {
             let ps = payload.iter().map(fmt_op).collect::<Vec<_>>().join(", ");
             format!("ConstructEnum(sym#{})({})", tag.0, ps)
         }
-        Rvalue::EnumTagCheck { value, expected_tag } => {
+        Rvalue::EnumTagCheck {
+            value,
+            expected_tag,
+        } => {
             format!("{}.tag == sym#{}", fmt_op(value), expected_tag.0)
         }
         Rvalue::EnumPayload { value, index } => {

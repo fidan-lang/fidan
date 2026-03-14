@@ -10,9 +10,9 @@ pub struct ByteOffset(pub u32);
 /// they carry no semantic information, just a location.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Span {
-    pub file:  FileId,
-    pub start: u32,   // byte offset, inclusive
-    pub end:   u32,   // byte offset, exclusive
+    pub file: FileId,
+    pub start: u32, // byte offset, inclusive
+    pub end: u32,   // byte offset, exclusive
 }
 
 impl Span {
@@ -23,16 +23,23 @@ impl Span {
 
     /// A zero-length span pointing at a single byte position.
     pub fn point(file: FileId, offset: u32) -> Self {
-        Self { file, start: offset, end: offset }
+        Self {
+            file,
+            start: offset,
+            end: offset,
+        }
     }
 
     /// Merge two spans (must be from the same file) into one that covers both.
     pub fn merge(self, other: Span) -> Span {
-        debug_assert_eq!(self.file, other.file, "cannot merge spans from different files");
+        debug_assert_eq!(
+            self.file, other.file,
+            "cannot merge spans from different files"
+        );
         Span {
-            file:  self.file,
+            file: self.file,
             start: self.start.min(other.start),
-            end:   self.end.max(other.end),
+            end: self.end.max(other.end),
         }
     }
 
@@ -49,7 +56,7 @@ impl Span {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Location {
     pub line: u32,
-    pub col:  u32,
+    pub col: u32,
 }
 
 impl std::fmt::Display for Location {
@@ -60,5 +67,7 @@ impl std::fmt::Display for Location {
 
 // Make FileId default to 0 so Span::default() works without a file.
 impl Default for FileId {
-    fn default() -> Self { FileId(0) }
+    fn default() -> Self {
+        FileId(0)
+    }
 }

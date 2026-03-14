@@ -19,7 +19,9 @@ pub struct AstArena {
 }
 
 impl AstArena {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     pub fn alloc_expr(&mut self, e: crate::Expr) -> ExprId {
         let id = ExprId(self.exprs.len() as u32);
@@ -39,7 +41,13 @@ impl AstArena {
         id
     }
 
-    pub fn get_expr(&self, id: ExprId) -> &crate::Expr { &self.exprs[id.0 as usize] }
-    pub fn get_stmt(&self, id: StmtId) -> &crate::Stmt { &self.stmts[id.0 as usize] }
-    pub fn get_item(&self, id: ItemId) -> &crate::Item { &self.items[id.0 as usize] }
+    pub fn get_expr(&self, id: ExprId) -> &crate::Expr {
+        &self.exprs[id.0 as usize]
+    }
+    pub fn get_stmt(&self, id: StmtId) -> &crate::Stmt {
+        &self.stmts[id.0 as usize]
+    }
+    pub fn get_item(&self, id: ItemId) -> &crate::Item {
+        &self.items[id.0 as usize]
+    }
 }

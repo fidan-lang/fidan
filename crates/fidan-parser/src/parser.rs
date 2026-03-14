@@ -2,8 +2,8 @@
 use std::sync::Arc;
 
 use fidan_ast::{
-    BinOp, CatchClause, CheckArm, Decorator, ElseIf, EnumVariantDef, Expr, FieldDecl, Item,
-    ItemId, Module, Param, Stmt, StmtId, Task, TypeExpr,
+    BinOp, CatchClause, CheckArm, Decorator, ElseIf, EnumVariantDef, Expr, FieldDecl, Item, ItemId,
+    Module, Param, Stmt, StmtId, Task, TypeExpr,
 };
 use fidan_diagnostics::Diagnostic;
 use fidan_lexer::{Symbol, SymbolInterner, Token, TokenKind};

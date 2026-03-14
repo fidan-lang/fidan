@@ -8,6 +8,8 @@ pub struct Session {
 
 impl Session {
     pub fn new() -> Self {
-        Session { source_map: Arc::new(SourceMap::new()) }
+        Session {
+            source_map: Arc::new(SourceMap::new()),
+        }
     }
 }

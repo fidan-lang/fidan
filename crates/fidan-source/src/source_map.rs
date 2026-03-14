@@ -1,5 +1,5 @@
+use crate::{FileId, Location, SourceFile};
 use std::sync::{Arc, RwLock};
-use crate::{FileId, SourceFile, Location};
 
 /// Central registry for all source files in a compilation session.
 ///

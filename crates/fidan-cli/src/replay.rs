@@ -1,4 +1,4 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 // ── Replay bundle helpers ─────────────────────────────────────────────────────
 //
@@ -37,8 +37,7 @@ pub(crate) fn save_replay_bundle(source: &std::path::Path, lines: &[String]) -> 
     let id = format!("{:08x}", h.finish() & 0xFFFF_FFFF);
 
     let dir = replay_dir();
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("cannot create replay dir {:?}", dir))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create replay dir {:?}", dir))?;
 
     let path = dir.join(format!("{id}.bundle"));
     let mut content = String::from("fidan-replay-v1\n");

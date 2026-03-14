@@ -8,12 +8,22 @@ use std::rc::Rc;
 pub struct OwnedRef<T>(pub Rc<RefCell<T>>);
 
 impl<T> OwnedRef<T> {
-    pub fn new(val: T) -> Self { OwnedRef(Rc::new(RefCell::new(val))) }
-    pub fn borrow(&self) -> std::cell::Ref<'_, T> { self.0.borrow() }
-    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, T> { self.0.borrow_mut() }
-    pub fn clone_ref(&self) -> Self { OwnedRef(Rc::clone(&self.0)) }
+    pub fn new(val: T) -> Self {
+        OwnedRef(Rc::new(RefCell::new(val)))
+    }
+    pub fn borrow(&self) -> std::cell::Ref<'_, T> {
+        self.0.borrow()
+    }
+    pub fn borrow_mut(&self) -> std::cell::RefMut<'_, T> {
+        self.0.borrow_mut()
+    }
+    pub fn clone_ref(&self) -> Self {
+        OwnedRef(Rc::clone(&self.0))
+    }
 }
 
 impl<T: Clone> OwnedRef<T> {
-    pub fn deep_clone(&self) -> Self { OwnedRef::new(self.0.borrow().clone()) }
+    pub fn deep_clone(&self) -> Self {
+        OwnedRef::new(self.0.borrow().clone())
+    }
 }

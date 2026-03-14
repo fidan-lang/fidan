@@ -22,8 +22,7 @@ use regex::Regex;
 
 /// Process-wide cache: pattern string → compiled `Regex`.
 /// `DashMap` allows concurrent reads without a global lock.
-static REGEX_CACHE: LazyLock<DashMap<String, Arc<Regex>>> =
-    LazyLock::new(DashMap::new);
+static REGEX_CACHE: LazyLock<DashMap<String, Arc<Regex>>> = LazyLock::new(DashMap::new);
 
 fn as_str(v: &FidanValue) -> String {
     match v {

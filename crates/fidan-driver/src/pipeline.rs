@@ -20,7 +20,9 @@ pub fn compile(
         ExecutionMode::Build => match opts.backend {
             crate::options::Backend::Cranelift => compile_aot_cranelift(program, interner, opts),
             crate::options::Backend::Llvm => {
-                anyhow::bail!("LLVM backend is not yet implemented. Use --backend cranelift (default).")
+                anyhow::bail!(
+                    "LLVM backend is not yet implemented. Use --backend cranelift (default)."
+                )
             }
         },
         // Interpret / check / test modes are dispatched in the CLI before reaching here.

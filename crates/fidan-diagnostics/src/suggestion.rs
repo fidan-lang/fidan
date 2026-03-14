@@ -52,7 +52,10 @@ impl Suggestion {
     ) -> Self {
         Self {
             message: message.into(),
-            edit: Some(SourceEdit { span, replacement: replacement.into() }),
+            edit: Some(SourceEdit {
+                span,
+                replacement: replacement.into(),
+            }),
             confidence,
         }
     }

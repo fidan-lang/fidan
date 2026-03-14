@@ -9,10 +9,20 @@ pub struct FidanList {
 }
 
 impl FidanList {
-    pub fn new() -> Self { FidanList { inner: Arc::new(Vec::new()) } }
-    pub fn len(&self) -> usize { self.inner.len() }
-    pub fn is_empty(&self) -> bool { self.inner.is_empty() }
-    pub fn get(&self, idx: usize) -> Option<&FidanValue> { self.inner.get(idx) }
+    pub fn new() -> Self {
+        FidanList {
+            inner: Arc::new(Vec::new()),
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+    pub fn get(&self, idx: usize) -> Option<&FidanValue> {
+        self.inner.get(idx)
+    }
 
     /// Append a value. Clones the inner Vec only if there are other owners.
     pub fn append(&mut self, val: FidanValue) {
@@ -33,5 +43,7 @@ impl FidanList {
 }
 
 impl Default for FidanList {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }

@@ -7,14 +7,14 @@ pub struct FileId(pub u32);
 /// A loaded source file: its path, raw text, and pre-computed line start offsets.
 #[derive(Debug, Clone)]
 pub struct SourceFile {
-    pub id:           FileId,
+    pub id: FileId,
     /// The file path as given on the command line (may be relative).
-    pub name:         Arc<str>,
+    pub name: Arc<str>,
     /// The raw UTF-8 source text.
-    pub src:          Arc<str>,
+    pub src: Arc<str>,
     /// Byte offset of the start of each line.
     /// `line_starts[0]` is always 0 (start of the file).
-    pub line_starts:  Vec<u32>,
+    pub line_starts: Vec<u32>,
 }
 
 impl SourceFile {
@@ -22,7 +22,12 @@ impl SourceFile {
     pub fn new(id: FileId, name: impl Into<Arc<str>>, src: impl Into<Arc<str>>) -> Self {
         let src: Arc<str> = src.into();
         let line_starts = Self::compute_line_starts(&src);
-        Self { id, name: name.into(), src, line_starts }
+        Self {
+            id,
+            name: name.into(),
+            src,
+            line_starts,
+        }
     }
 
     fn compute_line_starts(src: &str) -> Vec<u32> {

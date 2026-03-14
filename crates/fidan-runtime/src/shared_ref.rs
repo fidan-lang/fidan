@@ -6,6 +6,10 @@ use std::sync::{Arc, Mutex};
 pub struct SharedRef<T>(pub Arc<Mutex<T>>);
 
 impl<T> SharedRef<T> {
-    pub fn new(val: T) -> Self { SharedRef(Arc::new(Mutex::new(val))) }
-    pub fn clone_ref(&self) -> Self { SharedRef(Arc::clone(&self.0)) }
+    pub fn new(val: T) -> Self {
+        SharedRef(Arc::new(Mutex::new(val)))
+    }
+    pub fn clone_ref(&self) -> Self {
+        SharedRef(Arc::clone(&self.0))
+    }
 }

@@ -2,11 +2,7 @@
 
 use fidan_runtime::{FidanDict, FidanList, FidanValue, OwnedRef};
 
-pub fn dispatch(
-    d: OwnedRef<FidanDict>,
-    method: &str,
-    args: Vec<FidanValue>,
-) -> Option<FidanValue> {
+pub fn dispatch(d: OwnedRef<FidanDict>, method: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
     match method {
         "get" => {
             if let Some(FidanValue::String(k)) = args.first() {

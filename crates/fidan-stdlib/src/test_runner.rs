@@ -7,7 +7,7 @@
 //!   `test.assert(cond)`, `test.assertEq(a, b)`, `test.assertNe(a, b)`,
 //!   `test.assertSome(v)`, `test.fail(msg)`
 
-use fidan_runtime::{display as format_val, FidanValue};
+use fidan_runtime::{FidanValue, display as format_val};
 
 /// Result of a single test case.
 #[derive(Debug, Clone)]

@@ -1,4 +1,4 @@
-﻿use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 
 pub(crate) fn run_explain(code: &str) {
@@ -1347,4 +1347,3 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
     println!();
     Ok(())
 }
-
