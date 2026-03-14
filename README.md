@@ -853,6 +853,26 @@ Contributions are welcome! By submitting a pull request or patch you acknowledge
 
 Please sign the CLA before your first PR is merged (the bot will prompt you automatically).
 
+### Git hooks
+
+This repository ships git hooks in `.githooks`.
+
+Install them after cloning:
+
+```powershell
+.\scripts\install-git-hooks.ps1
+```
+
+That script sets `core.hooksPath` to `.githooks` for this repository.
+
+You can verify the hook path with:
+
+```powershell
+git config --get core.hooksPath
+```
+
+The current `pre-commit` hook automatically runs `cargo fmt --all` when staged `.rs` files are present, then re-stages the formatted files for you.
+
 **Development setup:**
 
 ```bash
