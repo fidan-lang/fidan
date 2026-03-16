@@ -47,6 +47,7 @@ perf.data
 perf.data.old
 flamegraph.svg
 /scripts/*.log
+LOCAL/
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 *.log

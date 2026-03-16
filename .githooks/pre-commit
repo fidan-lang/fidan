@@ -18,3 +18,7 @@ echo "$staged_rust_files" | while IFS= read -r file; do
 done
 
 echo "pre-commit: Rust files formatted and re-staged"
+echo "pre-commit: running cargo clippy --workspace --all-targets -- -D warnings"
+cargo clippy --workspace --all-targets -- -D warnings
+
+echo "pre-commit: cargo fmt and cargo clippy passed"
