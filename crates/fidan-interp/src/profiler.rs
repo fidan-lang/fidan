@@ -105,18 +105,19 @@ impl ProfileReport {
         }
 
         // Suggestion block.
-        if let Some(top) = self.hot_paths.first() {
-            if top.pct > 80.0 && top.call_count > 0 {
-                let _ = writeln!(out);
-                let _ = writeln!(out, "  suggestion");
-                let _ = writeln!(
-                    out,
-                    "    action {} is >{:.0}% of runtime",
-                    top.name,
-                    top.pct.floor()
-                );
-                let _ = writeln!(out, "    consider annotating with @precompile");
-            }
+        if let Some(top) = self.hot_paths.first()
+            && top.pct > 80.0
+            && top.call_count > 0
+        {
+            let _ = writeln!(out);
+            let _ = writeln!(out, "  suggestion");
+            let _ = writeln!(
+                out,
+                "    action {} is >{:.0}% of runtime",
+                top.name,
+                top.pct.floor()
+            );
+            let _ = writeln!(out, "    consider annotating with @precompile");
         }
 
         out
@@ -159,8 +160,6 @@ impl ProfileReport {
 fn format_ms(ms: f64) -> String {
     if ms >= 1_000.0 {
         format!("{:.2} s  ", ms / 1_000.0)
-    } else if ms >= 1.0 {
-        format!("{:.3} ms ", ms)
     } else if ms >= 0.001 {
         format!("{:.3} ms ", ms)
     } else {

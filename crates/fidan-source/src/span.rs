@@ -64,10 +64,3 @@ impl std::fmt::Display for Location {
         write!(f, "{}:{}", self.line, self.col)
     }
 }
-
-// Make FileId default to 0 so Span::default() works without a file.
-impl Default for FileId {
-    fn default() -> Self {
-        FileId(0)
-    }
-}

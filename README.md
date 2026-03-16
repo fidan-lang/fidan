@@ -568,6 +568,42 @@ fidan <COMMAND> [OPTIONS] [FILE]
 | `fidan explain <code>` | Show detailed explanation of a diagnostic code |
 | `fidan explain-line <file> --line N` | Explain what line N does (static analysis) |
 | `fidan new <name>` | Scaffold a new Fidan project |
+| `fidan dal <command>` | Work with the Dal package registry |
+
+### `fidan dal` commands
+
+| Command | Description |
+|---|---|
+| `fidan dal login` | Store a Dal API token in the OS keychain for CLI use |
+| `fidan dal logout` | Remove the stored Dal API token from the OS keychain |
+| `fidan dal whoami` | Show the authenticated Dal account |
+| `fidan dal search <query>` | Search packages on Dal |
+| `fidan dal info <package>` | Show package metadata and published versions |
+| `fidan dal add <package>` | Download and vendor a package into a local importable module directory |
+| `fidan dal package [path]` | Build a canonical Dal `.tar.gz` archive locally |
+| `fidan dal publish [path]` | Build and publish the current package to Dal |
+| `fidan dal yank <package> <version>` | Yank a published version |
+| `fidan dal unyank <package> <version>` | Unyank a published version |
+
+`fidan dal add` installs packages into an import-safe local module directory.
+For example, a Dal package named `my-package` is installed so you can import it
+in Fidan as:
+
+```fidan
+use my_package
+```
+
+Dal token lookup order:
+
+1. `--token` argument to `fidan dal login`
+2. `FIDAN_DAL_API_TOKEN` environment override
+3. OS keychain / credential manager
+
+Registry lookup order:
+
+1. `--registry`
+2. `FIDAN_DAL_REGISTRY`
+3. default: `https://api.dal.fidan.dev`
 
 ### `fidan run` flags
 

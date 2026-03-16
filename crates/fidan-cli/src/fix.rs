@@ -34,10 +34,10 @@ pub(crate) fn run_fix(file: PathBuf, dry_run: bool) -> Result<()> {
         .chain(lex_diags.iter())
     {
         for sug in &diag.suggestions {
-            if sug.confidence == Confidence::High {
-                if let Some(edit) = &sug.edit {
-                    edits.push((edit.span.start, edit.span.end, edit.replacement.clone()));
-                }
+            if sug.confidence == Confidence::High
+                && let Some(edit) = &sug.edit
+            {
+                edits.push((edit.span.start, edit.span.end, edit.replacement.clone()));
             }
         }
     }

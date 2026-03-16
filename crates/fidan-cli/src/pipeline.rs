@@ -302,10 +302,10 @@ pub(crate) fn render_trace_to_stderr(trace: &[fidan_interp::TraceFrame], mode: T
                 String::new()
             };
             eprintln!("    #{i}  {display}{relation}");
-            if mode == TraceMode::Full {
-                if let Some(ref loc) = frame.location {
-                    eprintln!("         at {loc}");
-                }
+            if mode == TraceMode::Full
+                && let Some(ref loc) = frame.location
+            {
+                eprintln!("         at {loc}");
             }
         }
         if matches!(mode, TraceMode::Short) && trace.len() > 5 {
@@ -567,10 +567,8 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
 
         // Track canonical paths to break import cycles.
         let mut loaded: HashSet<std::path::PathBuf> = HashSet::new();
-        if !is_stdin {
-            if let Ok(canon) = opts.input.canonicalize() {
-                loaded.insert(canon);
-            }
+        if !is_stdin && let Ok(canon) = opts.input.canonicalize() {
+            loaded.insert(canon);
         }
 
         while let Some((import_path, expose, filter)) = queue.pop_front() {
@@ -813,54 +811,54 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     }
     match opts.mode {
         ExecutionMode::Interpret => {
-            if error_count == 0 {
-                if let Some(ref hir) = merged_hir {
-                    let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
-                    // ── MIR safety analysis (E0401, W1004) ───────────────────────
-                    error_count +=
-                        emit_mir_safety_diags(&mir, &interner, opts.strict_mode, &opts.suppress);
-                    if error_count == 0 {
-                        // ── Optimisation passes (Phase 6) ─────────────────────
-                        fidan_passes::run_all(&mut mir);
-                        let replay_inputs = std::mem::take(&mut opts.replay_inputs);
-                        let sandbox = opts.sandbox.take();
-                        let (result, captured) = fidan_interp::run_mir_with_replay(
-                            mir,
-                            Arc::clone(&interner),
-                            Arc::clone(&source_map),
-                            opts.jit_threshold,
-                            replay_inputs,
-                            sandbox,
-                        );
-                        if let Err(err) = result {
-                            render_message_to_stderr(Severity::Error, err.code, &err.message);
-                            if !err.trace.is_empty() && opts.trace != TraceMode::None {
-                                render_trace_to_stderr(&err.trace, opts.trace);
-                            }
-                            if opts.trace != TraceMode::Full {
-                                render_message_to_stderr(
+            if error_count == 0
+                && let Some(ref hir) = merged_hir
+            {
+                let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                // ── MIR safety analysis (E0401, W1004) ───────────────────────
+                error_count +=
+                    emit_mir_safety_diags(&mir, &interner, opts.strict_mode, &opts.suppress);
+                if error_count == 0 {
+                    // ── Optimisation passes (Phase 6) ─────────────────────
+                    fidan_passes::run_all(&mut mir);
+                    let replay_inputs = std::mem::take(&mut opts.replay_inputs);
+                    let sandbox = opts.sandbox.take();
+                    let (result, captured) = fidan_interp::run_mir_with_replay(
+                        mir,
+                        Arc::clone(&interner),
+                        Arc::clone(&source_map),
+                        opts.jit_threshold,
+                        replay_inputs,
+                        sandbox,
+                    );
+                    if let Err(err) = result {
+                        render_message_to_stderr(Severity::Error, err.code, &err.message);
+                        if !err.trace.is_empty() && opts.trace != TraceMode::None {
+                            render_trace_to_stderr(&err.trace, opts.trace);
+                        }
+                        if opts.trace != TraceMode::Full {
+                            render_message_to_stderr(
+                                Severity::Note,
+                                "",
+                                "run with `--trace full` for more details",
+                            );
+                        }
+                        // Save replay bundle if any stdin was captured.
+                        if !captured.is_empty() {
+                            match save_replay_bundle(&opts.input, &captured) {
+                                Ok(id) => render_message_to_stderr(
                                     Severity::Note,
-                                    "",
-                                    "run with `--trace full` for more details",
-                                );
-                            }
-                            // Save replay bundle if any stdin was captured.
-                            if !captured.is_empty() {
-                                match save_replay_bundle(&opts.input, &captured) {
-                                    Ok(id) => render_message_to_stderr(
-                                        Severity::Note,
-                                        "replay",
-                                        &format!(
-                                            "inputs saved — reproduce with: fidan run {} --replay {id}",
-                                            opts.input.display()
-                                        ),
+                                    "replay",
+                                    &format!(
+                                        "inputs saved — reproduce with: fidan run {} --replay {id}",
+                                        opts.input.display()
                                     ),
-                                    Err(e) => render_message_to_stderr(
-                                        Severity::Note,
-                                        "replay",
-                                        &format!("could not save replay bundle: {e}"),
-                                    ),
-                                }
+                                ),
+                                Err(e) => render_message_to_stderr(
+                                    Severity::Note,
+                                    "replay",
+                                    &format!("could not save replay bundle: {e}"),
+                                ),
                             }
                         }
                     }
@@ -874,134 +872,134 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             }
         }
         ExecutionMode::Build => {
-            if error_count == 0 {
-                if let Some(ref hir) = merged_hir {
-                    let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
-                    error_count +=
-                        emit_mir_safety_diags(&mir, &interner, opts.strict_mode, &opts.suppress);
-                    if error_count == 0 {
-                        fidan_passes::run_all(&mut mir);
-                        let session = fidan_driver::Session::new();
-                        if let Err(e) =
-                            fidan_driver::compile(&session, mir, Arc::clone(&interner), &opts)
-                        {
-                            render_message_to_stderr(
-                                Severity::Error,
-                                "",
-                                &format!("AOT compilation failed: {e:#}"),
-                            );
-                        }
+            if error_count == 0
+                && let Some(ref hir) = merged_hir
+            {
+                let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                error_count +=
+                    emit_mir_safety_diags(&mir, &interner, opts.strict_mode, &opts.suppress);
+                if error_count == 0 {
+                    fidan_passes::run_all(&mut mir);
+                    let session = fidan_driver::Session::new();
+                    if let Err(e) =
+                        fidan_driver::compile(&session, mir, Arc::clone(&interner), &opts)
+                    {
+                        render_message_to_stderr(
+                            Severity::Error,
+                            "",
+                            &format!("AOT compilation failed: {e:#}"),
+                        );
                     }
                 }
             }
         }
         ExecutionMode::Profile => {
-            if error_count == 0 {
-                if let Some(ref hir) = merged_hir {
-                    let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
-                    // Safety analysis warns about potential issues — profile run
-                    // continues regardless (warnings don't block profiling).
-                    emit_mir_safety_diags(&mir, &interner, false, &opts.suppress);
-                    fidan_passes::run_all(&mut mir);
-                    let prog_name = opts
-                        .input
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("?")
-                        .to_string();
-                    let (result, report) = fidan_interp::run_mir_with_profile(
-                        mir,
-                        Arc::clone(&interner),
-                        Arc::clone(&source_map),
-                        &prog_name,
-                    );
-                    if let Err(ref err) = result {
-                        render_message_to_stderr(Severity::Error, err.code, &err.message);
-                        if !err.trace.is_empty() {
-                            render_trace_to_stderr(&err.trace, TraceMode::Short);
+            if error_count == 0
+                && let Some(ref hir) = merged_hir
+            {
+                let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                // Safety analysis warns about potential issues — profile run
+                // continues regardless (warnings don't block profiling).
+                emit_mir_safety_diags(&mir, &interner, false, &opts.suppress);
+                fidan_passes::run_all(&mut mir);
+                let prog_name = opts
+                    .input
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("?")
+                    .to_string();
+                let (result, report) = fidan_interp::run_mir_with_profile(
+                    mir,
+                    Arc::clone(&interner),
+                    Arc::clone(&source_map),
+                    &prog_name,
+                );
+                if let Err(ref err) = result {
+                    render_message_to_stderr(Severity::Error, err.code, &err.message);
+                    if !err.trace.is_empty() {
+                        render_trace_to_stderr(&err.trace, TraceMode::Short);
+                    }
+                }
+                if let Some(ref rep) = report {
+                    print!("{}", rep.render());
+                    if let Some(ref out_path) = opts.output {
+                        match std::fs::write(out_path, rep.render_json()) {
+                            Ok(()) => render_message_to_stderr(
+                                Severity::Note,
+                                "profile",
+                                &format!("JSON written to {}", out_path.display()),
+                            ),
+                            Err(e) => render_message_to_stderr(
+                                Severity::Error,
+                                fidan_diagnostics::diag_code!("R0001"),
+                                &format!("could not write profile output: {e}"),
+                            ),
                         }
                     }
-                    if let Some(ref rep) = report {
-                        print!("{}", rep.render());
-                        if let Some(ref out_path) = opts.output {
-                            match std::fs::write(out_path, rep.render_json()) {
-                                Ok(()) => render_message_to_stderr(
-                                    Severity::Note,
-                                    "profile",
-                                    &format!("JSON written to {}", out_path.display()),
-                                ),
-                                Err(e) => render_message_to_stderr(
-                                    Severity::Error,
-                                    fidan_diagnostics::diag_code!("R0001"),
-                                    &format!("could not write profile output: {e}"),
-                                ),
-                            }
-                        }
-                    }
-                    if result.is_err() {
-                        std::process::exit(1);
-                    }
+                }
+                if result.is_err() {
+                    std::process::exit(1);
                 }
             }
         }
         ExecutionMode::Test => {
-            if error_count == 0 {
-                if let Some(ref hir) = merged_hir {
-                    let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
-                    // ── MIR safety analysis (E0401, W1004) ───────────────────
-                    error_count +=
-                        emit_mir_safety_diags(&mir, &interner, opts.strict_mode, &opts.suppress);
-                    if error_count == 0 {
-                        fidan_passes::run_all(&mut mir);
-                        let test_count = mir.test_functions.len();
-                        if test_count == 0 {
-                            render_message_to_stderr(Severity::Note, "", "no test blocks found");
-                        } else {
-                            match fidan_interp::run_tests(
-                                mir,
-                                Arc::clone(&interner),
-                                Arc::clone(&source_map),
-                            ) {
-                                (Err(err), _) => {
-                                    // Initialisation (top-level code) crashed before tests ran.
-                                    render_message_to_stderr(
-                                        Severity::Error,
-                                        err.code,
-                                        &format!("program initialisation failed: {}", err.message),
-                                    );
-                                    if !err.trace.is_empty() && opts.trace != TraceMode::None {
-                                        render_trace_to_stderr(&err.trace, opts.trace);
-                                    }
-                                    std::process::exit(1);
+            if error_count == 0
+                && let Some(ref hir) = merged_hir
+            {
+                let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                // ── MIR safety analysis (E0401, W1004) ───────────────────
+                error_count +=
+                    emit_mir_safety_diags(&mir, &interner, opts.strict_mode, &opts.suppress);
+                if error_count == 0 {
+                    fidan_passes::run_all(&mut mir);
+                    let test_count = mir.test_functions.len();
+                    if test_count == 0 {
+                        render_message_to_stderr(Severity::Note, "", "no test blocks found");
+                    } else {
+                        match fidan_interp::run_tests(
+                            mir,
+                            Arc::clone(&interner),
+                            Arc::clone(&source_map),
+                        ) {
+                            (Err(err), _) => {
+                                // Initialisation (top-level code) crashed before tests ran.
+                                render_message_to_stderr(
+                                    Severity::Error,
+                                    err.code,
+                                    &format!("program initialisation failed: {}", err.message),
+                                );
+                                if !err.trace.is_empty() && opts.trace != TraceMode::None {
+                                    render_trace_to_stderr(&err.trace, opts.trace);
                                 }
-                                (Ok(()), results) => {
-                                    let mut passed = 0usize;
-                                    let mut failed = 0usize;
-                                    for r in &results {
-                                        if r.passed {
-                                            passed += 1;
-                                            eprintln!("  \x1b[1;32m✓\x1b[0m {}", r.name);
-                                        } else {
-                                            failed += 1;
-                                            let msg = r.message.as_deref().unwrap_or("failed");
-                                            let msg = msg.trim_start_matches("assertion failed: ");
-                                            eprintln!("  \x1b[1;31m✗\x1b[0m {} — {}", r.name, msg);
-                                        }
-                                    }
-                                    eprintln!();
-                                    if failed == 0 {
-                                        eprintln!(
-                                            "\x1b[1;32m{} test{} passed\x1b[0m",
-                                            passed,
-                                            if passed == 1 { "" } else { "s" }
-                                        );
+                                std::process::exit(1);
+                            }
+                            (Ok(()), results) => {
+                                let mut passed = 0usize;
+                                let mut failed = 0usize;
+                                for r in &results {
+                                    if r.passed {
+                                        passed += 1;
+                                        eprintln!("  \x1b[1;32m✓\x1b[0m {}", r.name);
                                     } else {
-                                        eprintln!(
-                                            "\x1b[1;32m{} passed\x1b[0m, \x1b[1;31m{} failed\x1b[0m",
-                                            passed, failed
-                                        );
-                                        std::process::exit(1);
+                                        failed += 1;
+                                        let msg = r.message.as_deref().unwrap_or("failed");
+                                        let msg = msg.trim_start_matches("assertion failed: ");
+                                        eprintln!("  \x1b[1;31m✗\x1b[0m {} — {}", r.name, msg);
                                     }
+                                }
+                                eprintln!();
+                                if failed == 0 {
+                                    eprintln!(
+                                        "\x1b[1;32m{} test{} passed\x1b[0m",
+                                        passed,
+                                        if passed == 1 { "" } else { "s" }
+                                    );
+                                } else {
+                                    eprintln!(
+                                        "\x1b[1;32m{} passed\x1b[0m, \x1b[1;31m{} failed\x1b[0m",
+                                        passed, failed
+                                    );
+                                    std::process::exit(1);
                                 }
                             }
                         }

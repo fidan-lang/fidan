@@ -179,20 +179,20 @@ fn check_parallel_for_body(
 
     for block in &body.blocks {
         for instr in &block.instructions {
-            if let Instr::StoreGlobal { global, .. } = instr {
-                if reported.insert(*global) {
-                    let var_name = resolve_global_name(prog, *global, interner);
-                    diags.push(ParallelRaceDiag {
-                        var_name: var_name.clone(),
-                        context: format!(
-                            "`{}` is mutated inside a `parallel for` body — \
+            if let Instr::StoreGlobal { global, .. } = instr
+                && reported.insert(*global)
+            {
+                let var_name = resolve_global_name(prog, *global, interner);
+                diags.push(ParallelRaceDiag {
+                    var_name: var_name.clone(),
+                    context: format!(
+                        "`{}` is mutated inside a `parallel for` body — \
                              each iteration runs concurrently and writes are \
                              silently lost; use `Shared oftype T` and `.update()` \
                              for safe accumulation",
-                            var_name
-                        ),
-                    });
-                }
+                        var_name
+                    ),
+                });
             }
         }
     }

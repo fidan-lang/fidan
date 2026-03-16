@@ -22,23 +22,23 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
     match name {
         // ── Console I/O ───────────────────────────────────────────────────
         "print" => {
-            let parts: Vec<String> = args.iter().map(|v| format_val(v)).collect();
+            let parts: Vec<String> = args.iter().map(format_val).collect();
             println!("{}", parts.join(" "));
             Some(FidanValue::Nothing)
         }
         "println" => {
-            let parts: Vec<String> = args.iter().map(|v| format_val(v)).collect();
+            let parts: Vec<String> = args.iter().map(format_val).collect();
             println!("{}", parts.join(" "));
             Some(FidanValue::Nothing)
         }
         "eprint" => {
-            let parts: Vec<String> = args.iter().map(|v| format_val(v)).collect();
+            let parts: Vec<String> = args.iter().map(format_val).collect();
             eprintln!("{}", parts.join(" "));
             Some(FidanValue::Nothing)
         }
         "readLine" | "read_line" | "readline" => {
             use std::io::BufRead;
-            let prompt = args.first().map(|v| format_val(v)).unwrap_or_default();
+            let prompt = args.first().map(format_val).unwrap_or_default();
             if !prompt.is_empty() {
                 use std::io::Write;
                 print!("{}", prompt);
@@ -216,7 +216,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "isatty" => {
             use std::io::IsTerminal;
             // Optional first arg: "stdin" | "stderr" — defaults to stdout.
-            let stream = args.first().map(|v| as_str(v)).unwrap_or_default();
+            let stream = args.first().map(as_str).unwrap_or_default();
             let tty = match stream.as_str() {
                 "stdin" => std::io::stdin().is_terminal(),
                 "stderr" => std::io::stderr().is_terminal(),

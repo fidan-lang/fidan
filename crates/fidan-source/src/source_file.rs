@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 /// Opaque identifier for a loaded source file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct FileId(pub u32);
 
 /// A loaded source file: its path, raw text, and pre-computed line start offsets.

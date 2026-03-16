@@ -7,6 +7,7 @@ use fidan_diagnostics::{Severity, render_backtrace_to_stderr, render_message_to_
 use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, OptLevel, SandboxPolicy, TraceMode};
 use std::path::PathBuf;
 
+mod dal;
 mod explain;
 mod fix;
 mod imports;
@@ -237,6 +238,11 @@ enum Command {
         /// Output directory (default: current directory)
         #[arg(short, long)]
         dir: Option<PathBuf>,
+    },
+    /// Dal package registry commands
+    Dal {
+        #[command(subcommand)]
+        command: dal::DalCommand,
     },
 }
 
@@ -542,5 +548,6 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::New { project_name, dir } => pipeline::run_new(&project_name, dir.as_ref()),
+        Command::Dal { command } => dal::run(command),
     }
 }

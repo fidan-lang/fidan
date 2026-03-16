@@ -129,12 +129,11 @@ impl<'t> Parser<'t> {
             // work correctly.  We only consume the Newline when we are certain
             // the operator that follows will be accepted (l_bp >= min_bp), so
             // the parser state is never corrupted.
-            if matches!(self.peek(), TokenKind::Newline) {
-                if let Some((l_bp, _)) = self.infix_bp(self.peek_nth(1)) {
-                    if l_bp >= min_bp {
-                        self.advance(); // eat the Newline; next peek is the operator
-                    }
-                }
+            if matches!(self.peek(), TokenKind::Newline)
+                && let Some((l_bp, _)) = self.infix_bp(self.peek_nth(1))
+                && l_bp >= min_bp
+            {
+                self.advance(); // eat the Newline; next peek is the operator
             }
 
             // `is not` → NotEq normalization (special two-token sequence)
@@ -760,13 +759,13 @@ impl<'t> Parser<'t> {
             parts.push(InterpPart::Literal(rest.to_string()));
         }
         // Degenerate: only one literal part after stripping braces
-        if parts.len() == 1 {
-            if let InterpPart::Literal(s) = &parts[0] {
-                return self.module.arena.alloc_expr(Expr::StrLit {
-                    value: s.clone(),
-                    span,
-                });
-            }
+        if parts.len() == 1
+            && let InterpPart::Literal(s) = &parts[0]
+        {
+            return self.module.arena.alloc_expr(Expr::StrLit {
+                value: s.clone(),
+                span,
+            });
         }
         self.module
             .arena

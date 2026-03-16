@@ -263,7 +263,7 @@ action greetUser with (username oftype string) {
 }
 
 # Required `certain` param (enforces nonnull)
-action greetUser with (certain username oftype string) {
+action greetUser2 with (certain username oftype string) {
     print("Welcome, {username}!")
 }
 

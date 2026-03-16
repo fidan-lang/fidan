@@ -97,7 +97,7 @@ impl<'a> Printer<'a> {
     /// one newline character.
     pub fn finish(mut self) -> String {
         // Trim trailing whitespace / blank lines.
-        let trimmed = self.out.trim_end_matches(|c: char| c == ' ' || c == '\n');
+        let trimmed = self.out.trim_end_matches([' ', '\n']);
         self.out = trimmed.to_string();
         self.out.push('\n');
         self.out

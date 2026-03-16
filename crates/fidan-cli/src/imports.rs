@@ -5,6 +5,9 @@
 /// excluded from file-based resolution.  If a user writes bare `use math`,
 /// `find_relative` will simply find nothing — no magic silent swallow.
 const STDLIB_MODULES: &[&str] = &["std"];
+type ImportFilter = Option<std::collections::HashSet<String>>;
+type ResolvedImport = (std::path::PathBuf, bool, ImportFilter);
+type UnresolvedImport = (String, fidan_source::Span);
 
 /// Resolve a dot-path user import relative to `base_dir` (the directory of
 /// the importing file), mirroring Python's package layout:
@@ -62,12 +65,8 @@ pub(crate) fn collect_file_import_paths(
     interner: &fidan_lexer::SymbolInterner,
     base_dir: &std::path::Path,
 ) -> (
-    std::collections::VecDeque<(
-        std::path::PathBuf,
-        bool,
-        Option<std::collections::HashSet<String>>,
-    )>,
-    Vec<(String, fidan_source::Span)>,
+    std::collections::VecDeque<ResolvedImport>,
+    Vec<UnresolvedImport>,
 ) {
     // Three import modes, encoded in `Option<HashSet<String>>`:
     //
@@ -90,18 +89,14 @@ pub(crate) fn collect_file_import_paths(
         Flat(String),
     }
 
-    let mut path_map: Vec<(
-        std::path::PathBuf,
-        bool,
-        Option<std::collections::HashSet<String>>,
-    )> = Vec::new();
-    let mut unresolved: Vec<(String, fidan_source::Span)> = Vec::new();
+    let mut path_map: Vec<ResolvedImport> = Vec::new();
+    let mut unresolved: Vec<UnresolvedImport> = Vec::new();
 
     let mut add = |resolved: std::path::PathBuf, re_export: bool, mode: Mode| {
         if let Some(entry) = path_map.iter_mut().find(|(p, _, _)| *p == resolved) {
             entry.1 |= re_export;
             // If already a wildcard (Some(empty)), it can never be downgraded.
-            if entry.2.as_ref().map_or(false, |s| s.is_empty()) {
+            if entry.2.as_ref().is_some_and(|s| s.is_empty()) {
                 return;
             }
             match mode {
@@ -306,10 +301,9 @@ pub(crate) fn pre_register_hir_into_tc(
         if let fidan_hir::HirStmt::VarDecl {
             name, ty, is_const, ..
         } = stmt
+            && visible(*name)
         {
-            if visible(*name) {
-                tc.pre_register_global(*name, ty.clone(), *is_const);
-            }
+            tc.pre_register_global(*name, ty.clone(), *is_const);
         }
     }
 

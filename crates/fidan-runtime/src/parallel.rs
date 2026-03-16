@@ -21,6 +21,9 @@ use std::sync::{Arc, Mutex};
 
 use crate::FidanValue;
 
+type PendingJoinHandle = std::thread::JoinHandle<Result<ParallelCapture, String>>;
+type PendingState = Arc<Mutex<Option<PendingJoinHandle>>>;
+
 // ── ParallelCapture ────────────────────────────────────────────────────────────
 
 /// Thread-safe wrapper for a single [`FidanValue`] being sent into a parallel task.
@@ -90,9 +93,7 @@ impl ParallelArgs {
 /// the error; [`Self::join`] is the backwards-compatible convenience that
 /// maps errors to `FidanValue::Nothing`.
 #[derive(Clone)]
-pub struct FidanPending(
-    pub Arc<Mutex<Option<std::thread::JoinHandle<Result<ParallelCapture, String>>>>>,
-);
+pub struct FidanPending(pub PendingState);
 
 impl FidanPending {
     /// Spawn a closure on a new OS thread and wrap the result in a `FidanPending`.

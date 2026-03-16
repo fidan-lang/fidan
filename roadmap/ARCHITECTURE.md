@@ -3214,6 +3214,65 @@ instance. Estimated effort: 2–3 weeks for interpreted path; +1 week for Phase 
 
 ---
 
+### 22.15 – Dal Package Binary Installation
+
+**Elevator pitch:** Allow a Dal package to declare an optional CLI entrypoint in
+its manifest so `fidan dal add` can do more than vendor source code. When the
+package explicitly opts in, the installer should:
+
+1. download and unpack the package source
+2. compile the declared entrypoint into a native executable
+3. place that executable into a Fidan-managed local `bin/` directory
+4. make the installed command discoverable alongside normal imported modules
+
+Example future manifest direction:
+
+```toml
+[package]
+name = "my-tool"
+version = "1.2.0"
+
+[cli]
+name = "my-tool"
+entry = "src/init.fdn"
+```
+
+**Why this is valuable:**
+- makes Dal packages usable as both libraries and tools
+- gives Fidan an ergonomic equivalent to Python's console scripts / `pipx`
+- keeps source packages portable while still enabling local executable installs
+
+**Important design constraints:**
+- binary installation must be **opt-in via manifest**, never inferred implicitly
+- normal `fidan dal add` should continue to vendor importable source modules
+- command-name collisions in the managed `bin/` directory must be detected and handled explicitly
+- installs should remain reproducible: the compiled binary must come from the package source that was just downloaded
+- PATH mutation should be documented and ideally happen once at Fidan installation time, not silently per-package
+
+**Likely implementation shape:**
+- the Fidan installation owns a managed package area, e.g.:
+
+```text
+<fidan-home>/
+├── packages/
+└── bin/
+```
+
+- library-style packages are unpacked into `packages/`
+- packages with `[cli]` are additionally compiled and linked/copied into `bin/`
+- `fidan dal add` may later gain an explicit `--bin` mode or auto-install binaries for packages that declare `[cli]`
+
+**Why deferred:**
+- needs package-install-location policy (`fidan home`, managed cache, bin dir ownership)
+- needs a stable manifest schema for CLI metadata
+- needs careful UX around recompilation, upgrades, uninstall, and cross-platform executable naming
+
+**Dependency:** After the initial Dal package-manager work is stable. This builds on
+Phase 14 (CLI) plus the Dal package workflow and should be scheduled only once
+basic add/package/publish behavior is production-stable.
+
+---
+
 ### Feature → Phase Dependency Map
 
 | Feature | Earliest schedulable after | Estimated effort |
@@ -3235,3 +3294,4 @@ instance. Estimated effort: 2–3 weeks for interpreted path; +1 week for Phase 
 | 22.14 Regex (transparent native DFA via Cranelift) | Phase 9 (Cranelift JIT) | + 1 week on top of interpreted path |
 | 22.12 `Stream`/`Handle` & stdio manipulation | self-hosting phase | deferred (needs method dispatch) |
 | 22.10 Native GPU / CUDA (`@gpu`) | Phase 11 (LLVM AOT + NVPTX) | 4–8 weeks after Phase 11 |
+| 22.15 Dal package binary installation | after initial Dal package-manager rollout stabilizes | 1–2 weeks |

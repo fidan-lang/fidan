@@ -466,7 +466,7 @@ impl FidanLsp {
         // in the editor.  Files that are actively open in the editor (version ≥ 0)
         // are managed through their own did-open / did-change notifications and
         // must NOT be overwritten with the on-disk version here.
-        for (_, import_url) in &import_urls {
+        for import_url in import_urls.values() {
             let skip = self
                 .store
                 .get(import_url)
@@ -475,63 +475,60 @@ impl FidanLsp {
             if skip {
                 continue; // actively open in editor — let did_change manage it
             }
-            if let Ok(path) = import_url.to_file_path() {
-                if let Ok(file_text) = std::fs::read_to_string(&path) {
-                    let r = analysis::analyze(&file_text, import_url.as_str());
-                    self.store.insert(
-                        import_url.clone(),
-                        Document {
-                            version: -1, // -1 = background-loaded; reloaded on every parent refresh
-                            text: file_text,
-                            diagnostics: vec![], // no diagnostics for background docs
-                            semantic_tokens: r.semantic_tokens,
-                            symbol_table: r.symbol_table,
-                            identifier_spans: r.identifier_spans,
-                            imports: HashMap::new(),
-                            stdlib_imports: HashMap::new(),
-                            inlay_hint_sites: vec![], // not shown for background docs
-                        },
-                    );
-                }
+            if let Ok(path) = import_url.to_file_path()
+                && let Ok(file_text) = std::fs::read_to_string(&path)
+            {
+                let r = analysis::analyze(&file_text, import_url.as_str());
+                self.store.insert(
+                    import_url.clone(),
+                    Document {
+                        version: -1, // -1 = background-loaded; reloaded on every parent refresh
+                        text: file_text,
+                        diagnostics: vec![], // no diagnostics for background docs
+                        semantic_tokens: r.semantic_tokens,
+                        symbol_table: r.symbol_table,
+                        identifier_spans: r.identifier_spans,
+                        imports: HashMap::new(),
+                        stdlib_imports: HashMap::new(),
+                        inlay_hint_sites: vec![], // not shown for background docs
+                    },
+                );
             }
         }
 
         // Patch `var x: dynamic` entries whose init was a cross-module method call.
         // Now that background docs are loaded we can resolve the actual return type.
         for (var_name, recv_ty, method_name) in &result.dynamic_var_call_sites {
-            if let Some((_, entry)) = self.resolve_member_cross_doc(recv_ty, method_name) {
-                if let Some(ref ret_type) = entry.return_type {
-                    if let Some(mut doc) = self.store.get_mut(uri) {
-                        if let Some(sym_entry) = doc.symbol_table.entries.get_mut(var_name) {
-                            // Update the hover detail to show the real return type.
-                            let kw = if matches!(
-                                sym_entry.kind,
-                                crate::symbols::SymKind::Variable { is_const: true }
-                            ) {
-                                "const var"
-                            } else {
-                                "var"
-                            };
-                            sym_entry.detail =
-                                format!("```fidan\n{} {} -> {}\n```", kw, var_name, ret_type);
-                            // Also set ty_name so member accesses on `x` can be resolved
-                            // if the return type is an object type.
-                            sym_entry.ty_name = Some(ret_type.clone());
-                        }
-                        // Also update the inlay hint label: it was set to `-> dynamic`
-                        // during analysis but the real return type is now known.
-                        if let Some((span, _)) =
-                            doc.identifier_spans.iter().find(|(_, n)| n == var_name)
-                        {
-                            let end = span.end;
-                            if let Some(hint) = doc
-                                .inlay_hint_sites
-                                .iter_mut()
-                                .find(|h| h.byte_offset == end && h.is_type_hint)
-                            {
-                                hint.label = format!(" -> {}", ret_type);
-                            }
-                        }
+            if let Some((_, entry)) = self.resolve_member_cross_doc(recv_ty, method_name)
+                && let Some(ref ret_type) = entry.return_type
+                && let Some(mut doc) = self.store.get_mut(uri)
+            {
+                if let Some(sym_entry) = doc.symbol_table.entries.get_mut(var_name) {
+                    // Update the hover detail to show the real return type.
+                    let kw = if matches!(
+                        sym_entry.kind,
+                        crate::symbols::SymKind::Variable { is_const: true }
+                    ) {
+                        "const var"
+                    } else {
+                        "var"
+                    };
+                    sym_entry.detail =
+                        format!("```fidan\n{} {} -> {}\n```", kw, var_name, ret_type);
+                    // Also set ty_name so member accesses on `x` can be resolved
+                    // if the return type is an object type.
+                    sym_entry.ty_name = Some(ret_type.clone());
+                }
+                // Also update the inlay hint label: it was set to `-> dynamic`
+                // during analysis but the real return type is now known.
+                if let Some((span, _)) = doc.identifier_spans.iter().find(|(_, n)| n == var_name) {
+                    let end = span.end;
+                    if let Some(hint) = doc
+                        .inlay_hint_sites
+                        .iter_mut()
+                        .find(|h| h.byte_offset == end && h.is_type_hint)
+                    {
+                        hint.label = format!(" -> {}", ret_type);
                     }
                 }
             }
@@ -894,10 +891,10 @@ impl LanguageServer for FidanLsp {
                     if let Some(e) = doc.symbol_table.get(&format!("{}.{}", pn, cur_name)) {
                         return Some(e);
                     }
-                    if let Some(pe) = doc.symbol_table.get(pn) {
-                        if let Some(ty) = &pe.ty_name {
-                            return doc.symbol_table.get(&format!("{}.{}", ty, cur_name));
-                        }
+                    if let Some(pe) = doc.symbol_table.get(pn)
+                        && let Some(ty) = &pe.ty_name
+                    {
+                        return doc.symbol_table.get(&format!("{}.{}", ty, cur_name));
                     }
                     None
                 });
@@ -1014,10 +1011,10 @@ impl LanguageServer for FidanLsp {
                 if let Some(e) = doc.symbol_table.get(&format!("{}.{}", pn, cur_name)) {
                     return Some(e);
                 }
-                if let Some(pe) = doc.symbol_table.get(pn) {
-                    if let Some(ty) = &pe.ty_name {
-                        return doc.symbol_table.get(&format!("{}.{}", ty, cur_name));
-                    }
+                if let Some(pe) = doc.symbol_table.get(pn)
+                    && let Some(ty) = &pe.ty_name
+                {
+                    return doc.symbol_table.get(&format!("{}.{}", ty, cur_name));
                 }
                 None
             });
@@ -1334,58 +1331,51 @@ impl LanguageServer for FidanLsp {
                         i -= 1;
                     }
 
-                    if let Some(open) = open_paren {
-                        if let Some((fn_span, fn_name)) = doc
+                    if let Some(open) = open_paren
+                        && let Some((fn_span, fn_name)) = doc
                             .identifier_spans
                             .iter()
                             .rev()
                             .find(|(span, _)| span.end as usize <= open)
-                        {
-                            // Try direct lookup first, then dot-receiver-qualified.
-                            let entry_opt = doc.symbol_table.get(fn_name.as_str()).or_else(|| {
-                                let fn_start = fn_span.start as usize;
-                                if fn_start > 0
-                                    && src.get(fn_start.saturating_sub(1)) == Some(&b'.')
-                                {
-                                    let recv = doc
-                                        .identifier_spans
-                                        .iter()
-                                        .rev()
-                                        .find(|(span, _)| (span.end as usize) < fn_start)?;
-                                    let ty = doc
-                                        .symbol_table
-                                        .get(recv.1.as_str())
-                                        .and_then(|e| e.ty_name.as_deref())?;
-                                    doc.symbol_table.get(&format!("{}.{}", ty, fn_name))
-                                } else {
-                                    None
-                                }
-                            });
-
-                            if let Some(entry) = entry_opt {
-                                named_param_entries = entry.param_names.clone();
+                    {
+                        // Try direct lookup first, then dot-receiver-qualified.
+                        let entry_opt = doc.symbol_table.get(fn_name.as_str()).or_else(|| {
+                            let fn_start = fn_span.start as usize;
+                            if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
+                                let recv = doc
+                                    .identifier_spans
+                                    .iter()
+                                    .rev()
+                                    .find(|(span, _)| (span.end as usize) < fn_start)?;
+                                let ty = doc
+                                    .symbol_table
+                                    .get(recv.1.as_str())
+                                    .and_then(|e| e.ty_name.as_deref())?;
+                                doc.symbol_table.get(&format!("{}.{}", ty, fn_name))
                             } else {
-                                // Record for cross-doc resolution in Phase 2.
-                                let fn_start = fn_span.start as usize;
-                                if fn_start > 0
-                                    && src.get(fn_start.saturating_sub(1)) == Some(&b'.')
-                                {
-                                    if let Some((_, recv_name)) = doc
-                                        .identifier_spans
-                                        .iter()
-                                        .rev()
-                                        .find(|(span, _)| (span.end as usize) < fn_start)
-                                    {
-                                        if let Some(ty) = doc
-                                            .symbol_table
-                                            .get(recv_name.as_str())
-                                            .and_then(|e| e.ty_name.as_deref())
-                                            .map(|s| s.to_string())
-                                        {
-                                            named_param_cross = Some((ty, fn_name.clone()));
-                                        }
-                                    }
-                                }
+                                None
+                            }
+                        });
+
+                        if let Some(entry) = entry_opt {
+                            named_param_entries = entry.param_names.clone();
+                        } else {
+                            // Record for cross-doc resolution in Phase 2.
+                            let fn_start = fn_span.start as usize;
+                            if fn_start > 0
+                                && src.get(fn_start.saturating_sub(1)) == Some(&b'.')
+                                && let Some((_, recv_name)) = doc
+                                    .identifier_spans
+                                    .iter()
+                                    .rev()
+                                    .find(|(span, _)| (span.end as usize) < fn_start)
+                                && let Some(ty) = doc
+                                    .symbol_table
+                                    .get(recv_name.as_str())
+                                    .and_then(|e| e.ty_name.as_deref())
+                                    .map(|s| s.to_string())
+                            {
+                                named_param_cross = Some((ty, fn_name.clone()));
                             }
                         }
                     }
@@ -1432,7 +1422,7 @@ impl LanguageServer for FidanLsp {
                         // Split partial into (directory_prefix, file_prefix).
                         let (search_dir, file_prefix) =
                             if partial.contains('/') || partial.contains('\\') {
-                                let sep_pos = partial.rfind(|c| c == '/' || c == '\\').unwrap();
+                                let sep_pos = partial.rfind(['/', '\\']).unwrap();
                                 let dir_part = &partial[..sep_pos];
                                 let name_part = &partial[sep_pos + 1..];
                                 (base_dir.join(dir_part), name_part.to_string())
@@ -1515,44 +1505,43 @@ impl LanguageServer for FidanLsp {
                     }
 
                     // .fdn files in the current directory (enumerated on a blocking thread).
-                    if let Ok(file_path) = uri.to_file_path() {
-                        if let Some(base_dir) = file_path.parent().map(|p| p.to_path_buf()) {
-                            // `partial` is already owned — move it directly into the closure,
-                            // no clone needed.
-                            let fdn_items = tokio::task::spawn_blocking(move || {
-                                let mut fdn_items: Vec<CompletionItem> = vec![];
-                                if let Ok(entries) = std::fs::read_dir(&base_dir) {
-                                    for entry in entries.flatten() {
-                                        let path = entry.path();
-                                        if path.extension().and_then(|e| e.to_str()) != Some("fdn")
-                                        {
-                                            continue;
-                                        }
-                                        // Skip the current file.
-                                        if path == file_path {
-                                            continue;
-                                        }
-                                        let stem = path
-                                            .file_stem()
-                                            .unwrap_or_default()
-                                            .to_string_lossy()
-                                            .to_string();
-                                        if stem.starts_with(partial.as_str()) {
-                                            fdn_items.push(CompletionItem {
-                                                label: stem.clone(),
-                                                kind: Some(CompletionItemKind::MODULE),
-                                                insert_text: Some(stem),
-                                                ..Default::default()
-                                            });
-                                        }
+                    if let Ok(file_path) = uri.to_file_path()
+                        && let Some(base_dir) = file_path.parent().map(|p| p.to_path_buf())
+                    {
+                        // `partial` is already owned — move it directly into the closure,
+                        // no clone needed.
+                        let fdn_items = tokio::task::spawn_blocking(move || {
+                            let mut fdn_items: Vec<CompletionItem> = vec![];
+                            if let Ok(entries) = std::fs::read_dir(&base_dir) {
+                                for entry in entries.flatten() {
+                                    let path = entry.path();
+                                    if path.extension().and_then(|e| e.to_str()) != Some("fdn") {
+                                        continue;
+                                    }
+                                    // Skip the current file.
+                                    if path == file_path {
+                                        continue;
+                                    }
+                                    let stem = path
+                                        .file_stem()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_string();
+                                    if stem.starts_with(partial.as_str()) {
+                                        fdn_items.push(CompletionItem {
+                                            label: stem.clone(),
+                                            kind: Some(CompletionItemKind::MODULE),
+                                            insert_text: Some(stem),
+                                            ..Default::default()
+                                        });
                                     }
                                 }
-                                fdn_items
-                            })
-                            .await
-                            .unwrap_or_default();
-                            items.extend(fdn_items);
-                        }
+                            }
+                            fdn_items
+                        })
+                        .await
+                        .unwrap_or_default();
+                        items.extend(fdn_items);
                     }
 
                     items
@@ -1662,22 +1651,21 @@ impl LanguageServer for FidanLsp {
             })
             .collect();
 
-        if named_param_items.is_empty() {
-            if let Some((recv_ty, method_name)) = phase1.named_param_cross {
-                if let Some((_, entry)) = self.resolve_member_cross_doc(&recv_ty, &method_name) {
-                    named_param_items = entry
-                        .param_names
-                        .iter()
-                        .map(|(name, _)| CompletionItem {
-                            label: format!("{} = ", name),
-                            kind: Some(CompletionItemKind::KEYWORD),
-                            insert_text: Some(format!("{} = ", name)),
-                            sort_text: Some(format!("0{}", name)),
-                            ..Default::default()
-                        })
-                        .collect();
-                }
-            }
+        if named_param_items.is_empty()
+            && let Some((recv_ty, method_name)) = phase1.named_param_cross
+            && let Some((_, entry)) = self.resolve_member_cross_doc(&recv_ty, &method_name)
+        {
+            named_param_items = entry
+                .param_names
+                .iter()
+                .map(|(name, _)| CompletionItem {
+                    label: format!("{} = ", name),
+                    kind: Some(CompletionItemKind::KEYWORD),
+                    insert_text: Some(format!("{} = ", name)),
+                    sort_text: Some(format!("0{}", name)),
+                    ..Default::default()
+                })
+                .collect();
         }
 
         // Assemble final list: named params first (sort_text "0…" keeps them
@@ -2580,7 +2568,7 @@ fn find_named_arg_param(
 ) -> Option<NamedArgLookup> {
     // 1. Confirm named-argument context.
     let after = text.get(cur_span.end as usize..)?;
-    let rest = after.trim_start_matches(|c: char| c == ' ' || c == '\t');
+    let rest = after.trim_start_matches([' ', '\t']);
     if !rest.starts_with('=') && !rest.starts_with("set ") && !rest.starts_with("set\t") {
         return None;
     }
@@ -2602,10 +2590,10 @@ fn find_named_arg_param(
         }
 
         // 3a. Direct lookup — global action named `fn_name`.
-        if let Some(entry) = symbol_table.get(fn_name) {
-            if let Some((_, span)) = entry.param_names.iter().find(|(n, _)| *n == param_name) {
-                return Some(NamedArgLookup::InDoc(*span));
-            }
+        if let Some(entry) = symbol_table.get(fn_name)
+            && let Some((_, span)) = entry.param_names.iter().find(|(n, _)| *n == param_name)
+        {
+            return Some(NamedArgLookup::InDoc(*span));
         }
 
         // 3b. Method lookup via the receiver variable at index i-1.

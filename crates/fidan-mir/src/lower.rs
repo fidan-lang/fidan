@@ -1,4 +1,4 @@
-﻿// fidan-mir/src/lower.rs
+// fidan-mir/src/lower.rs
 //
 // HIR → MIR lowering.
 //
@@ -326,12 +326,16 @@ type VarEnv = FxHashMap<Symbol, LocalId>;
 fn env_diff(before: &VarEnv, after: &VarEnv) -> Vec<Symbol> {
     after
         .iter()
-        .filter(|(sym, id)| before.get(sym).map_or(true, |old| old != *id))
+        .filter(|(sym, id)| before.get(sym) != Some(*id))
         .map(|(sym, _)| *sym)
         .collect()
 }
 
 // ── Function builder ───────────────────────────────────────────────────────────
+
+type EnvSnapshot = FxHashMap<Symbol, LocalId>;
+type ContinueSite = (BlockId, EnvSnapshot);
+type ContinueSiteMap = FxHashMap<BlockId, Vec<ContinueSite>>;
 
 struct FnCtx<'p> {
     /// The MIR program we're building into.
@@ -377,7 +381,7 @@ struct FnCtx<'p> {
     loop_stack: Vec<(BlockId, BlockId)>,
     /// Records all `continue` sites: maps continue_target_bb to a list of
     /// (source_bb, env_snapshot_at_that_point).
-    continue_sites: FxHashMap<BlockId, Vec<(BlockId, FxHashMap<Symbol, LocalId>)>>,
+    continue_sites: ContinueSiteMap,
     /// Symbol for `"_"` — the wildcard pattern in `check` arms.
     wildcard_sym: Symbol,
     /// Symbol for `"__lambda__"` — used as the debug name for synthetic lambda functions.
@@ -651,7 +655,7 @@ impl<'p> FnCtx<'p> {
                 let _entry_bb = self.cur_bb;
 
                 self.set_terminator(Terminator::Branch {
-                    cond: cond,
+                    cond,
                     then_bb,
                     else_bb,
                 });
@@ -687,96 +691,89 @@ impl<'p> FnCtx<'p> {
             // ── Calls ─────────────────────────────────────────────────────────
             HirExprKind::Call { callee, args } => {
                 // ① parent(args) → call parent's `new` constructor directly.
-                if let HirExprKind::Parent = &callee.kind {
-                    if let (Some(owner), Some(tr)) = (self.owner_class, self.this_reg) {
-                        if let Some(&parent_cls) = self.parent_map.get(&owner) {
-                            if let Some(&pfid) = self.method_ids.get(&(parent_cls, self.new_sym)) {
-                                let dest = self.alloc_local();
-                                let mut arg_ops = vec![Operand::Local(tr)];
-                                arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
-                                self.emit(Instr::Call {
-                                    dest: Some(dest),
-                                    callee: Callee::Fn(pfid),
-                                    args: arg_ops,
-                                    span: expr.span,
-                                });
-                                return Operand::Local(dest);
-                            }
-                        }
-                    }
+                if let HirExprKind::Parent = &callee.kind
+                    && let (Some(owner), Some(tr)) = (self.owner_class, self.this_reg)
+                    && let Some(&parent_cls) = self.parent_map.get(&owner)
+                    && let Some(&pfid) = self.method_ids.get(&(parent_cls, self.new_sym))
+                {
+                    let dest = self.alloc_local();
+                    let mut arg_ops = vec![Operand::Local(tr)];
+                    arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                    self.emit(Instr::Call {
+                        dest: Some(dest),
+                        callee: Callee::Fn(pfid),
+                        args: arg_ops,
+                        span: expr.span,
+                    });
+                    return Operand::Local(dest);
                 }
 
                 // ② ClassName(args)  →  Construct + call `new`.
-                if let HirExprKind::Var(name) = &callee.kind {
-                    if let Some(init_fid) = self.obj_map.get(name).copied() {
-                        let this_local = self.alloc_local();
-                        self.emit(Instr::Assign {
-                            dest: this_local,
-                            ty: MirTy::Object(*name),
-                            rhs: Rvalue::Construct {
-                                ty: *name,
-                                fields: vec![],
-                            },
-                        });
-                        let mut arg_ops = vec![Operand::Local(this_local)];
-                        arg_ops.extend(self.sort_args_for_fn(init_fid, args));
-                        self.emit(Instr::Call {
-                            dest: None,
-                            callee: Callee::Fn(init_fid),
-                            args: arg_ops,
-                            span: expr.span,
-                        });
-                        return Operand::Local(this_local);
-                    }
+                if let HirExprKind::Var(name) = &callee.kind
+                    && let Some(init_fid) = self.obj_map.get(name).copied()
+                {
+                    let this_local = self.alloc_local();
+                    self.emit(Instr::Assign {
+                        dest: this_local,
+                        ty: MirTy::Object(*name),
+                        rhs: Rvalue::Construct {
+                            ty: *name,
+                            fields: vec![],
+                        },
+                    });
+                    let mut arg_ops = vec![Operand::Local(this_local)];
+                    arg_ops.extend(self.sort_args_for_fn(init_fid, args));
+                    self.emit(Instr::Call {
+                        dest: None,
+                        callee: Callee::Fn(init_fid),
+                        args: arg_ops,
+                        span: expr.span,
+                    });
+                    return Operand::Local(this_local);
                 }
 
                 let callee_op = match &callee.kind {
                     HirExprKind::Field { object, field } => {
                         // ③ parent.method(args) → direct call to parent class's fn.
-                        if let HirExprKind::Parent = &object.kind {
-                            if let (Some(owner), Some(tr)) = (self.owner_class, self.this_reg) {
-                                if let Some(&parent_cls) = self.parent_map.get(&owner) {
-                                    if let Some(&pfid) = self.method_ids.get(&(parent_cls, *field))
-                                    {
-                                        let mut arg_ops = vec![Operand::Local(tr)];
-                                        arg_ops
-                                            .extend(args.iter().map(|a| self.lower_expr(&a.value)));
-                                        let dest = self.alloc_local();
-                                        self.emit(Instr::Call {
-                                            dest: Some(dest),
-                                            callee: Callee::Fn(pfid),
-                                            args: arg_ops,
-                                            span: expr.span,
-                                        });
-                                        return Operand::Local(dest);
-                                    }
-                                }
-                            }
+                        if let HirExprKind::Parent = &object.kind
+                            && let (Some(owner), Some(tr)) = (self.owner_class, self.this_reg)
+                            && let Some(&parent_cls) = self.parent_map.get(&owner)
+                            && let Some(&pfid) = self.method_ids.get(&(parent_cls, *field))
+                        {
+                            let mut arg_ops = vec![Operand::Local(tr)];
+                            arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                            let dest = self.alloc_local();
+                            self.emit(Instr::Call {
+                                dest: Some(dest),
+                                callee: Callee::Fn(pfid),
+                                args: arg_ops,
+                                span: expr.span,
+                            });
+                            return Operand::Local(dest);
                         }
                         // ④ ObjType.new(args) → constructor call (explicit form).
-                        if *field == self.new_sym {
-                            if let HirExprKind::Var(cls_name) = &object.kind {
-                                if let Some(&init_fid) = self.obj_map.get(cls_name) {
-                                    let this_local = self.alloc_local();
-                                    self.emit(Instr::Assign {
-                                        dest: this_local,
-                                        ty: MirTy::Object(*cls_name),
-                                        rhs: Rvalue::Construct {
-                                            ty: *cls_name,
-                                            fields: vec![],
-                                        },
-                                    });
-                                    let mut arg_ops = vec![Operand::Local(this_local)];
-                                    arg_ops.extend(self.sort_args_for_fn(init_fid, args));
-                                    self.emit(Instr::Call {
-                                        dest: None,
-                                        callee: Callee::Fn(init_fid),
-                                        args: arg_ops,
-                                        span: expr.span,
-                                    });
-                                    return Operand::Local(this_local);
-                                }
-                            }
+                        if *field == self.new_sym
+                            && let HirExprKind::Var(cls_name) = &object.kind
+                            && let Some(&init_fid) = self.obj_map.get(cls_name)
+                        {
+                            let this_local = self.alloc_local();
+                            self.emit(Instr::Assign {
+                                dest: this_local,
+                                ty: MirTy::Object(*cls_name),
+                                rhs: Rvalue::Construct {
+                                    ty: *cls_name,
+                                    fields: vec![],
+                                },
+                            });
+                            let mut arg_ops = vec![Operand::Local(this_local)];
+                            arg_ops.extend(self.sort_args_for_fn(init_fid, args));
+                            self.emit(Instr::Call {
+                                dest: None,
+                                callee: Callee::Fn(init_fid),
+                                args: arg_ops,
+                                span: expr.span,
+                            });
+                            return Operand::Local(this_local);
                         }
                         let recv = self.lower_expr(object);
                         Callee::Method {
@@ -1283,14 +1280,14 @@ impl<'p> FnCtx<'p> {
                 // the name to the local SSA `env`; this forces all subsequent
                 // reads in `init_stmts` to go through `LoadGlobal`, so they
                 // always reflect mutations made by called functions.
-                if self.is_init_fn {
-                    if let Some(&gid) = self.global_map.get(name) {
-                        self.emit(Instr::StoreGlobal {
-                            global: gid,
-                            value: Operand::Local(dest),
-                        });
-                        return; // do NOT define_var — keep globals out of the SSA env
-                    }
+                if self.is_init_fn
+                    && let Some(&gid) = self.global_map.get(name)
+                {
+                    self.emit(Instr::StoreGlobal {
+                        global: gid,
+                        value: Operand::Local(dest),
+                    });
+                    return; // do NOT define_var — keep globals out of the SSA env
                 }
                 self.define_var(*name, dest);
             }
@@ -1384,101 +1381,86 @@ impl<'p> FnCtx<'p> {
                     // Calls as statements: dest = None
                     HirExprKind::Call { callee, args } => {
                         // ① parent(args) → call parent's `new` constructor (statement form).
-                        if let HirExprKind::Parent = &callee.kind {
-                            if let (Some(owner), Some(tr)) = (self.owner_class, self.this_reg) {
-                                if let Some(&parent_cls) = self.parent_map.get(&owner) {
-                                    if let Some(&pfid) =
-                                        self.method_ids.get(&(parent_cls, self.new_sym))
-                                    {
-                                        let mut arg_ops = vec![Operand::Local(tr)];
-                                        arg_ops
-                                            .extend(args.iter().map(|a| self.lower_expr(&a.value)));
-                                        self.emit(Instr::Call {
-                                            dest: None,
-                                            callee: Callee::Fn(pfid),
-                                            args: arg_ops,
-                                            span: expr.span,
-                                        });
-                                        return;
-                                    }
-                                }
-                            }
+                        if let HirExprKind::Parent = &callee.kind
+                            && let (Some(owner), Some(tr)) = (self.owner_class, self.this_reg)
+                            && let Some(&parent_cls) = self.parent_map.get(&owner)
+                            && let Some(&pfid) = self.method_ids.get(&(parent_cls, self.new_sym))
+                        {
+                            let mut arg_ops = vec![Operand::Local(tr)];
+                            arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                            self.emit(Instr::Call {
+                                dest: None,
+                                callee: Callee::Fn(pfid),
+                                args: arg_ops,
+                                span: expr.span,
+                            });
+                            return;
                         }
                         // ② ClassName(args) constructor call as a statement.
-                        if let HirExprKind::Var(name) = &callee.kind {
-                            if let Some(init_fid) = self.obj_map.get(name).copied() {
-                                let this_local = self.alloc_local();
-                                self.emit(Instr::Assign {
-                                    dest: this_local,
-                                    ty: MirTy::Object(*name),
-                                    rhs: Rvalue::Construct {
-                                        ty: *name,
-                                        fields: vec![],
-                                    },
-                                });
-                                let mut arg_ops = vec![Operand::Local(this_local)];
-                                arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
-                                self.emit(Instr::Call {
-                                    dest: None,
-                                    callee: Callee::Fn(init_fid),
-                                    args: arg_ops,
-                                    span: expr.span,
-                                });
-                                return;
-                            }
+                        if let HirExprKind::Var(name) = &callee.kind
+                            && let Some(init_fid) = self.obj_map.get(name).copied()
+                        {
+                            let this_local = self.alloc_local();
+                            self.emit(Instr::Assign {
+                                dest: this_local,
+                                ty: MirTy::Object(*name),
+                                rhs: Rvalue::Construct {
+                                    ty: *name,
+                                    fields: vec![],
+                                },
+                            });
+                            let mut arg_ops = vec![Operand::Local(this_local)];
+                            arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                            self.emit(Instr::Call {
+                                dest: None,
+                                callee: Callee::Fn(init_fid),
+                                args: arg_ops,
+                                span: expr.span,
+                            });
+                            return;
                         }
                         let callee_op = match &callee.kind {
                             HirExprKind::Field { object, field } => {
                                 // ③ parent.method(args) → direct call to parent class fn.
-                                if let HirExprKind::Parent = &object.kind {
-                                    if let (Some(owner), Some(tr)) =
+                                if let HirExprKind::Parent = &object.kind
+                                    && let (Some(owner), Some(tr)) =
                                         (self.owner_class, self.this_reg)
-                                    {
-                                        if let Some(&parent_cls) = self.parent_map.get(&owner) {
-                                            if let Some(&pfid) =
-                                                self.method_ids.get(&(parent_cls, *field))
-                                            {
-                                                let mut arg_ops = vec![Operand::Local(tr)];
-                                                arg_ops.extend(
-                                                    args.iter().map(|a| self.lower_expr(&a.value)),
-                                                );
-                                                self.emit(Instr::Call {
-                                                    dest: None,
-                                                    callee: Callee::Fn(pfid),
-                                                    args: arg_ops,
-                                                    span: expr.span,
-                                                });
-                                                return;
-                                            }
-                                        }
-                                    }
+                                    && let Some(&parent_cls) = self.parent_map.get(&owner)
+                                    && let Some(&pfid) = self.method_ids.get(&(parent_cls, *field))
+                                {
+                                    let mut arg_ops = vec![Operand::Local(tr)];
+                                    arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                                    self.emit(Instr::Call {
+                                        dest: None,
+                                        callee: Callee::Fn(pfid),
+                                        args: arg_ops,
+                                        span: expr.span,
+                                    });
+                                    return;
                                 }
                                 // ④ ObjType.new(args) constructor (explicit, statement form).
-                                if *field == self.new_sym {
-                                    if let HirExprKind::Var(cls_name) = &object.kind {
-                                        if let Some(&init_fid) = self.obj_map.get(cls_name) {
-                                            let this_local = self.alloc_local();
-                                            self.emit(Instr::Assign {
-                                                dest: this_local,
-                                                ty: MirTy::Object(*cls_name),
-                                                rhs: Rvalue::Construct {
-                                                    ty: *cls_name,
-                                                    fields: vec![],
-                                                },
-                                            });
-                                            let mut arg_ops = vec![Operand::Local(this_local)];
-                                            arg_ops.extend(
-                                                args.iter().map(|a| self.lower_expr(&a.value)),
-                                            );
-                                            self.emit(Instr::Call {
-                                                dest: None,
-                                                callee: Callee::Fn(init_fid),
-                                                args: arg_ops,
-                                                span: expr.span,
-                                            });
-                                            return;
-                                        }
-                                    }
+                                if *field == self.new_sym
+                                    && let HirExprKind::Var(cls_name) = &object.kind
+                                    && let Some(&init_fid) = self.obj_map.get(cls_name)
+                                {
+                                    let this_local = self.alloc_local();
+                                    self.emit(Instr::Assign {
+                                        dest: this_local,
+                                        ty: MirTy::Object(*cls_name),
+                                        rhs: Rvalue::Construct {
+                                            ty: *cls_name,
+                                            fields: vec![],
+                                        },
+                                    });
+                                    let mut arg_ops = vec![Operand::Local(this_local)];
+                                    arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                                    self.emit(Instr::Call {
+                                        dest: None,
+                                        callee: Callee::Fn(init_fid),
+                                        args: arg_ops,
+                                        span: expr.span,
+                                    });
+                                    return;
                                 }
                                 let recv = self.lower_expr(object);
                                 Callee::Method {
@@ -2857,11 +2839,11 @@ pub fn lower_program(
 
         // Extension actions that target this class — reuse their fn_map FunctionId.
         for (&fn_name, &ext_cls) in &ext_fn_map {
-            if ext_cls == obj.name {
-                if let Some(&fid) = fn_map.get(&fn_name) {
-                    method_ids.insert((obj.name, fn_name), fid);
-                    obj_info.methods.insert(fn_name, fid);
-                }
+            if ext_cls == obj.name
+                && let Some(&fid) = fn_map.get(&fn_name)
+            {
+                method_ids.insert((obj.name, fn_name), fid);
+                obj_info.methods.insert(fn_name, fid);
             }
         }
 
@@ -2926,13 +2908,13 @@ pub fn lower_program(
             let ns_alias = decl.alias.clone().unwrap_or_else(|| module.clone());
             let alias_sym = interner.intern(&ns_alias);
             namespace_global_count += 1;
-            if !global_map.contains_key(&alias_sym) {
+            if let std::collections::hash_map::Entry::Vacant(e) = global_map.entry(alias_sym) {
                 let gid = GlobalId(prog.globals.len() as u32);
                 prog.globals.push(MirGlobal {
                     name: alias_sym,
                     ty: MirTy::Dynamic,
                 });
-                global_map.insert(alias_sym, gid);
+                e.insert(gid);
             }
         } else if decl.module_path.len() == 1 && decl.specific_names.is_none() {
             // User module: `use test2` -> module_path = ["test2"].
@@ -2942,13 +2924,13 @@ pub fn lower_program(
                 .unwrap_or_else(|| decl.module_path[0].clone());
             let alias_sym = interner.intern(&ns_alias);
             namespace_global_count += 1;
-            if !global_map.contains_key(&alias_sym) {
+            if let std::collections::hash_map::Entry::Vacant(e) = global_map.entry(alias_sym) {
                 let gid = GlobalId(prog.globals.len() as u32);
                 prog.globals.push(MirGlobal {
                     name: alias_sym,
                     ty: MirTy::Dynamic,
                 });
-                global_map.insert(alias_sym, gid);
+                e.insert(gid);
             }
         } else if let Some(ref names) = decl.specific_names {
             // Specific-name stdlib import: `use std.io.{readFile}` -> each name is a global.
@@ -2956,13 +2938,13 @@ pub fn lower_program(
                 for fn_name in names {
                     let fn_sym = interner.intern(fn_name);
                     namespace_global_count += 1;
-                    if !global_map.contains_key(&fn_sym) {
+                    if let std::collections::hash_map::Entry::Vacant(e) = global_map.entry(fn_sym) {
                         let gid = GlobalId(prog.globals.len() as u32);
                         prog.globals.push(MirGlobal {
                             name: fn_sym,
                             ty: MirTy::Dynamic,
                         });
-                        global_map.insert(fn_sym, gid);
+                        e.insert(gid);
                     }
                 }
             }
@@ -2974,13 +2956,13 @@ pub fn lower_program(
     // These are appended right after namespace globals so the REPL cursor boundary still works.
     for hir_enum in &hir.enums {
         let enum_sym = hir_enum.name;
-        if !global_map.contains_key(&enum_sym) {
+        if let std::collections::hash_map::Entry::Vacant(e) = global_map.entry(enum_sym) {
             let gid = GlobalId(prog.globals.len() as u32);
             prog.globals.push(MirGlobal {
                 name: enum_sym,
                 ty: MirTy::Dynamic,
             });
-            global_map.insert(enum_sym, gid);
+            e.insert(gid);
         }
         prog.enums.push(MirEnumInfo {
             name: enum_sym,
@@ -2991,28 +2973,28 @@ pub fn lower_program(
     // Register class type globals (each object name becomes a global holding a ClassType value).
     for obj in &hir.objects {
         let obj_sym = obj.name;
-        if !global_map.contains_key(&obj_sym) {
+        if let std::collections::hash_map::Entry::Vacant(e) = global_map.entry(obj_sym) {
             let gid = GlobalId(prog.globals.len() as u32);
             prog.globals.push(MirGlobal {
                 name: obj_sym,
                 ty: MirTy::Dynamic,
             });
-            global_map.insert(obj_sym, gid);
+            e.insert(gid);
         }
     }
 
     // Module-level `var` declarations -- registered after namespace globals.
     // With stable GIDs, symbols already in the registry are skipped.
     for stmt in &hir.init_stmts {
-        if let HirStmt::VarDecl { name, ty, .. } = stmt {
-            if !global_map.contains_key(name) {
-                let gid = GlobalId(prog.globals.len() as u32);
-                prog.globals.push(MirGlobal {
-                    name: *name,
-                    ty: fidan_ty_to_mir(ty),
-                });
-                global_map.insert(*name, gid);
-            }
+        if let HirStmt::VarDecl { name, ty, .. } = stmt
+            && !global_map.contains_key(name)
+        {
+            let gid = GlobalId(prog.globals.len() as u32);
+            prog.globals.push(MirGlobal {
+                name: *name,
+                ty: fidan_ty_to_mir(ty),
+            });
+            global_map.insert(*name, gid);
         }
     }
     // Build FunctionId → param-name-order map for sorting named call args.

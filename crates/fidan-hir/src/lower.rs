@@ -68,6 +68,18 @@ struct Ctx<'a> {
     interner: &'a SymbolInterner,
 }
 
+struct LowerFunction<'a> {
+    name: Symbol,
+    extends: Option<Symbol>,
+    params: &'a [Param],
+    return_ty: FidanType,
+    body: &'a [StmtId],
+    is_parallel: bool,
+    precompile: bool,
+    custom_decorators: Vec<crate::hir::CustomDecorator>,
+    span: Span,
+}
+
 impl<'a> Ctx<'a> {
     /// Look up the inferred type of an expression.
     fn ty(&self, id: ExprId) -> FidanType {
@@ -559,18 +571,19 @@ impl<'a> Ctx<'a> {
             .collect()
     }
 
-    fn lower_function(
-        &self,
-        name: Symbol,
-        extends: Option<Symbol>,
-        params: &[Param],
-        return_ty: FidanType,
-        body: &[StmtId],
-        is_parallel: bool,
-        precompile: bool,
-        custom_decorators: Vec<crate::hir::CustomDecorator>,
-        span: Span,
-    ) -> HirFunction {
+    fn lower_function(&self, function: LowerFunction<'_>) -> HirFunction {
+        let LowerFunction {
+            name,
+            extends,
+            params,
+            return_ty,
+            body,
+            is_parallel,
+            precompile,
+            custom_decorators,
+            span,
+        } = function;
+
         HirFunction {
             name,
             extends,
@@ -705,17 +718,17 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                             });
                             let custom_decs =
                                 extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
-                            Some(ctx.lower_function(
-                                mname,
-                                None,
-                                &params,
-                                ret,
-                                &body,
+                            Some(ctx.lower_function(LowerFunction {
+                                name: mname,
+                                extends: None,
+                                params: &params,
+                                return_ty: ret,
+                                body: &body,
                                 is_parallel,
                                 precompile,
-                                custom_decs,
-                                mspan,
-                            ))
+                                custom_decorators: custom_decs,
+                                span: mspan,
+                            }))
                         } else {
                             None
                         }
@@ -750,17 +763,17 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     .iter()
                     .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
                 let custom_decs = extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
-                functions.push(ctx.lower_function(
+                functions.push(ctx.lower_function(LowerFunction {
                     name,
-                    None,
-                    &params,
-                    ret,
-                    &body,
+                    extends: None,
+                    params: &params,
+                    return_ty: ret,
+                    body: &body,
                     is_parallel,
                     precompile,
-                    custom_decs,
+                    custom_decorators: custom_decs,
                     span,
-                ));
+                }));
             }
 
             Item::ExtensionAction {
@@ -784,17 +797,17 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     .iter()
                     .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
                 let custom_decs = extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
-                functions.push(ctx.lower_function(
+                functions.push(ctx.lower_function(LowerFunction {
                     name,
-                    Some(extends),
-                    &params,
-                    ret,
-                    &body,
+                    extends: Some(extends),
+                    params: &params,
+                    return_ty: ret,
+                    body: &body,
                     is_parallel,
                     precompile,
-                    custom_decs,
+                    custom_decorators: custom_decs,
                     span,
-                ));
+                }));
             }
 
             Item::VarDecl {

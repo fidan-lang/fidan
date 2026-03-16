@@ -44,6 +44,15 @@ pub struct ObjectInfo {
     pub span: Span,
 }
 
+struct ActionBody<'a> {
+    params: &'a [fidan_ast::Param],
+    return_ty: &'a Option<TypeExpr>,
+    body: &'a [StmtId],
+    inject_this: Option<FidanType>,
+    implicit_return_ty: Option<FidanType>,
+    span: Span,
+}
+
 // ── TypeChecker ───────────────────────────────────────────────────────────────
 
 pub struct TypeChecker {
@@ -349,7 +358,7 @@ impl TypeChecker {
 
         // Find the last top-level ExprStmt — that is the expression the user
         // wants to know the type of.
-        for &item_id in module.items.iter().rev() {
+        if let Some(&item_id) = module.items.iter().next_back() {
             let item = module.arena.get_item(item_id).clone();
             if let Item::ExprStmt(expr_id) = item {
                 let ty = self.infer_expr(expr_id, module);
@@ -358,7 +367,6 @@ impl TypeChecker {
             }
             // Stop at the first non-ExprStmt from the end so that
             //   `:type var x = 5` reports nothing rather than panicking.
-            break;
         }
         None
     }
@@ -522,31 +530,30 @@ impl TypeChecker {
             } => {
                 // Redeclaration check at pass 1 — fires exactly once on the
                 // duplicate `var`, before pass 2 ever runs `check_var_decl`.
-                if !self.is_repl {
-                    if let Some(prev) = self.table.lookup_current_scope(*name) {
-                        if prev.kind != SymbolKind::BuiltinAction {
-                            let n = self.interner.resolve(*name).to_string();
-                            let prev_span = prev.span;
-                            // High-confidence fix: remove the leading `var ` (4 bytes)
-                            // to turn the redeclaration into a plain assignment.
-                            let var_kw = Span::new(span.file, span.start, span.start + 4);
-                            self.diags.push(
-                                Diagnostic::error(
-                                    fidan_diagnostics::diag_code!("E0102"),
-                                    format!("`{n}` is already declared in this scope — use `{n} = value` to reassign"),
-                                    *span,
-                                )
-                                .with_label(Label::secondary(prev_span, "first declared here"))
-                                .with_suggestion(Suggestion::fix(
-                                    format!("remove `var` to reassign `{n}`"),
-                                    var_kw,
-                                    "",
-                                    Confidence::High,
-                                )),
-                            );
-                            return; // do not redefine; leave old binding intact
-                        }
-                    }
+                if !self.is_repl
+                    && let Some(prev) = self.table.lookup_current_scope(*name)
+                    && prev.kind != SymbolKind::BuiltinAction
+                {
+                    let n = self.interner.resolve(*name).to_string();
+                    let prev_span = prev.span;
+                    // High-confidence fix: remove the leading `var ` (4 bytes)
+                    // to turn the redeclaration into a plain assignment.
+                    let var_kw = Span::new(span.file, span.start, span.start + 4);
+                    self.diags.push(
+                        Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0102"),
+                            format!("`{n}` is already declared in this scope — use `{n} = value` to reassign"),
+                            *span,
+                        )
+                        .with_label(Label::secondary(prev_span, "first declared here"))
+                        .with_suggestion(Suggestion::fix(
+                            format!("remove `var` to reassign `{n}`"),
+                            var_kw,
+                            "",
+                            Confidence::High,
+                        )),
+                    );
+                    return; // do not redefine; leave old binding intact
                 }
                 let var_ty = ty
                     .as_ref()
@@ -580,8 +587,7 @@ impl TypeChecker {
                         let module_str = self.interner.resolve(path[1]).to_string();
                         let export_str = self.interner.resolve(*path.last().unwrap()).to_string();
                         let exports = fidan_stdlib::module_exports(&module_str);
-                        if !exports.is_empty() && !exports.iter().any(|&e| e == export_str.as_str())
-                        {
+                        if !exports.is_empty() && !exports.contains(&export_str.as_str()) {
                             self.diags.push(
                                 Diagnostic::error(
                                     fidan_diagnostics::diag_code!("E0108"),
@@ -613,23 +619,23 @@ impl TypeChecker {
                             *path.last().unwrap()
                         };
                         // Import-vs-declaration conflict check (E0109, Case B).
-                        if let Some(prev) = self.table.lookup_current_scope(binding_sym) {
-                            if matches!(prev.kind, SymbolKind::Object | SymbolKind::Action) {
-                                let n = self.interner.resolve(binding_sym).to_string();
-                                let kind_word = if prev.kind == SymbolKind::Object {
-                                    "object"
-                                } else {
-                                    "action"
-                                };
-                                self.diags.push(
-                                    Diagnostic::error(
-                                        fidan_diagnostics::diag_code!("E0109"),
-                                        format!("import `{n}` conflicts with a top-level {kind_word} declaration — use an alias: `use ... as other_name`"),
-                                        *span,
-                                    )
-                                    .with_label(Label::secondary(prev.span, "declared here")),
-                                );
-                            }
+                        if let Some(prev) = self.table.lookup_current_scope(binding_sym)
+                            && matches!(prev.kind, SymbolKind::Object | SymbolKind::Action)
+                        {
+                            let n = self.interner.resolve(binding_sym).to_string();
+                            let kind_word = if prev.kind == SymbolKind::Object {
+                                "object"
+                            } else {
+                                "action"
+                            };
+                            self.diags.push(
+                                Diagnostic::error(
+                                    fidan_diagnostics::diag_code!("E0109"),
+                                    format!("import `{n}` conflicts with a top-level {kind_word} declaration — use an alias: `use ... as other_name`"),
+                                    *span,
+                                )
+                                .with_label(Label::secondary(prev.span, "declared here")),
+                            );
                         }
                         self.table.define(
                             binding_sym,
@@ -669,23 +675,23 @@ impl TypeChecker {
                         // `use "./utils.fdn" as utils` → bind `utils` as Dynamic.
                         // Plain `use "./utils.fdn"` exposes everything flat — no binding.
                         if let Some(&a) = alias.as_ref() {
-                            if let Some(prev) = self.table.lookup_current_scope(a) {
-                                if matches!(prev.kind, SymbolKind::Object | SymbolKind::Action) {
-                                    let n = self.interner.resolve(a).to_string();
-                                    let kind_word = if prev.kind == SymbolKind::Object {
-                                        "object"
-                                    } else {
-                                        "action"
-                                    };
-                                    self.diags.push(
-                                        Diagnostic::error(
-                                            fidan_diagnostics::diag_code!("E0109"),
-                                            format!("import `{n}` conflicts with a top-level {kind_word} declaration — use a different alias"),
-                                            *span,
-                                        )
-                                        .with_label(Label::secondary(prev.span, "declared here")),
-                                    );
-                                }
+                            if let Some(prev) = self.table.lookup_current_scope(a)
+                                && matches!(prev.kind, SymbolKind::Object | SymbolKind::Action)
+                            {
+                                let n = self.interner.resolve(a).to_string();
+                                let kind_word = if prev.kind == SymbolKind::Object {
+                                    "object"
+                                } else {
+                                    "action"
+                                };
+                                self.diags.push(
+                                    Diagnostic::error(
+                                        fidan_diagnostics::diag_code!("E0109"),
+                                        format!("import `{n}` conflicts with a top-level {kind_word} declaration — use a different alias"),
+                                        *span,
+                                    )
+                                    .with_label(Label::secondary(prev.span, "declared here")),
+                                );
                             }
                             self.table.define(
                                 a,
@@ -704,23 +710,23 @@ impl TypeChecker {
                         }
                     } else {
                         // Import-vs-declaration conflict check (E0109, Case B).
-                        if let Some(prev) = self.table.lookup_current_scope(binding_sym) {
-                            if matches!(prev.kind, SymbolKind::Object | SymbolKind::Action) {
-                                let n = self.interner.resolve(binding_sym).to_string();
-                                let kind_word = if prev.kind == SymbolKind::Object {
-                                    "object"
-                                } else {
-                                    "action"
-                                };
-                                self.diags.push(
-                                    Diagnostic::error(
-                                        fidan_diagnostics::diag_code!("E0109"),
-                                        format!("import `{n}` conflicts with a top-level {kind_word} declaration — use an alias: `use ... as other_name`"),
-                                        *span,
-                                    )
-                                    .with_label(Label::secondary(prev.span, "declared here")),
-                                );
-                            }
+                        if let Some(prev) = self.table.lookup_current_scope(binding_sym)
+                            && matches!(prev.kind, SymbolKind::Object | SymbolKind::Action)
+                        {
+                            let n = self.interner.resolve(binding_sym).to_string();
+                            let kind_word = if prev.kind == SymbolKind::Object {
+                                "object"
+                            } else {
+                                "action"
+                            };
+                            self.diags.push(
+                                Diagnostic::error(
+                                    fidan_diagnostics::diag_code!("E0109"),
+                                    format!("import `{n}` conflicts with a top-level {kind_word} declaration — use an alias: `use ... as other_name`"),
+                                    *span,
+                                )
+                                .with_label(Label::secondary(prev.span, "declared here")),
+                            );
                         }
                         self.table.define(
                             binding_sym,
@@ -885,7 +891,17 @@ impl TypeChecker {
                     None
                 };
                 // `this_ty` is already set if we're inside an ObjectDecl scope.
-                self.check_action_body(params, return_ty, body, None, implicit_ret, *span, module);
+                self.check_action_body(
+                    ActionBody {
+                        params,
+                        return_ty,
+                        body,
+                        inject_this: None,
+                        implicit_return_ty: implicit_ret,
+                        span: *span,
+                    },
+                    module,
+                );
             }
 
             Item::ExtensionAction {
@@ -908,7 +924,17 @@ impl TypeChecker {
                 }
                 let ext_ty = FidanType::Object(*extends);
                 let prev_this = self.this_ty.replace(ext_ty.clone());
-                self.check_action_body(params, return_ty, body, Some(ext_ty), None, *span, module);
+                self.check_action_body(
+                    ActionBody {
+                        params,
+                        return_ty,
+                        body,
+                        inject_this: Some(ext_ty),
+                        implicit_return_ty: None,
+                        span: *span,
+                    },
+                    module,
+                );
                 self.this_ty = prev_this;
             }
 
@@ -997,19 +1023,16 @@ impl TypeChecker {
         }
     }
 
-    fn check_action_body(
-        &mut self,
-        params: &[fidan_ast::Param],
-        return_ty: &Option<TypeExpr>,
-        body: &[StmtId],
-        // If Some, inject a `this` binding for extension actions (object scope already
-        // provides `this` for regular methods).
-        inject_this: Option<FidanType>,
-        // If Some, overrides the resolved return type (e.g. `Nothing` for `new` constructors).
-        implicit_return_ty: Option<FidanType>,
-        action_span: Span,
-        module: &Module,
-    ) {
+    fn check_action_body(&mut self, action: ActionBody<'_>, module: &Module) {
+        let ActionBody {
+            params,
+            return_ty,
+            body,
+            inject_this,
+            implicit_return_ty,
+            span: action_span,
+        } = action;
+
         let ret = if let Some(implicit) = implicit_return_ty {
             Some(implicit)
         } else {
@@ -1066,17 +1089,16 @@ impl TypeChecker {
 
         // Emit E0202 if a non-Nothing return type was declared but the action body
         // has no `return` statement at all.
-        if let Some(ref declared) = declared_ret {
-            if !matches!(declared, FidanType::Nothing | FidanType::Dynamic)
-                && !self.all_paths_return(body, module)
-            {
-                let ret_name = self.ty_name(declared);
-                self.emit_error(
-                    fidan_diagnostics::diag_code!("E0202"),
-                    format!("not all code paths return a value of type `{ret_name}`"),
-                    action_span,
-                );
-            }
+        if let Some(ref declared) = declared_ret
+            && !matches!(declared, FidanType::Nothing | FidanType::Dynamic)
+            && !self.all_paths_return(body, module)
+        {
+            let ret_name = self.ty_name(declared);
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0202"),
+                format!("not all code paths return a value of type `{ret_name}`"),
+                action_span,
+            );
         }
 
         self.table.pop_scope();
@@ -1096,29 +1118,28 @@ impl TypeChecker {
                 span,
             } => {
                 // Local redeclaration check (action bodies have no pass 1).
-                if !self.is_repl {
-                    if let Some(prev) = self.table.lookup_current_scope(name) {
-                        if prev.kind != SymbolKind::BuiltinAction {
-                            let n = self.interner.resolve(name).to_string();
-                            let prev_span = prev.span;
-                            let var_kw = Span::new(span.file, span.start, span.start + 4);
-                            self.diags.push(
-                                Diagnostic::error(
-                                    fidan_diagnostics::diag_code!("E0102"),
-                                    format!("`{n}` is already declared in this scope — use `{n} = value` to reassign"),
-                                    span,
-                                )
-                                .with_label(Label::secondary(prev_span, "first declared here"))
-                                .with_suggestion(Suggestion::fix(
-                                    format!("remove `var` to reassign `{n}`"),
-                                    var_kw,
-                                    "",
-                                    Confidence::High,
-                                )),
-                            );
-                            return;
-                        }
-                    }
+                if !self.is_repl
+                    && let Some(prev) = self.table.lookup_current_scope(name)
+                    && prev.kind != SymbolKind::BuiltinAction
+                {
+                    let n = self.interner.resolve(name).to_string();
+                    let prev_span = prev.span;
+                    let var_kw = Span::new(span.file, span.start, span.start + 4);
+                    self.diags.push(
+                        Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0102"),
+                            format!("`{n}` is already declared in this scope — use `{n} = value` to reassign"),
+                            span,
+                        )
+                        .with_label(Label::secondary(prev_span, "first declared here"))
+                        .with_suggestion(Suggestion::fix(
+                            format!("remove `var` to reassign `{n}`"),
+                            var_kw,
+                            "",
+                            Confidence::High,
+                        )),
+                    );
+                    return;
                 }
                 self.check_var_decl(name, &ty, init, is_const, span, module);
             }
@@ -1188,15 +1209,15 @@ impl TypeChecker {
                 let ret = value
                     .map(|id| self.infer_expr(id, module))
                     .unwrap_or(FidanType::Nothing);
-                if let Some(expected) = self.current_return_ty.clone() {
-                    if !expected.is_assignable_from(&ret) {
-                        let (e, a) = (self.ty_name(&expected), self.ty_name(&ret));
-                        self.emit_error(
-                            fidan_diagnostics::diag_code!("E0202"),
-                            format!("return type mismatch: expected `{e}`, found `{a}`"),
-                            span,
-                        );
-                    }
+                if let Some(expected) = self.current_return_ty.clone()
+                    && !expected.is_assignable_from(&ret)
+                {
+                    let (e, a) = (self.ty_name(&expected), self.ty_name(&ret));
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0202"),
+                        format!("return type mismatch: expected `{e}`, found `{a}`"),
+                        span,
+                    );
                 }
             }
 
@@ -1438,15 +1459,15 @@ impl TypeChecker {
 
         let inferred = if let Some(init_id) = init {
             let actual = self.infer_expr(init_id, module);
-            if let Some(ref dt) = declared {
-                if !dt.is_assignable_from(&actual) {
-                    let (d, a) = (self.ty_name(dt), self.ty_name(&actual));
-                    self.emit_error(
-                        fidan_diagnostics::diag_code!("E0201"),
-                        format!("type mismatch: expected `{d}`, found `{a}`"),
-                        span,
-                    );
-                }
+            if let Some(ref dt) = declared
+                && !dt.is_assignable_from(&actual)
+            {
+                let (d, a) = (self.ty_name(dt), self.ty_name(&actual));
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0201"),
+                    format!("type mismatch: expected `{d}`, found `{a}`"),
+                    span,
+                );
             }
             actual
         } else {
@@ -1513,21 +1534,20 @@ impl TypeChecker {
     /// Emit E0103 if `target` resolves to an immutable (`const var`) symbol.
     fn check_const_assign(&mut self, target_id: ExprId, span: Span, module: &Module) {
         let expr = module.arena.get_expr(target_id).clone();
-        if let Expr::Ident { name, .. } = expr {
-            if let Some(info) = self.table.lookup(name) {
-                if !info.is_mutable {
-                    let n = self.interner.resolve(name).to_string();
-                    let def_span = info.span;
-                    self.diags.push(
-                        Diagnostic::error(
-                            fidan_diagnostics::diag_code!("E0103"),
-                            format!("cannot assign to constant `{n}`"),
-                            span,
-                        )
-                        .with_label(Label::secondary(def_span, "defined as `const var` here")),
-                    );
-                }
-            }
+        if let Expr::Ident { name, .. } = expr
+            && let Some(info) = self.table.lookup(name)
+            && !info.is_mutable
+        {
+            let n = self.interner.resolve(name).to_string();
+            let def_span = info.span;
+            self.diags.push(
+                Diagnostic::error(
+                    fidan_diagnostics::diag_code!("E0103"),
+                    format!("cannot assign to constant `{n}`"),
+                    span,
+                )
+                .with_label(Label::secondary(def_span, "defined as `const var` here")),
+            );
         }
     }
 
@@ -1925,7 +1945,17 @@ impl TypeChecker {
                 span,
             } => {
                 // Typecheck the lambda body in its own action scope.
-                self.check_action_body(&params, &return_ty, &body, None, None, span, module);
+                self.check_action_body(
+                    ActionBody {
+                        params: &params,
+                        return_ty: &return_ty,
+                        body: &body,
+                        inject_this: None,
+                        implicit_return_ty: None,
+                        span,
+                    },
+                    module,
+                );
                 FidanType::Function
             }
         }
@@ -2060,7 +2090,7 @@ impl TypeChecker {
                 match self.table.lookup(name).map(|i| i.kind) {
                     Some(SymbolKind::Object) => {
                         self.check_required_params(name, args, span);
-                        return FidanType::Object(name);
+                        FidanType::Object(name)
                     }
                     Some(_) => {
                         // User action — check that all non-optional params are provided.
@@ -2076,7 +2106,7 @@ impl TypeChecker {
                                 callee_span,
                             );
                         }
-                        return FidanType::Dynamic;
+                        FidanType::Dynamic
                     }
                     None => {
                         // Not a builtin, not declared — undefined callee.
@@ -2104,7 +2134,7 @@ impl TypeChecker {
                             ));
                         }
                         self.diags.push(diag);
-                        return FidanType::Error;
+                        FidanType::Error
                     }
                 }
             }
@@ -2583,7 +2613,7 @@ impl TypeChecker {
                     .keys()
                     .map(|k| self.interner.resolve(*k).to_string())
                     .collect();
-                let mut candidates: Vec<&str> = builtin_names.iter().copied().collect();
+                let mut candidates: Vec<&str> = builtin_names.to_vec();
                 for n in &obj_names {
                     candidates.push(n.as_str());
                 }
@@ -2804,15 +2834,15 @@ impl TypeChecker {
             Expr::Ident { name, span } => {
                 let name = *name;
                 let span = *span;
-                if let Some(info) = self.table.lookup(name) {
-                    if matches!(info.kind, SymbolKind::BuiltinAction | SymbolKind::Action) {
-                        let n = self.interner.resolve(name).to_string();
-                        self.emit_warning(
-                            fidan_diagnostics::diag_code!("W2003"),
-                            format!("bare reference to action `{n}` has no effect — did you mean to call it with `{n}(...)`?"),
-                            span,
-                        );
-                    }
+                if let Some(info) = self.table.lookup(name)
+                    && matches!(info.kind, SymbolKind::BuiltinAction | SymbolKind::Action)
+                {
+                    let n = self.interner.resolve(name).to_string();
+                    self.emit_warning(
+                        fidan_diagnostics::diag_code!("W2003"),
+                        format!("bare reference to action `{n}` has no effect — did you mean to call it with `{n}(...)`?"),
+                        span,
+                    );
                 }
             }
             _ => {}

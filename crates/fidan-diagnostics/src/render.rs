@@ -60,10 +60,10 @@ fn is_color_enabled() -> bool {
 /// Result is clamped to [50, 120] so boxes never grow absurdly wide.
 /// `$COLUMNS` overrides the OS query (handy in CI or scripts).
 fn terminal_width() -> usize {
-    if let Ok(s) = std::env::var("COLUMNS") {
-        if let Ok(n) = s.trim().parse::<usize>() {
-            return n.clamp(50, 120);
-        }
+    if let Ok(s) = std::env::var("COLUMNS")
+        && let Ok(n) = s.trim().parse::<usize>()
+    {
+        return n.clamp(50, 120);
     }
 
     #[cfg(unix)]
@@ -236,8 +236,7 @@ pub fn render_message_to_stderr(severity: Severity, code: impl std::fmt::Display
             } else {
                 format!("{}{chunk}", " ".repeat(prefix_vis))
             };
-            let content_vis =
-                (if i == 0 { prefix_vis } else { prefix_vis }) + chunk.chars().count();
+            let content_vis = prefix_vis + chunk.chars().count();
             let pad = cw.saturating_sub(content_vis.min(cw));
             eprintln!(
                 " {sev_color}│{reset}  {}{}  {sev_color}│{reset}",
@@ -304,14 +303,14 @@ pub fn render_backtrace_to_stderr(bt: &std::backtrace::Backtrace) {
             }
         }
         // Location continuation: "at <path>"
-        if t.starts_with("at ") {
-            if let Some(func) = pending.take() {
-                frames.push(Frame {
-                    func,
-                    location: Some(t[3..].trim().to_string()),
-                });
-                continue;
-            }
+        if let Some(stripped) = t.strip_prefix("at ")
+            && let Some(func) = pending.take()
+        {
+            frames.push(Frame {
+                func,
+                location: Some(stripped.trim().to_string()),
+            });
+            continue;
         }
     }
     if let Some(func) = pending {

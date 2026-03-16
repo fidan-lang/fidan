@@ -78,7 +78,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<Result<FidanValue, 
             } else {
                 let msg = args
                     .get(1)
-                    .map(|v| format_val(v))
+                    .map(format_val)
                     .unwrap_or_else(|| "assertion failed".to_string());
                 Some(Err(msg))
             }
@@ -168,7 +168,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<Result<FidanValue, 
         "fail" => {
             let msg = args
                 .first()
-                .map(|v| format_val(v))
+                .map(format_val)
                 .unwrap_or_else(|| "test failed".to_string());
             Some(Err(msg))
         }
@@ -177,7 +177,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<Result<FidanValue, 
             // We just print the skip message and return Nothing.
             let msg = args
                 .first()
-                .map(|v| format_val(v))
+                .map(format_val)
                 .unwrap_or_else(|| "skipped".to_string());
             eprintln!("  ⏭  skip: {msg}");
             Some(Ok(FidanValue::Nothing))

@@ -35,11 +35,11 @@ impl crate::Pass for CopyPropagation {
             let resolve = |op: &Operand| -> Operand {
                 let mut cur = op.clone();
                 for _ in 0..8 {
-                    if let Operand::Local(l) = &cur {
-                        if let Some(next) = copy_map.get(l) {
-                            cur = next.clone();
-                            continue;
-                        }
+                    if let Operand::Local(l) = &cur
+                        && let Some(next) = copy_map.get(l)
+                    {
+                        cur = next.clone();
+                        continue;
                     }
                     break;
                 }

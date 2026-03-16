@@ -29,3 +29,12 @@ anyhow = { workspace = true }
 rustyline = { workspace = true }
 mimalloc = { workspace = true }
 notify = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+reqwest = { workspace = true }
+semver = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+urlencoding = { workspace = true }
+keyring = { workspace = true }

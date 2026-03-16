@@ -33,7 +33,6 @@ use cranelift_codegen::{
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{DataDescription, Linkage, Module};
-use cranelift_native;
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{
@@ -727,7 +726,7 @@ fn lower_function(
         for (pi, phi) in mir_bb.phis.iter().enumerate() {
             let ty = local_types
                 .get(&phi.result.0)
-                .map(|t| mir_ty_to_cl(t))
+                .map(mir_ty_to_cl)
                 .unwrap_or(PTR_TY);
             let v = builder.append_block_param(cl_blocks[bi], ty);
             phi_param_vals.insert((bi, pi), v);
@@ -739,7 +738,7 @@ fn lower_function(
     for i in 0..num_locals {
         let ty = local_types
             .get(&(i as u32))
-            .map(|t| mir_ty_to_cl(t))
+            .map(mir_ty_to_cl)
             .unwrap_or(PTR_TY);
         let var = builder.declare_var(ty);
         cl_vars.push(var);
@@ -941,11 +940,12 @@ fn lower_instr(
         }
 
         Instr::Drop { local } => {
-            if let Some(ty) = local_types.get(&local.0) {
-                if !is_scalar(ty) && !matches!(ty, MirTy::Nothing | MirTy::Error) {
-                    let v = builder.use_var(cl_vars[local.0 as usize]);
-                    call_rt(module, builder, rt.drop_any, &[v])?;
-                }
+            if let Some(ty) = local_types.get(&local.0)
+                && !is_scalar(ty)
+                && !matches!(ty, MirTy::Nothing | MirTy::Error)
+            {
+                let v = builder.use_var(cl_vars[local.0 as usize]);
+                call_rt(module, builder, rt.drop_any, &[v])?;
             }
         }
 
@@ -2251,6 +2251,7 @@ fn emit_trampolines(
     Ok(tramp_ids)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_c_main(
     module: &mut ObjectModule,
     rt: &RuntimeDecls,
@@ -2328,6 +2329,7 @@ fn emit_c_main(
 
 // ── Phi argument collection ────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn collect_phi_args(
     module: &mut ObjectModule,
     rt: &RuntimeDecls,
@@ -2885,10 +2887,10 @@ fn link(
 
 fn find_linker() -> Result<String> {
     // Respect explicit user override.
-    if let Ok(v) = std::env::var("FIDAN_LINKER") {
-        if !v.is_empty() {
-            return Ok(v);
-        }
+    if let Ok(v) = std::env::var("FIDAN_LINKER")
+        && !v.is_empty()
+    {
+        return Ok(v);
     }
 
     // Check the components directory for lld (e.g. {exe_dir}/components/llvm/bin/).
@@ -2996,27 +2998,26 @@ fn find_msvc_lib_paths() -> Vec<PathBuf> {
         if let Ok(out) = std::process::Command::new(vswhere)
             .args(["-latest", "-property", "installationPath"])
             .output()
+            && out.status.success()
         {
-            if out.status.success() {
-                let vs_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !vs_path.is_empty() {
-                    let msvc_root = PathBuf::from(&vs_path).join(r"VC\Tools\MSVC");
-                    if let Ok(entries) = std::fs::read_dir(&msvc_root) {
-                        let mut versions: Vec<PathBuf> = entries
-                            .flatten()
-                            .filter(|e| e.path().is_dir())
-                            .map(|e| e.path())
-                            .collect();
-                        versions.sort();
-                        if let Some(latest) = versions.last() {
-                            let lib = latest.join(r"lib\x64");
-                            if lib.exists() {
-                                paths.push(lib);
-                            }
+            let vs_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !vs_path.is_empty() {
+                let msvc_root = PathBuf::from(&vs_path).join(r"VC\Tools\MSVC");
+                if let Ok(entries) = std::fs::read_dir(&msvc_root) {
+                    let mut versions: Vec<PathBuf> = entries
+                        .flatten()
+                        .filter(|e| e.path().is_dir())
+                        .map(|e| e.path())
+                        .collect();
+                    versions.sort();
+                    if let Some(latest) = versions.last() {
+                        let lib = latest.join(r"lib\x64");
+                        if lib.exists() {
+                            paths.push(lib);
                         }
                     }
-                    break;
                 }
+                break;
             }
         }
     }

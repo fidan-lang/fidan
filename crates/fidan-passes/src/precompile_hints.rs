@@ -188,24 +188,24 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<SlowHintDiag> 
                     if cid == func.id {
                         continue;
                     }
-                    if let Some(callee_fn) = prog.functions.get(cid.0 as usize) {
-                        if !callee_fn.precompile {
-                            let callee_name = fn_names
-                                .get(&cid)
-                                .map(String::as_str)
-                                .unwrap_or("<unknown>");
-                            diags.push(SlowHintDiag {
-                                code: "W5003",
-                                fn_name: fn_name.clone(),
-                                context: format!(
-                                    "action `{callee_name}` is called inside a loop in \
+                    if let Some(callee_fn) = prog.functions.get(cid.0 as usize)
+                        && !callee_fn.precompile
+                    {
+                        let callee_name = fn_names
+                            .get(&cid)
+                            .map(String::as_str)
+                            .unwrap_or("<unknown>");
+                        diags.push(SlowHintDiag {
+                            code: "W5003",
+                            fn_name: fn_name.clone(),
+                            context: format!(
+                                "action `{callee_name}` is called inside a loop in \
                                      `{fn_name}` but lacks `@precompile`; \
                                      consider adding `@precompile` to `{callee_name}` \
                                      so the JIT can eagerly compile it"
-                                ),
-                            });
-                            w5003_reported.insert(cid);
-                        }
+                            ),
+                        });
+                        w5003_reported.insert(cid);
                     }
                 }
             }

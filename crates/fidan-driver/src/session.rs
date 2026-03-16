@@ -6,6 +6,12 @@ pub struct Session {
     pub source_map: Arc<SourceMap>,
 }
 
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Session {
     pub fn new() -> Self {
         Session {

@@ -367,8 +367,8 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             _ => Some(FidanValue::Integer(0)),
         },
         "isEmpty" | "is_empty" => match args.first() {
-            Some(FidanValue::List(l)) => Some(FidanValue::Boolean(l.borrow().len() == 0)),
-            Some(FidanValue::Dict(d)) => Some(FidanValue::Boolean(d.borrow().len() == 0)),
+            Some(FidanValue::List(l)) => Some(FidanValue::Boolean(l.borrow().is_empty())),
+            Some(FidanValue::Dict(d)) => Some(FidanValue::Boolean(d.borrow().is_empty())),
             _ => Some(FidanValue::Boolean(true)),
         },
         "concat" => {
@@ -424,9 +424,9 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         },
         "join" => {
             let list = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let sep = args.get(1).map(|v| as_str(v)).unwrap_or_default();
+            let sep = args.get(1).map(as_str).unwrap_or_default();
             if let FidanValue::List(l) = list {
-                let parts: Vec<String> = l.borrow().iter().map(|v| as_str(v)).collect();
+                let parts: Vec<String> = l.borrow().iter().map(as_str).collect();
                 Some(FidanValue::String(FidanString::new(&parts.join(&sep))))
             } else {
                 Some(FidanValue::Nothing)

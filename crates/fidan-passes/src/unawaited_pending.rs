@@ -84,12 +84,13 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<UnawaitedPendi
                     Instr::SpawnExpr { dest, .. } | Instr::SpawnDynamic { dest, .. } => {
                         pending_locals.insert(*dest);
                     }
-                    Instr::AwaitPending { handle, .. } => {
-                        if let Operand::Local(l) = handle {
-                            // Chase copy-aliases so `await h` where `h = spawn`
-                            // correctly resolves back to the SpawnExpr dest.
-                            awaited_locals.insert(chase(*l, &copy_of));
-                        }
+                    Instr::AwaitPending {
+                        handle: Operand::Local(l),
+                        ..
+                    } => {
+                        // Chase copy-aliases so `await h` where `h = spawn`
+                        // correctly resolves back to the SpawnExpr dest.
+                        awaited_locals.insert(chase(*l, &copy_of));
                     }
                     _ => {}
                 }

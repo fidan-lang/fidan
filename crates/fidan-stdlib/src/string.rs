@@ -67,10 +67,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         // ── Split / join ─────────────────────────────────────────────────
         "split" => {
             let s = as_str(args.first().unwrap_or(&FidanValue::Nothing));
-            let sep = args
-                .get(1)
-                .map(|v| as_str(v))
-                .unwrap_or_else(|| " ".to_string());
+            let sep = args.get(1).map(as_str).unwrap_or_else(|| " ".to_string());
             let parts: Vec<&str> = s.split(sep.as_str()).collect();
             // Can't easily use list_of_strings because str lifetimes differ, so reborrow:
             let mut list = FidanList::new();
@@ -82,9 +79,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "join" => {
             let sep = as_str(args.first().unwrap_or(&FidanValue::Nothing));
             let list = match args.get(1) {
-                Some(FidanValue::List(l)) => {
-                    l.borrow().iter().map(|v| as_str(v)).collect::<Vec<_>>()
-                }
+                Some(FidanValue::List(l)) => l.borrow().iter().map(as_str).collect::<Vec<_>>(),
                 _ => return Some(str_val("")),
             };
             Some(str_val(&list.join(&sep)))
@@ -166,15 +161,12 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 Some(FidanValue::Integer(n)) => *n as usize,
                 _ => 0,
             };
-            let pad = args
-                .get(2)
-                .map(|v| as_str(v))
-                .unwrap_or_else(|| " ".to_string());
+            let pad = args.get(2).map(as_str).unwrap_or_else(|| " ".to_string());
             let pad_char = pad.chars().next().unwrap_or(' ');
             if s.len() >= width {
                 Some(str_val(&s))
             } else {
-                let padding: String = std::iter::repeat(pad_char).take(width - s.len()).collect();
+                let padding: String = std::iter::repeat_n(pad_char, width - s.len()).collect();
                 Some(str_val(&format!("{padding}{s}")))
             }
         }
@@ -184,15 +176,12 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 Some(FidanValue::Integer(n)) => *n as usize,
                 _ => 0,
             };
-            let pad = args
-                .get(2)
-                .map(|v| as_str(v))
-                .unwrap_or_else(|| " ".to_string());
+            let pad = args.get(2).map(as_str).unwrap_or_else(|| " ".to_string());
             let pad_char = pad.chars().next().unwrap_or(' ');
             if s.len() >= width {
                 Some(str_val(&s))
             } else {
-                let padding: String = std::iter::repeat(pad_char).take(width - s.len()).collect();
+                let padding: String = std::iter::repeat_n(pad_char, width - s.len()).collect();
                 Some(str_val(&format!("{s}{padding}")))
             }
         }

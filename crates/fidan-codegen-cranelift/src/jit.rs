@@ -109,7 +109,7 @@ fn build_local_type_map(func: &MirFunction) -> HashMap<LocalId, MirTy> {
                     Some(phi.ty.clone())
                 } else {
                     phi.operands.iter().find_map(|(_, op)| match op {
-                        Operand::Local(l) => map.get(l).filter(|t| is_jit_primitive(*t)).cloned(),
+                        Operand::Local(l) => map.get(l).filter(|t| is_jit_primitive(t)).cloned(),
                         Operand::Const(MirLit::Float(_)) => Some(MirTy::Float),
                         Operand::Const(MirLit::Int(_)) => Some(MirTy::Integer),
                         Operand::Const(MirLit::Bool(_)) => Some(MirTy::Boolean),
@@ -161,6 +161,12 @@ pub struct JitCompiler {
     builder_ctx: FunctionBuilderContext,
     /// Counter used to generate unique function names.
     fn_counter: u32,
+}
+
+impl Default for JitCompiler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl JitCompiler {
@@ -217,10 +223,11 @@ impl JitCompiler {
         for (i, g) in program.globals.iter().enumerate() {
             let g_name = interner.resolve(g.name);
             for decl in &program.use_decls {
-                if decl.is_stdlib && decl.specific_names.is_none() {
-                    if g_name.as_ref() == decl.alias.as_str() {
-                        global_ns_map.insert(GlobalId(i as u32), decl.module.clone());
-                    }
+                if decl.is_stdlib
+                    && decl.specific_names.is_none()
+                    && g_name.as_ref() == decl.alias.as_str()
+                {
+                    global_ns_map.insert(GlobalId(i as u32), decl.module.clone());
                 }
             }
         }
@@ -260,7 +267,7 @@ impl JitCompiler {
                         // directly — phi.ty is often Dynamic for loop-carried variables.
                         let phi_cl_ty = local_types
                             .get(&phi.result)
-                            .and_then(|t| mir_ty_to_cl(t))
+                            .and_then(mir_ty_to_cl)
                             .unwrap_or(I64);
                         let pval = builder.append_block_param(cl_blocks[bi], phi_cl_ty);
                         phi_param_vals.insert((bi, pi), pval);
@@ -277,7 +284,7 @@ impl JitCompiler {
             for i in 0..num_locals {
                 let cl_ty = local_types
                     .get(&LocalId(i as u32))
-                    .and_then(|t| mir_ty_to_cl(t))
+                    .and_then(mir_ty_to_cl)
                     .unwrap_or(I64);
                 let var = builder.declare_var(cl_ty);
                 cl_vars.push(var);
@@ -471,7 +478,7 @@ impl JitCompiler {
         let fn_ptr = self.module.get_finalized_function(func_id);
 
         Some(JitFnEntry {
-            fn_ptr: fn_ptr as *const u8,
+            fn_ptr,
             param_tys: func.params.iter().map(|p| p.ty.clone()).collect(),
             return_ty: func.return_ty.clone(),
         })
@@ -755,7 +762,7 @@ fn collect_phi_args(
                     // Coerce to the declared phi type so the jump type-checks.
                     let expected_ty = local_types
                         .get(&phi.result)
-                        .and_then(|t| mir_ty_to_cl(t))
+                        .and_then(mir_ty_to_cl)
                         .unwrap_or(I64);
                     let coerced = if val_ty == expected_ty {
                         val

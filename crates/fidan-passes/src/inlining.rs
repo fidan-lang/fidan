@@ -39,10 +39,10 @@ impl crate::Pass for Inlining {
         for (ci, func) in prog.functions.iter().enumerate() {
             for (bi, bb) in func.blocks.iter().enumerate() {
                 for (ii, instr) in bb.instructions.iter().enumerate() {
-                    if let Some(fid) = call_target(instr) {
-                        if inlinable.get(fid.0 as usize).copied().unwrap_or(false) {
-                            sites.push((ci, bi, ii, fid));
-                        }
+                    if let Some(fid) = call_target(instr)
+                        && inlinable.get(fid.0 as usize).copied().unwrap_or(false)
+                    {
+                        sites.push((ci, bi, ii, fid));
                     }
                 }
             }
@@ -289,7 +289,7 @@ fn remap_instr(instr: &Instr, param_map: &FxHashMap<LocalId, Operand>, offset: u
         } => Instr::Call {
             dest: dest.map(d),
             callee: remap_callee(callee, &r),
-            args: args.iter().map(|a| r(a)).collect(),
+            args: args.iter().map(&r).collect(),
             span: *span,
         },
         Instr::SetField {
@@ -349,7 +349,7 @@ fn remap_instr(instr: &Instr, param_map: &FxHashMap<LocalId, Operand>, offset: u
         } => Instr::SpawnConcurrent {
             handle: d(*handle),
             task_fn: *task_fn,
-            args: args.iter().map(|a| r(a)).collect(),
+            args: args.iter().map(&r).collect(),
         },
         Instr::SpawnParallel {
             handle,
@@ -358,7 +358,7 @@ fn remap_instr(instr: &Instr, param_map: &FxHashMap<LocalId, Operand>, offset: u
         } => Instr::SpawnParallel {
             handle: d(*handle),
             task_fn: *task_fn,
-            args: args.iter().map(|a| r(a)).collect(),
+            args: args.iter().map(&r).collect(),
         },
         Instr::SpawnExpr {
             dest,
@@ -367,12 +367,12 @@ fn remap_instr(instr: &Instr, param_map: &FxHashMap<LocalId, Operand>, offset: u
         } => Instr::SpawnExpr {
             dest: d(*dest),
             task_fn: *task_fn,
-            args: args.iter().map(|a| r(a)).collect(),
+            args: args.iter().map(&r).collect(),
         },
         Instr::SpawnDynamic { dest, method, args } => Instr::SpawnDynamic {
             dest: d(*dest),
             method: *method,
-            args: args.iter().map(|a| r(a)).collect(),
+            args: args.iter().map(&r).collect(),
         },
         Instr::JoinAll { handles } => Instr::JoinAll {
             handles: handles.iter().map(|&h| d(h)).collect(),
@@ -384,7 +384,7 @@ fn remap_instr(instr: &Instr, param_map: &FxHashMap<LocalId, Operand>, offset: u
         } => Instr::ParallelIter {
             collection: r(collection),
             body_fn: *body_fn,
-            closure_args: closure_args.iter().map(|a| r(a)).collect(),
+            closure_args: closure_args.iter().map(&r).collect(),
         },
         Instr::PushCatch(bid) => Instr::PushCatch(*bid),
         Instr::PopCatch => Instr::PopCatch,
@@ -414,15 +414,15 @@ fn remap_rvalue(rv: &Rvalue, r: &impl Fn(&Operand) -> Operand) -> Rvalue {
         },
         Rvalue::Call { callee, args } => Rvalue::Call {
             callee: remap_callee(callee, r),
-            args: args.iter().map(|a| r(a)).collect(),
+            args: args.iter().map(r).collect(),
         },
         Rvalue::Construct { ty, fields } => Rvalue::Construct {
             ty: *ty,
             fields: fields.iter().map(|(f, v)| (*f, r(v))).collect(),
         },
-        Rvalue::List(elems) => Rvalue::List(elems.iter().map(|e| r(e)).collect()),
+        Rvalue::List(elems) => Rvalue::List(elems.iter().map(r).collect()),
         Rvalue::Dict(pairs) => Rvalue::Dict(pairs.iter().map(|(k, v)| (r(k), r(v))).collect()),
-        Rvalue::Tuple(elems) => Rvalue::Tuple(elems.iter().map(|e| r(e)).collect()),
+        Rvalue::Tuple(elems) => Rvalue::Tuple(elems.iter().map(r).collect()),
         Rvalue::StringInterp(parts) => Rvalue::StringInterp(
             parts
                 .iter()
@@ -436,7 +436,7 @@ fn remap_rvalue(rv: &Rvalue, r: &impl Fn(&Operand) -> Operand) -> Rvalue {
         Rvalue::CatchException => Rvalue::CatchException,
         Rvalue::MakeClosure { fn_id, captures } => Rvalue::MakeClosure {
             fn_id: *fn_id,
-            captures: captures.iter().map(|c| r(c)).collect(),
+            captures: captures.iter().map(r).collect(),
         },
         Rvalue::Slice {
             target,
@@ -446,14 +446,14 @@ fn remap_rvalue(rv: &Rvalue, r: &impl Fn(&Operand) -> Operand) -> Rvalue {
             step,
         } => Rvalue::Slice {
             target: r(target),
-            start: start.as_ref().map(|o| r(o)),
-            end: end.as_ref().map(|o| r(o)),
+            start: start.as_ref().map(r),
+            end: end.as_ref().map(r),
             inclusive: *inclusive,
-            step: step.as_ref().map(|o| r(o)),
+            step: step.as_ref().map(r),
         },
         Rvalue::ConstructEnum { tag, payload } => Rvalue::ConstructEnum {
             tag: *tag,
-            payload: payload.iter().map(|p| r(p)).collect(),
+            payload: payload.iter().map(r).collect(),
         },
         Rvalue::EnumTagCheck {
             value,

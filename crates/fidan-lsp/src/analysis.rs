@@ -225,17 +225,14 @@ fn extract_dynamic_var_calls(
                 continue;
             }
             // Check if the init is a Call whose callee is a Field expression.
-            if let Expr::Call { callee, .. } = module.arena.get_expr(*init_eid) {
-                if let Expr::Field { object, field, .. } = module.arena.get_expr(*callee) {
-                    if let Some(fidan_typeck::FidanType::Object(obj_sym)) =
-                        typed.expr_types.get(object)
-                    {
-                        let var_name = interner.resolve(*name).to_string();
-                        let recv_ty = interner.resolve(*obj_sym).to_string();
-                        let method_name = interner.resolve(*field).to_string();
-                        out.push((var_name, recv_ty, method_name));
-                    }
-                }
+            if let Expr::Call { callee, .. } = module.arena.get_expr(*init_eid)
+                && let Expr::Field { object, field, .. } = module.arena.get_expr(*callee)
+                && let Some(fidan_typeck::FidanType::Object(obj_sym)) = typed.expr_types.get(object)
+            {
+                let var_name = interner.resolve(*name).to_string();
+                let recv_ty = interner.resolve(*obj_sym).to_string();
+                let method_name = interner.resolve(*field).to_string();
+                out.push((var_name, recv_ty, method_name));
             }
         }
     }

@@ -93,7 +93,7 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
             Expr::Ident { name, .. } => {
                 let s = interner.resolve(*name).to_string();
                 if seen.insert(s.clone()) {
-                    let ty_s = typed.expr_types.get(&eid).map(|t| type_name(t));
+                    let ty_s = typed.expr_types.get(&eid).map(type_name);
                     out.push((s, ty_s));
                 }
             }
@@ -616,18 +616,17 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
             .join(" ")
     }
 
-    fn process_stmt(
-        stmt: &Stmt,
-        module: &fidan_ast::Module,
-        interner: &SymbolInterner,
-        typed: &fidan_typeck::TypedModule,
-        src: &str,
-        all_src_lines: &[&str],
+    struct StmtExplainCtx<'a> {
+        module: &'a fidan_ast::Module,
+        interner: &'a SymbolInterner,
+        typed: &'a fidan_typeck::TypedModule,
+        src: &'a str,
+        all_src_lines: &'a [&'a str],
         line_start: usize,
         line_end: usize,
-        context: &str,
-        results: &mut Vec<Expl>,
-    ) {
+    }
+
+    fn process_stmt(stmt: &Stmt, context: &str, ctx: &StmtExplainCtx<'_>, results: &mut Vec<Expl>) {
         let span = match stmt {
             Stmt::VarDecl { span, .. }
             | Stmt::Destructure { span, .. }
@@ -647,7 +646,7 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
             | Stmt::Error { span } => *span,
         };
 
-        if !span_overlaps(src, span, line_start, line_end) {
+        if !span_overlaps(ctx.src, span, ctx.line_start, ctx.line_end) {
             // Check recursively into compound stmts.
             let children: Vec<fidan_ast::StmtId> = match stmt {
                 Stmt::If {
@@ -694,27 +693,16 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
                 _ => vec![],
             };
             for sid in children {
-                let child = module.arena.get_stmt(sid);
-                process_stmt(
-                    child,
-                    module,
-                    interner,
-                    typed,
-                    src,
-                    all_src_lines,
-                    line_start,
-                    line_end,
-                    context,
-                    results,
-                );
+                let child = ctx.module.arena.get_stmt(sid);
+                process_stmt(child, context, ctx, results);
             }
             return;
         }
 
-        let stmt_lo = offset_line(src, span.start as usize);
-        let stmt_hi = offset_line(src, span.end.saturating_sub(1) as usize);
-        let source_text = extract_source_text(all_src_lines, stmt_lo, stmt_hi);
-        let (what, ty) = describe_stmt(stmt, module, interner, typed);
+        let stmt_lo = offset_line(ctx.src, span.start as usize);
+        let stmt_hi = offset_line(ctx.src, span.end.saturating_sub(1) as usize);
+        let source_text = extract_source_text(ctx.all_src_lines, stmt_lo, stmt_hi);
+        let (what, ty) = describe_stmt(stmt, ctx.module, ctx.interner, ctx.typed);
 
         // Collect reads from all expressions in this stmt.
         let expr_ids_in_stmt: Vec<fidan_ast::ExprId> = match stmt {
@@ -742,17 +730,24 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
         let mut reads: Vec<(String, Option<String>)> = Vec::new();
         let mut seen_reads = std::collections::HashSet::new();
         for eid in &expr_ids_in_stmt {
-            collect_reads(*eid, module, interner, typed, &mut reads, &mut seen_reads);
+            collect_reads(
+                *eid,
+                ctx.module,
+                ctx.interner,
+                ctx.typed,
+                &mut reads,
+                &mut seen_reads,
+            );
         }
 
         // Remove from reads any names that are also writes (they're declared here).
-        let writes = collect_writes(stmt, module, interner);
+        let writes = collect_writes(stmt, ctx.module, ctx.interner);
         reads.retain(|(name, _)| !writes.contains(name));
 
         // Collect risks from expression operators.
         let risks: Vec<String> = expr_ids_in_stmt
             .iter()
-            .flat_map(|&eid| binary_risks(eid, module))
+            .flat_map(|&eid| binary_risks(eid, ctx.module))
             .collect::<std::collections::BTreeSet<String>>()
             .into_iter()
             .collect();
@@ -776,6 +771,15 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
     }
 
     let mut results: Vec<Expl> = Vec::new();
+    let stmt_ctx = StmtExplainCtx {
+        module: &module,
+        interner: &interner,
+        typed: &typed,
+        src: &src,
+        all_src_lines: &all_src_lines,
+        line_start,
+        line_end,
+    };
 
     // Walk top-level items.
     for &iid in &module.items {
@@ -797,18 +801,7 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
                     let ctx = format!("in action `{fn_name}`");
                     for &sid in body {
                         let stmt = module.arena.get_stmt(sid);
-                        process_stmt(
-                            stmt,
-                            &module,
-                            &interner,
-                            &typed,
-                            &src,
-                            &all_src_lines,
-                            line_start,
-                            line_end,
-                            &ctx,
-                            &mut results,
-                        );
+                        process_stmt(stmt, &ctx, &stmt_ctx, &mut results);
                     }
                     // If the action signature line itself is targeted, describe the declaration.
                     let sig_lo = offset_line(&src, action_span.start as usize);
@@ -848,18 +841,7 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
             }
             Item::Stmt(sid) => {
                 let stmt = module.arena.get_stmt(*sid);
-                process_stmt(
-                    stmt,
-                    &module,
-                    &interner,
-                    &typed,
-                    &src,
-                    &all_src_lines,
-                    line_start,
-                    line_end,
-                    "at module level",
-                    &mut results,
-                );
+                process_stmt(stmt, "at module level", &stmt_ctx, &mut results);
             }
             Item::ExprStmt(eid) => {
                 let expr_span = module.arena.get_expr(*eid).span();
@@ -1066,18 +1048,7 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
                                     let ctx = format!("method `{mn}` on object `{obj_name}`");
                                     for &sid in body {
                                         let stmt = module.arena.get_stmt(sid);
-                                        process_stmt(
-                                            stmt,
-                                            &module,
-                                            &interner,
-                                            &typed,
-                                            &src,
-                                            &all_src_lines,
-                                            line_start,
-                                            line_end,
-                                            &ctx,
-                                            &mut results,
-                                        );
+                                        process_stmt(stmt, &ctx, &stmt_ctx, &mut results);
                                     }
                                     // Signature line with no body match → describe the method.
                                     let sig_lo = offset_line(&src, mspan.start as usize);
@@ -1204,18 +1175,7 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
                     let ctx = format!("in test `{test_name}`");
                     for &sid in body {
                         let stmt = module.arena.get_stmt(sid);
-                        process_stmt(
-                            stmt,
-                            &module,
-                            &interner,
-                            &typed,
-                            &src,
-                            &all_src_lines,
-                            line_start,
-                            line_end,
-                            &ctx,
-                            &mut results,
-                        );
+                        process_stmt(stmt, &ctx, &stmt_ctx, &mut results);
                     }
                     if results.is_empty() {
                         let hdr_lo = offset_line(&src, span.start as usize);

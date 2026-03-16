@@ -14,10 +14,10 @@ impl crate::Pass for ConstantFolding {
         for func in &mut prog.functions {
             for bb in &mut func.blocks {
                 for instr in &mut bb.instructions {
-                    if let Instr::Assign { rhs, .. } = instr {
-                        if let Some(reduced) = try_reduce(rhs) {
-                            *rhs = reduced;
-                        }
+                    if let Instr::Assign { rhs, .. } = instr
+                        && let Some(reduced) = try_reduce(rhs)
+                    {
+                        *rhs = reduced;
                     }
                 }
             }

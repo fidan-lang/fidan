@@ -198,7 +198,7 @@ pub fn compute(
         let (line1, col1) = file.line_col(tok.span.start);
         let line = line1.saturating_sub(1);
         let start = col1.saturating_sub(1);
-        let len = (tok.span.end - tok.span.start) as u32;
+        let len = tok.span.end - tok.span.start;
 
         raw.push((line, start, len, tt, mods));
     }

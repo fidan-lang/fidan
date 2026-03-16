@@ -79,10 +79,10 @@ impl DocumentStore {
                         }
                     }
                 }
-                if next_type.is_none() {
-                    if let Some(e) = tbl.get(&cur_type) {
-                        next_type = e.ty_name.clone();
-                    }
+                if next_type.is_none()
+                    && let Some(e) = tbl.get(&cur_type)
+                {
+                    next_type = e.ty_name.clone();
                 }
             }
             match next_type {

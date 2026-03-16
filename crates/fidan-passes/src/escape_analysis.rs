@@ -24,6 +24,18 @@
 use fidan_mir::{Callee, Instr, LocalId, MirFunction, MirProgram, Operand, Rvalue, Terminator};
 use std::collections::HashSet;
 
+fn mark_operand(escaping: &mut HashSet<u32>, op: &Operand) {
+    if let Operand::Local(l) = op {
+        escaping.insert(l.0);
+    }
+}
+
+fn mark_all_operands(escaping: &mut HashSet<u32>, ops: &[Operand]) {
+    for op in ops {
+        mark_operand(escaping, op);
+    }
+}
+
 // ── Public types ───────────────────────────────────────────────────────────────
 
 /// Escape analysis result for a single function.
@@ -66,68 +78,54 @@ pub fn analyze_function(mf: &MirFunction) -> EscapeInfo {
     let total_locals = mf.local_count as usize;
     let mut escaping: HashSet<u32> = HashSet::new();
 
-    // Mark a single operand's local (if any) as escaping.
-    macro_rules! mark {
-        ($op:expr) => {
-            if let Operand::Local(l) = $op {
-                escaping.insert(l.0);
-            }
-        };
-    }
-
-    // Mark all operands in a slice as escaping.
-    macro_rules! mark_all {
-        ($ops:expr) => {
-            for _op in $ops {
-                mark!(_op);
-            }
-        };
-    }
-
     for bb in &mf.blocks {
         for instr in &bb.instructions {
             match instr {
                 // ── Stores that push a value onto the heap or into global scope ──
 
                 // Stored to a module global → survives past the current frame.
-                Instr::StoreGlobal { value, .. } => mark!(value),
+                Instr::StoreGlobal { value, .. } => mark_operand(&mut escaping, value),
 
                 // Stored into an object field → the field owner may outlive the caller.
-                Instr::SetField { value, .. } => mark!(value),
+                Instr::SetField { value, .. } => mark_operand(&mut escaping, value),
 
                 // Stored into a collection slot → the collection may outlive the caller.
-                Instr::SetIndex { value, .. } => mark!(value),
+                Instr::SetIndex { value, .. } => mark_operand(&mut escaping, value),
 
                 // ── Rvalue assignments ─────────────────────────────────────────
                 Instr::Assign { rhs, .. } => match rhs {
                     // Collection constructors heap-allocate their elements.
-                    Rvalue::List(elems) | Rvalue::Tuple(elems) => mark_all!(elems),
+                    Rvalue::List(elems) | Rvalue::Tuple(elems) => {
+                        mark_all_operands(&mut escaping, elems)
+                    }
 
                     Rvalue::Dict(pairs) => {
                         for (k, v) in pairs {
-                            mark!(k);
-                            mark!(v);
+                            mark_operand(&mut escaping, k);
+                            mark_operand(&mut escaping, v);
                         }
                     }
 
                     // Object field initialisers escape into the heap object.
                     Rvalue::Construct { fields, .. } => {
                         for (_, v) in fields {
-                            mark!(v);
+                            mark_operand(&mut escaping, v);
                         }
                     }
 
                     // Closure captures escape into the heap closure object.
-                    Rvalue::MakeClosure { captures, .. } => mark_all!(captures),
+                    Rvalue::MakeClosure { captures, .. } => {
+                        mark_all_operands(&mut escaping, captures)
+                    }
 
                     // Function calls: all arguments escape conservatively.
                     Rvalue::Call { callee, args } => {
-                        mark_all!(args);
+                        mark_all_operands(&mut escaping, args);
                         if let Callee::Method { receiver, .. } = callee {
-                            mark!(receiver);
+                            mark_operand(&mut escaping, receiver);
                         }
                         if let Callee::Dynamic(fn_op) = callee {
-                            mark!(fn_op);
+                            mark_operand(&mut escaping, fn_op);
                         }
                     }
 
@@ -136,29 +134,29 @@ pub fn analyze_function(mf: &MirFunction) -> EscapeInfo {
 
                 // ── Call instruction (non-rvalue) ──────────────────────────────
                 Instr::Call { callee, args, .. } => {
-                    mark_all!(args);
+                    mark_all_operands(&mut escaping, args);
                     if let Callee::Method { receiver, .. } = callee {
-                        mark!(receiver);
+                        mark_operand(&mut escaping, receiver);
                     }
                     if let Callee::Dynamic(fn_op) = callee {
-                        mark!(fn_op);
+                        mark_operand(&mut escaping, fn_op);
                     }
                 }
 
                 // ── Concurrency: args cross thread boundaries ──────────────────
                 Instr::SpawnExpr { args, .. }
                 | Instr::SpawnConcurrent { args, .. }
-                | Instr::SpawnParallel { args, .. } => mark_all!(args),
+                | Instr::SpawnParallel { args, .. } => mark_all_operands(&mut escaping, args),
 
-                Instr::SpawnDynamic { args, .. } => mark_all!(args),
+                Instr::SpawnDynamic { args, .. } => mark_all_operands(&mut escaping, args),
 
                 Instr::ParallelIter {
                     collection,
                     closure_args,
                     ..
                 } => {
-                    mark!(collection);
-                    mark_all!(closure_args);
+                    mark_operand(&mut escaping, collection);
+                    mark_all_operands(&mut escaping, closure_args);
                 }
 
                 _ => {}
@@ -169,10 +167,10 @@ pub fn analyze_function(mf: &MirFunction) -> EscapeInfo {
 
         match &bb.terminator {
             // Return value escapes to the caller's frame.
-            Terminator::Return(Some(op)) => mark!(op),
+            Terminator::Return(Some(op)) => mark_operand(&mut escaping, op),
 
             // Thrown value escapes to the nearest catch handler (may be in caller).
-            Terminator::Throw { value } => mark!(value),
+            Terminator::Throw { value } => mark_operand(&mut escaping, value),
 
             _ => {}
         }

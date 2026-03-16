@@ -136,7 +136,7 @@ impl<'src> Lexer<'src> {
                     if self
                         .last_kind
                         .as_ref()
-                        .map_or(false, |k| k.terminates_statement())
+                        .is_some_and(|k| k.terminates_statement())
                     {
                         let span = self.span_from(start);
                         self.last_kind = Some(TokenKind::Newline);
@@ -153,7 +153,7 @@ impl<'src> Lexer<'src> {
                     if self
                         .last_kind
                         .as_ref()
-                        .map_or(false, |k| k.terminates_statement())
+                        .is_some_and(|k| k.terminates_statement())
                     {
                         self.last_kind = Some(TokenKind::Newline);
                         return Token::new(TokenKind::Newline, span);
@@ -249,7 +249,7 @@ impl<'src> Lexer<'src> {
                     self.advance(); // eat `x`/`X`
                     while self
                         .peek()
-                        .map_or(false, |c| c.is_ascii_hexdigit() || c == '_')
+                        .is_some_and(|c| c.is_ascii_hexdigit() || c == '_')
                     {
                         self.advance();
                     }
@@ -262,7 +262,7 @@ impl<'src> Lexer<'src> {
                     self.advance(); // eat `b`/`B`
                     while self
                         .peek()
-                        .map_or(false, |c| c == '0' || c == '1' || c == '_')
+                        .is_some_and(|c| c == '0' || c == '1' || c == '_')
                     {
                         self.advance();
                     }
@@ -274,20 +274,13 @@ impl<'src> Lexer<'src> {
             }
         }
 
-        while self
-            .peek()
-            .map_or(false, |c| c.is_ascii_digit() || c == '_')
-        {
+        while self.peek().is_some_and(|c| c.is_ascii_digit() || c == '_') {
             self.advance();
         }
-        let is_float =
-            self.peek() == Some('.') && self.peek2().map_or(false, |c| c.is_ascii_digit());
+        let is_float = self.peek() == Some('.') && self.peek2().is_some_and(|c| c.is_ascii_digit());
         if is_float {
             self.advance(); // `.`
-            while self
-                .peek()
-                .map_or(false, |c| c.is_ascii_digit() || c == '_')
-            {
+            while self.peek().is_some_and(|c| c.is_ascii_digit() || c == '_') {
                 self.advance();
             }
             // Optional exponent: e/E [+-] digits
@@ -296,7 +289,7 @@ impl<'src> Lexer<'src> {
                 if matches!(self.peek(), Some('+') | Some('-')) {
                     self.advance();
                 }
-                while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+                while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                     self.advance();
                 }
             }
@@ -310,10 +303,7 @@ impl<'src> Lexer<'src> {
     }
 
     fn lex_ident(&mut self, start: u32) -> Token {
-        while self
-            .peek()
-            .map_or(false, |c| c.is_alphanumeric() || c == '_')
-        {
+        while self.peek().is_some_and(|c| c.is_alphanumeric() || c == '_') {
             self.advance();
         }
         let word = &self.src[start as usize..self.pos as usize];
@@ -535,7 +525,7 @@ mod tests {
     fn test_auto_newline() {
         // Newline after an identifier terminates the statement.
         let tokens = lex("x\ny");
-        assert!(tokens.iter().any(|t| *t == TokenKind::Newline));
+        assert!(tokens.contains(&TokenKind::Newline));
     }
 
     #[test]
@@ -553,7 +543,7 @@ mod tests {
     fn test_line_comment() {
         let tokens = lex("x # this is a comment\ny");
         // Should have x, Newline, y, Eof — comment is gone.
-        assert!(tokens.iter().any(|t| *t == TokenKind::Newline));
+        assert!(tokens.contains(&TokenKind::Newline));
         assert!(!tokens.iter().any(|t| matches!(t, TokenKind::Unknown(_))));
     }
 

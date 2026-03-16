@@ -220,7 +220,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 _ => now_ms(),
             };
             // 1970-01-01 was a Thursday (ISO weekday 3, i.e. index 3 from Monday=0)
-            let days = ms.div_euclid(86_400_000) as i64;
+            let days = ms.div_euclid(86_400_000);
             Some(int_val(days.rem_euclid(7).wrapping_add(3).rem_euclid(7)))
         }
 

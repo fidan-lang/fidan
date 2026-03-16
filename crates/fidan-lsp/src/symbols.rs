@@ -194,7 +194,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 detail,
                 // Store the parent type name so the LSP can follow the
                 // inheritance chain across documents (e.g. TRex → Dinosaur).
-                ty_name: info.parent.map(|p| res(p)),
+                ty_name: info.parent.map(&res),
                 param_types: vec![],
                 param_required: vec![],
                 return_type: None,

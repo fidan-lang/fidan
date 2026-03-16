@@ -7,6 +7,7 @@
 // per-call-frame catch stack, mirroring the `PushCatch`/`PopCatch`
 // instructions emitted by the MIR lowerer.
 
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
@@ -68,12 +69,12 @@ fn build_class_table(
         // Use a HashSet for O(1) dedup instead of Vec::contains (which is O(n) per check).
         let mut seen: FxHashSet<fidan_lexer::Symbol> = FxHashSet::default();
         let mut all_field_names: Vec<fidan_lexer::Symbol> = Vec::new();
-        if let Some(parent_sym) = obj.parent {
-            if let Some(parent_class) = table.get(&parent_sym) {
-                for fd in &parent_class.fields {
-                    if seen.insert(fd.name) {
-                        all_field_names.push(fd.name);
-                    }
+        if let Some(parent_sym) = obj.parent
+            && let Some(parent_class) = table.get(&parent_sym)
+        {
+            for fd in &parent_class.fields {
+                if seen.insert(fd.name) {
+                    all_field_names.push(fd.name);
                 }
             }
         }
@@ -189,7 +190,7 @@ pub struct MirMachine {
     /// Init function writes (single-threaded); all other accesses are reads unless
     /// the user program explicitly mutates a global at runtime.  `RwLock` allows
     /// concurrent reads (parallel tasks) while still supporting write access.
-    globals: Arc<parking_lot::RwLock<Vec<FidanValue>>>,
+    globals: Rc<parking_lot::RwLock<Vec<FidanValue>>>,
     /// Frozen snapshot of globals taken after the init function completes.
     /// When set, `LoadGlobal` reads from this lock-free `Arc<[FidanValue]>` slice
     /// instead of acquiring the `RwLock` on every access — a measurable speedup
@@ -351,7 +352,7 @@ impl MirMachine {
             stdlib_modules: Arc::new(stdlib_modules),
             reexported_namespaces: Arc::new(reexported_namespaces),
             user_fn_map: Arc::new(user_fn_map),
-            globals: Arc::new(parking_lot::RwLock::new(vec![
+            globals: Rc::new(parking_lot::RwLock::new(vec![
                 FidanValue::Nothing;
                 globals_count
             ])),
@@ -389,7 +390,7 @@ impl MirMachine {
             stdlib_modules: self.stdlib_modules.clone(),
             reexported_namespaces: self.reexported_namespaces.clone(),
             user_fn_map: self.user_fn_map.clone(),
-            globals: Arc::clone(&self.globals),
+            globals: Rc::clone(&self.globals),
             frozen_globals: self.frozen_globals.as_ref().map(Arc::clone),
             // One atomic bump on the outer Arc; all Arc<str> entries are shared.
             str_table: Arc::clone(&self.str_table),
@@ -783,13 +784,13 @@ impl MirMachine {
         self.call_stack.pop();
 
         // ── Profiling: accumulate inclusive elapsed time ──────────────────────
-        if let Some(start) = profile_start {
-            if let Some(ref pd) = self.profile_data {
-                let idx = fn_id.0 as usize;
-                if idx < pd.len() {
-                    let ns = start.elapsed().as_nanos() as u64;
-                    pd[idx].total_ns.fetch_add(ns, Ordering::Relaxed);
-                }
+        if let Some(start) = profile_start
+            && let Some(ref pd) = self.profile_data
+        {
+            let idx = fn_id.0 as usize;
+            if idx < pd.len() {
+                let ns = start.elapsed().as_nanos() as u64;
+                pd[idx].total_ns.fetch_add(ns, Ordering::Relaxed);
             }
         }
 
@@ -1317,12 +1318,10 @@ impl MirMachine {
                 // (+1 from frame.load clone), so a "sole owner" shows count == 2 here.
                 // We use == 2 as the "last owner" threshold.
                 let is_last_owner = std::rc::Rc::strong_count(&obj_ref.0) == 2;
-                if is_last_owner {
-                    if let Some(RuntimeFnId(id)) = drop_fn {
-                        // Call `drop` with only `this` — no other arguments.
-                        // We consume `val` here so the drop body can access `this`.
-                        self.call_function(FunctionId(id), vec![val])?;
-                    }
+                if is_last_owner && let Some(RuntimeFnId(id)) = drop_fn {
+                    // Call `drop` with only `this` — no other arguments.
+                    // We consume `val` here so the drop body can access `this`.
+                    self.call_function(FunctionId(id), vec![val])?;
                 }
             }
         }
@@ -1648,12 +1647,11 @@ impl MirMachine {
         }
         // For list callbacks and bootstrap, resolve the string lazily (O(1) Arc clone).
         let method_name = self.sym_str(method);
-        if let FidanValue::List(ref list_ref) = receiver {
-            if let Some(result) =
+        if let FidanValue::List(ref list_ref) = receiver
+            && let Some(result) =
                 self.dispatch_list_callbacks(list_ref, &method_name, args.clone())?
-            {
-                return Ok(result);
-            }
+        {
+            return Ok(result);
         }
         crate::bootstrap::call_bootstrap_method(receiver, &method_name, args)
             .ok_or_else(|| MirSignal::Panic(format!("no method `{}` found", method_name)))
@@ -1741,32 +1739,32 @@ impl MirMachine {
         // Sandbox check: guard all `io` module calls before execution.
         // Check sandbox first (Option branch) so non-sandbox runs skip the
         // module string comparison entirely on every stdlib call.
-        if let Some(ref policy) = self.sandbox {
-            if module == "io" {
-                let first_arg = args
-                    .first()
-                    .and_then(|v| {
-                        if let FidanValue::String(s) = v {
-                            Some(s.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or("");
-                if let Err(violation) = policy.check_io_call(name, first_arg) {
-                    let (code, msg) = match &violation {
-                        SandboxViolation::ReadDenied { .. } => {
-                            (fidan_diagnostics::diag_code!("R4001"), violation.message())
-                        }
-                        SandboxViolation::WriteDenied { .. } => {
-                            (fidan_diagnostics::diag_code!("R4002"), violation.message())
-                        }
-                        SandboxViolation::EnvDenied { .. } => {
-                            (fidan_diagnostics::diag_code!("R4003"), violation.message())
-                        }
-                    };
-                    return Err(MirSignal::SandboxViolation(code, msg));
-                }
+        if let Some(ref policy) = self.sandbox
+            && module == "io"
+        {
+            let first_arg = args
+                .first()
+                .and_then(|v| {
+                    if let FidanValue::String(s) = v {
+                        Some(s.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or("");
+            if let Err(violation) = policy.check_io_call(name, first_arg) {
+                let (code, msg) = match &violation {
+                    SandboxViolation::ReadDenied { .. } => {
+                        (fidan_diagnostics::diag_code!("R4001"), violation.message())
+                    }
+                    SandboxViolation::WriteDenied { .. } => {
+                        (fidan_diagnostics::diag_code!("R4002"), violation.message())
+                    }
+                    SandboxViolation::EnvDenied { .. } => {
+                        (fidan_diagnostics::diag_code!("R4003"), violation.message())
+                    }
+                };
+                return Err(MirSignal::SandboxViolation(code, msg));
             }
         }
         match fidan_stdlib::dispatch_stdlib(module, name, args) {
@@ -1881,11 +1879,11 @@ impl MirMachine {
             // `.name` on a first-class action value returns its declared name.
             FidanValue::Function(RuntimeFnId(id)) => {
                 let field_name = self.sym_str(field);
-                if field_name.as_ref() == "name" {
-                    if let Some(func) = self.program.functions.get(*id as usize) {
-                        let name = self.sym_str(func.name);
-                        return FidanValue::String(FidanString::new(name.as_ref()));
-                    }
+                if field_name.as_ref() == "name"
+                    && let Some(func) = self.program.functions.get(*id as usize)
+                {
+                    let name = self.sym_str(func.name);
+                    return FidanValue::String(FidanString::new(name.as_ref()));
                 }
                 FidanValue::Nothing
             }

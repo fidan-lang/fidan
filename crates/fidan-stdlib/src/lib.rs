@@ -68,12 +68,12 @@ pub fn dispatch_stdlib(
                 }
             })
         }
-        "parallel" => parallel::dispatch_op(name, args).and_then(|res| match res {
-            Ok(Some(op)) => Some(StdlibResult::NeedsCallbackDispatch(op)),
-            Ok(None) => Some(StdlibResult::Value(fidan_runtime::FidanValue::Nothing)),
-            Err(msg) => Some(StdlibResult::Value(fidan_runtime::FidanValue::String(
+        "parallel" => parallel::dispatch_op(name, args).map(|res| match res {
+            Ok(Some(op)) => StdlibResult::NeedsCallbackDispatch(op),
+            Ok(None) => StdlibResult::Value(fidan_runtime::FidanValue::Nothing),
+            Err(msg) => StdlibResult::Value(fidan_runtime::FidanValue::String(
                 fidan_runtime::FidanString::new(&format!("__error__: {msg}")),
-            ))),
+            )),
         }),
         "time" => time::dispatch(name, args).map(StdlibResult::Value),
         "regex" => regex::dispatch(name, args).map(StdlibResult::Value),

@@ -1,17 +1,17 @@
 use crate::FidanValue;
-use std::sync::Arc;
+use std::rc::Rc;
 
 /// Copy-on-Write list. Cheap to clone; physical copy on first mutation.
 #[derive(Debug, Clone)]
 pub struct FidanList {
-    // Arc for the shared backing storage (COW).
-    inner: Arc<Vec<FidanValue>>,
+    // Rc for shared single-threaded backing storage (COW).
+    inner: Rc<Vec<FidanValue>>,
 }
 
 impl FidanList {
     pub fn new() -> Self {
         FidanList {
-            inner: Arc::new(Vec::new()),
+            inner: Rc::new(Vec::new()),
         }
     }
     pub fn len(&self) -> usize {
@@ -26,12 +26,12 @@ impl FidanList {
 
     /// Append a value. Clones the inner Vec only if there are other owners.
     pub fn append(&mut self, val: FidanValue) {
-        Arc::make_mut(&mut self.inner).push(val);
+        Rc::make_mut(&mut self.inner).push(val);
     }
 
     /// Set value at index. No-op if out of bounds.
     pub fn set_at(&mut self, idx: usize, val: FidanValue) {
-        let v = Arc::make_mut(&mut self.inner);
+        let v = Rc::make_mut(&mut self.inner);
         if idx < v.len() {
             v[idx] = val;
         }

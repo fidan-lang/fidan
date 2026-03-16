@@ -1,24 +1,24 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/fidan-source",
-    "crates/fidan-lexer",
-    "crates/fidan-ast",
-    "crates/fidan-parser",
-    "crates/fidan-diagnostics",
-    "crates/fidan-typeck",
-    "crates/fidan-hir",
-    "crates/fidan-mir",
-    "crates/fidan-passes",
-    "crates/fidan-runtime",
-    "crates/fidan-interp",
-    "crates/fidan-codegen-cranelift",
-    "crates/fidan-codegen-llvm",
-    "crates/fidan-stdlib",
-    "crates/fidan-driver",
-    "crates/fidan-fmt",
-    "crates/fidan-lsp",
-    "crates/fidan-cli",
+  "crates/fidan-source",
+  "crates/fidan-lexer",
+  "crates/fidan-ast",
+  "crates/fidan-parser",
+  "crates/fidan-diagnostics",
+  "crates/fidan-typeck",
+  "crates/fidan-hir",
+  "crates/fidan-mir",
+  "crates/fidan-passes",
+  "crates/fidan-runtime",
+  "crates/fidan-interp",
+  "crates/fidan-codegen-cranelift",
+  "crates/fidan-codegen-llvm",
+  "crates/fidan-stdlib",
+  "crates/fidan-driver",
+  "crates/fidan-fmt",
+  "crates/fidan-lsp",
+  "crates/fidan-cli",
 ]
 
 [workspace.package]
@@ -68,6 +68,19 @@ mimalloc = { version = "0.1", default-features = false }
 tower-lsp = "0.20"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std"] }
 serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+reqwest = { version = "0.13", default-features = false, features = [
+  "blocking",
+  "json",
+  "multipart",
+  "rustls",
+] }
+semver = "1"
+flate2 = "1"
+tar = "0.4"
+urlencoding = "2"
+keyring = "3"
 notify = { version = "8", features = ["macos_fsevent"] }
 
 # Cranelift JIT + AOT

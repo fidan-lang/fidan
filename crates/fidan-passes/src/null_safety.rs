@@ -53,8 +53,8 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<NullSafetyDiag
 
         for bb in &func.blocks {
             for instr in &bb.instructions {
-                match instr {
-                    Instr::Assign { dest, rhs, .. } => match rhs {
+                if let Instr::Assign { dest, rhs, .. } = instr {
+                    match rhs {
                         // Literal nothing  →  dest is definitely nothing.
                         Rvalue::Literal(MirLit::Nothing) => {
                             def_nothing.insert(*dest);
@@ -76,11 +76,7 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<NullSafetyDiag
                         _ => {
                             // Any other rvalue → we assume it might be non-nothing.
                         }
-                    },
-                    // CertainCheck means the operand is definitely NOT nothing
-                    // after this instruction.  (We don't need to update the set
-                    // because CertainCheck locals are params — never in def_nothing.)
-                    _ => {}
+                    }
                 }
             }
         }
@@ -242,17 +238,17 @@ fn check_certain_args(
         if !param.certain {
             continue;
         }
-        if let Some(arg) = args.get(i) {
-            if is_def_nothing(arg, def_nothing, def_value) {
-                let pname = interner.resolve(param.name);
-                diags.push(NullSafetyDiag {
-                    fn_name: caller_name.to_string(),
-                    context: format!(
-                        "passing `nothing` as `{pname}` in call to `{callee_name}` \
+        if let Some(arg) = args.get(i)
+            && is_def_nothing(arg, def_nothing, def_value)
+        {
+            let pname = interner.resolve(param.name);
+            diags.push(NullSafetyDiag {
+                fn_name: caller_name.to_string(),
+                context: format!(
+                    "passing `nothing` as `{pname}` in call to `{callee_name}` \
                          — parameter is `oftype` (non-nullable)"
-                    ),
-                });
-            }
+                ),
+            });
         }
     }
 }

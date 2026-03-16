@@ -307,7 +307,7 @@ impl<'t> Parser<'t> {
                 if let Some(sid) = self.parse_stmt() {
                     return Some(self.module.arena.alloc_item(Item::Stmt(sid)));
                 }
-                return None;
+                None
             }
             TokenKind::Parallel => {
                 // `parallel action` → declaration; `parallel for` / `parallel {` → stmt
@@ -315,11 +315,11 @@ impl<'t> Parser<'t> {
                 let _ = span;
                 if matches!(self.peek_nth(1), TokenKind::Action) {
                     self.advance(); // eat `parallel`
-                    return Some(self.parse_action_decl(true, decs));
+                    Some(self.parse_action_decl(true, decs))
                 } else if let Some(sid) = self.parse_stmt() {
-                    return Some(self.module.arena.alloc_item(Item::Stmt(sid)));
+                    Some(self.module.arena.alloc_item(Item::Stmt(sid)))
                 } else {
-                    return None;
+                    None
                 }
             }
             TokenKind::Var => {
@@ -646,10 +646,9 @@ impl<'t> Parser<'t> {
                 span: self.current_span(),
             }
         };
-        let default = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
-            self.advance();
-            Some(self.parse_expr())
-        } else if self.at_ident(self.sym_default) {
+        let default = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set)
+            || self.at_ident(self.sym_default)
+        {
             self.advance();
             Some(self.parse_expr())
         } else {
@@ -789,10 +788,9 @@ impl<'t> Parser<'t> {
                 span: self.current_span(),
             }
         };
-        let default = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
-            self.advance();
-            Some(self.parse_expr())
-        } else if self.at_ident(self.sym_default) {
+        let default = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set)
+            || self.at_ident(self.sym_default)
+        {
             self.advance();
             Some(self.parse_expr())
         } else {

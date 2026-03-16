@@ -1087,20 +1087,19 @@ pub unsafe extern "C" fn fdn_obj_invoke(
                 return v;
             }
             // User namespace: look up method_name in the name table and call through FN_TABLE.
-            if let Some(name_table) = FN_NAME_TABLE.get() {
-                if let Ok(guard) = name_table.lock() {
-                    if let Some(&idx) = guard.get(method_name.as_str()) {
-                        drop(guard);
-                        // Build arg pointers
-                        let mut arg_ptrs: Vec<*mut FidanValue> =
-                            extra.iter().map(|v| into_raw(v.clone())).collect();
-                        let result = call_trampoline_by_idx(idx, &arg_ptrs);
-                        for p in arg_ptrs.drain(..) {
-                            drop(Box::from_raw(p));
-                        }
-                        return result;
-                    }
+            if let Some(name_table) = FN_NAME_TABLE.get()
+                && let Ok(guard) = name_table.lock()
+                && let Some(&idx) = guard.get(method_name.as_str())
+            {
+                drop(guard);
+                // Build arg pointers
+                let mut arg_ptrs: Vec<*mut FidanValue> =
+                    extra.iter().map(|v| into_raw(v.clone())).collect();
+                let result = call_trampoline_by_idx(idx, &arg_ptrs);
+                for p in arg_ptrs.drain(..) {
+                    drop(Box::from_raw(p));
                 }
+                return result;
             }
             eprintln!(
                 "AOT: no function `{}` in user namespace `{}`",
@@ -1201,7 +1200,7 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
         "split" => {
             let sep = args
                 .first()
-                .map(|v| as_str_val(v))
+                .map(as_str_val)
                 .unwrap_or_else(|| " ".to_owned());
             let mut list = FidanList::new();
             for part in str_val.split(sep.as_str()) {
@@ -1229,7 +1228,7 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
             let collection = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             match collection {
                 FidanValue::List(l) => {
-                    let items: Vec<String> = l.borrow().iter().map(|v| as_str_val(v)).collect();
+                    let items: Vec<String> = l.borrow().iter().map(as_str_val).collect();
                     into_raw(FidanValue::String(FidanString::new(&items.join(&str_val))))
                 }
                 _ => into_raw(FidanValue::String(FidanString::new(""))),
@@ -1238,26 +1237,26 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
 
         // ── Search ────────────────────────────────────────────────────────────
         "contains" => {
-            let pat = args.first().map(|v| as_str_val(v)).unwrap_or_default();
+            let pat = args.first().map(as_str_val).unwrap_or_default();
             into_raw(FidanValue::Boolean(str_val.contains(pat.as_str())))
         }
         "startsWith" | "starts_with" => {
-            let pat = args.first().map(|v| as_str_val(v)).unwrap_or_default();
+            let pat = args.first().map(as_str_val).unwrap_or_default();
             into_raw(FidanValue::Boolean(str_val.starts_with(pat.as_str())))
         }
         "endsWith" | "ends_with" => {
-            let pat = args.first().map(|v| as_str_val(v)).unwrap_or_default();
+            let pat = args.first().map(as_str_val).unwrap_or_default();
             into_raw(FidanValue::Boolean(str_val.ends_with(pat.as_str())))
         }
         "indexOf" | "index_of" => {
-            let pat = args.first().map(|v| as_str_val(v)).unwrap_or_default();
+            let pat = args.first().map(as_str_val).unwrap_or_default();
             match str_val.find(pat.as_str()) {
                 Some(i) => into_raw(FidanValue::Integer(i as i64)),
                 None => into_raw(FidanValue::Integer(-1)),
             }
         }
         "lastIndexOf" | "last_index_of" => {
-            let pat = args.first().map(|v| as_str_val(v)).unwrap_or_default();
+            let pat = args.first().map(as_str_val).unwrap_or_default();
             match str_val.rfind(pat.as_str()) {
                 Some(i) => into_raw(FidanValue::Integer(i as i64)),
                 None => into_raw(FidanValue::Integer(-1)),
@@ -1266,22 +1265,22 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
 
         // ── Mutation / transformation ─────────────────────────────────────────
         "replace" => {
-            let from = args.first().map(|v| as_str_val(v)).unwrap_or_default();
-            let to = args.get(1).map(|v| as_str_val(v)).unwrap_or_default();
+            let from = args.first().map(as_str_val).unwrap_or_default();
+            let to = args.get(1).map(as_str_val).unwrap_or_default();
             into_raw(FidanValue::String(FidanString::new(
                 &str_val.replace(from.as_str(), to.as_str()),
             )))
         }
         "replaceAll" | "replace_all" => {
-            let from = args.first().map(|v| as_str_val(v)).unwrap_or_default();
-            let to = args.get(1).map(|v| as_str_val(v)).unwrap_or_default();
+            let from = args.first().map(as_str_val).unwrap_or_default();
+            let to = args.get(1).map(as_str_val).unwrap_or_default();
             into_raw(FidanValue::String(FidanString::new(
                 &str_val.replace(from.as_str(), to.as_str()),
             )))
         }
         "replaceFirst" | "replace_first" => {
-            let from = args.first().map(|v| as_str_val(v)).unwrap_or_default();
-            let to = args.get(1).map(|v| as_str_val(v)).unwrap_or_default();
+            let from = args.first().map(as_str_val).unwrap_or_default();
+            let to = args.get(1).map(as_str_val).unwrap_or_default();
             into_raw(FidanValue::String(FidanString::new(&str_val.replacen(
                 from.as_str(),
                 to.as_str(),
@@ -1383,12 +1382,12 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
                 .unwrap_or(0);
             let pad_char = args
                 .get(1)
-                .map(|v| as_str_val(v))
+                .map(as_str_val)
                 .unwrap_or_else(|| " ".to_owned());
             let pad_ch = pad_char.chars().next().unwrap_or(' ');
             let len = str_val.chars().count();
             let padded = if total > len {
-                let padding: String = std::iter::repeat(pad_ch).take(total - len).collect();
+                let padding: String = std::iter::repeat_n(pad_ch, total - len).collect();
                 padding + &str_val
             } else {
                 str_val
@@ -1408,12 +1407,12 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
                 .unwrap_or(0);
             let pad_char = args
                 .get(1)
-                .map(|v| as_str_val(v))
+                .map(as_str_val)
                 .unwrap_or_else(|| " ".to_owned());
             let pad_ch = pad_char.chars().next().unwrap_or(' ');
             let len = str_val.chars().count();
             let padded = if total > len {
-                let padding: String = std::iter::repeat(pad_ch).take(total - len).collect();
+                let padding: String = std::iter::repeat_n(pad_ch, total - len).collect();
                 str_val + &padding
             } else {
                 str_val
@@ -1541,7 +1540,7 @@ fn dispatch_list_method(
         "sort" => {
             let mut b = list.borrow_mut();
             let mut items: Vec<FidanValue> = b.iter().cloned().collect();
-            items.sort_by(|a, b| compare_values(a, b));
+            items.sort_by(compare_values);
             let mut new_list = FidanList::new();
             for v in items {
                 new_list.append(v);
@@ -1550,9 +1549,9 @@ fn dispatch_list_method(
             into_raw(FidanValue::Nothing)
         }
         "join" => {
-            let sep = args.first().map(|v| as_str_val(v)).unwrap_or_default();
+            let sep = args.first().map(as_str_val).unwrap_or_default();
             let b = list.borrow();
-            let items: Vec<String> = b.iter().map(|v| as_str_val(v)).collect();
+            let items: Vec<String> = b.iter().map(as_str_val).collect();
             into_raw(FidanValue::String(FidanString::new(&items.join(&sep))))
         }
         "slice" => {
@@ -1617,7 +1616,7 @@ fn dispatch_list_method(
         }
         "toString" | "to_string" => {
             let b = list.borrow();
-            let items: Vec<String> = b.iter().map(|v| display(v)).collect();
+            let items: Vec<String> = b.iter().map(display).collect();
             into_raw(FidanValue::String(FidanString::new(&format!(
                 "[{}]",
                 items.join(", ")
@@ -2315,11 +2314,11 @@ fn dispatch_string_fn(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
         _ => {}
     }
     // Delegate to method dispatch by treating the first arg as the string receiver.
-    if let Some(recv) = args.first().cloned() {
-        if let FidanValue::String(s) = recv {
-            let rest = args.into_iter().skip(1).collect();
-            return dispatch_string_method(s, func, rest);
-        }
+    if let Some(recv) = args.first().cloned()
+        && let FidanValue::String(s) = recv
+    {
+        let rest = args.into_iter().skip(1).collect();
+        return dispatch_string_method(s, func, rest);
     }
     into_raw(FidanValue::Nothing)
 }
@@ -2415,29 +2414,17 @@ fn dispatch_io(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
             }
         }
         "print" => {
-            let text = args
-                .iter()
-                .map(|v| as_str_val(v))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let text = args.iter().map(as_str_val).collect::<Vec<_>>().join(" ");
             println!("{}", text);
             into_raw(FidanValue::Nothing)
         }
         "println" => {
-            let text = args
-                .iter()
-                .map(|v| as_str_val(v))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let text = args.iter().map(as_str_val).collect::<Vec<_>>().join(" ");
             println!("{}", text);
             into_raw(FidanValue::Nothing)
         }
         "eprint" | "eprintln" => {
-            let text = args
-                .iter()
-                .map(|v| as_str_val(v))
-                .collect::<Vec<_>>()
-                .join(" ");
+            let text = args.iter().map(as_str_val).collect::<Vec<_>>().join(" ");
             eprintln!("{}", text);
             into_raw(FidanValue::Nothing)
         }
@@ -2651,7 +2638,7 @@ fn dispatch_collections(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
             if let Some(FidanValue::List(l)) = args.first() {
                 let b = l.borrow();
                 let mut items: Vec<FidanValue> = b.iter().cloned().collect();
-                items.sort_by(|a, b| compare_values(a, b));
+                items.sort_by(compare_values);
                 let mut new_list = FidanList::new();
                 for v in items {
                     new_list.append(v);
@@ -2780,8 +2767,8 @@ fn dispatch_collections(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
             _ => into_raw(FidanValue::Integer(0)),
         },
         "isEmpty" | "is_empty" => match args.first() {
-            Some(FidanValue::List(l)) => into_raw(FidanValue::Boolean(l.borrow().len() == 0)),
-            Some(FidanValue::Dict(d)) => into_raw(FidanValue::Boolean(d.borrow().len() == 0)),
+            Some(FidanValue::List(l)) => into_raw(FidanValue::Boolean(l.borrow().is_empty())),
+            Some(FidanValue::Dict(d)) => into_raw(FidanValue::Boolean(d.borrow().is_empty())),
             _ => into_raw(FidanValue::Boolean(true)),
         },
         "concat" => {
@@ -2838,9 +2825,9 @@ fn dispatch_collections(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
         }
         "join" => {
             let list_val = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let sep = args.get(1).map(|v| as_str_val(v)).unwrap_or_default();
+            let sep = args.get(1).map(as_str_val).unwrap_or_default();
             if let FidanValue::List(l) = list_val {
-                let parts: Vec<String> = l.borrow().iter().map(|v| as_str_val(v)).collect();
+                let parts: Vec<String> = l.borrow().iter().map(as_str_val).collect();
                 into_raw(FidanValue::String(FidanString::new(&parts.join(&sep))))
             } else {
                 into_raw(FidanValue::Nothing)
@@ -3675,7 +3662,7 @@ fn dispatch_time(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
             };
             let (y, mo, d, _, _, _) = ms_to_civil(ms);
             let t = [0i32, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
-            let yr = if mo < 3 { y as i32 - 1 } else { y as i32 };
+            let yr = if mo < 3 { y - 1 } else { y };
             let wd = (yr + yr / 4 - yr / 100 + yr / 400 + t[(mo as usize) - 1] + d as i32) % 7;
             into_raw(FidanValue::Integer(wd as i64))
         }
@@ -3762,7 +3749,7 @@ pub unsafe extern "C" fn fdn_str_interp(
 
 thread_local! {
     static EXCEPTION_VALUE: std::cell::RefCell<Option<*mut FidanValue>> =
-        std::cell::RefCell::new(None);
+        const { std::cell::RefCell::new(None) };
 }
 
 #[unsafe(no_mangle)]
@@ -3864,13 +3851,13 @@ pub extern "C" fn fdn_fn_table_init(count: i64) {
 /// `ptr` is the raw function pointer cast to `usize`.
 #[unsafe(no_mangle)]
 pub extern "C" fn fdn_fn_table_set(idx: i64, ptr: usize) {
-    if let Some(table) = FN_TABLE.get() {
-        if let Ok(mut guard) = table.lock() {
-            let i = idx as usize;
-            if i < guard.len() {
-                // SAFETY: the AOT compiler guarantees `ptr` is a valid trampoline.
-                guard[i] = Some(unsafe { std::mem::transmute::<usize, FnTrampoline>(ptr) });
-            }
+    if let Some(table) = FN_TABLE.get()
+        && let Ok(mut guard) = table.lock()
+    {
+        let i = idx as usize;
+        if i < guard.len() {
+            // SAFETY: the AOT compiler guarantees `ptr` is a valid trampoline.
+            guard[i] = Some(unsafe { std::mem::transmute::<usize, FnTrampoline>(ptr) });
         }
     }
 }
