@@ -161,6 +161,7 @@ fn subst_instr(instr: &mut Instr, resolve: &impl Fn(&Operand) -> Operand) {
             callee,
             args,
             dest: _,
+            result_ty: _,
             span: _,
         } => {
             subst_callee(callee, resolve);

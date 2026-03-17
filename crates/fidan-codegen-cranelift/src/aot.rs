@@ -36,8 +36,8 @@ use cranelift_module::{DataDescription, Linkage, Module};
 use cranelift_object::{ObjectBuilder, ObjectModule};
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{
-    BlockId as MirBlockId, Callee, FunctionId as MirFunctionId, GlobalId, Instr, MirFunction,
-    MirLit, MirProgram, MirStringPart, MirTy, Operand, Rvalue, Terminator,
+    BlockId as MirBlockId, Callee, FunctionId as MirFunctionId, GlobalId, Instr, LocalId,
+    MirFunction, MirLit, MirProgram, MirStringPart, MirTy, Operand, Rvalue, Terminator,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -242,6 +242,7 @@ struct RuntimeDecls {
     box_namespace: cranelift_module::FuncId,
     box_enum_type: cranelift_module::FuncId,
     box_class_type: cranelift_module::FuncId,
+    make_shared: cranelift_module::FuncId,
     unbox_int: cranelift_module::FuncId,
     unbox_float: cranelift_module::FuncId,
     unbox_bool: cranelift_module::FuncId,
@@ -384,6 +385,7 @@ impl RuntimeDecls {
             box_namespace: decl!("fdn_box_namespace", sig!((p, i64t) -> ptr)),
             box_enum_type: decl!("fdn_box_enum_type", sig!((p, i64t) -> ptr)),
             box_class_type: decl!("fdn_box_class_type", sig!((p, i64t) -> ptr)),
+            make_shared: decl!("fdn_make_shared", sig!((p) -> ptr)),
             unbox_int: decl!("fdn_unbox_int", sig!((p) -> i64)),
             unbox_float: decl!("fdn_unbox_float", {
                 let mut s = module.make_signature();
@@ -678,6 +680,8 @@ fn lower_function(
     mf: &MirFunction,
     interner: &SymbolInterner,
 ) -> Result<()> {
+    let global_ns_map = build_global_namespace_map(program, interner);
+
     // Build the Cranelift function signature.
     let mut sig = module.make_signature();
     for p in &mf.params {
@@ -694,7 +698,7 @@ fn lower_function(
     );
 
     // Build a local-type map for operand lowering.
-    let local_types = build_local_type_map(mf);
+    let local_types = build_local_type_map(mf, program, interner);
     let num_locals = mf.local_count as usize;
 
     let mut builder = FunctionBuilder::new(&mut ctx.func, builder_ctx);
@@ -759,6 +763,8 @@ fn lower_function(
 
     // ── Lower each basic block ─────────────────────────────────────────────────
     for (bi, mir_bb) in mf.blocks.iter().enumerate() {
+        let mut namespace_locals: HashMap<LocalId, String> = HashMap::new();
+
         if bi > 0 {
             builder.switch_to_block(cl_blocks[bi]);
             for (pi, phi) in mir_bb.phis.iter().enumerate() {
@@ -792,6 +798,8 @@ fn lower_function(
                 &mut builder,
                 &cl_vars,
                 &local_types,
+                &global_ns_map,
+                &mut namespace_locals,
                 program,
                 instr,
                 interner,
@@ -831,6 +839,8 @@ fn lower_instr(
     builder: &mut FunctionBuilder<'_>,
     cl_vars: &[Variable],
     local_types: &HashMap<u32, MirTy>,
+    global_ns_map: &HashMap<GlobalId, String>,
+    namespace_locals: &mut HashMap<LocalId, String>,
     program: &MirProgram,
     instr: &Instr,
     interner: &SymbolInterner,
@@ -844,6 +854,7 @@ fn lower_instr(
                 builder,
                 cl_vars,
                 local_types,
+                namespace_locals,
                 program,
                 rhs,
                 ty,
@@ -867,8 +878,20 @@ fn lower_instr(
         }
 
         Instr::Call {
-            dest, callee, args, ..
+            dest,
+            result_ty,
+            callee,
+            args,
+            ..
         } => {
+            let call_result_ty = dest
+                .and_then(|d| {
+                    result_ty
+                        .clone()
+                        .filter(|ty| !matches!(ty, MirTy::Dynamic | MirTy::Error))
+                        .or_else(|| local_types.get(&d.0).cloned())
+                })
+                .unwrap_or(MirTy::Dynamic);
             let ret = emit_call(
                 module,
                 rt,
@@ -876,13 +899,31 @@ fn lower_instr(
                 builder,
                 cl_vars,
                 local_types,
+                namespace_locals,
                 program,
                 callee,
                 args,
-                &MirTy::Dynamic,
+                &call_result_ty,
                 interner,
             )?;
             if let (Some(d), Some(v)) = (dest, ret) {
+                let effective_ty = result_ty
+                    .clone()
+                    .filter(|ty| !matches!(ty, MirTy::Dynamic | MirTy::Error))
+                    .or_else(|| local_types.get(&d.0).cloned())
+                    .unwrap_or(MirTy::Dynamic);
+                let expected_cl_ty = mir_ty_to_cl(&effective_ty);
+                let actual_cl_ty = builder.func.dfg.value_type(v);
+                let v = if actual_cl_ty != expected_cl_ty {
+                    let coerced =
+                        coerce_value(builder, module, rt, v, actual_cl_ty, expected_cl_ty)?;
+                    if actual_cl_ty == PTR_TY && is_scalar(&effective_ty) {
+                        call_rt(module, builder, rt.drop_any, &[v])?;
+                    }
+                    coerced
+                } else {
+                    v
+                };
                 builder.def_var(cl_vars[d.0 as usize], v);
             }
         }
@@ -967,11 +1008,17 @@ fn lower_instr(
         Instr::LoadGlobal { dest, global } => {
             let GlobalId(gid) = global;
             if let Some(&data_id) = global_data_ids.get(*gid as usize) {
+                if let Some(ns) = global_ns_map.get(global) {
+                    namespace_locals.insert(*dest, ns.clone());
+                } else {
+                    namespace_locals.remove(dest);
+                }
                 let gv = module.declare_data_in_func(data_id, builder.func);
                 let addr = builder.ins().global_value(PTR_TY, gv);
                 let val = builder.ins().load(PTR_TY, MemFlags::new(), addr, 0);
                 builder.def_var(cl_vars[dest.0 as usize], val);
             } else {
+                namespace_locals.remove(dest);
                 let zero = builder.ins().iconst(PTR_TY, 0);
                 builder.def_var(cl_vars[dest.0 as usize], zero);
             }
@@ -1293,6 +1340,7 @@ fn lower_rvalue(
     builder: &mut FunctionBuilder<'_>,
     cl_vars: &[Variable],
     local_types: &HashMap<u32, MirTy>,
+    namespace_locals: &HashMap<LocalId, String>,
     program: &MirProgram,
     rval: &Rvalue,
     ty: &MirTy,
@@ -1365,13 +1413,25 @@ fn lower_rvalue(
                 builder,
                 cl_vars,
                 local_types,
+                namespace_locals,
                 program,
                 callee,
                 args,
                 ty,
                 interner,
             )?;
-            Ok(ret.unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)))
+            let ret = ret.unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+            let expected_cl_ty = mir_ty_to_cl(ty);
+            let actual_cl_ty = builder.func.dfg.value_type(ret);
+            if actual_cl_ty != expected_cl_ty {
+                let coerced = coerce_value(builder, module, rt, ret, actual_cl_ty, expected_cl_ty)?;
+                if actual_cl_ty == PTR_TY && is_scalar(ty) {
+                    call_rt(module, builder, rt.drop_any, &[ret])?;
+                }
+                Ok(coerced)
+            } else {
+                Ok(ret)
+            }
         }
 
         Rvalue::Construct {
@@ -1878,6 +1938,7 @@ fn emit_call(
     builder: &mut FunctionBuilder<'_>,
     cl_vars: &[Variable],
     local_types: &HashMap<u32, MirTy>,
+    namespace_locals: &HashMap<LocalId, String>,
     program: &MirProgram,
     callee: &Callee,
     args: &[Operand],
@@ -1889,13 +1950,33 @@ fn emit_call(
             let cl_fn_id = fn_ids[fn_id.0 as usize];
             let fn_ref = module.declare_func_in_func(cl_fn_id, builder.func);
             let mir_fn = &program.functions[fn_id.0 as usize];
-            let mut arg_vals = Vec::with_capacity(args.len());
-            for (i, arg_op) in args.iter().enumerate() {
-                let param_ty = mir_fn.params.get(i).map(|p| &p.ty);
-                let v = if let Some(pt) = param_ty {
-                    lower_operand_coerced(builder, cl_vars, local_types, arg_op, pt, rt, module)?
+            let mut arg_vals = Vec::with_capacity(mir_fn.params.len());
+            for (i, param) in mir_fn.params.iter().enumerate() {
+                let v = if let Some(arg_op) = args.get(i) {
+                    lower_operand_coerced(
+                        builder,
+                        cl_vars,
+                        local_types,
+                        arg_op,
+                        &param.ty,
+                        rt,
+                        module,
+                    )?
+                } else if let Some(default_lit) = &param.default {
+                    let raw = lower_lit(module, builder, rt, default_lit, interner)?;
+                    let expected_cl_ty = mir_ty_to_cl(&param.ty);
+                    let actual_cl_ty = builder.func.dfg.value_type(raw);
+                    if actual_cl_ty != expected_cl_ty {
+                        coerce_value(builder, module, rt, raw, actual_cl_ty, expected_cl_ty)?
+                    } else {
+                        raw
+                    }
                 } else {
-                    lower_operand(builder, cl_vars, arg_op)
+                    bail!(
+                        "internal compiler bug: missing required argument {} when lowering call to `{}`",
+                        i,
+                        interner.resolve(mir_fn.name)
+                    );
                 };
                 arg_vals.push(v);
             }
@@ -1921,6 +2002,28 @@ fn emit_call(
         }
 
         Callee::Method { receiver, method } => {
+            if let Callee::Method {
+                receiver: Operand::Local(recv),
+                ..
+            } = callee
+                && let Some(ns) = namespace_locals.get(recv)
+            {
+                let method_name = interner.resolve(*method);
+                if let Some(val) = emit_stdlib_method_call(
+                    module,
+                    rt,
+                    builder,
+                    cl_vars,
+                    local_types,
+                    ns.as_ref(),
+                    method_name.as_ref(),
+                    args,
+                    result_ty,
+                )? {
+                    return Ok(Some(val));
+                }
+            }
+
             let recv = lower_operand_as_ptr(builder, cl_vars, local_types, receiver, rt, module)?;
             let (mp, ml) = str_const(module, builder, interner.resolve(*method).as_ref())?;
             let (arr, cnt) =
@@ -1942,6 +2045,69 @@ fn emit_call(
             )?)
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_stdlib_method_call(
+    module: &mut ObjectModule,
+    rt: &RuntimeDecls,
+    builder: &mut FunctionBuilder<'_>,
+    vars: &[Variable],
+    _local_types: &HashMap<u32, MirTy>,
+    ns: &str,
+    method: &str,
+    args: &[Operand],
+    result_ty: &MirTy,
+) -> Result<Option<cranelift_codegen::ir::Value>> {
+    match (ns, method) {
+        ("math", "sqrt") | ("math", "floor") | ("math", "ceil") | ("math", "trunc") => {
+            let Some(first_arg) = args.first() else {
+                return Ok(None);
+            };
+
+            let arg = lower_operand(builder, vars, first_arg);
+            let arg_ty = builder.func.dfg.value_type(arg);
+            let fval = if arg_ty == F64 {
+                arg
+            } else {
+                builder.ins().fcvt_from_sint(F64, arg)
+            };
+
+            let result = match method {
+                "sqrt" => builder.ins().sqrt(fval),
+                "floor" => builder.ins().floor(fval),
+                "ceil" => builder.ins().ceil(fval),
+                "trunc" => builder.ins().trunc(fval),
+                _ => unreachable!(),
+            };
+
+            if matches!(result_ty, MirTy::Dynamic) {
+                Ok(call_rt(module, builder, rt.box_float, &[result])?)
+            } else {
+                Ok(Some(result))
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
+fn build_global_namespace_map(
+    program: &MirProgram,
+    interner: &SymbolInterner,
+) -> HashMap<GlobalId, String> {
+    let mut global_ns_map = HashMap::new();
+    for (i, global) in program.globals.iter().enumerate() {
+        let global_name = interner.resolve(global.name);
+        for decl in &program.use_decls {
+            if decl.is_stdlib
+                && decl.specific_names.is_none()
+                && global_name.as_ref() == decl.alias.as_str()
+            {
+                global_ns_map.insert(GlobalId(i as u32), decl.module.clone());
+            }
+        }
+    }
+    global_ns_map
 }
 
 // ── Builtin dispatch ───────────────────────────────────────────────────────────
@@ -2039,6 +2205,15 @@ fn emit_builtin(
             Ok(call_rt(module, builder, rt.box_nothing, &[])?.unwrap())
         }
 
+        "Shared" => {
+            let inner = if args.is_empty() {
+                call_rt(module, builder, rt.box_nothing, &[])?.unwrap()
+            } else {
+                lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?
+            };
+            Ok(call_rt(module, builder, rt.make_shared, &[inner])?
+                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)))
+        }
         "string" | "str" => {
             let arg = if args.is_empty() {
                 call_rt(module, builder, rt.box_nothing, &[])?.unwrap()
@@ -2406,12 +2581,20 @@ fn collect_phi_args(
 
 // ── Local-type map ─────────────────────────────────────────────────────────────
 
-fn build_local_type_map(mf: &MirFunction) -> HashMap<u32, MirTy> {
+fn build_local_type_map(
+    mf: &MirFunction,
+    program: &MirProgram,
+    interner: &SymbolInterner,
+) -> HashMap<u32, MirTy> {
     let mut map = HashMap::new();
+    let global_ns_map = build_global_namespace_map(program, interner);
+    let mut namespace_locals: HashMap<LocalId, String> = HashMap::new();
+
     for p in &mf.params {
         map.insert(p.local.0, p.ty.clone());
     }
     for bb in &mf.blocks {
+        namespace_locals.clear();
         for phi in &bb.phis {
             map.entry(phi.result.0).or_insert_with(|| phi.ty.clone());
         }
@@ -2427,21 +2610,69 @@ fn build_local_type_map(mf: &MirFunction) -> HashMap<u32, MirTy> {
                         ty.clone()
                     };
                     map.insert(dest.0, effective_ty);
+                    namespace_locals.remove(dest);
+                    match rhs {
+                        Rvalue::Literal(MirLit::Namespace(ns)) => {
+                            namespace_locals.insert(*dest, ns.clone());
+                        }
+                        Rvalue::Use(Operand::Local(src)) => {
+                            if let Some(ns) = namespace_locals.get(src).cloned() {
+                                namespace_locals.insert(*dest, ns);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                Instr::Call { dest: Some(d), .. } => {
-                    map.entry(d.0).or_insert(MirTy::Dynamic);
+                Instr::Call {
+                    dest: Some(d),
+                    result_ty,
+                    callee,
+                    ..
+                } => {
+                    let inferred_ty = result_ty
+                        .clone()
+                        .filter(|ty| !matches!(ty, MirTy::Dynamic | MirTy::Error))
+                        .or_else(|| match callee {
+                            Callee::Method {
+                                receiver: Operand::Local(recv),
+                                method,
+                            } => namespace_locals.get(recv).and_then(|ns| {
+                                infer_stdlib_method_return_ty(
+                                    ns.as_str(),
+                                    interner.resolve(*method).as_ref(),
+                                )
+                            }),
+                            _ => None,
+                        })
+                        .unwrap_or(MirTy::Dynamic);
+                    map.insert(d.0, inferred_ty);
                 }
                 Instr::GetField { dest, .. } | Instr::GetIndex { dest, .. } => {
                     map.insert(dest.0, MirTy::Dynamic);
+                    namespace_locals.remove(dest);
                 }
-                Instr::LoadGlobal { dest, .. } => {
+                Instr::LoadGlobal { dest, global } => {
                     map.entry(dest.0).or_insert(MirTy::Dynamic);
+                    if let Some(ns) = global_ns_map.get(global) {
+                        namespace_locals.insert(*dest, ns.clone());
+                    } else {
+                        namespace_locals.remove(dest);
+                    }
                 }
                 _ => {}
             }
         }
     }
     map
+}
+
+fn infer_stdlib_method_return_ty(ns: &str, method: &str) -> Option<MirTy> {
+    match (ns, method) {
+        ("math", "sqrt") | ("math", "floor") | ("math", "ceil") | ("math", "trunc") => {
+            Some(MirTy::Float)
+        }
+        _ => None,
+    }
 }
 
 /// Try to infer the type of an rvalue from its operands when the declared type is `Error`.
@@ -2621,7 +2852,29 @@ fn lower_operand_coerced(
     module: &mut ObjectModule,
 ) -> Result<cranelift_codegen::ir::Value> {
     if is_scalar(param_ty) {
-        Ok(lower_operand(builder, cl_vars, op))
+        let op_mir_ty = operand_mir_ty(local_types, op);
+        let raw = lower_operand(builder, cl_vars, op);
+        if matches!(op_mir_ty, MirTy::Dynamic) {
+            return match param_ty {
+                MirTy::Integer => {
+                    Ok(call_rt(module, builder, rt.unbox_int, &[raw])?.unwrap_or(raw))
+                }
+                MirTy::Float => {
+                    Ok(call_rt(module, builder, rt.unbox_float, &[raw])?.unwrap_or(raw))
+                }
+                MirTy::Boolean => {
+                    Ok(call_rt(module, builder, rt.unbox_bool, &[raw])?.unwrap_or(raw))
+                }
+                _ => Ok(raw),
+            };
+        }
+        let expected_cl_ty = mir_ty_to_cl(param_ty);
+        let actual_cl_ty = builder.func.dfg.value_type(raw);
+        if actual_cl_ty != expected_cl_ty {
+            coerce_value(builder, module, rt, raw, actual_cl_ty, expected_cl_ty)
+        } else {
+            Ok(raw)
+        }
     } else {
         lower_operand_boxed(builder, cl_vars, local_types, op, rt, module)
     }

@@ -318,6 +318,7 @@ mod tests {
         // Also use it as a call argument to trigger W5001
         f.blocks[0].instructions.push(Instr::Call {
             dest: None,
+            result_ty: None,
             callee: fidan_mir::Callee::Builtin(target_name),
             args: vec![Operand::Local(dest)],
             span: fidan_source::Span::new(fidan_source::FileId(0), 0, 0),
@@ -349,6 +350,7 @@ mod tests {
         let mut caller_fn = make_loop_func(0, caller_name);
         caller_fn.blocks[0].instructions.push(Instr::Call {
             dest: None,
+            result_ty: None,
             callee: fidan_mir::Callee::Fn(FunctionId(1)),
             args: vec![],
             span: fidan_source::Span::new(fidan_source::FileId(0), 0, 0),
@@ -380,6 +382,7 @@ mod tests {
         let mut caller_fn = make_loop_func(0, caller_name);
         caller_fn.blocks[0].instructions.push(Instr::Call {
             dest: None,
+            result_ty: None,
             callee: fidan_mir::Callee::Fn(FunctionId(1)),
             args: vec![],
             span: fidan_source::Span::new(fidan_source::FileId(0), 0, 0),

@@ -884,6 +884,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                     if let Err(e) =
                         fidan_driver::compile(&session, mir, Arc::clone(&interner), &opts)
                     {
+                        error_count += 1;
                         render_message_to_stderr(
                             Severity::Error,
                             "",
@@ -1007,6 +1008,10 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                 }
             }
         }
+    }
+
+    if matches!(opts.mode, ExecutionMode::Build | ExecutionMode::Check) && error_count > 0 {
+        std::process::exit(1);
     }
 
     Ok(())

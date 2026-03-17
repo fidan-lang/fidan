@@ -85,10 +85,12 @@ fn build_local_type_map(func: &MirFunction) -> HashMap<LocalId, MirTy> {
                 Instr::GetField { dest, .. } | Instr::GetIndex { dest, .. } => {
                     map.insert(*dest, MirTy::Dynamic);
                 }
-                // Stdlib method calls (the only Call variant the JIT handles)
-                // always return a float value (math.sqrt / abs / floor / ceil / trunc).
-                Instr::Call { dest: Some(d), .. } => {
-                    map.insert(*d, MirTy::Float);
+                Instr::Call {
+                    dest: Some(d),
+                    result_ty,
+                    ..
+                } => {
+                    map.insert(*d, result_ty.clone().unwrap_or(MirTy::Dynamic));
                 }
                 _ => {}
             }

@@ -43,7 +43,7 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use crate::{
-    FidanDict, FidanList, FidanString, OwnedRef,
+    FidanDict, FidanList, FidanString, OwnedRef, SharedRef,
     value::{FidanValue, FunctionId, display},
 };
 use std::sync::{Arc, LazyLock};
@@ -179,6 +179,11 @@ pub unsafe extern "C" fn fdn_box_enum_type(bytes: *const u8, len: i64) -> *mut F
 pub unsafe extern "C" fn fdn_box_class_type(bytes: *const u8, len: i64) -> *mut FidanValue {
     let s = str_from_raw(bytes, len);
     into_raw(FidanValue::ClassType(Arc::from(s.as_str())))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_make_shared(ptr: *mut FidanValue) -> *mut FidanValue {
+    into_raw(FidanValue::Shared(SharedRef::new(borrow(ptr).clone())))
 }
 
 // ── Ownership ──────────────────────────────────────────────────────────────────
@@ -1133,6 +1138,22 @@ pub unsafe extern "C" fn fdn_obj_invoke(
             end,
             inclusive,
         } => dispatch_range_method(*start, *end, *inclusive, &method_name, extra),
+        FidanValue::Shared(sr) => match method_name.as_str() {
+            "get" => into_raw(sr.0.lock().unwrap().clone()),
+            "set" => {
+                let val = extra.into_iter().next().unwrap_or(FidanValue::Nothing);
+                *sr.0.lock().unwrap() = val;
+                into_raw(FidanValue::Nothing)
+            }
+            _ => {
+                eprintln!(
+                    "AOT: method dispatch not implemented: {}.{}()",
+                    recv.type_name(),
+                    method_name
+                );
+                into_raw(FidanValue::Nothing)
+            }
+        },
         _ => {
             eprintln!(
                 "AOT: method dispatch not implemented: {}.{}()",

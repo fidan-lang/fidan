@@ -212,6 +212,9 @@ pub enum Instr {
     /// Function / method call whose result (if any) is stored in `dest`.
     Call {
         dest: Option<LocalId>,
+        /// Expected result type when `dest` is present.
+        /// Used by backends to avoid unnecessary boxing for typed call expressions.
+        result_ty: Option<MirTy>,
         callee: Callee,
         args: Vec<Operand>,
         span: Span,

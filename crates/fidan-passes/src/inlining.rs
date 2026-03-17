@@ -283,11 +283,13 @@ fn remap_instr(instr: &Instr, param_map: &FxHashMap<LocalId, Operand>, offset: u
         },
         Instr::Call {
             dest,
+            result_ty,
             callee,
             args,
             span,
         } => Instr::Call {
             dest: dest.map(d),
+            result_ty: result_ty.clone(),
             callee: remap_callee(callee, &r),
             args: args.iter().map(&r).collect(),
             span: *span,

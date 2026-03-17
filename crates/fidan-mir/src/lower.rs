@@ -448,6 +448,40 @@ impl<'p> FnCtx<'p> {
         self.env.get(&name).copied()
     }
 
+    fn local_ty(&self, local: LocalId) -> MirTy {
+        if let Some(param) = self.func().params.iter().find(|p| p.local == local) {
+            return param.ty.clone();
+        }
+
+        for bb in &self.func().blocks {
+            for phi in &bb.phis {
+                if phi.result == local {
+                    return phi.ty.clone();
+                }
+            }
+            for instr in &bb.instructions {
+                match instr {
+                    Instr::Assign { dest, ty, .. } if *dest == local => return ty.clone(),
+                    Instr::Call {
+                        dest: Some(dest), ..
+                    } if *dest == local => {
+                        return MirTy::Dynamic;
+                    }
+                    Instr::GetField { dest, .. }
+                    | Instr::GetIndex { dest, .. }
+                    | Instr::LoadGlobal { dest, .. }
+                        if *dest == local =>
+                    {
+                        return MirTy::Dynamic;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        MirTy::Dynamic
+    }
+
     // ── φ-node insertion ─────────────────────────────────────────────────────
 
     fn add_phi(
@@ -701,6 +735,7 @@ impl<'p> FnCtx<'p> {
                     arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
                     self.emit(Instr::Call {
                         dest: Some(dest),
+                        result_ty: Some(ty.clone()),
                         callee: Callee::Fn(pfid),
                         args: arg_ops,
                         span: expr.span,
@@ -725,6 +760,7 @@ impl<'p> FnCtx<'p> {
                     arg_ops.extend(self.sort_args_for_fn(init_fid, args));
                     self.emit(Instr::Call {
                         dest: None,
+                        result_ty: None,
                         callee: Callee::Fn(init_fid),
                         args: arg_ops,
                         span: expr.span,
@@ -745,6 +781,7 @@ impl<'p> FnCtx<'p> {
                             let dest = self.alloc_local();
                             self.emit(Instr::Call {
                                 dest: Some(dest),
+                                result_ty: Some(ty.clone()),
                                 callee: Callee::Fn(pfid),
                                 args: arg_ops,
                                 span: expr.span,
@@ -769,6 +806,7 @@ impl<'p> FnCtx<'p> {
                             arg_ops.extend(self.sort_args_for_fn(init_fid, args));
                             self.emit(Instr::Call {
                                 dest: None,
+                                result_ty: None,
                                 callee: Callee::Fn(init_fid),
                                 args: arg_ops,
                                 span: expr.span,
@@ -790,6 +828,7 @@ impl<'p> FnCtx<'p> {
                                 call_args.extend(self.sort_args_for_fn(fid, args));
                                 self.emit(Instr::Call {
                                     dest: Some(dest),
+                                    result_ty: Some(ty.clone()),
                                     callee: Callee::Fn(fid),
                                     args: call_args,
                                     span: expr.span,
@@ -825,6 +864,7 @@ impl<'p> FnCtx<'p> {
                 let dest = self.alloc_local();
                 self.emit(Instr::Call {
                     dest: Some(dest),
+                    result_ty: Some(ty.clone()),
                     callee: callee_op,
                     args: arg_ops,
                     span: expr.span,
@@ -1390,6 +1430,7 @@ impl<'p> FnCtx<'p> {
                             arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
                             self.emit(Instr::Call {
                                 dest: None,
+                                result_ty: None,
                                 callee: Callee::Fn(pfid),
                                 args: arg_ops,
                                 span: expr.span,
@@ -1413,6 +1454,7 @@ impl<'p> FnCtx<'p> {
                             arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
                             self.emit(Instr::Call {
                                 dest: None,
+                                result_ty: None,
                                 callee: Callee::Fn(init_fid),
                                 args: arg_ops,
                                 span: expr.span,
@@ -1432,6 +1474,7 @@ impl<'p> FnCtx<'p> {
                                     arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
                                     self.emit(Instr::Call {
                                         dest: None,
+                                        result_ty: None,
                                         callee: Callee::Fn(pfid),
                                         args: arg_ops,
                                         span: expr.span,
@@ -1456,6 +1499,7 @@ impl<'p> FnCtx<'p> {
                                     arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
                                     self.emit(Instr::Call {
                                         dest: None,
+                                        result_ty: None,
                                         callee: Callee::Fn(init_fid),
                                         args: arg_ops,
                                         span: expr.span,
@@ -1477,6 +1521,7 @@ impl<'p> FnCtx<'p> {
                                             .extend(args.iter().map(|a| self.lower_expr(&a.value)));
                                         self.emit(Instr::Call {
                                             dest: None,
+                                            result_ty: None,
                                             callee: Callee::Fn(fid),
                                             args: call_args,
                                             span: expr.span,
@@ -1508,6 +1553,7 @@ impl<'p> FnCtx<'p> {
                             args.iter().map(|a| self.lower_expr(&a.value)).collect();
                         self.emit(Instr::Call {
                             dest: None,
+                            result_ty: None,
                             callee: callee_op,
                             args: arg_ops,
                             span: expr.span,
@@ -1970,6 +2016,7 @@ impl<'p> FnCtx<'p> {
         let len_local = self.alloc_local();
         self.emit(Instr::Call {
             dest: Some(len_local),
+            result_ty: Some(MirTy::Integer),
             callee: Callee::Method {
                 receiver: list_op.clone(),
                 method: self.len_sym,
@@ -1994,10 +2041,11 @@ impl<'p> FnCtx<'p> {
         for sym in &written {
             if let Some(&pre_local) = env_before.get(sym) {
                 let phi_local = self.alloc_local();
+                let phi_ty = self.local_ty(pre_local);
                 self.add_phi(
                     header_bb,
                     phi_local,
-                    MirTy::Dynamic,
+                    phi_ty,
                     vec![(pre_bb, Operand::Local(pre_local))],
                 );
                 self.define_var(*sym, phi_local);
@@ -2104,7 +2152,17 @@ impl<'p> FnCtx<'p> {
                 }
                 _ => {
                     let phi_local = self.alloc_local();
-                    self.add_phi(step_bb, phi_local, MirTy::Dynamic, phi_operands);
+                    let phi_ty = phi_operands
+                        .first()
+                        .and_then(|(_, op)| match op {
+                            Operand::Local(local) => Some(self.local_ty(*local)),
+                            Operand::Const(MirLit::Int(_)) => Some(MirTy::Integer),
+                            Operand::Const(MirLit::Float(_)) => Some(MirTy::Float),
+                            Operand::Const(MirLit::Bool(_)) => Some(MirTy::Boolean),
+                            _ => None,
+                        })
+                        .unwrap_or(MirTy::Dynamic);
+                    self.add_phi(step_bb, phi_local, phi_ty, phi_operands);
                     step_phi_locals.push(phi_local);
                 }
             }
@@ -2172,6 +2230,7 @@ impl<'p> FnCtx<'p> {
             let append_sym = ctx.append_sym;
             ctx.emit(Instr::Call {
                 dest: None,
+                result_ty: None,
                 callee: Callee::Method {
                     receiver: Operand::Local(result),
                     method: append_sym,
@@ -2259,6 +2318,7 @@ impl<'p> FnCtx<'p> {
         let len_sym = self.len_sym;
         self.emit(Instr::Call {
             dest: Some(len_local),
+            result_ty: Some(MirTy::Integer),
             callee: Callee::Method {
                 receiver: list_op.clone(),
                 method: len_sym,
@@ -2391,10 +2451,11 @@ impl<'p> FnCtx<'p> {
         for sym in &written {
             if let Some(&pre_local) = env_before.get(sym) {
                 let phi_local = self.alloc_local();
+                let phi_ty = self.local_ty(pre_local);
                 self.add_phi(
                     header_bb,
                     phi_local,
-                    MirTy::Dynamic,
+                    phi_ty,
                     vec![(pre_bb, Operand::Local(pre_local))],
                 );
                 self.define_var(*sym, phi_local);
@@ -2505,6 +2566,7 @@ impl<'p> FnCtx<'p> {
                 let type_local = self.alloc_local();
                 self.emit(Instr::Call {
                     dest: Some(type_local),
+                    result_ty: Some(MirTy::String),
                     callee: Callee::Builtin(type_sym),
                     args: vec![Operand::Local(err_save)],
                     span: fidan_source::Span::default(),

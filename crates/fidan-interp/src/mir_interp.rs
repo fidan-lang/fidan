@@ -920,6 +920,7 @@ impl MirMachine {
                 callee,
                 args,
                 span,
+                ..
             } => {
                 // Record the call-site span so call_function can attach it to the frame.
                 self.pending_call_span = Some(*span);
