@@ -75,7 +75,7 @@ if "!CPP_OK!"=="0" (
 )
 
 if "!CPP_OK!"=="0" (
-    echo SKIP: no C++ compiler found (g++ or cl), skipping C++ benchmark
+    echo SKIP: no C++ compiler found ^(g++ or cl^), skipping C++ benchmark
 )
 
 :: ── Run benchmarks ────────────────────────────────────────────
