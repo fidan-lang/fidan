@@ -175,18 +175,24 @@ fn run_whoami(registry: Option<String>) -> Result<()> {
     let client = authenticated_client(registry)?;
     let user = client.whoami()?;
 
-    let mut lines = vec![
-        format!("username     {}", user.username),
-        format!("email        {}", user.email),
-    ];
+    let mut rows = vec![("username", user.username), ("email", user.email)];
     if let Some(display_name) = user.display_name {
-        lines.push(format!("display name {}", display_name));
+        rows.push(("display name", display_name));
     }
+
+    let label_width = rows
+        .iter()
+        .map(|(label, _)| label.chars().count())
+        .max()
+        .unwrap_or(0);
+    let lines = rows
+        .into_iter()
+        .map(|(label, value)| format!("{label:<width$}  {value}", width = label_width))
+        .collect::<Vec<_>>();
 
     render_message_to_stderr(Severity::Note, "dal", &lines.join("\n"));
     Ok(())
 }
-
 fn run_search(query: &str, page: u32, per_page: u32, registry: Option<String>) -> Result<()> {
     let registry = config::resolve_registry(registry.as_deref())?;
     let client = DalClient::new(registry, None)?;

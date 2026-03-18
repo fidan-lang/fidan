@@ -180,6 +180,25 @@ fn word_wrap(text: &str, width: usize) -> Vec<String> {
     }
 }
 
+fn wrap_preserving_layout(text: &str, width: usize) -> Vec<String> {
+    let expanded = text.replace('\t', "    ");
+    let mut lines = Vec::new();
+
+    for raw_line in expanded.split('\n') {
+        if raw_line.chars().count() <= width {
+            lines.push(raw_line.to_string());
+        } else {
+            lines.extend(word_wrap(raw_line.trim(), width));
+        }
+    }
+
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
+}
+
 // ── spanless badge renderer ───────────────────────────────────────────────────
 
 /// Render a spanless pipeline-level message to stderr.
@@ -229,7 +248,7 @@ pub fn render_message_to_stderr(severity: Severity, code: impl std::fmt::Display
             )
         };
         let text_width = cw.saturating_sub(prefix_vis).max(cw / 2);
-        let wrapped = word_wrap(message, text_width);
+        let wrapped = wrap_preserving_layout(message, text_width);
         for (i, chunk) in wrapped.iter().enumerate() {
             let content = if i == 0 {
                 format!("{prefix_styled}{chunk}")
