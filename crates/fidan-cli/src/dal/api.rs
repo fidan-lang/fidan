@@ -208,8 +208,6 @@ pub struct UserInfo {
     pub username: String,
     pub email: String,
     pub display_name: Option<String>,
-    pub is_admin: bool,
-    pub email_verified: bool,
 }
 
 #[derive(Debug, Deserialize)]

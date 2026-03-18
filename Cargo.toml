@@ -80,7 +80,13 @@ semver = "1"
 flate2 = "1"
 tar = "0.4"
 urlencoding = "2"
-keyring = "3"
+keyring = { version = "3", features = [
+  "apple-native",
+  "windows-native",
+  "linux-native-sync-persistent",
+  "crypto-rust",
+] }
+crossterm = "0.29"
 notify = { version = "8", features = ["macos_fsevent"] }
 
 # Cranelift JIT + AOT

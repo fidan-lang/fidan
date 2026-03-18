@@ -4,6 +4,9 @@ mod config;
 
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
+use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use fidan_diagnostics::{Severity, render_message_to_stderr};
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
@@ -147,6 +150,7 @@ fn run_login(token: Option<String>, registry: Option<String>) -> Result<()> {
     )?;
 
     config::store_token(&token)?;
+    config::verify_stored_token(&token)?;
 
     println!(
         "Logged in to {} as {}{}",
@@ -171,14 +175,15 @@ fn run_whoami(registry: Option<String>) -> Result<()> {
     let client = authenticated_client(registry)?;
     let user = client.whoami()?;
 
-    println!("username: {}", user.username);
-    println!("email: {}", user.email);
+    let mut lines = vec![
+        format!("username     {}", user.username),
+        format!("email        {}", user.email),
+    ];
     if let Some(display_name) = user.display_name {
-        println!("display_name: {display_name}");
+        lines.push(format!("display name {}", display_name));
     }
-    println!("email_verified: {}", user.email_verified);
-    println!("is_admin: {}", user.is_admin);
 
+    render_message_to_stderr(Severity::Note, "dal", &lines.join("\n"));
     Ok(())
 }
 
@@ -353,17 +358,103 @@ fn authenticated_client(registry: Option<String>) -> Result<DalClient> {
 }
 
 fn prompt_token() -> Result<String> {
-    print!("Paste your Dal API token: ");
-    io::stdout().flush().ok();
-
-    let mut token = String::new();
-    io::stdin()
-        .read_line(&mut token)
-        .context("failed to read API token from stdin")?;
-
-    let token = token.trim().to_string();
+    let token = read_masked_token("Paste your Dal API token: ")?;
     if token.is_empty() {
         bail!("Dal API token must not be empty");
     }
     Ok(token)
+}
+
+fn read_masked_token(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    io::stdout().flush().ok();
+
+    enable_raw_mode().context("failed to enable terminal raw mode for secure token input")?;
+    let _raw_mode = RawModeGuard;
+
+    let mut token = String::new();
+    loop {
+        match read().context("failed to read API token from stdin")? {
+            Event::Key(key) if key.kind != KeyEventKind::Release => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    match key.code {
+                        KeyCode::Char('c') | KeyCode::Char('C') => {
+                            println!();
+                            bail!("Dal login cancelled");
+                        }
+                        KeyCode::Char('w')
+                        | KeyCode::Char('W')
+                        | KeyCode::Char('\u{17}')
+                        | KeyCode::Backspace => {
+                            erase_masked_chars(delete_last_word(&mut token));
+                        }
+                        KeyCode::Char(ch) if ch.is_control() => {}
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                match key.code {
+                    KeyCode::Enter => {
+                        println!();
+                        return Ok(token.trim().to_string());
+                    }
+                    KeyCode::Backspace => {
+                        if token.pop().is_some() {
+                            erase_masked_chars(1);
+                        }
+                    }
+                    KeyCode::Char('\u{17}') => {
+                        erase_masked_chars(delete_last_word(&mut token));
+                    }
+                    KeyCode::Char(ch) if !ch.is_control() => {
+                        token.push(ch);
+                        print!("*");
+                        io::stdout().flush().ok();
+                    }
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn delete_last_word(token: &mut String) -> usize {
+    let trailing_ws = token
+        .chars()
+        .rev()
+        .take_while(|ch| ch.is_whitespace())
+        .count();
+    for _ in 0..trailing_ws {
+        token.pop();
+    }
+
+    let word_len = token
+        .chars()
+        .rev()
+        .take_while(|ch| !ch.is_whitespace())
+        .count();
+    for _ in 0..word_len {
+        token.pop();
+    }
+
+    trailing_ws + word_len
+}
+
+fn erase_masked_chars(count: usize) {
+    for _ in 0..count {
+        print!("\u{8} \u{8}");
+    }
+    if count > 0 {
+        io::stdout().flush().ok();
+    }
+}
+
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+    }
 }

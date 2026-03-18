@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use keyring::Entry;
 use std::env;
 
@@ -49,6 +49,18 @@ pub fn store_token(token: &str) -> Result<()> {
         .context("failed to store Dal API token in OS keychain")
 }
 
+pub fn verify_stored_token(token: &str) -> Result<()> {
+    let expected = token.trim();
+    let stored = load_token_from_keychain()?
+        .context("Dal API token could not be read back from the OS keychain after login")?;
+
+    if stored.trim() != expected {
+        bail!("Dal API token round-trip verification failed after storing it in the OS keychain")
+    }
+
+    Ok(())
+}
+
 fn load_token_from_keychain() -> Result<Option<String>> {
     let entry = keychain_entry()?;
     match entry.get_password() {
@@ -68,8 +80,5 @@ fn normalize_registry(value: &str) -> String {
 }
 
 fn is_no_entry_error(err: &keyring::Error) -> bool {
-    matches!(
-        err,
-        keyring::Error::NoEntry | keyring::Error::NoStorageAccess(_)
-    )
+    matches!(err, keyring::Error::NoEntry)
 }

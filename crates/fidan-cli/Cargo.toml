@@ -38,3 +38,4 @@ flate2 = { workspace = true }
 tar = { workspace = true }
 urlencoding = { workspace = true }
 keyring = { workspace = true }
+crossterm = { workspace = true }
