@@ -9,6 +9,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 use self::api::DalClient;
+pub(crate) use self::archive::validate_package_name;
 use self::archive::{
     build_package_archive, install_downloaded_package, module_dir_name, select_version,
 };

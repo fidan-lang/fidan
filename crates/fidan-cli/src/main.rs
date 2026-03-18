@@ -238,6 +238,9 @@ enum Command {
         /// Output directory (default: current directory)
         #[arg(short, long)]
         dir: Option<PathBuf>,
+        /// Scaffold a Dal package layout with dal.toml and src/init.fdn
+        #[arg(long)]
+        package: bool,
     },
     /// Dal package registry commands
     Dal {
@@ -291,7 +294,7 @@ fn parse_opt_level(raw: &str) -> Result<fidan_driver::OptLevel> {
     }
 }
 
-fn main() -> Result<()> {
+fn main() {
     ensure_utf8_console();
 
     // Catch all Rust panics and render them as Fidan-style boxed error messages
@@ -322,6 +325,20 @@ fn main() -> Result<()> {
         render_backtrace_to_stderr(&bt);
     }));
 
+    let exit_code = match run_cli() {
+        Ok(()) => 0,
+        Err(err) => {
+            render_message_to_stderr(Severity::Error, "cli", &format_cli_error(&err));
+            1
+        }
+    };
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
+}
+
+fn run_cli() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -547,7 +564,24 @@ fn main() -> Result<()> {
             fidan_lsp::run();
             Ok(())
         }
-        Command::New { project_name, dir } => pipeline::run_new(&project_name, dir.as_ref()),
+        Command::New {
+            project_name,
+            dir,
+            package,
+        } => pipeline::run_new(&project_name, dir.as_ref(), package),
         Command::Dal { command } => dal::run(command),
     }
+}
+
+fn format_cli_error(err: &anyhow::Error) -> String {
+    let mut rendered = err.to_string();
+    let mut chain = err.chain();
+    let _ = chain.next();
+    for cause in chain {
+        let cause_text = cause.to_string();
+        if cause_text != rendered {
+            rendered.push_str(&format!("\n  cause: {cause_text}"));
+        }
+    }
+    rendered
 }

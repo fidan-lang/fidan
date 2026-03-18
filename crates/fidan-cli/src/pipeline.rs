@@ -1,3 +1,4 @@
+use crate::dal::validate_package_name;
 use crate::imports::{collect_file_import_paths, filter_hir_module, pre_register_hir_into_tc};
 use crate::replay::save_replay_bundle;
 use anyhow::{Context, Result, bail};
@@ -173,26 +174,68 @@ pub(crate) fn run_with_reload(opts: CompileOptions) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run_new(project_name: &str, parent_dir: Option<&PathBuf>) -> Result<()> {
+pub(crate) fn run_new(
+    project_name: &str,
+    parent_dir: Option<&PathBuf>,
+    package: bool,
+) -> Result<()> {
     let base = parent_dir
         .cloned()
         .unwrap_or_else(|| std::env::current_dir().expect("cannot read cwd"));
     let project_dir = base.join(project_name);
 
-    if project_dir.exists() {
-        bail!("directory {:?} already exists", project_dir);
+    ensure_new_project_dir(&project_dir)?;
+
+    if package {
+        scaffold_dal_package(&project_dir, project_name)?;
+        render_message_to_stderr(
+            Severity::Note,
+            "",
+            &format!(
+                "created Dal package `{}` — next: cd {} && fidan dal package",
+                project_name, project_name
+            ),
+        );
+    } else {
+        scaffold_standard_project(&project_dir, project_name)?;
+        render_message_to_stderr(
+            Severity::Note,
+            "",
+            &format!(
+                "created project `{}` — run: fidan run {}/main.fdn",
+                project_name, project_name
+            ),
+        );
     }
 
-    std::fs::create_dir_all(&project_dir)
-        .with_context(|| format!("cannot create directory {:?}", project_dir))?;
+    Ok(())
+}
 
-    // main.fdn — boilerplate entry point
+fn ensure_new_project_dir(project_dir: &std::path::Path) -> Result<()> {
+    if project_dir.exists() {
+        let mut entries = std::fs::read_dir(project_dir)
+            .with_context(|| format!("cannot read directory {:?}", project_dir))?;
+        if entries.next().is_some() {
+            bail!(
+                "directory {:?} already exists and is not empty",
+                project_dir
+            );
+        }
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(project_dir)
+        .with_context(|| format!("cannot create directory {:?}", project_dir))?;
+    Ok(())
+}
+
+fn scaffold_standard_project(project_dir: &std::path::Path, project_name: &str) -> Result<()> {
     let main_src = format!(
         concat!(
             "# {name}\n",
             "# Entry point — run with: fidan run main.fdn\n",
             "\n",
-            "action main() {{\n",
+            "action main {{\n",
             "    print(\"Hello from {name}!\")\n",
             "}}\n",
             "\n",
@@ -202,15 +245,55 @@ pub(crate) fn run_new(project_name: &str, parent_dir: Option<&PathBuf>) -> Resul
     );
     std::fs::write(project_dir.join("main.fdn"), &main_src)
         .with_context(|| "cannot write main.fdn")?;
+    Ok(())
+}
 
-    render_message_to_stderr(
-        Severity::Note,
-        "",
-        &format!(
-            "created project `{}` — run: fidan run {}/main.fdn",
-            project_name, project_name
+fn scaffold_dal_package(project_dir: &std::path::Path, project_name: &str) -> Result<()> {
+    validate_package_name(project_name)
+        .with_context(|| "Dal package names must be lowercase, use digits or single hyphens, and start/end with an alphanumeric character")?;
+
+    std::fs::create_dir_all(project_dir.join("src"))
+        .with_context(|| format!("cannot create {:?}", project_dir.join("src")))?;
+
+    let manifest = format!(
+        concat!(
+            "[package]\n",
+            "name = \"{name}\"\n",
+            "version = \"0.1.0\"\n",
+            "readme = \"README.md\"\n"
         ),
+        name = project_name
     );
+    std::fs::write(project_dir.join("dal.toml"), manifest)
+        .with_context(|| "cannot write dal.toml")?;
+
+    let readme = format!(
+        concat!(
+            "# {name}\n\n",
+            "A Dal package for Fidan.\n\n",
+            "## Package structure\n\n",
+            "- `dal.toml` package manifest\n",
+            "- `src/init.fdn` package entry module\n\n",
+            "Build locally with `fidan dal package`.\n"
+        ),
+        name = project_name
+    );
+    std::fs::write(project_dir.join("README.md"), readme)
+        .with_context(|| "cannot write README.md")?;
+
+    let init_src = format!(
+        concat!(
+            "# {name}\n",
+            "# Dal package entry module\n\n",
+            "action greet returns string {{\n",
+            "    return \"Hello from {name}!\"\n",
+            "}}\n"
+        ),
+        name = project_name
+    );
+    std::fs::write(project_dir.join("src").join("init.fdn"), init_src)
+        .with_context(|| "cannot write src/init.fdn")?;
+
     Ok(())
 }
 
@@ -1015,4 +1098,57 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn run_new_scaffolds_standard_project() -> Result<()> {
+        let sandbox = make_temp_dir("fidan_new_standard");
+        run_new("hello-app", Some(&sandbox), false)?;
+        let project_dir = sandbox.join("hello-app");
+        assert!(project_dir.join("main.fdn").is_file());
+        assert!(!project_dir.join("dal.toml").exists());
+        fs::remove_dir_all(&sandbox).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn run_new_scaffolds_dal_package_project() -> Result<()> {
+        let sandbox = make_temp_dir("fidan_new_package");
+        run_new("hello-package", Some(&sandbox), true)?;
+        let project_dir = sandbox.join("hello-package");
+        assert!(project_dir.join("dal.toml").is_file());
+        assert!(project_dir.join("README.md").is_file());
+        assert!(project_dir.join("src").join("init.fdn").is_file());
+        assert!(!project_dir.join("main.fdn").exists());
+        fs::remove_dir_all(&sandbox).ok();
+        Ok(())
+    }
+
+    #[test]
+    fn run_new_rejects_invalid_dal_package_names() {
+        let sandbox = make_temp_dir("fidan_new_invalid_package");
+        let err = run_new("HelloPkg", Some(&sandbox), true)
+            .expect_err("expected invalid package name error");
+        assert!(
+            err.to_string()
+                .contains("Dal package names must be lowercase")
+        );
+        fs::remove_dir_all(&sandbox).ok();
+    }
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), nonce));
+        fs::create_dir_all(&dir).expect("failed to create temp test dir");
+        dir
+    }
 }

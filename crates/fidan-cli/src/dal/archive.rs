@@ -382,7 +382,7 @@ fn validate_file(path: &Path, project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn validate_package_name(name: &str) -> Result<()> {
+pub(crate) fn validate_package_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 64 {
         bail!("invalid package name `{name}`");
     }

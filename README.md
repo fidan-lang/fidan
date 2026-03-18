@@ -568,6 +568,7 @@ fidan <COMMAND> [OPTIONS] [FILE]
 | `fidan explain <code>` | Show detailed explanation of a diagnostic code |
 | `fidan explain-line <file> --line N` | Explain what line N does (static analysis) |
 | `fidan new <name>` | Scaffold a new Fidan project |
+| `fidan new <name> --package` | Scaffold a Dal-ready package with `dal.toml` and `src/init.fdn` |
 | `fidan dal <command>` | Work with the Dal package registry |
 
 ### `fidan dal` commands
@@ -580,8 +581,8 @@ fidan <COMMAND> [OPTIONS] [FILE]
 | `fidan dal search <query>` | Search packages on Dal |
 | `fidan dal info <package>` | Show package metadata and published versions |
 | `fidan dal add <package>` | Download and vendor a package into a local importable module directory |
-| `fidan dal package [path]` | Build a canonical Dal `.tar.gz` archive locally |
-| `fidan dal publish [path]` | Build and publish the current package to Dal |
+| `fidan dal package [path]` | Validate the package layout locally and build a canonical Dal `.tar.gz` archive |
+| `fidan dal publish [path]` | Run the same local validation, build the archive, and publish it to Dal |
 | `fidan dal yank <package> <version>` | Yank a published version |
 | `fidan dal unyank <package> <version>` | Unyank a published version |
 
@@ -604,6 +605,13 @@ Registry lookup order:
 1. `--registry`
 2. `FIDAN_DAL_REGISTRY`
 3. default: `https://api.dal.fidan.dev`
+
+Dal package preflight validation happens locally before archive creation or upload. A package must contain:
+
+- `dal.toml`
+- `src/init.fdn`
+- only allowed top-level entries such as `README*`, `LICENSE*`, `CHANGELOG.md`, `src/`, `examples/`, `tests/`, `docs/`, and `assets/`
+- no symlinks, path traversal, or unsafe archive paths
 
 ### `fidan run` flags
 
