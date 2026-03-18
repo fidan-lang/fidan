@@ -39,6 +39,9 @@ use fidan_mir::{
     BlockId as MirBlockId, Callee, FunctionId as MirFunctionId, GlobalId, Instr, LocalId,
     MirFunction, MirLit, MirProgram, MirStringPart, MirTy, Operand, Rvalue, Terminator,
 };
+use fidan_stdlib::{
+    MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_receiver_method, infer_stdlib_method,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -321,6 +324,7 @@ struct RuntimeDecls {
     throw_unhandled: cranelift_module::FuncId,
     store_exception: cranelift_module::FuncId,
     catch_exception: cranelift_module::FuncId,
+    has_exception: cranelift_module::FuncId,
     // Closures
     make_closure: cranelift_module::FuncId,
     // Dynamic function dispatch table
@@ -328,7 +332,9 @@ struct RuntimeDecls {
     fn_table_set: cranelift_module::FuncId,
     fn_name_register: cranelift_module::FuncId,
     call_dynamic: cranelift_module::FuncId,
-    // Parallel / concurrent (sequential AOT fallback)
+    spawn_expr: cranelift_module::FuncId,
+    spawn_task: cranelift_module::FuncId,
+    pending_join: cranelift_module::FuncId,
     parallel_iter_seq: cranelift_module::FuncId,
 }
 
@@ -477,11 +483,15 @@ impl RuntimeDecls {
             throw_unhandled: decl!("fdn_throw_unhandled", sig!((p) -> void)),
             store_exception: decl!("fdn_store_exception", sig!((p) -> void)),
             catch_exception: decl!("fdn_catch_exception", sig!(() -> ptr)),
+            has_exception: decl!("fdn_has_exception", sig!(() -> i8)),
             make_closure: decl!("fdn_make_closure", sig!((i64t, p, i64t) -> ptr)),
             fn_table_init: decl!("fdn_fn_table_init", sig!((i64t) -> void)),
             fn_table_set: decl!("fdn_fn_table_set", sig!((i64t, i64t) -> void)),
             fn_name_register: decl!("fdn_fn_name_register", sig!((p, i64t, i64t) -> void)),
             call_dynamic: decl!("fdn_call_dynamic", sig!((p, p, i64t) -> ptr)),
+            spawn_expr: decl!("fdn_spawn_expr", sig!((i64t, p, i64t) -> ptr)),
+            spawn_task: decl!("fdn_spawn_task", sig!((i64t, p, i64t, p, i64t) -> ptr)),
+            pending_join: decl!("fdn_pending_join", sig!((p) -> ptr)),
             parallel_iter_seq: decl!("fdn_parallel_iter_seq", sig!((p, i64t, p, i64t) -> void)),
         })
     }
@@ -801,6 +811,10 @@ fn lower_function(
                 &global_ns_map,
                 &mut namespace_locals,
                 program,
+                mf,
+                bi,
+                &cl_blocks,
+                &current_catch_stack,
                 instr,
                 interner,
             )?;
@@ -842,11 +856,16 @@ fn lower_instr(
     global_ns_map: &HashMap<GlobalId, String>,
     namespace_locals: &mut HashMap<LocalId, String>,
     program: &MirProgram,
+    mf: &MirFunction,
+    bi: usize,
+    cl_blocks: &[cranelift_codegen::ir::Block],
+    current_catch_stack: &[MirBlockId],
     instr: &Instr,
     interner: &SymbolInterner,
 ) -> Result<()> {
     match instr {
         Instr::Assign { dest, ty, rhs } => {
+            let effective_ty = local_types.get(&dest.0).unwrap_or(ty);
             let val = lower_rvalue(
                 module,
                 rt,
@@ -857,16 +876,15 @@ fn lower_instr(
                 namespace_locals,
                 program,
                 rhs,
-                ty,
+                effective_ty,
                 interner,
             )?;
             // Cranelift requires that the type of the assigned value exactly matches
             // the declared type of the variable.  When dynamic dispatch is used (e.g.
             // a float op where one operand was loaded from a global and is therefore
             // `MirTy::Dynamic`), `lower_rvalue` may return a PTR_TY (I64) boxed
-            // pointer even though `ty` says Float or Boolean.  Also, when the MIR
-            // type is `Error` (un-inferred), use the overridden type from local_types.
-            let effective_ty = local_types.get(&dest.0).unwrap_or(ty);
+            // pointer even though the logical destination is scalar.  The local-type map
+            // provides the backend's best-known effective destination type here.
             let expected_cl_ty = mir_ty_to_cl(effective_ty);
             let actual_cl_ty = builder.func.dfg.value_type(val);
             let val = if actual_cl_ty != expected_cl_ty {
@@ -875,6 +893,20 @@ fn lower_instr(
                 val
             };
             builder.def_var(cl_vars[dest.0 as usize], val);
+            if matches!(rhs, Rvalue::Call { .. }) {
+                emit_pending_exception_check(
+                    module,
+                    rt,
+                    builder,
+                    cl_blocks,
+                    cl_vars,
+                    local_types,
+                    mf,
+                    bi,
+                    current_catch_stack,
+                    interner,
+                )?;
+            }
         }
 
         Instr::Call {
@@ -926,6 +958,18 @@ fn lower_instr(
                 };
                 builder.def_var(cl_vars[d.0 as usize], v);
             }
+            emit_pending_exception_check(
+                module,
+                rt,
+                builder,
+                cl_blocks,
+                cl_vars,
+                local_types,
+                mf,
+                bi,
+                current_catch_stack,
+                interner,
+            )?;
         }
 
         Instr::GetField {
@@ -1034,16 +1078,21 @@ fn lower_instr(
             }
         }
 
-        // ── Concurrency: synchronous AOT fallback ─────────────────────────
-        // AOT runs everything on one thread.  spawn/await are lowered to
-        // a direct synchronous call so that functional correctness is preserved
-        // (at the cost of actual parallelism).
+        // ── Concurrency / Parallelism ─────────────────────────────────────
         Instr::SpawnExpr {
             dest,
             task_fn,
             args,
+        } => {
+            let fn_idx = builder.ins().iconst(I64, task_fn.0 as i64);
+            let (arr, cnt) =
+                build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
+            let pending = call_rt(module, builder, rt.spawn_expr, &[fn_idx, arr, cnt])?
+                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+            builder.def_var(cl_vars[dest.0 as usize], pending);
         }
-        | Instr::SpawnConcurrent {
+
+        Instr::SpawnConcurrent {
             handle: dest,
             task_fn,
             args,
@@ -1053,27 +1102,43 @@ fn lower_instr(
             task_fn,
             args,
         } => {
-            // Synchronous spawn: call the function through its trampoline so the
-            // result is always a properly-boxed *mut FidanValue (the trampoline
-            // handles void/scalar/pointer return types uniformly).
             let fn_idx = builder.ins().iconst(I64, task_fn.0 as i64);
-            let boxed_fn = call_rt(module, builder, rt.box_fn_ref, &[fn_idx])?
-                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+            let task_name_sym = interner.resolve(program.function(*task_fn).name);
+            let (name_ptr, name_len) = str_const(module, builder, task_name_sym.as_ref())?;
             let (arr, cnt) =
                 build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
-            let result = call_rt(module, builder, rt.call_dynamic, &[boxed_fn, arr, cnt])?
-                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
-            builder.def_var(cl_vars[dest.0 as usize], result);
+            let pending = call_rt(
+                module,
+                builder,
+                rt.spawn_task,
+                &[fn_idx, name_ptr, name_len, arr, cnt],
+            )?
+            .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+            builder.def_var(cl_vars[dest.0 as usize], pending);
         }
 
-        Instr::JoinAll { .. } => {
-            // All spawned tasks already completed synchronously; no-op.
+        Instr::JoinAll { handles } => {
+            for handle in handles {
+                let handle_ptr = lower_operand_as_ptr(
+                    builder,
+                    cl_vars,
+                    local_types,
+                    &Operand::Local(*handle),
+                    rt,
+                    module,
+                )?;
+                let resolved = call_rt(module, builder, rt.pending_join, &[handle_ptr])?
+                    .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+                builder.def_var(cl_vars[handle.0 as usize], resolved);
+            }
         }
 
         Instr::AwaitPending { dest, handle } => {
-            // The handle already holds the resolved value (not a Pending wrapper).
-            let val = lower_operand(builder, cl_vars, handle);
-            builder.def_var(cl_vars[dest.0 as usize], val);
+            let handle_ptr =
+                lower_operand_as_ptr(builder, cl_vars, local_types, handle, rt, module)?;
+            let resolved = call_rt(module, builder, rt.pending_join, &[handle_ptr])?
+                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+            builder.def_var(cl_vars[dest.0 as usize], resolved);
         }
 
         Instr::SpawnDynamic { dest, method, args } => {
@@ -1163,6 +1228,65 @@ fn lower_instr(
     Ok(())
 }
 
+fn emit_exceptional_return(builder: &mut FunctionBuilder<'_>, mf: &MirFunction) {
+    let eff_ty = effective_return_ty(mf);
+    if matches!(&eff_ty, MirTy::Nothing | MirTy::Error) {
+        builder.ins().return_(&[]);
+        return;
+    }
+
+    let ret_cl_ty = mir_ty_to_cl(&eff_ty);
+    let default_ret = if ret_cl_ty == F64 {
+        builder.ins().f64const(0.0)
+    } else {
+        builder.ins().iconst(ret_cl_ty, 0)
+    };
+    builder.ins().return_(&[default_ret]);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_pending_exception_check(
+    module: &mut ObjectModule,
+    rt: &RuntimeDecls,
+    builder: &mut FunctionBuilder<'_>,
+    cl_blocks: &[cranelift_codegen::ir::Block],
+    cl_vars: &[Variable],
+    local_types: &HashMap<u32, MirTy>,
+    mf: &MirFunction,
+    bi: usize,
+    current_catch_stack: &[MirBlockId],
+    interner: &SymbolInterner,
+) -> Result<()> {
+    let has_exception = call_rt(module, builder, rt.has_exception, &[])?
+        .unwrap_or_else(|| builder.ins().iconst(I8, 0));
+    let pending_block = builder.create_block();
+    let cont_block = builder.create_block();
+    builder
+        .ins()
+        .brif(has_exception, pending_block, &[], cont_block, &[]);
+
+    builder.switch_to_block(pending_block);
+    if let Some(catch_bid) = current_catch_stack.last() {
+        let catch_idx = catch_bid.0 as usize;
+        let catch_args = collect_phi_args(
+            module,
+            rt,
+            builder,
+            cl_vars,
+            local_types,
+            mf,
+            bi,
+            catch_idx,
+            interner,
+        )?;
+        builder.ins().jump(cl_blocks[catch_idx], &catch_args);
+    } else {
+        emit_exceptional_return(builder, mf);
+    }
+
+    builder.switch_to_block(cont_block);
+    Ok(())
+}
 // ── Terminator lowering ────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -1318,9 +1442,10 @@ fn lower_terminator(
                 )?;
                 builder.ins().jump(cl_blocks[catch_idx], &catch_args);
             } else {
-                // No catch handler in this function — unhandled exception.
-                call_rt(module, builder, rt.throw_unhandled, &[v])?;
-                builder.ins().trap(TrapCode::unwrap_user(2));
+                // No local catch handler in this function. Leave the exception in
+                // thread-local storage and return early so the caller can either
+                // catch it or propagate it further upward.
+                emit_exceptional_return(builder, mf);
             }
         }
         Terminator::Unreachable => {
@@ -2028,8 +2153,13 @@ fn emit_call(
             let (mp, ml) = str_const(module, builder, interner.resolve(*method).as_ref())?;
             let (arr, cnt) =
                 build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
-            let ret = call_rt(module, builder, rt.obj_invoke, &[recv, mp, ml, arr, cnt])?;
-            Ok(ret)
+            let boxed = call_rt(module, builder, rt.obj_invoke, &[recv, mp, ml, arr, cnt])?;
+            if let Some(boxed) = boxed {
+                let coerced = coerce_boxed_call_result(module, rt, builder, boxed, result_ty)?;
+                Ok(Some(coerced))
+            } else {
+                Ok(None)
+            }
         }
 
         Callee::Dynamic(fn_op) => {
@@ -2037,14 +2167,37 @@ fn emit_call(
             let fn_val = lower_operand_boxed(builder, cl_vars, local_types, fn_op, rt, module)?;
             let (arr, cnt) =
                 build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
-            Ok(call_rt(
-                module,
-                builder,
-                rt.call_dynamic,
-                &[fn_val, arr, cnt],
-            )?)
+            let boxed = call_rt(module, builder, rt.call_dynamic, &[fn_val, arr, cnt])?;
+            if let Some(boxed) = boxed {
+                let coerced = coerce_boxed_call_result(module, rt, builder, boxed, result_ty)?;
+                Ok(Some(coerced))
+            } else {
+                Ok(None)
+            }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coerce_boxed_call_result(
+    module: &mut ObjectModule,
+    rt: &RuntimeDecls,
+    builder: &mut FunctionBuilder<'_>,
+    boxed: cranelift_codegen::ir::Value,
+    result_ty: &MirTy,
+) -> Result<cranelift_codegen::ir::Value> {
+    let value = match result_ty {
+        MirTy::Integer => call_rt(module, builder, rt.unbox_int, &[boxed])?.unwrap_or(boxed),
+        MirTy::Float => call_rt(module, builder, rt.unbox_float, &[boxed])?.unwrap_or(boxed),
+        MirTy::Boolean => call_rt(module, builder, rt.unbox_bool, &[boxed])?.unwrap_or(boxed),
+        _ => boxed,
+    };
+
+    if is_scalar(result_ty) {
+        call_rt(module, builder, rt.drop_any, &[boxed])?;
+    }
+
+    Ok(value)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2059,35 +2212,66 @@ fn emit_stdlib_method_call(
     args: &[Operand],
     result_ty: &MirTy,
 ) -> Result<Option<cranelift_codegen::ir::Value>> {
-    match (ns, method) {
-        ("math", "sqrt") | ("math", "floor") | ("math", "ceil") | ("math", "trunc") => {
-            let Some(first_arg) = args.first() else {
-                return Ok(None);
-            };
+    let Some(first_arg) = args.first() else {
+        return Ok(None);
+    };
 
-            let arg = lower_operand(builder, vars, first_arg);
-            let arg_ty = builder.func.dfg.value_type(arg);
-            let fval = if arg_ty == F64 {
-                arg
+    let arg_kinds = [operand_stdlib_kind(first_arg, _local_types)];
+    let Some(info) = infer_stdlib_method(ns, method, &arg_kinds) else {
+        return Ok(None);
+    };
+
+    let Some(intrinsic) = info.intrinsic else {
+        return Ok(None);
+    };
+
+    let arg = lower_operand(builder, vars, first_arg);
+    let arg_ty = builder.func.dfg.value_type(arg);
+    let fval = if arg_ty == F64 {
+        arg
+    } else {
+        builder.ins().fcvt_from_sint(F64, arg)
+    };
+
+    let result = match intrinsic {
+        StdlibIntrinsic::Math(MathIntrinsic::Sqrt) => {
+            StdlibResultValue::Float(builder.ins().sqrt(fval))
+        }
+        StdlibIntrinsic::Math(MathIntrinsic::Abs) => {
+            if arg_ty == F64 {
+                StdlibResultValue::Float(builder.ins().fabs(arg))
             } else {
-                builder.ins().fcvt_from_sint(F64, arg)
-            };
-
-            let result = match method {
-                "sqrt" => builder.ins().sqrt(fval),
-                "floor" => builder.ins().floor(fval),
-                "ceil" => builder.ins().ceil(fval),
-                "trunc" => builder.ins().trunc(fval),
-                _ => unreachable!(),
-            };
-
-            if matches!(result_ty, MirTy::Dynamic) {
-                Ok(call_rt(module, builder, rt.box_float, &[result])?)
-            } else {
-                Ok(Some(result))
+                StdlibResultValue::Integer(builder.ins().iabs(arg))
             }
         }
-        _ => Ok(None),
+        StdlibIntrinsic::Math(MathIntrinsic::Floor) => {
+            let floored = builder.ins().floor(fval);
+            StdlibResultValue::Integer(builder.ins().fcvt_to_sint(I64, floored))
+        }
+        StdlibIntrinsic::Math(MathIntrinsic::Ceil) => {
+            let ceiled = builder.ins().ceil(fval);
+            StdlibResultValue::Integer(builder.ins().fcvt_to_sint(I64, ceiled))
+        }
+        StdlibIntrinsic::Math(MathIntrinsic::Trunc) => {
+            StdlibResultValue::Float(builder.ins().trunc(fval))
+        }
+    };
+
+    match result {
+        StdlibResultValue::Integer(value) => {
+            if matches!(result_ty, MirTy::Dynamic) {
+                Ok(call_rt(module, builder, rt.box_int, &[value])?)
+            } else {
+                Ok(Some(value))
+            }
+        }
+        StdlibResultValue::Float(value) => {
+            if matches!(result_ty, MirTy::Dynamic) {
+                Ok(call_rt(module, builder, rt.box_float, &[value])?)
+            } else {
+                Ok(Some(value))
+            }
+        }
     }
 }
 
@@ -2314,6 +2498,40 @@ fn lower_string_interp(
 /// so that `fdn_call_dynamic` can call any Fidan function generically.
 /// It unboxes each argument according to the function's typed parameter list,
 /// calls the real function, and boxes the result back before returning.
+fn emit_trampoline_default_value(
+    module: &mut ObjectModule,
+    rt: &RuntimeDecls,
+    builder: &mut FunctionBuilder<'_>,
+    default: Option<&MirLit>,
+    ty: &MirTy,
+) -> Result<cranelift_codegen::ir::Value> {
+    if let Some(lit) = default {
+        let value = match lit {
+            MirLit::Int(n) => builder.ins().iconst(I64, *n),
+            MirLit::Float(f) => builder.ins().f64const(*f),
+            MirLit::Bool(b) => builder.ins().iconst(I8, i64::from(*b)),
+            MirLit::Str(s) => {
+                let (p, l) = str_const(module, builder, s)?;
+                call_rt(module, builder, rt.box_str, &[p, l])?
+                    .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0))
+            }
+            MirLit::Nothing => call_rt(module, builder, rt.box_nothing, &[])?
+                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)),
+            _ => builder.ins().iconst(PTR_TY, 0),
+        };
+        return Ok(value);
+    }
+
+    let value = match ty {
+        MirTy::Integer => builder.ins().iconst(I64, 0),
+        MirTy::Float => builder.ins().f64const(0.0),
+        MirTy::Boolean => builder.ins().iconst(I8, 0),
+        _ => call_rt(module, builder, rt.box_nothing, &[])?
+            .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)),
+    };
+    Ok(value)
+}
+
 fn emit_trampolines(
     module: &mut ObjectModule,
     rt: &RuntimeDecls,
@@ -2342,19 +2560,33 @@ fn emit_trampolines(
         builder.switch_to_block(entry);
 
         let args_ptr = builder.block_params(entry)[0];
-        // args_cnt = builder.block_params(entry)[1] — trusted; not bounds-checked here
+        let args_cnt = builder.block_params(entry)[1];
 
         let real_fn_id = fn_ids[mf.id.0 as usize];
         let real_fn_ref = module.declare_func_in_func(real_fn_id, builder.func);
 
-        // Unbox each positional argument.
+        // Unbox each positional argument, but honor omitted optional/default params
+        // instead of reading past the caller's provided argument list.
         let mut call_args: Vec<cranelift_codegen::ir::Value> = Vec::new();
         for (j, param) in mf.params.iter().enumerate() {
+            let have_arg = builder
+                .ins()
+                .icmp_imm(IntCC::UnsignedGreaterThan, args_cnt, j as i64);
+            let present_block = builder.create_block();
+            let missing_block = builder.create_block();
+            let cont_block = builder.create_block();
+            let param_cl_ty = mir_ty_to_cl(&param.ty);
+            builder.append_block_param(cont_block, param_cl_ty);
+            builder
+                .ins()
+                .brif(have_arg, present_block, &[], missing_block, &[]);
+
+            builder.switch_to_block(present_block);
             let offset = (j as i32) * 8;
             let raw = builder
                 .ins()
                 .load(PTR_TY, MemFlags::new(), args_ptr, offset);
-            let val = match &param.ty {
+            let present_val = match &param.ty {
                 MirTy::Integer => {
                     let r = module.declare_func_in_func(rt.unbox_int, builder.func);
                     let inst = builder.ins().call(r, &[raw]);
@@ -2372,6 +2604,26 @@ fn emit_trampolines(
                 }
                 _ => raw,
             };
+            builder.ins().jump(
+                cont_block,
+                &[cranelift_codegen::ir::BlockArg::Value(present_val)],
+            );
+
+            builder.switch_to_block(missing_block);
+            let missing_val = emit_trampoline_default_value(
+                module,
+                rt,
+                &mut builder,
+                param.default.as_ref(),
+                &param.ty,
+            )?;
+            builder.ins().jump(
+                cont_block,
+                &[cranelift_codegen::ir::BlockArg::Value(missing_val)],
+            );
+
+            builder.switch_to_block(cont_block);
+            let val = builder.block_params(cont_block)[0];
             call_args.push(val);
         }
 
@@ -2485,6 +2737,21 @@ fn emit_c_main(
     if !fn_ids.is_empty() {
         let init_ref = module.declare_func_in_func(fn_ids[0], builder.func);
         builder.ins().call(init_ref, &[]);
+        let has_exception = call_rt(module, &mut builder, rt.has_exception, &[])?
+            .unwrap_or_else(|| builder.ins().iconst(I8, 0));
+        let ok_block = builder.create_block();
+        let exn_block = builder.create_block();
+        builder
+            .ins()
+            .brif(has_exception, exn_block, &[], ok_block, &[]);
+
+        builder.switch_to_block(exn_block);
+        let exn = call_rt(module, &mut builder, rt.catch_exception, &[])?
+            .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+        call_rt(module, &mut builder, rt.throw_unhandled, &[exn])?;
+        builder.ins().trap(TrapCode::unwrap_user(2));
+
+        builder.switch_to_block(ok_block);
     }
 
     let zero = builder.ins().iconst(I32, 0);
@@ -2601,11 +2868,10 @@ fn build_local_type_map(
         for instr in &bb.instructions {
             match instr {
                 Instr::Assign { dest, ty, rhs } => {
-                    // When the declared type is Error (type checker couldn't infer),
-                    // try to deduce the real type from the rvalue so that the codegen
-                    // can use native scalar operations instead of boxing everything.
-                    let effective_ty = if matches!(ty, MirTy::Error) {
-                        infer_rvalue_type(rhs, &map)
+                    // When the declared type is Dynamic/Error, try to deduce the real type
+                    // from the rvalue so hot loops can stay on native scalar paths.
+                    let effective_ty = if matches!(ty, MirTy::Dynamic | MirTy::Error) {
+                        infer_rvalue_type(rhs, &map, &namespace_locals, interner)
                     } else {
                         ty.clone()
                     };
@@ -2627,22 +2893,14 @@ fn build_local_type_map(
                     dest: Some(d),
                     result_ty,
                     callee,
+                    args,
                     ..
                 } => {
                     let inferred_ty = result_ty
                         .clone()
                         .filter(|ty| !matches!(ty, MirTy::Dynamic | MirTy::Error))
-                        .or_else(|| match callee {
-                            Callee::Method {
-                                receiver: Operand::Local(recv),
-                                method,
-                            } => namespace_locals.get(recv).and_then(|ns| {
-                                infer_stdlib_method_return_ty(
-                                    ns.as_str(),
-                                    interner.resolve(*method).as_ref(),
-                                )
-                            }),
-                            _ => None,
+                        .or_else(|| {
+                            infer_call_result_ty(callee, args, &map, &namespace_locals, interner)
                         })
                         .unwrap_or(MirTy::Dynamic);
                     map.insert(d.0, inferred_ty);
@@ -2666,17 +2924,70 @@ fn build_local_type_map(
     map
 }
 
-fn infer_stdlib_method_return_ty(ns: &str, method: &str) -> Option<MirTy> {
-    match (ns, method) {
-        ("math", "sqrt") | ("math", "floor") | ("math", "ceil") | ("math", "trunc") => {
-            Some(MirTy::Float)
+fn infer_stdlib_method_return_ty(
+    ns: &str,
+    method: &str,
+    arg_kinds: &[StdlibValueKind],
+) -> Option<MirTy> {
+    infer_stdlib_method(ns, method, arg_kinds).map(|info| stdlib_kind_to_mir_ty(info.return_kind))
+}
+
+fn infer_call_result_ty(
+    callee: &Callee,
+    args: &[Operand],
+    map: &HashMap<u32, MirTy>,
+    namespace_locals: &HashMap<LocalId, String>,
+    interner: &SymbolInterner,
+) -> Option<MirTy> {
+    match callee {
+        Callee::Method {
+            receiver: Operand::Local(recv),
+            method,
+        } => {
+            let method_name = interner.resolve(*method);
+            let arg_kinds = args
+                .iter()
+                .map(|arg| operand_stdlib_kind(arg, map))
+                .collect::<Vec<_>>();
+            namespace_locals
+                .get(recv)
+                .and_then(|ns| {
+                    infer_stdlib_method_return_ty(ns.as_str(), method_name.as_ref(), &arg_kinds)
+                })
+                .or_else(|| {
+                    map.get(&recv.0).and_then(|receiver_ty| {
+                        infer_receiver_method_return_ty(
+                            receiver_ty,
+                            method_name.as_ref(),
+                            &arg_kinds,
+                        )
+                    })
+                })
         }
         _ => None,
     }
 }
 
+fn infer_receiver_method_return_ty(
+    receiver_ty: &MirTy,
+    method: &str,
+    arg_kinds: &[StdlibValueKind],
+) -> Option<MirTy> {
+    infer_receiver_method(
+        mir_ty_to_stdlib_kind(receiver_ty.clone()),
+        method,
+        arg_kinds,
+    )
+    .map(|info| stdlib_kind_to_mir_ty(info.return_kind))
+}
+
 /// Try to infer the type of an rvalue from its operands when the declared type is `Error`.
-fn infer_rvalue_type(rhs: &Rvalue, map: &HashMap<u32, MirTy>) -> MirTy {
+fn infer_rvalue_type(
+    rhs: &Rvalue,
+    map: &HashMap<u32, MirTy>,
+    namespace_locals: &HashMap<LocalId, String>,
+    interner: &SymbolInterner,
+) -> MirTy {
     use fidan_ast::BinOp::*;
     match rhs {
         Rvalue::Binary { op, lhs, rhs } => {
@@ -2714,6 +3025,10 @@ fn infer_rvalue_type(rhs: &Rvalue, map: &HashMap<u32, MirTy>) -> MirTy {
         Rvalue::Literal(MirLit::Bool(_)) => MirTy::Boolean,
         Rvalue::Literal(MirLit::Str(_)) => MirTy::String,
         Rvalue::Use(op) => infer_operand_type(op, map),
+        Rvalue::Call { callee, args } => {
+            infer_call_result_ty(callee, args, map, namespace_locals, interner)
+                .unwrap_or(MirTy::Dynamic)
+        }
         _ => MirTy::Dynamic,
     }
 }
@@ -3340,4 +3655,51 @@ fn query_registry_value(key: &str, value_name: &str) -> Option<String> {
         }
     }
     None
+}
+
+enum StdlibResultValue {
+    Integer(cranelift_codegen::ir::Value),
+    Float(cranelift_codegen::ir::Value),
+}
+
+fn operand_stdlib_kind(op: &Operand, local_types: &HashMap<u32, MirTy>) -> StdlibValueKind {
+    match op {
+        Operand::Local(local) => local_types
+            .get(&local.0)
+            .cloned()
+            .map(mir_ty_to_stdlib_kind)
+            .unwrap_or(StdlibValueKind::Dynamic),
+        Operand::Const(MirLit::Int(_)) => StdlibValueKind::Integer,
+        Operand::Const(MirLit::Float(_)) => StdlibValueKind::Float,
+        Operand::Const(MirLit::Bool(_)) => StdlibValueKind::Boolean,
+        Operand::Const(MirLit::Str(_)) => StdlibValueKind::String,
+        Operand::Const(MirLit::Nothing) => StdlibValueKind::Nothing,
+        _ => StdlibValueKind::Dynamic,
+    }
+}
+
+fn mir_ty_to_stdlib_kind(ty: MirTy) -> StdlibValueKind {
+    match ty {
+        MirTy::Integer => StdlibValueKind::Integer,
+        MirTy::Float => StdlibValueKind::Float,
+        MirTy::Boolean => StdlibValueKind::Boolean,
+        MirTy::String => StdlibValueKind::String,
+        MirTy::List(_) => StdlibValueKind::List,
+        MirTy::Dict(_, _) => StdlibValueKind::Dict,
+        MirTy::Nothing => StdlibValueKind::Nothing,
+        _ => StdlibValueKind::Dynamic,
+    }
+}
+
+fn stdlib_kind_to_mir_ty(kind: StdlibValueKind) -> MirTy {
+    match kind {
+        StdlibValueKind::Integer => MirTy::Integer,
+        StdlibValueKind::Float => MirTy::Float,
+        StdlibValueKind::Boolean => MirTy::Boolean,
+        StdlibValueKind::String => MirTy::String,
+        StdlibValueKind::List => MirTy::List(Box::new(MirTy::Dynamic)),
+        StdlibValueKind::Dict => MirTy::Dict(Box::new(MirTy::Dynamic), Box::new(MirTy::Dynamic)),
+        StdlibValueKind::Nothing => MirTy::Nothing,
+        StdlibValueKind::Dynamic => MirTy::Dynamic,
+    }
 }

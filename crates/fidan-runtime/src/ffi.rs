@@ -44,6 +44,7 @@
 
 use crate::{
     FidanDict, FidanList, FidanString, OwnedRef, SharedRef,
+    parallel::{FidanPending, ParallelArgs, ParallelCapture},
     value::{FidanValue, FunctionId, display},
 };
 use std::sync::{Arc, LazyLock};
@@ -3751,6 +3752,75 @@ pub unsafe extern "C" fn fdn_parallel_iter_seq(
     }
 }
 
+unsafe fn build_parallel_args_from_ptrs(
+    args_ptr: *const *mut FidanValue,
+    args_cnt: i64,
+) -> ParallelArgs {
+    let args_slice: &[*mut FidanValue] = if args_cnt > 0 && !args_ptr.is_null() {
+        std::slice::from_raw_parts(args_ptr, args_cnt as usize)
+    } else {
+        &[]
+    };
+
+    ParallelArgs::from_captures(
+        args_slice
+            .iter()
+            .map(|ptr| ParallelCapture(borrow(*ptr).parallel_capture())),
+    )
+}
+
+unsafe fn call_trampoline_owned(fn_idx: usize, values: Vec<FidanValue>) -> FidanValue {
+    let mut arg_ptrs: Vec<*mut FidanValue> = values.into_iter().map(into_raw).collect();
+    let result_ptr = call_trampoline_by_idx(fn_idx, &arg_ptrs);
+    for ptr in arg_ptrs.drain(..) {
+        drop(Box::from_raw(ptr));
+    }
+
+    if result_ptr.is_null() {
+        FidanValue::Nothing
+    } else {
+        *Box::from_raw(result_ptr)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_spawn_expr(
+    fn_idx: i64,
+    args_ptr: *const *mut FidanValue,
+    args_cnt: i64,
+) -> *mut FidanValue {
+    let args = build_parallel_args_from_ptrs(args_ptr, args_cnt);
+    let pending = FidanPending::spawn_with_args(args, move |bundle: ParallelArgs| {
+        call_trampoline_owned(fn_idx as usize, bundle.into_vec())
+    });
+    into_raw(FidanValue::Pending(pending))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_spawn_task(
+    fn_idx: i64,
+    name_bytes: *const u8,
+    name_len: i64,
+    args_ptr: *const *mut FidanValue,
+    args_cnt: i64,
+) -> *mut FidanValue {
+    let task_name = str_from_raw(name_bytes, name_len);
+    let args = build_parallel_args_from_ptrs(args_ptr, args_cnt);
+    let pending = FidanPending::spawn_with_args(args, move |bundle: ParallelArgs| {
+        let _ = &task_name;
+        call_trampoline_owned(fn_idx as usize, bundle.into_vec())
+    });
+    into_raw(FidanValue::Pending(pending))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_pending_join(handle: *mut FidanValue) -> *mut FidanValue {
+    match borrow(handle) {
+        FidanValue::Pending(pending) => into_raw(pending.join()),
+        other => into_raw(other.clone()),
+    }
+}
+
 // ── String interpolation ──────────────────────────────────────────────────────
 /// Each `FidanValue` in `parts_ptr` is BORROWED (not dropped).
 #[unsafe(no_mangle)]
@@ -3778,6 +3848,11 @@ pub extern "C" fn fdn_push_catch(_catch_id: i64) {}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fdn_pop_catch() {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_has_exception() -> i8 {
+    EXCEPTION_VALUE.with(|e| if e.borrow().is_some() { 1 } else { 0 })
+}
 
 /// Store a thrown exception value in thread-local storage so the catch block
 /// can retrieve it via `fdn_catch_exception`.  Called by the AOT throw path.

@@ -176,14 +176,14 @@ impl TypeChecker {
     /// Must be called before `check_module` so the main file's type-checker
     /// sees the imported function as a known binding.
     pub fn pre_register_action(&mut self, name: Symbol, info: ActionInfo) {
-        let dummy = self.dummy_span();
+        let span = info.span;
         self.actions.insert(name, info);
         self.table.define(
             name,
             SymbolInfo {
                 kind: SymbolKind::Action,
                 ty: FidanType::Function,
-                span: dummy,
+                span,
                 is_mutable: false,
                 initialized: Initialized::Yes,
             },
@@ -192,14 +192,14 @@ impl TypeChecker {
 
     /// Pre-register an object type from an already-lowered imported file.
     pub fn pre_register_object(&mut self, name: Symbol, info: ObjectInfo) {
-        let dummy = self.dummy_span();
+        let span = info.span;
         self.objects.insert(name, info);
         self.table.define(
             name,
             SymbolInfo {
                 kind: SymbolKind::Object,
                 ty: FidanType::ClassType(name),
-                span: dummy,
+                span,
                 is_mutable: false,
                 initialized: Initialized::Yes,
             },
@@ -226,14 +226,13 @@ impl TypeChecker {
     }
 
     /// Pre-register a module-level global variable from an already-lowered imported file.
-    pub fn pre_register_global(&mut self, name: Symbol, ty: FidanType, is_const: bool) {
-        let dummy = self.dummy_span();
+    pub fn pre_register_global(&mut self, name: Symbol, ty: FidanType, is_const: bool, span: Span) {
         self.table.define(
             name,
             SymbolInfo {
                 kind: SymbolKind::Var,
                 ty,
-                span: dummy,
+                span,
                 is_mutable: !is_const,
                 initialized: Initialized::Yes,
             },
@@ -621,6 +620,7 @@ impl TypeChecker {
                         // Import-vs-declaration conflict check (E0109, Case B).
                         if let Some(prev) = self.table.lookup_current_scope(binding_sym)
                             && matches!(prev.kind, SymbolKind::Object | SymbolKind::Action)
+                            && prev.span.file == span.file
                         {
                             let n = self.interner.resolve(binding_sym).to_string();
                             let kind_word = if prev.kind == SymbolKind::Object {
@@ -677,6 +677,7 @@ impl TypeChecker {
                         if let Some(&a) = alias.as_ref() {
                             if let Some(prev) = self.table.lookup_current_scope(a)
                                 && matches!(prev.kind, SymbolKind::Object | SymbolKind::Action)
+                                && prev.span.file == span.file
                             {
                                 let n = self.interner.resolve(a).to_string();
                                 let kind_word = if prev.kind == SymbolKind::Object {
@@ -712,6 +713,7 @@ impl TypeChecker {
                         // Import-vs-declaration conflict check (E0109, Case B).
                         if let Some(prev) = self.table.lookup_current_scope(binding_sym)
                             && matches!(prev.kind, SymbolKind::Object | SymbolKind::Action)
+                            && prev.span.file == span.file
                         {
                             let n = self.interner.resolve(binding_sym).to_string();
                             let kind_word = if prev.kind == SymbolKind::Object {

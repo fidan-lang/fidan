@@ -291,7 +291,7 @@ pub(crate) fn pre_register_hir_into_tc(
         if !visible(glob.name) {
             continue;
         }
-        tc.pre_register_global(glob.name, glob.ty.clone(), glob.is_const);
+        tc.pre_register_global(glob.name, glob.ty.clone(), glob.is_const, glob.span);
     }
 
     // Top-level variable declarations live in init_stmts (HirGlobal is unused by the
@@ -299,11 +299,15 @@ pub(crate) fn pre_register_hir_into_tc(
     // init statements).  Scan the first level to pre-register any such declarations.
     for stmt in &hir.init_stmts {
         if let fidan_hir::HirStmt::VarDecl {
-            name, ty, is_const, ..
+            name,
+            ty,
+            is_const,
+            span,
+            ..
         } = stmt
             && visible(*name)
         {
-            tc.pre_register_global(*name, ty.clone(), *is_const);
+            tc.pre_register_global(*name, ty.clone(), *is_const, *span);
         }
     }
 

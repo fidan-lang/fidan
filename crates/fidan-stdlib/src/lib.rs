@@ -17,6 +17,7 @@
 pub mod collections;
 pub mod io;
 pub mod math;
+pub mod metadata;
 pub mod parallel;
 pub mod regex;
 pub mod sandbox;
@@ -111,3 +112,8 @@ pub fn dispatch_test_assertion(
 ) -> Option<Result<fidan_runtime::FidanValue, String>> {
     test_runner::dispatch(name, args)
 }
+
+pub use metadata::{
+    MathIntrinsic, StdlibIntrinsic, StdlibMethodInfo, StdlibValueKind, infer_receiver_method,
+    infer_stdlib_method,
+};

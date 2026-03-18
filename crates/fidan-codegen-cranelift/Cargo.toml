@@ -12,6 +12,7 @@ fidan-ast = { workspace = true }
 fidan-mir = { workspace = true }
 fidan-runtime = { workspace = true }
 fidan-lexer = { workspace = true }
+fidan-stdlib = { workspace = true }
 cranelift-jit = { workspace = true }
 cranelift-codegen = { workspace = true }
 cranelift-frontend = { workspace = true }

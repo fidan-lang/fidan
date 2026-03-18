@@ -33,6 +33,9 @@ use fidan_mir::{
     BlockId, Callee, GlobalId, Instr, LocalId, MirFunction, MirLit, MirProgram, MirTy, Operand,
     Rvalue, Terminator,
 };
+use fidan_stdlib::{
+    MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_receiver_method, infer_stdlib_method,
+};
 use std::collections::HashMap;
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -58,8 +61,26 @@ const ABI_TY: cranelift_codegen::ir::Type = I64;
 
 // ── Build a local-type map ─────────────────────────────────────────────────────
 
-fn build_local_type_map(func: &MirFunction) -> HashMap<LocalId, MirTy> {
+fn build_local_type_map(
+    func: &MirFunction,
+    program: &MirProgram,
+    interner: &SymbolInterner,
+) -> HashMap<LocalId, MirTy> {
     let mut map: HashMap<LocalId, MirTy> = HashMap::new();
+    let mut global_ns_map: HashMap<GlobalId, String> = HashMap::new();
+    let mut namespace_locals: HashMap<LocalId, String> = HashMap::new();
+
+    for (i, g) in program.globals.iter().enumerate() {
+        let g_name = interner.resolve(g.name);
+        for decl in &program.use_decls {
+            if decl.is_stdlib
+                && decl.specific_names.is_none()
+                && g_name.as_ref() == decl.alias.as_str()
+            {
+                global_ns_map.insert(GlobalId(i as u32), decl.module.clone());
+            }
+        }
+    }
 
     // Params
     for p in &func.params {
@@ -67,6 +88,7 @@ fn build_local_type_map(func: &MirFunction) -> HashMap<LocalId, MirTy> {
     }
 
     for bb in &func.blocks {
+        namespace_locals.clear();
         // Instructions only on the first pass — phi types are resolved below.
         for phi in &bb.phis {
             // Seed phi results with their declared type (may be Dynamic/non-primitive).
@@ -75,22 +97,59 @@ fn build_local_type_map(func: &MirFunction) -> HashMap<LocalId, MirTy> {
         // Instructions
         for instr in &bb.instructions {
             match instr {
-                Instr::Assign { dest, ty, .. } => {
-                    map.insert(*dest, ty.clone());
+                Instr::Assign { dest, ty, rhs } => {
+                    let effective_ty = match rhs {
+                        Rvalue::Call { callee, args }
+                            if matches!(ty, MirTy::Dynamic | MirTy::Error) =>
+                        {
+                            infer_call_result_ty(callee, args, &map, &namespace_locals, interner)
+                                .unwrap_or_else(|| ty.clone())
+                        }
+                        _ => ty.clone(),
+                    };
+                    map.insert(*dest, effective_ty);
+                    namespace_locals.remove(dest);
+                    match rhs {
+                        Rvalue::Literal(MirLit::Namespace(ns)) => {
+                            namespace_locals.insert(*dest, ns.clone());
+                        }
+                        Rvalue::Use(Operand::Local(src)) => {
+                            if let Some(ns) = namespace_locals.get(src).cloned() {
+                                namespace_locals.insert(*dest, ns);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
-                Instr::LoadGlobal { dest, .. } => {
+                Instr::LoadGlobal { dest, global } => {
                     // Treat namespace slots as Integer (placeholder value)
                     map.insert(*dest, MirTy::Integer);
+                    if let Some(ns) = global_ns_map.get(global) {
+                        namespace_locals.insert(*dest, ns.clone());
+                    } else {
+                        namespace_locals.remove(dest);
+                    }
                 }
                 Instr::GetField { dest, .. } | Instr::GetIndex { dest, .. } => {
                     map.insert(*dest, MirTy::Dynamic);
+                    namespace_locals.remove(dest);
                 }
                 Instr::Call {
                     dest: Some(d),
                     result_ty,
+                    callee,
+                    args,
                     ..
                 } => {
-                    map.insert(*d, result_ty.clone().unwrap_or(MirTy::Dynamic));
+                    let inferred_ty = result_ty
+                        .clone()
+                        .filter(|ty| !matches!(ty, MirTy::Dynamic | MirTy::Error))
+                        .or_else(|| {
+                            infer_call_result_ty(callee, args, &map, &namespace_locals, interner)
+                        })
+                        .unwrap_or(MirTy::Dynamic);
+                    map.insert(*d, inferred_ty);
+                    namespace_locals.remove(d);
                 }
                 _ => {}
             }
@@ -130,6 +189,63 @@ fn build_local_type_map(func: &MirFunction) -> HashMap<LocalId, MirTy> {
     }
 
     map
+}
+
+fn infer_stdlib_method_return_ty(
+    ns: &str,
+    method: &str,
+    arg_kinds: &[StdlibValueKind],
+) -> Option<MirTy> {
+    infer_stdlib_method(ns, method, arg_kinds).map(|info| stdlib_kind_to_mir_ty(info.return_kind))
+}
+
+fn infer_call_result_ty(
+    callee: &Callee,
+    args: &[Operand],
+    map: &HashMap<LocalId, MirTy>,
+    namespace_locals: &HashMap<LocalId, String>,
+    interner: &SymbolInterner,
+) -> Option<MirTy> {
+    match callee {
+        Callee::Method {
+            receiver: Operand::Local(recv),
+            method,
+        } => {
+            let method_name = interner.resolve(*method);
+            let arg_kinds = args
+                .iter()
+                .map(|arg| operand_stdlib_kind(arg, map))
+                .collect::<Vec<_>>();
+            namespace_locals
+                .get(recv)
+                .and_then(|ns| {
+                    infer_stdlib_method_return_ty(ns.as_str(), method_name.as_ref(), &arg_kinds)
+                })
+                .or_else(|| {
+                    map.get(recv).and_then(|receiver_ty| {
+                        infer_receiver_method_return_ty(
+                            receiver_ty,
+                            method_name.as_ref(),
+                            &arg_kinds,
+                        )
+                    })
+                })
+        }
+        _ => None,
+    }
+}
+
+fn infer_receiver_method_return_ty(
+    receiver_ty: &MirTy,
+    method: &str,
+    arg_kinds: &[StdlibValueKind],
+) -> Option<MirTy> {
+    infer_receiver_method(
+        mir_ty_to_stdlib_kind(receiver_ty.clone()),
+        method,
+        arg_kinds,
+    )
+    .map(|info| stdlib_kind_to_mir_ty(info.return_kind))
 }
 
 // ── JitCompiler ────────────────────────────────────────────────────────────────
@@ -218,7 +334,7 @@ impl JitCompiler {
         }
 
         // ── Build auxiliary maps ──────────────────────────────────────────────
-        let local_types = build_local_type_map(func);
+        let local_types = build_local_type_map(func, program, interner);
 
         // Map GlobalId → stdlib module name, identified via use_decls
         let mut global_ns_map: HashMap<GlobalId, String> = HashMap::new();
@@ -319,6 +435,7 @@ impl JitCompiler {
                 for instr in &mir_bb.instructions {
                     match instr {
                         Instr::Assign { dest, ty, rhs } => {
+                            let effective_ty = local_types.get(dest).unwrap_or(ty);
                             let val = emit_rvalue(
                                 &mut builder,
                                 &cl_vars,
@@ -326,7 +443,7 @@ impl JitCompiler {
                                 rhs,
                                 &namespace_locals,
                                 interner,
-                                ty,
+                                effective_ty,
                             )?;
                             builder.def_var(cl_vars[dest.0 as usize], val);
                         }
@@ -688,41 +805,37 @@ fn emit_stdlib_method_call(
     method: &str,
     args: &[Operand],
 ) -> Option<Value> {
-    match (ns, method) {
-        ("math", "sqrt") => {
-            let arg = load_operand(builder, vars, args.first()?);
-            let arg_ty = builder.func.dfg.value_type(arg);
+    let arg = load_operand(builder, vars, args.first()?);
+    let arg_ty = builder.func.dfg.value_type(arg);
+    let arg_kinds = [value_type_to_stdlib_kind(arg_ty)];
+    let info = infer_stdlib_method(ns, method, &arg_kinds)?;
+    match info.intrinsic {
+        Some(StdlibIntrinsic::Math(MathIntrinsic::Sqrt)) => {
             let fval = ensure_f64(builder, arg, arg_ty);
             Some(builder.ins().sqrt(fval))
         }
-        ("math", "abs") => {
-            let arg = load_operand(builder, vars, args.first()?);
-            let arg_ty = builder.func.dfg.value_type(arg);
+        Some(StdlibIntrinsic::Math(MathIntrinsic::Abs)) => {
             if arg_ty == F64 {
                 Some(builder.ins().fabs(arg))
             } else {
                 Some(builder.ins().iabs(arg))
             }
         }
-        ("math", "floor") => {
-            let arg = load_operand(builder, vars, args.first()?);
-            let arg_ty = builder.func.dfg.value_type(arg);
+        Some(StdlibIntrinsic::Math(MathIntrinsic::Floor)) => {
             let fval = ensure_f64(builder, arg, arg_ty);
-            Some(builder.ins().floor(fval))
+            let floored = builder.ins().floor(fval);
+            Some(builder.ins().fcvt_to_sint(I64, floored))
         }
-        ("math", "ceil") => {
-            let arg = load_operand(builder, vars, args.first()?);
-            let arg_ty = builder.func.dfg.value_type(arg);
+        Some(StdlibIntrinsic::Math(MathIntrinsic::Ceil)) => {
             let fval = ensure_f64(builder, arg, arg_ty);
-            Some(builder.ins().ceil(fval))
+            let ceiled = builder.ins().ceil(fval);
+            Some(builder.ins().fcvt_to_sint(I64, ceiled))
         }
-        ("math", "trunc") => {
-            let arg = load_operand(builder, vars, args.first()?);
-            let arg_ty = builder.func.dfg.value_type(arg);
+        Some(StdlibIntrinsic::Math(MathIntrinsic::Trunc)) => {
             let fval = ensure_f64(builder, arg, arg_ty);
             Some(builder.ins().trunc(fval))
         }
-        _ => None,
+        None => None,
     }
 }
 
@@ -942,5 +1055,59 @@ unsafe fn dispatch_native(fn_ptr: *const u8, n: usize, args: &[i64; 16]) -> i64 
                 args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
             )
         },
+    }
+}
+
+fn stdlib_kind_to_mir_ty(kind: StdlibValueKind) -> MirTy {
+    match kind {
+        StdlibValueKind::Integer => MirTy::Integer,
+        StdlibValueKind::Float => MirTy::Float,
+        StdlibValueKind::Boolean => MirTy::Boolean,
+        StdlibValueKind::String => MirTy::String,
+        StdlibValueKind::List => MirTy::List(Box::new(MirTy::Dynamic)),
+        StdlibValueKind::Dict => MirTy::Dict(Box::new(MirTy::Dynamic), Box::new(MirTy::Dynamic)),
+        StdlibValueKind::Nothing => MirTy::Nothing,
+        StdlibValueKind::Dynamic => MirTy::Dynamic,
+    }
+}
+
+fn value_type_to_stdlib_kind(ty: cranelift_codegen::ir::Type) -> StdlibValueKind {
+    if ty == F64 {
+        StdlibValueKind::Float
+    } else if ty == I8 {
+        StdlibValueKind::Boolean
+    } else if ty == I64 {
+        StdlibValueKind::Integer
+    } else {
+        StdlibValueKind::Dynamic
+    }
+}
+
+fn operand_stdlib_kind(op: &Operand, map: &HashMap<LocalId, MirTy>) -> StdlibValueKind {
+    match op {
+        Operand::Local(local) => map
+            .get(local)
+            .cloned()
+            .map(mir_ty_to_stdlib_kind)
+            .unwrap_or(StdlibValueKind::Dynamic),
+        Operand::Const(MirLit::Int(_)) => StdlibValueKind::Integer,
+        Operand::Const(MirLit::Float(_)) => StdlibValueKind::Float,
+        Operand::Const(MirLit::Bool(_)) => StdlibValueKind::Boolean,
+        Operand::Const(MirLit::Str(_)) => StdlibValueKind::String,
+        Operand::Const(MirLit::Nothing) => StdlibValueKind::Nothing,
+        _ => StdlibValueKind::Dynamic,
+    }
+}
+
+fn mir_ty_to_stdlib_kind(ty: MirTy) -> StdlibValueKind {
+    match ty {
+        MirTy::Integer => StdlibValueKind::Integer,
+        MirTy::Float => StdlibValueKind::Float,
+        MirTy::Boolean => StdlibValueKind::Boolean,
+        MirTy::String => StdlibValueKind::String,
+        MirTy::List(_) => StdlibValueKind::List,
+        MirTy::Dict(_, _) => StdlibValueKind::Dict,
+        MirTy::Nothing => StdlibValueKind::Nothing,
+        _ => StdlibValueKind::Dynamic,
     }
 }
