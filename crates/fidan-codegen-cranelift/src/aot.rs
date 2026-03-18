@@ -2994,29 +2994,36 @@ fn infer_rvalue_type(
             let l_ty = infer_operand_type(lhs, map);
             let r_ty = infer_operand_type(rhs, map);
             match op {
-                // Comparison operators always produce boolean
+                // Comparison operators always produce boolean.
                 Eq | NotEq | Lt | LtEq | Gt | GtEq => MirTy::Boolean,
-                // Float ops if either side is float
+                // Float ops if either side is definitely float.
                 Add | Sub | Mul | Div | Rem | Pow
                     if matches!(l_ty, MirTy::Float) || matches!(r_ty, MirTy::Float) =>
                 {
                     MirTy::Float
                 }
-                // Integer ops if both sides are integer-typed
+                // Integer ops if both sides are definitely integer-typed.
                 Add | Sub | Mul | Div | Rem | Pow
                     if matches!(l_ty, MirTy::Integer) && matches!(r_ty, MirTy::Integer) =>
                 {
                     MirTy::Integer
                 }
+                // If either side is still dynamic/unknown, keep the result boxed.
+                Add | Sub | Mul | Div | Rem | Pow => MirTy::Dynamic,
                 And | Or => MirTy::Boolean,
                 Range | RangeInclusive => MirTy::Dynamic,
-                _ => MirTy::Error,
+                _ => MirTy::Dynamic,
             }
         }
         Rvalue::Unary { op, operand } => {
             let oty = infer_operand_type(operand, map);
             match op {
                 fidan_ast::UnOp::Not => MirTy::Boolean,
+                fidan_ast::UnOp::Neg | fidan_ast::UnOp::Pos
+                    if matches!(oty, MirTy::Error | MirTy::Dynamic) =>
+                {
+                    MirTy::Dynamic
+                }
                 fidan_ast::UnOp::Neg | fidan_ast::UnOp::Pos => oty,
             }
         }
