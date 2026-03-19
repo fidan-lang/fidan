@@ -16,36 +16,11 @@ pub fn compile(
     interner: Arc<SymbolInterner>,
     opts: &CompileOptions,
 ) -> Result<()> {
-    match opts.mode {
-        ExecutionMode::Build => match opts.backend {
-            crate::options::Backend::Cranelift => compile_aot_cranelift(program, interner, opts),
-            crate::options::Backend::Llvm => {
-                anyhow::bail!(
-                    "LLVM backend is not yet implemented. Use --backend cranelift (default)."
-                )
-            }
-        },
-        // Interpret / check / test modes are dispatched in the CLI before reaching here.
-        _ => unreachable!("compile() called with non-Build execution mode"),
-    }
-}
-
-/// AOT via Cranelift — pure Rust, zero system dependencies.
-fn compile_aot_cranelift(
-    program: MirProgram,
-    interner: Arc<SymbolInterner>,
-    opts: &CompileOptions,
-) -> Result<()> {
-    use fidan_codegen_cranelift::CraneliftOptLevel;
-    use fidan_codegen_cranelift::{CraneliftAotCompiler, CraneliftAotOptions};
-
     let output = {
         let raw = opts.output.clone().unwrap_or_else(|| {
             opts.input
                 .with_extension(if cfg!(windows) { "exe" } else { "" })
         });
-        // On Windows, ensure the output path always has the .exe extension so
-        // the resulting binary is directly executable without renaming.
         #[cfg(windows)]
         let raw = if raw
             .extension()
@@ -59,10 +34,42 @@ fn compile_aot_cranelift(
         raw
     };
 
+    match opts.mode {
+        ExecutionMode::Build => match crate::install::resolve_effective_backend(opts.backend)? {
+            crate::install::EffectiveBackend::Cranelift => {
+                compile_aot_cranelift(program, interner, opts, output)
+            }
+            crate::install::EffectiveBackend::Llvm(toolchain) => {
+                let out = crate::llvm_helper::invoke_llvm_helper(&toolchain, opts, output)?;
+                render_message_to_stderr(
+                    Severity::Note,
+                    "llvm",
+                    &format!(
+                        "compiled to `{}` via toolchain `{}`",
+                        out.display(),
+                        toolchain.metadata.toolchain_version
+                    ),
+                );
+                Ok(())
+            }
+        },
+        _ => unreachable!("compile() called with non-Build execution mode"),
+    }
+}
+
+/// AOT via Cranelift — pure Rust, zero system dependencies.
+fn compile_aot_cranelift(
+    program: MirProgram,
+    interner: Arc<SymbolInterner>,
+    opts: &CompileOptions,
+    output: std::path::PathBuf,
+) -> Result<()> {
+    use fidan_codegen_cranelift::CraneliftOptLevel;
+    use fidan_codegen_cranelift::{CraneliftAotCompiler, CraneliftAotOptions};
+
     let cl_opt = match opts.opt_level {
         crate::options::OptLevel::O0 => CraneliftOptLevel::None,
         crate::options::OptLevel::O1 | crate::options::OptLevel::O2 => CraneliftOptLevel::Speed,
-        // O3 (release mode), Os, Oz — use Cranelift's most aggressive preset.
         crate::options::OptLevel::O3
         | crate::options::OptLevel::Os
         | crate::options::OptLevel::Oz => CraneliftOptLevel::SpeedAndSize,

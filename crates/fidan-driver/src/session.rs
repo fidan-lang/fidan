@@ -1,4 +1,3 @@
-// fidan-driver stubs — Phase 1+
 use fidan_source::SourceMap;
 use std::sync::Arc;
 

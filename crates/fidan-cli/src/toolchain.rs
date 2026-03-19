@@ -1,0 +1,189 @@
+use crate::distribution::{
+    extract_tar_gz, fetch_bytes, fetch_manifest, materialize_release_root, read_all,
+    select_toolchain_release, stage_dir, verify_sha256, write_bytes,
+};
+use anyhow::{Context, Result, bail};
+use clap::Subcommand;
+use fidan_diagnostics::{Severity, render_message_to_stderr};
+use fidan_driver::{ToolchainMetadata, resolve_fidan_home};
+use std::fs;
+use std::path::PathBuf;
+
+#[derive(Subcommand)]
+pub(crate) enum ToolchainCommand {
+    /// Show installable toolchains for the current host
+    Available,
+    /// Show installed toolchains
+    List,
+    /// Install an optional toolchain package
+    Add {
+        name: String,
+        #[arg(long)]
+        version: Option<String>,
+    },
+    /// Remove an installed toolchain package
+    Remove {
+        name: String,
+        #[arg(long)]
+        version: Option<String>,
+    },
+}
+
+pub(crate) fn run(command: ToolchainCommand) -> Result<()> {
+    match command {
+        ToolchainCommand::Available => run_available(),
+        ToolchainCommand::List => run_list(),
+        ToolchainCommand::Add { name, version } => run_add(&name, version.as_deref()),
+        ToolchainCommand::Remove { name, version } => run_remove(&name, version.as_deref()),
+    }
+}
+
+fn run_available() -> Result<()> {
+    let manifest = fetch_manifest(None)?;
+    let host = fidan_driver::install::host_triple();
+    let mut any = false;
+    for release in manifest
+        .toolchains
+        .iter()
+        .filter(|release| release.host_triple == host)
+    {
+        any = true;
+        println!(
+            "- {} {} (tool {}, helper protocol {})",
+            release.kind,
+            release.toolchain_version,
+            release.tool_version,
+            release.backend_protocol_version
+        );
+    }
+    if !any {
+        render_message_to_stderr(
+            Severity::Note,
+            "toolchain",
+            &format!("no toolchain packages are published for `{host}` yet"),
+        );
+    }
+    Ok(())
+}
+
+fn run_list() -> Result<()> {
+    let home = resolve_fidan_home()?;
+    let toolchains = fidan_driver::install::installed_toolchains(&home, None)?;
+    if toolchains.is_empty() {
+        render_message_to_stderr(
+            Severity::Note,
+            "toolchain",
+            "no toolchains are installed yet",
+        );
+        return Ok(());
+    }
+
+    for toolchain in toolchains {
+        let metadata = toolchain.metadata;
+        println!(
+            "- {} {} (tool {}, helper protocol {})",
+            metadata.kind,
+            metadata.toolchain_version,
+            metadata.tool_version,
+            metadata.backend_protocol_version
+        );
+    }
+    Ok(())
+}
+
+fn run_add(name: &str, version: Option<&str>) -> Result<()> {
+    let manifest = fetch_manifest(None)?;
+    let host = fidan_driver::install::host_triple();
+    let release = select_toolchain_release(&manifest, name, version, &host)?;
+    let home = resolve_fidan_home()?;
+    let cache_path = home.join("cache").join("downloads").join(format!(
+        "toolchain-{}-{}-{}.tar.gz",
+        name, release.toolchain_version, host
+    ));
+    let bytes = fetch_bytes(&release.url)?;
+    verify_sha256(&bytes, &release.sha256)?;
+    write_bytes(&cache_path, &bytes)?;
+    let archive = read_all(&cache_path)?;
+
+    let parent = home.join("toolchains").join(name).join(&host);
+    fs::create_dir_all(&parent)
+        .with_context(|| format!("failed to create `{}`", parent.display()))?;
+    let final_dir = parent.join(&release.toolchain_version);
+    if final_dir.exists() {
+        bail!(
+            "toolchain `{name}` version `{}` is already installed",
+            release.toolchain_version
+        );
+    }
+
+    let staging = stage_dir(&parent, &format!("{}-{}", name, release.toolchain_version));
+    extract_tar_gz(&archive, &staging)?;
+    materialize_release_root(
+        &staging,
+        &PathBuf::from(&release.helper_relpath),
+        &final_dir,
+    )?;
+
+    let metadata = ToolchainMetadata {
+        schema_version: 1,
+        kind: release.kind.clone(),
+        toolchain_version: release.toolchain_version.clone(),
+        tool_version: release.tool_version.clone(),
+        host_triple: release.host_triple.clone(),
+        supported_fidan_versions: release.supported_fidan_versions.clone(),
+        backend_protocol_version: release.backend_protocol_version,
+        helper_relpath: release.helper_relpath.clone(),
+    };
+    let metadata_bytes =
+        serde_json::to_vec_pretty(&metadata).context("failed to serialize toolchain metadata")?;
+    write_bytes(&final_dir.join("metadata.json"), &metadata_bytes)?;
+
+    render_message_to_stderr(
+        Severity::Note,
+        "toolchain",
+        &format!(
+            "installed {} toolchain {} for {}",
+            release.kind, release.toolchain_version, host
+        ),
+    );
+    Ok(())
+}
+
+fn run_remove(name: &str, version: Option<&str>) -> Result<()> {
+    let home = resolve_fidan_home()?;
+    let host = fidan_driver::install::host_triple();
+    let parent = home.join("toolchains").join(name).join(&host);
+    if !parent.exists() {
+        bail!("no `{name}` toolchains are installed for `{host}`");
+    }
+
+    let target = if let Some(version) = version {
+        parent.join(version)
+    } else {
+        let mut dirs = fs::read_dir(&parent)
+            .with_context(|| format!("failed to read `{}`", parent.display()))?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+            .collect::<Vec<_>>();
+        dirs.sort_by_key(|entry| entry.file_name());
+        let Some(entry) = dirs.pop() else {
+            bail!("no `{name}` toolchains are installed for `{host}`");
+        };
+        entry.path()
+    };
+
+    if !target.exists() {
+        bail!(
+            "toolchain `{name}` version `{}` is not installed",
+            version.unwrap_or("<latest>")
+        );
+    }
+    fs::remove_dir_all(&target)
+        .with_context(|| format!("failed to remove `{}`", target.display()))?;
+    render_message_to_stderr(
+        Severity::Note,
+        "toolchain",
+        &format!("removed `{}`", target.display()),
+    );
+    Ok(())
+}

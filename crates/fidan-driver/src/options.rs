@@ -48,7 +48,7 @@ pub struct CompileOptions {
     /// of embedding `libfidan_runtime.a` into the binary.  Corresponds to
     /// `fidan build --link-runtime dynamic`.
     pub link_dynamic: bool,
-    /// AOT codegen backend.  Defaults to Cranelift.
+    /// AOT codegen backend selection policy.
     pub backend: Backend,
 }
 
@@ -69,7 +69,7 @@ impl Default for CompileOptions {
             opt_level: OptLevel::O2,
             extra_lib_dirs: vec![],
             link_dynamic: false,
-            backend: Backend::Cranelift,
+            backend: Backend::Auto,
         }
     }
 }
@@ -97,8 +97,10 @@ pub enum EmitKind {
 /// Which AOT codegen backend to use for `fidan build`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Backend {
-    /// Pure-Rust Cranelift backend — no system LLVM required (default).
+    /// Prefer a compatible installed LLVM toolchain; otherwise fall back to Cranelift.
     #[default]
+    Auto,
+    /// Pure-Rust Cranelift backend — no system LLVM required.
     Cranelift,
     /// LLVM backend — higher-quality code, requires LLVM to be installed.
     Llvm,

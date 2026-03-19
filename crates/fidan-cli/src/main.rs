@@ -8,12 +8,15 @@ use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, OptLevel, SandboxPol
 use std::path::PathBuf;
 
 mod dal;
+mod distribution;
 mod explain;
 mod fix;
 mod imports;
 mod pipeline;
 mod repl;
 mod replay;
+mod self_cmd;
+mod toolchain;
 
 // On Windows, PowerShell's default code page is CP1252 which corrupts the UTF-8
 // box-drawing characters emitted by ariadne.  Switch both the input and output
@@ -138,8 +141,8 @@ enum Command {
         /// Suppress specific diagnostic codes (comma-separated, e.g. `W5003,W1004`)
         #[arg(long, value_delimiter = ',')]
         suppress: Vec<String>,
-        /// AOT codegen backend: `cranelift` (default) or `llvm`
-        #[arg(long, default_value = "cranelift")]
+        /// AOT codegen backend: `auto` (prefer installed LLVM), `cranelift`, or `llvm`
+        #[arg(long, default_value = "auto")]
         backend: String,
     },
     /// Profile a Fidan source file: call counts, time per action, hot-path hints
@@ -241,6 +244,17 @@ enum Command {
         /// Scaffold a Dal package layout with dal.toml and src/init.fdn
         #[arg(long)]
         package: bool,
+    },
+    /// Manage installed Fidan versions
+    #[command(name = "self")]
+    SelfManage {
+        #[command(subcommand)]
+        command: self_cmd::SelfCommand,
+    },
+    /// Manage optional heavyweight toolchains like LLVM
+    Toolchain {
+        #[command(subcommand)]
+        command: toolchain::ToolchainCommand,
     },
     /// Dal package registry commands
     Dal {
@@ -477,9 +491,13 @@ fn run_cli() -> Result<()> {
                 ),
             };
             let backend = match backend.trim().to_lowercase().as_str() {
+                "auto" | "" => fidan_driver::Backend::Auto,
                 "cranelift" | "cl" => fidan_driver::Backend::Cranelift,
                 "llvm" => fidan_driver::Backend::Llvm,
-                other => bail!("unknown --backend {:?}  (valid: cranelift, llvm)", other),
+                other => bail!(
+                    "unknown --backend {:?}  (valid: auto, cranelift, llvm)",
+                    other
+                ),
             };
             let opts = CompileOptions {
                 input: file,
@@ -569,6 +587,8 @@ fn run_cli() -> Result<()> {
             dir,
             package,
         } => pipeline::run_new(&project_name, dir.as_ref(), package),
+        Command::SelfManage { command } => self_cmd::run(command),
+        Command::Toolchain { command } => toolchain::run(command),
         Command::Dal { command } => dal::run(command),
     }
 }

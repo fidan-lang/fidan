@@ -21,3 +21,6 @@ fidan-interp = { workspace = true }
 fidan-stdlib = { workspace = true }
 fidan-codegen-cranelift = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+semver = { workspace = true }

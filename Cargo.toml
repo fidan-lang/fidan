@@ -28,9 +28,7 @@ authors = ["Fidan Contributors", "Kaan Gönüldinc <contact@appsolves.dev>"]
 license-file = "LICENSE"
 repository = "https://github.com/fidan-lang/fidan"
 
-# ── Shared dependency versions ────────────────────────────────────────────────
 [workspace.dependencies]
-# Internal crates
 fidan-source = { path = "crates/fidan-source" }
 fidan-lexer = { path = "crates/fidan-lexer" }
 fidan-ast = { path = "crates/fidan-ast" }
@@ -88,8 +86,7 @@ keyring = { version = "3", features = [
 ] }
 crossterm = "0.29"
 notify = { version = "8", features = ["macos_fsevent"] }
-
-# Cranelift JIT + AOT
+sha2 = "0.10"
 cranelift-jit = "0.129.1"
 cranelift-codegen = { version = "0.129.1", features = ["x86"] }
 cranelift-frontend = "0.129.1"
