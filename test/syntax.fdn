@@ -493,6 +493,7 @@ action demonstrateConcurrency {
     # ── spawn / await — explicit async handle (Pending oftype T) ──────────────
     var handle = spawn fetchData("https://example.com")     # type: Pending oftype string
     var fetched = await handle                              # unwraps to string
+    print("Fetched: {fetched}")
 
     # Inline spawn + await (shorthand)
     var direct = await spawn fetchData("https://example.com/2")
