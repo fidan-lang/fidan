@@ -1,19 +1,23 @@
 name: Auto Assign
 on:
-    issues:
-        types: [opened]
-    pull_request:
-        types: [opened]
+  issues:
+    types: [opened]
+  pull_request:
+    types: [opened]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
-    run:
-        runs-on: ubuntu-latest
-        permissions:
-            issues: write
-            pull-requests: write
-        steps:
-            - name: "Auto-assign issue"
-              uses: pozil/auto-assign-issue@v1
-              with:
-                  repo-token: ${{ secrets.GITHUB_TOKEN }}
-                  assignees: AppSolves
-                  numOfAssignee: 1
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - name: "Auto-assign issue"
+        uses: pozil/auto-assign-issue@v1
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          assignees: AppSolves
+          numOfAssignee: 1
