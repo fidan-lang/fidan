@@ -19,8 +19,8 @@ pub(crate) enum SelfCommand {
     List,
     /// Show the active Fidan version and install paths
     Current,
-    /// Install a Fidan version from the distribution manifest (`latest` allowed)
-    Install { version: String },
+    /// Install a Fidan version from the distribution manifest (default: `latest`)
+    Install { version: Option<String> },
     /// Switch the active Fidan version
     Use { version: String },
     /// Remove an installed Fidan version
@@ -31,7 +31,10 @@ pub(crate) fn run(command: SelfCommand) -> Result<()> {
     match command {
         SelfCommand::List => run_list(),
         SelfCommand::Current => run_current(),
-        SelfCommand::Install { version } => run_install(&version),
+        SelfCommand::Install { version } => {
+            let version = version.unwrap_or_else(|| "latest".to_string());
+            run_install(&version)
+        }
         SelfCommand::Use { version } => run_use(&version),
         SelfCommand::Remove { version } => run_remove(&version),
     }
