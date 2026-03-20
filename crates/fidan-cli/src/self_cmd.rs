@@ -21,8 +21,8 @@ pub(crate) enum SelfCommand {
     Current,
     /// Install a Fidan version from the distribution manifest (default: `latest`)
     Install { version: Option<String> },
-    /// Switch the active Fidan version
-    Use { version: String },
+    /// Switch the active Fidan version (default: `latest`)
+    Use { version: Option<String> },
     /// Remove an installed Fidan version
     Remove { version: String },
 }
@@ -35,7 +35,10 @@ pub(crate) fn run(command: SelfCommand) -> Result<()> {
             let version = version.unwrap_or_else(|| "latest".to_string());
             run_install(&version)
         }
-        SelfCommand::Use { version } => run_use(&version),
+        SelfCommand::Use { version } => {
+            let version = version.unwrap_or_else(|| "latest".to_string());
+            run_use(&version)
+        }
         SelfCommand::Remove { version } => run_remove(&version),
     }
 }
@@ -131,7 +134,8 @@ fn run_install(version: &str) -> Result<()> {
 
 fn run_use(version: &str) -> Result<()> {
     let root = resolve_install_root()?;
-    set_active_version(&root, version)?;
+    let version = resolve_version_selector(&root, version)?;
+    set_active_version(&root, &version)?;
     render_message_to_stderr(
         Severity::Note,
         "self",
@@ -143,11 +147,8 @@ fn run_use(version: &str) -> Result<()> {
 fn run_remove(version: &str) -> Result<()> {
     let root = resolve_install_root()?;
     let home = resolve_fidan_home()?;
+    let version = resolve_version_selector(&root, version)?;
     let installed = scan_installed_versions(&root)?;
-    if !installed.iter().any(|entry| entry == version) {
-        bail!("Fidan version `{version}` is not installed");
-    }
-
     let (active, _) = load_or_repair_metadata(&root)?;
     let is_active = active.active_version == version;
     if is_active && installed.len() > 1 {
@@ -174,15 +175,35 @@ fn run_remove(version: &str) -> Result<()> {
         return Ok(());
     }
 
-    fs::remove_dir_all(fidan_driver::install::versions_dir(&root).join(version))
+    fs::remove_dir_all(fidan_driver::install::versions_dir(&root).join(&version))
         .with_context(|| format!("failed to remove installed version directory for `{version}`"))?;
-    let _ = remove_install_record(&root, version)?;
+    let _ = remove_install_record(&root, &version)?;
     render_message_to_stderr(
         Severity::Note,
         "self",
         &format!("removed Fidan version `{version}`"),
     );
     Ok(())
+}
+
+fn resolve_version_selector(root: &std::path::Path, version: &str) -> Result<String> {
+    let installed = scan_installed_versions(root)?;
+    if installed.is_empty() {
+        bail!("no Fidan versions are installed yet");
+    }
+
+    if version == "latest" {
+        return installed
+            .into_iter()
+            .next()
+            .context("no Fidan versions are installed yet");
+    }
+
+    if installed.iter().any(|entry| entry == version) {
+        Ok(version.to_string())
+    } else {
+        bail!("Fidan version `{version}` is not installed");
+    }
 }
 
 fn prompt_yes_no(prompt: &str, default: bool) -> Result<bool> {
