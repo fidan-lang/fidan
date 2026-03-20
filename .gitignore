@@ -41,6 +41,7 @@ desktop.ini
 
 # ── Test / benchmark output ───────────────────────────────────────────────────
 /test/output/
+/dist/
 *.fdn.out
 criterion/
 perf.data

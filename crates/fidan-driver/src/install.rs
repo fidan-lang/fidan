@@ -440,11 +440,11 @@ pub fn resolve_effective_backend(requested: Backend) -> Result<EffectiveBackend>
 
 pub fn host_triple() -> String {
     let os = if cfg!(target_os = "windows") {
-        "windows"
+        "pc-windows-msvc"
     } else if cfg!(target_os = "macos") {
-        "macos"
+        "apple-darwin"
     } else {
-        "linux"
+        "unknown-linux-gnu"
     };
     let arch = if cfg!(target_arch = "x86_64") {
         "x86_64"
@@ -453,7 +453,7 @@ pub fn host_triple() -> String {
     } else {
         std::env::consts::ARCH
     };
-    format!("{os}-{arch}")
+    format!("{arch}-{os}")
 }
 
 fn normalize_installs(mut installs: InstallsMetadata) -> InstallsMetadata {
