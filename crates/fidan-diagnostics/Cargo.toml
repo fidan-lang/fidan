@@ -10,3 +10,4 @@ repository.workspace = true
 fidan-source = { workspace = true }
 thiserror = { workspace = true }
 strsim = { workspace = true }
+unicode-width = { workspace = true }

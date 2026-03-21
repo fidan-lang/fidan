@@ -1,12 +1,13 @@
 use crate::{Diagnostic, Severity};
-use fidan_source::SourceMap;
+use fidan_source::{FileId, SourceMap};
+use unicode_width::UnicodeWidthStr;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Fidan Diagnostic Renderer
 //
 // Span-anchored format (TTY / color):
 //
-//  ╭─ ✖ error[E0101] ────────────────────────────────────────────────────────╮
+//  ╭─ ■ error[E0101] ────────────────────────────────────────────────────────╮
 //  │  undefined name `greting`                                               │
 //  │  test.fdn:2:7                                                           │
 //  ╰─────────────────────────────────────────────────────────────────────────╯
@@ -30,7 +31,7 @@ use fidan_source::SourceMap;
 // Cause-chain (one level per cause, labelled):
 //
 //   caused by (1/2):
-//     ╭─ ✖ error[E0201] ──…
+//     ╭─ ■ error[E0201] ──…
 //     …
 //
 // Spanless pipeline badge:
@@ -42,18 +43,144 @@ use fidan_source::SourceMap;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
+fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn truncate_to_width(s: &str, max_width: usize) -> String {
+    let mut out = String::new();
+    let mut width = 0;
+
+    for ch in s.chars() {
+        let mut buf = [0u8; 4];
+        let chs = ch.encode_utf8(&mut buf);
+        let ch_w = visible_width(chs);
+        if width + ch_w > max_width {
+            break;
+        }
+        out.push(ch);
+        width += ch_w;
+    }
+
+    out
+}
+
+fn expand_tabs(s: &str, tabstop: usize) -> String {
+    let mut out = String::new();
+    let mut col = 0usize;
+
+    for ch in s.chars() {
+        match ch {
+            '\t' => {
+                let spaces = tabstop - (col % tabstop);
+                out.push_str(&" ".repeat(spaces));
+                col += spaces;
+            }
+            _ => {
+                let mut buf = [0u8; 4];
+                let chs = ch.encode_utf8(&mut buf);
+                let w = visible_width(chs).max(1);
+                out.push(ch);
+                col += w;
+            }
+        }
+    }
+
+    out
+}
+
 /// Convert a byte offset into a 1-based `(line, column)` pair.
+/// Column is counted in terminal display cells, not bytes.
 fn byte_to_line_col(src: &str, offset: usize) -> (usize, usize) {
-    let clamped = offset.min(src.len());
+    let clamped = floor_char_boundary(src, offset);
     let before = &src[..clamped];
-    let line = before.chars().filter(|c| *c == '\n').count() + 1;
-    let col = before.rfind('\n').map_or(clamped, |n| clamped - n - 1) + 1;
+    let line = before.chars().filter(|&c| c == '\n').count() + 1;
+    let col = before
+        .rsplit_once('\n')
+        .map_or(visible_width(&expand_tabs(before, 4)), |(_, tail)| {
+            visible_width(&expand_tabs(tail, 4))
+        })
+        + 1;
     (line, col)
 }
 
-fn is_color_enabled() -> bool {
+fn line_start_byte(src: &str, line_1_based: usize) -> Option<usize> {
+    if line_1_based == 0 {
+        return None;
+    }
+    if line_1_based == 1 {
+        return Some(0);
+    }
+
+    let mut line = 1usize;
+    for (idx, ch) in src.char_indices() {
+        if ch == '\n' {
+            line += 1;
+            if line == line_1_based {
+                return Some(idx + ch.len_utf8());
+            }
+        }
+    }
+    None
+}
+
+fn line_end_byte(src: &str, line_start: usize) -> usize {
+    src[line_start..]
+        .find('\n')
+        .map(|rel| line_start + rel)
+        .unwrap_or(src.len())
+}
+
+fn split_lines_preserve_trailing(src: &str) -> Vec<&str> {
+    src.split('\n').collect()
+}
+
+fn span_segment_on_line(
+    src: &str,
+    line_1_based: usize,
+    span_start: usize,
+    span_end: usize,
+) -> Option<(usize, usize)> {
+    let line_start = line_start_byte(src, line_1_based)?;
+    let line_end = line_end_byte(src, line_start);
+    let seg_start = span_start.max(line_start).min(line_end);
+    let seg_end = span_end.max(seg_start).min(line_end);
+
+    if seg_start == seg_end && !(span_start == span_end && seg_start == span_start) {
+        return None;
+    }
+
+    Some((seg_start, seg_end))
+}
+
+fn primary_label_message_for_line<'a>(
+    diag: &'a Diagnostic,
+    file: FileId,
+    src: &str,
+    line_1_based: usize,
+) -> Option<&'a str> {
+    diag.labels
+        .iter()
+        .find(|label| {
+            label.primary
+                && !label.message.is_empty()
+                && label.span.file == file
+                && byte_to_line_col(src, label.span.start as usize).0 == line_1_based
+        })
+        .map(|label| label.message.as_str())
+}
+
+fn is_pretty_enabled() -> bool {
     use std::io::IsTerminal;
-    std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
+    std::io::stderr().is_terminal()
+}
+
+fn is_color_enabled() -> bool {
+    is_pretty_enabled() && std::env::var_os("NO_COLOR").is_none()
 }
 
 /// Detect the current terminal width, falling back to 80 columns.
@@ -145,6 +272,10 @@ fn terminal_width() -> usize {
     80 // fallback
 }
 
+fn visible_width(s: &str) -> usize {
+    UnicodeWidthStr::width(s)
+}
+
 /// Split `text` into lines of at most `width` visible characters, breaking at
 /// word boundaries.  Words longer than `width` are kept on a line of their own
 /// rather than being truncated.
@@ -156,7 +287,7 @@ fn word_wrap(text: &str, width: usize) -> Vec<String> {
     let mut current = String::new();
     let mut current_len: usize = 0;
     for word in text.split_whitespace() {
-        let wlen = word.chars().count();
+        let wlen = visible_width(word);
         if current_len == 0 {
             current.push_str(word);
             current_len = wlen;
@@ -185,7 +316,7 @@ fn wrap_preserving_layout(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
 
     for raw_line in expanded.split('\n') {
-        if raw_line.chars().count() <= width {
+        if visible_width(raw_line) <= width {
             lines.push(raw_line.to_string());
         } else {
             lines.extend(word_wrap(raw_line.trim(), width));
@@ -207,21 +338,35 @@ fn wrap_preserving_layout(text: &str, width: usize) -> Vec<String> {
 /// box using box-drawing characters:
 ///
 /// ```text
-///  ╭─ ✖ error ──────────────────────────────────────────────────────────────╮
+///  ╭─ ■ error ──────────────────────────────────────────────────────────────╮
 ///  │  W2001  file 'test.js' does not have the '.fdn' extension              │
 ///  ╰────────────────────────────────────────────────────────────────────────╯
 /// ```
 pub fn render_message_to_stderr(severity: Severity, code: impl std::fmt::Display, message: &str) {
     let code_s = code.to_string();
-    if is_color_enabled() {
-        let (sym, sev_color) = match severity {
-            Severity::Error => ("✖", "\x1b[1;31m"),
-            Severity::Warning => ("⚠", "\x1b[1;33m"),
-            Severity::Note => ("◆", "\x1b[1;36m"),
+    let pretty = is_pretty_enabled();
+    let color = is_color_enabled();
+
+    if pretty {
+        let sym = match severity {
+            Severity::Error => "■",
+            Severity::Warning => "▲",
+            Severity::Note => "◆",
         };
+
+        let sev_color = if color {
+            match severity {
+                Severity::Error => "\x1b[1;31m",
+                Severity::Warning => "\x1b[1;33m",
+                Severity::Note => "\x1b[1;36m",
+            }
+        } else {
+            ""
+        };
+
         let sev_str = severity.to_string();
-        let reset = "\x1b[0m";
-        let bold = "\x1b[1m";
+        let reset = if color { "\x1b[0m" } else { "" };
+        let bold = if color { "\x1b[1m" } else { "" };
 
         // ── Box layout — adapts to the current terminal width ────────────────
         // Top:    " ╭─ {sym} {sev_str} ─...─╮"   1+1+2+title_vis+1+dashes+1 = w
@@ -231,7 +376,7 @@ pub fn render_message_to_stderr(severity: Severity, code: impl std::fmt::Display
         let cw = w - 7; // usable content width inside │  …  │
 
         // Title (sym + sev_str): sym is 1 terminal column, space, sev_str chars.
-        let title_vis = 1 + 1 + sev_str.chars().count();
+        let title_vis = 1 + 1 + visible_width(&sev_str);
         let dashes_top = w.saturating_sub(6 + title_vis);
         eprintln!(
             " {sev_color}╭─ {sym} {sev_str} {}╮{reset}",
@@ -244,7 +389,7 @@ pub fn render_message_to_stderr(severity: Severity, code: impl std::fmt::Display
         } else {
             (
                 format!("{bold}{code_s}{reset}  "),
-                code_s.chars().count() + 2,
+                visible_width(&code_s) + 2,
             )
         };
         let text_width = cw.saturating_sub(prefix_vis).max(cw / 2);
@@ -255,7 +400,7 @@ pub fn render_message_to_stderr(severity: Severity, code: impl std::fmt::Display
             } else {
                 format!("{}{chunk}", " ".repeat(prefix_vis))
             };
-            let content_vis = prefix_vis + chunk.chars().count();
+            let content_vis = prefix_vis + visible_width(chunk);
             let pad = cw.saturating_sub(content_vis.min(cw));
             eprintln!(
                 " {sev_color}│{reset}  {}{}  {sev_color}│{reset}",
@@ -392,20 +537,19 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
     let name: &str = &file.name;
     let src: &str = &file.src;
 
-    let (line, col) = byte_to_line_col(src, diag.span.start as usize);
-    let span_len = (diag.span.end as usize)
-        .saturating_sub(diag.span.start as usize)
-        .max(1);
-
+    let span_start = floor_char_boundary(src, diag.span.start as usize);
+    let span_end = floor_char_boundary(src, diag.span.end as usize).max(span_start);
+    let (line, col) = byte_to_line_col(src, span_start);
     // Indentation for cause-chain nesting.
     let dp = "  ".repeat(depth);
 
+    let pretty = is_pretty_enabled();
     let color = is_color_enabled();
     let (hdr_c, ctx_c, plus_c, reset, bold, dim) = if color {
         let h = match diag.severity {
-            Severity::Error => "\x1b[1;31m",   // bold red
-            Severity::Warning => "\x1b[1;33m", // bold yellow
-            Severity::Note => "\x1b[1;36m",    // bold cyan
+            Severity::Error => "\x1b[1;31m",
+            Severity::Warning => "\x1b[1;33m",
+            Severity::Note => "\x1b[1;36m",
         };
         (h, "\x1b[2m", "\x1b[1;32m", "\x1b[0m", "\x1b[1m", "\x1b[2m")
     } else {
@@ -420,16 +564,16 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
         Severity::Warning => "warning".to_string(),
         Severity::Note => "note".to_string(),
     };
-    if color {
+    if pretty {
         let sym = match diag.severity {
-            Severity::Error => "\u{2716}",   // ✖
-            Severity::Warning => "\u{26a0}", // ⚠
+            Severity::Error => "\u{25a0}",   // ■
+            Severity::Warning => "\u{25b2}", // ▲
             Severity::Note => "\u{25c6}",    // ◆
         };
         let w = terminal_width() - 1;
         let cw = w - 7; // usable content width inside │  …  │
         // Top: " ╭─ {sym} {kind_label} ─{dashes}╮"
-        let title_vis = 1 + 1 + kind_label.chars().count();
+        let title_vis = 1 + 1 + visible_width(&kind_label);
         let dashes_top = w.saturating_sub(6 + title_vis);
         eprintln!(
             "{dp} {hdr_c}\u{256d}\u{2500} {sym} {kind_label} {}\u{256e}{reset}",
@@ -438,7 +582,7 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
         // Message body line - word-wrapped so long messages don't overflow the box
         let wrapped_msg = word_wrap(&diag.message, cw);
         for (i, chunk) in wrapped_msg.iter().enumerate() {
-            let chunk_vis = chunk.chars().count();
+            let chunk_vis = visible_width(chunk);
             let chunk_pad = cw.saturating_sub(chunk_vis.min(cw));
             if i == 0 {
                 eprintln!(
@@ -454,8 +598,8 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
         }
         // Location line (dimmed)
         let loc_str = format!("{name}:{line}:{col}");
-        let loc_chars: String = loc_str.chars().take(cw).collect();
-        let loc_vis = loc_chars.chars().count();
+        let loc_chars = truncate_to_width(&loc_str, cw);
+        let loc_vis = visible_width(&loc_chars);
         let loc_pad = cw.saturating_sub(loc_vis);
         eprintln!(
             "{dp} {hdr_c}\u{2502}{reset}  {dim}{loc_chars}{reset}{}  {hdr_c}\u{2502}{reset}",
@@ -473,7 +617,7 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
     }
 
     // ── Source snippet with context window ───────────────────────────────────
-    let all_lines: Vec<&str> = src.lines().collect();
+    let all_lines = split_lines_preserve_trailing(src);
     let total = all_lines.len();
 
     if line > 0 && line <= total {
@@ -486,11 +630,7 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
         let g = " ".repeat(gutter_w); // blank gutter for separator lines
 
         // Optional inline label — only from a *primary* label on this line.
-        let label_msg: Option<&str> = diag
-            .labels
-            .iter()
-            .find(|l| l.primary && !l.message.is_empty())
-            .map(|l| l.message.as_str());
+        let label_msg = primary_label_message_for_line(diag, diag.span.file, src, line);
 
         eprintln!("{dp}  {g} |");
         for ln in ctx_start..=ctx_end {
@@ -498,11 +638,12 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
                 continue;
             }
             let src_line = all_lines[ln - 1];
+            let src_line_expanded = expand_tabs(src_line, 4);
             let ln_s = format!("{:>width$}", ln, width = gutter_w);
 
             if ln == line {
                 // Primary error line — full brightness.
-                eprintln!("{dp}  {ln_s} | {src_line}");
+                eprintln!("{dp}  {ln_s} | {src_line_expanded}");
 
                 // Underline: ^ for errors, ~ for warnings/notes.
                 let caret = if diag.severity == Severity::Error {
@@ -510,10 +651,18 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
                 } else {
                     '~'
                 };
+                let (seg_start, seg_end) = span_segment_on_line(src, line, span_start, span_end)
+                    .unwrap_or((span_start, span_start));
+                let line_start = line_start_byte(src, line).unwrap_or(0);
+                let prefix = &src[line_start..seg_start];
+                let underline_col = visible_width(&expand_tabs(prefix, 4));
+                let underline_text = &src[seg_start..seg_end];
+                let underline_len = visible_width(&expand_tabs(underline_text, 4)).max(1);
+
                 let uline = format!(
                     "{}{}",
-                    " ".repeat(col.saturating_sub(1)),
-                    caret.to_string().repeat(span_len),
+                    " ".repeat(underline_col),
+                    caret.to_string().repeat(underline_len),
                 );
 
                 if let Some(lmsg) = label_msg {
@@ -523,7 +672,7 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
                 }
             } else {
                 // Context line — dimmed.
-                eprintln!("{dp}  {ctx_c}{ln_s} | {src_line}{reset}");
+                eprintln!("{dp}  {ctx_c}{ln_s} | {src_line_expanded}{reset}");
             }
         }
         eprintln!("{dp}  {g} |");
@@ -542,11 +691,10 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
         let lfile = source_map.get(label.span.file);
         let lsrc: &str = &lfile.src;
         let lname: &str = &lfile.name;
-        let (lline, lcol) = byte_to_line_col(lsrc, label.span.start as usize);
-        let lspan_len = (label.span.end as usize)
-            .saturating_sub(label.span.start as usize)
-            .max(1);
-        let llines: Vec<&str> = lsrc.lines().collect();
+        let lstart = floor_char_boundary(lsrc, label.span.start as usize);
+        let lend = floor_char_boundary(lsrc, label.span.end as usize).max(lstart);
+        let (lline, lcol) = byte_to_line_col(lsrc, lstart);
+        let llines = split_lines_preserve_trailing(lsrc);
         let ltotal = llines.len();
 
         if lline > 0 && lline <= ltotal {
@@ -564,17 +712,26 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
                     continue;
                 }
                 let src_line = llines[ln - 1];
+                let src_line_expanded = expand_tabs(src_line, 4);
                 let ln_s = format!("{:>width$}", ln, width = lgutter_w);
                 if ln == lline {
-                    eprintln!("{dp}  {ln_s} | {src_line}");
+                    eprintln!("{dp}  {ln_s} | {src_line_expanded}");
+                    let (lseg_start, lseg_end) =
+                        span_segment_on_line(lsrc, lline, lstart, lend).unwrap_or((lstart, lstart));
+                    let lline_start = line_start_byte(lsrc, lline).unwrap_or(0);
+                    let lprefix = &lsrc[lline_start..lseg_start];
+                    let lunderline_col = visible_width(&expand_tabs(lprefix, 4));
+                    let lunderline_text = &lsrc[lseg_start..lseg_end];
+                    let lunderline_len = visible_width(&expand_tabs(lunderline_text, 4)).max(1);
+
                     let uline = format!(
                         "{}{}",
-                        " ".repeat(lcol.saturating_sub(1)),
-                        "~".repeat(lspan_len),
+                        " ".repeat(lunderline_col),
+                        "~".repeat(lunderline_len)
                     );
                     eprintln!("{dp}  {lg} | {dim}{uline}{reset}");
                 } else {
-                    eprintln!("{dp}  {ctx_c}{ln_s} | {src_line}{reset}");
+                    eprintln!("{dp}  {ctx_c}{ln_s} | {src_line_expanded}{reset}");
                 }
             }
             eprintln!("{dp}  {lg} |");
@@ -600,33 +757,47 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
         eprintln!("{dp}  {dim}help:{reset} {}", sug.message);
 
         if let Some(edit) = &sug.edit {
-            let (edit_ln, edit_col) = byte_to_line_col(src, edit.span.start as usize);
-            let edit_raw_len = (edit.span.end as usize).saturating_sub(edit.span.start as usize);
+            let start = floor_char_boundary(src, edit.span.start as usize);
+            let end = floor_char_boundary(src, edit.span.end as usize).max(start);
 
-            if edit_ln > 0 && edit_ln <= all_lines.len() {
-                let src_line = all_lines[edit_ln - 1];
-                let col0 = edit_col.saturating_sub(1); // 0-based column
-                let col0c = col0.min(src_line.len()); // clamped
-                let end0c = (col0 + edit_raw_len).min(src_line.len());
+            let (edit_ln, _) = byte_to_line_col(src, start);
+            let (edit_end_line, edit_end_col) = byte_to_line_col(src, end);
 
-                let patched = format!(
-                    "{}{}{}",
-                    &src_line[..col0c],
-                    &edit.replacement,
-                    &src_line[end0c..],
+            if edit_ln != edit_end_line || edit.replacement.contains('\n') {
+                let (_, edit_start_col) = byte_to_line_col(src, start);
+                eprintln!(
+                    "{dp}  {dim}note:{reset} multi-line fix preview omitted; replace {}:{}:{} through {}:{}:{}",
+                    name, edit_ln, edit_start_col, name, edit_end_line, edit_end_col
                 );
+                continue;
+            }
+
+            if let Some(line_start) = line_start_byte(src, edit_ln) {
+                let line_end = line_end_byte(src, line_start);
+                let src_line = &src[line_start..line_end];
+
+                let start_in_line_bytes = start.saturating_sub(line_start).min(src_line.len());
+                let end_in_line_bytes = end.saturating_sub(line_start).min(src_line.len());
+
+                let prefix = &src_line[..start_in_line_bytes];
+                let suffix = &src_line[end_in_line_bytes..];
+
+                let patched = format!("{prefix}{}{suffix}", edit.replacement);
+
+                let prefix_cols = visible_width(&expand_tabs(prefix, 4));
+                let replacement_cols = visible_width(&expand_tabs(&edit.replacement, 4)).max(1);
 
                 let gw = edit_ln.to_string().len();
                 let gp = " ".repeat(gw);
                 let ln_s = format!("{:>width$}", edit_ln, width = gw);
                 let plus = format!(
                     "{}{}",
-                    " ".repeat(col0c),
-                    "+".repeat(edit.replacement.len().max(1)),
+                    " ".repeat(prefix_cols),
+                    "+".repeat(replacement_cols),
                 );
 
                 eprintln!("{dp}  {gp} |");
-                eprintln!("{dp}  {ln_s} | {patched}");
+                eprintln!("{dp}  {ln_s} | {}", expand_tabs(&patched, 4));
                 eprintln!("{dp}  {gp} | {plus_c}{plus}{reset}");
                 eprintln!("{dp}  {gp} |");
             }
@@ -646,5 +817,57 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
             eprintln!("{dp}  {dim}caused by ({n}/{total_c}):{reset}");
             render_one(cause, source_map, depth + 1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Label;
+    use fidan_source::{SourceMap, Span};
+
+    #[test]
+    fn split_lines_keeps_trailing_empty_line() {
+        let lines = split_lines_preserve_trailing("first\n");
+        assert_eq!(lines, vec!["first", ""]);
+    }
+
+    #[test]
+    fn span_segment_is_clamped_per_line() {
+        let src = "ab\ncd";
+        let start = src.find('b').unwrap();
+        let end = src.find('d').unwrap();
+
+        assert_eq!(span_segment_on_line(src, 1, start, end), Some((1, 2)));
+        assert_eq!(span_segment_on_line(src, 2, start, end), Some((3, 4)));
+    }
+
+    #[test]
+    fn primary_label_message_is_line_and_file_aware() {
+        let sm = SourceMap::new();
+        let file_a = sm.add_file("a.fdn", "one\ntwo");
+        let file_b = sm.add_file("b.fdn", "other");
+
+        let diag = Diagnostic::error(crate::diag_code!("E0001"), "msg", Span::point(file_a.id, 0))
+            .with_label(Label::primary(Span::point(file_b.id, 0), "wrong file"))
+            .with_label(Label::primary(Span::point(file_a.id, 4), "right line"));
+
+        assert_eq!(
+            primary_label_message_for_line(&diag, file_a.id, &file_a.src, 2),
+            Some("right line")
+        );
+        assert_eq!(
+            primary_label_message_for_line(&diag, file_a.id, &file_a.src, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn byte_to_line_col_counts_tabs_and_wide_chars_in_display_cells() {
+        let src = "a\t界";
+        let offset = src.find('界').unwrap();
+        let (line, col) = byte_to_line_col(src, offset);
+        assert_eq!(line, 1);
+        assert_eq!(col, 5);
     }
 }

@@ -3437,8 +3437,8 @@ fn link(
         cmd.arg(format!("-L{}", runtime_dir.display()));
         if link_dynamic {
             cmd.arg("-lfidan_runtime");
+            cmd.arg(format!("-Wl,-rpath,{}", runtime_dir.display()));
             if !cfg!(target_os = "macos") {
-                cmd.arg(format!("-Wl,-rpath,{}", runtime_dir.display()));
                 cmd.arg("-Wl,--enable-new-dtags");
             }
         } else {

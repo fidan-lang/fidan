@@ -228,7 +228,7 @@
 | `Suggestion` type with `SourceEdit` + `Confidence` | ✅ | `suggestion.rs` — `High/Medium/Low`, `SourceEdit`, `Suggestion::hint/fix` |
 | `Diagnostic` notes + suggestions fields | ✅ | `with_note()`, `with_suggestion()`, `add_note()`, `add_suggestion()` |
 | `cause_chain: Vec<Diagnostic>` rendering | ✅ | Causality chain rendered as indented sub-blocks via ariadne |
-| Custom Fidan diagnostic visual identity | ✅ | `error[E0xxx]:` headers; spanless `✖/⚠/◆` badges; distinct from Rust format |
+| Custom Fidan diagnostic visual identity | ✅ | `error[E0xxx]:` headers; spanless `■/▲/◆` badges; distinct from Rust format |
 | Error code registry (`codes.rs`) | ✅ | `E0xxx`/`W1xxx`/`W2xxx`/`R2xxx`/`R3xxx` codes with category + title; `lookup()` / `title()` API |
 | Context window in diagnostics | ✅ | 1 line before + error line + 1 line after; gutter with aligned line numbers |
 | Inline underline label (`^^^^^^^ unknown name`) | ✅ | `Label::primary(span, message)` shown after carets on primary span |

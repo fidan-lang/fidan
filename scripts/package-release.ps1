@@ -44,6 +44,28 @@ function Initialize-CleanDirectory {
   New-Item -ItemType Directory -Force -Path $Path | Out-Null
 }
 
+function Get-RuntimeArtifactNames {
+  if ($IsWindows) {
+    return @(
+      "fidan_runtime.lib",
+      "fidan_runtime.dll",
+      "fidan_runtime.dll.lib"
+    )
+  }
+
+  if ($IsMacOS) {
+    return @(
+      "libfidan_runtime.a",
+      "libfidan_runtime.dylib"
+    )
+  }
+
+  return @(
+    "libfidan_runtime.a",
+    "libfidan_runtime.so"
+  )
+}
+
 if (-not $Version) {
   $Version = Get-WorkspaceVersion
 }
@@ -52,12 +74,21 @@ $hostTriple = Get-HostTriple
 $binaryName = if ($IsWindows) { "fidan.exe" } else { "fidan" }
 
 if (-not $SkipBuild) {
-  cargo build -p fidan-cli --release
+  cargo build -p fidan-cli -p fidan-runtime --release
 }
 
 $binaryPath = Join-Path "target/release" $binaryName
 if (-not (Test-Path -LiteralPath $binaryPath)) {
   throw "Expected release binary at '$binaryPath'"
+}
+
+$runtimeArtifacts = @()
+foreach ($name in (Get-RuntimeArtifactNames)) {
+  $path = Join-Path "target/release" $name
+  if (-not (Test-Path -LiteralPath $path)) {
+    throw "Expected runtime artifact at '$path'"
+  }
+  $runtimeArtifacts += $path
 }
 
 $payloadDir = Join-Path $OutputRoot "payload"
@@ -75,6 +106,9 @@ $stageDir = Join-Path $tempRoot "package"
 Initialize-CleanDirectory -Path $stageDir
 
 Copy-Item -LiteralPath $binaryPath -Destination (Join-Path $stageDir $binaryName)
+foreach ($artifact in $runtimeArtifacts) {
+  Copy-Item -LiteralPath $artifact -Destination (Join-Path $stageDir (Split-Path -Leaf $artifact))
+}
 if (Test-Path -LiteralPath "README.md") {
   Copy-Item -LiteralPath "README.md" -Destination (Join-Path $stageDir "README.md")
 }
