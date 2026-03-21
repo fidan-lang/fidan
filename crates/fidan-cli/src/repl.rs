@@ -161,6 +161,7 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
     use rustyline::error::ReadlineError;
+    use rustyline::{At, Cmd, KeyCode, KeyEvent, Modifiers, Movement, Word};
     use std::sync::Arc;
 
     // ── Banner ─────────────────────────────────────────────────────────────
@@ -185,6 +186,10 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
 
     // ── rustyline editor ───────────────────────────────────────────────────
     let mut rl = rustyline::Editor::<ReplHelper, rustyline::history::DefaultHistory>::new()?;
+    rl.bind_sequence(
+        KeyEvent(KeyCode::Delete, Modifiers::CTRL),
+        Cmd::Kill(Movement::ForwardWord(1, At::AfterEnd, Word::Emacs)),
+    );
     rl.set_helper(Some(ReplHelper));
 
     let prompt_main = "ƒ>  ";
