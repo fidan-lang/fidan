@@ -63,6 +63,8 @@ jobs:
     name: Merge manifest
     runs-on: ubuntu-latest
     needs: build-llvm-toolchain
+    environment: releases
+    if: ${{ needs.build-llvm-toolchain.result == 'success' }}
 
     steps:
       - uses: actions/checkout@v6
@@ -75,23 +77,39 @@ jobs:
 
       - name: Fetch existing manifest if present
         shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          AWS_REGION: auto
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
         run: |
           set -euo pipefail
           mkdir -p dist/release
-          manifest_url="https://releases.fidan.dev/manifest.json"
-          status_code="$(curl -sS -o /dev/null -w "%{http_code}" "$manifest_url" || true)"
-          if [ "$status_code" = "404" ]; then
-            echo "No existing manifest present yet"
+          if aws s3api head-object \
+            --bucket "$R2_BUCKET" \
+            --key "manifest.json" \
+            --endpoint-url "$R2_ENDPOINT" >/dev/null 2>&1; then
+            if aws s3 cp "s3://$R2_BUCKET/manifest.json" dist/release/existing-manifest.json \
+              --endpoint-url "$R2_ENDPOINT" \
+              --no-progress; then
+              echo "Fetched existing manifest from R2"
+            else
+              echo "Remote manifest exists but could not be fetched from R2" >&2
+              exit 1
+            fi
           else
-            if [ -z "$status_code" ] || [ "$status_code" = "000" ]; then
-              echo "Failed to probe existing manifest at $manifest_url" >&2
+            status_code="$(curl -sS -o /dev/null -w "%{http_code}" "https://releases.fidan.dev/manifest.json" || true)"
+            if [ "$status_code" = "404" ]; then
+              echo "No existing manifest present yet"
+            elif [ -z "$status_code" ] || [ "$status_code" = "000" ]; then
+              echo "Failed to probe existing manifest state" >&2
+              exit 1
+            else
+              echo "Remote manifest appears to exist but could not be read from R2" >&2
               exit 1
             fi
-            if ! curl -fsSL "$manifest_url" -o dist/release/existing-manifest.json; then
-              echo "Remote manifest exists but could not be fetched from $manifest_url" >&2
-              exit 1
-            fi
-            echo "Fetched existing manifest"
           fi
 
       - name: Merge distribution manifest
