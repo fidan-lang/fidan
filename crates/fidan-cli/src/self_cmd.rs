@@ -7,18 +7,16 @@ use clap::Subcommand;
 use fidan_diagnostics::{Severity, render_message_to_stderr};
 use fidan_driver::install::{
     load_or_repair_metadata, register_install, remove_bootstrap_path_entries,
-    remove_install_record, resolve_current_binary, scan_installed_versions, set_active_version,
+    remove_install_record, resolve_current_binary, scan_installed_versions,
+    schedule_last_uninstall_cleanup, set_active_version,
 };
 #[cfg(target_os = "windows")]
 use fidan_driver::install::{
-    persist_active_version, read_current_version_from_pointer, resolve_powershell_exe,
-    schedule_current_pointer_update,
+    persist_active_version, read_current_version_from_pointer, schedule_current_pointer_update,
 };
 use fidan_driver::{resolve_fidan_home, resolve_install_root};
 use std::fs;
 use std::path::PathBuf;
-#[cfg(target_os = "windows")]
-use std::{os::windows::process::CommandExt, process::Stdio};
 
 #[derive(Subcommand)]
 pub(crate) enum SelfCommand {
@@ -255,69 +253,4 @@ fn prompt_yes_no(prompt: &str, default: bool) -> Result<bool> {
         return Ok(default);
     }
     Ok(matches!(trimmed.as_str(), "y" | "yes"))
-}
-
-fn schedule_last_uninstall_cleanup(
-    root: &std::path::Path,
-    purge_home: Option<&std::path::Path>,
-) -> Result<()> {
-    #[cfg(target_os = "windows")]
-    {
-        let mut script = format!(
-            "$ErrorActionPreference = 'SilentlyContinue'; \
-             Start-Sleep -Milliseconds 900; \
-             if (Test-Path -LiteralPath {root}) {{ Remove-Item -LiteralPath {root} -Force -Recurse; }}",
-            root = powershell_literal(root)
-        );
-        if let Some(home) = purge_home {
-            script.push_str(&format!(
-                "; if (Test-Path -LiteralPath {home}) {{ Remove-Item -LiteralPath {home} -Force -Recurse; }}",
-                home = powershell_literal(home)
-            ));
-        }
-        spawn_hidden_powershell(&script).context("failed to schedule Windows cleanup process")?;
-        Ok(())
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let script = if let Some(home) = purge_home {
-            format!("sleep 1; rm -rf '{}' '{}';", root.display(), home.display())
-        } else {
-            format!("sleep 1; rm -rf '{}';", root.display())
-        };
-        std::process::Command::new("sh")
-            .args(["-c", &script])
-            .spawn()
-            .context("failed to schedule POSIX cleanup process")?;
-        Ok(())
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn powershell_literal(path: &std::path::Path) -> String {
-    format!("'{}'", path.display().to_string().replace('\'', "''"))
-}
-
-#[cfg(target_os = "windows")]
-fn spawn_hidden_powershell(script: &str) -> Result<std::process::Child> {
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-    std::process::Command::new(resolve_powershell_exe())
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-WindowStyle",
-            "Hidden",
-            "-Command",
-            script,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .context("failed to spawn hidden Windows PowerShell helper")
 }
