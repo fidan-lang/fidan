@@ -84,7 +84,7 @@ function Get-Sha256 {
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
-function Copy-ArchiveRootContents {
+function Move-ArchiveRootContents {
   param(
     [string]$ExtractRoot,
     [string]$Destination
@@ -99,7 +99,7 @@ function Copy-ArchiveRootContents {
 
   New-Item -ItemType Directory -Force -Path $Destination | Out-Null
   foreach ($entry in (Get-ChildItem -LiteralPath $sourceRoot -Force)) {
-    Copy-Item -LiteralPath $entry.FullName -Destination (Join-Path $Destination $entry.Name) -Recurse -Force
+    Move-Item -LiteralPath $entry.FullName -Destination (Join-Path $Destination $entry.Name) -Force
   }
 }
 
@@ -279,12 +279,14 @@ try {
   }
 
   Expand-AnyArchive -ArchivePath $localArchivePath -Destination $extractDir
+  Remove-Item -LiteralPath $localArchivePath -Force
+  $localArchivePath = ""
 
   $helperDir = Join-Path $stageDir "helper"
   $llvmDir = Join-Path $stageDir "llvm"
   New-Item -ItemType Directory -Force -Path $helperDir | Out-Null
   Copy-Item -LiteralPath $helperPath -Destination (Join-Path $helperDir $helperBinary)
-  Copy-ArchiveRootContents -ExtractRoot $extractDir -Destination $llvmDir
+  Move-ArchiveRootContents -ExtractRoot $extractDir -Destination $llvmDir
 
   if ($Kind -eq "llvm") {
     Prune-LlvmPayload -LlvmRoot $llvmDir

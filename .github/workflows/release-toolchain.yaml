@@ -59,6 +59,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libdbus-1-dev
 
+      - name: Free Linux runner disk space
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          df -h
+
       - name: Resolve LLVM source metadata
         id: source
         shell: pwsh
