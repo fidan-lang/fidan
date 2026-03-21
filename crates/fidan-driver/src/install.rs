@@ -7,6 +7,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
+#[cfg(target_os = "windows")]
+use std::{os::windows::process::CommandExt, process::Stdio};
 
 const INSTALL_SCHEMA_VERSION: u32 = 1;
 const TOOLCHAIN_SCHEMA_VERSION: u32 = 1;
@@ -119,6 +121,73 @@ pub fn installs_path(root: &Path) -> PathBuf {
 pub fn current_binary_for_version(root: &Path, version: &str) -> PathBuf {
     let exe = if cfg!(windows) { "fidan.exe" } else { "fidan" };
     versions_dir(root).join(version).join(exe)
+}
+
+pub fn remove_bootstrap_path_entries(root: &Path) -> Result<bool> {
+    let current = current_dir(root);
+
+    #[cfg(target_os = "windows")]
+    {
+        let current_text = current.to_string_lossy().to_string();
+        let normalized_current = normalize_windows_path_entry(&current_text);
+        let stored_path = current_user_path_value()?.unwrap_or_default();
+        let mut changed = false;
+        let filtered = stored_path
+            .split(';')
+            .filter_map(|entry| {
+                let trimmed = entry.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                if normalize_windows_path_entry(trimmed) == normalized_current {
+                    changed = true;
+                    None
+                } else {
+                    Some(trimmed.to_string())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+
+        if changed {
+            persist_user_path_value(&filtered)?;
+            // SAFETY: this short-lived CLI updates its own environment after persisting the
+            // user PATH so child processes launched afterward observe the same value.
+            unsafe {
+                std::env::set_var("Path", &filtered);
+                std::env::set_var("PATH", &filtered);
+            }
+        }
+
+        Ok(changed)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let current_text = current.to_string_lossy().to_string();
+        let path_line = format!("export PATH=\"{}:$PATH\"", current_text);
+        let mut changed = false;
+
+        for profile in candidate_bootstrap_profiles()? {
+            if !profile.exists() {
+                continue;
+            }
+            let original = fs::read_to_string(&profile)
+                .with_context(|| format!("failed to read `{}`", profile.display()))?;
+            let filtered_lines = split_lines_preserve_trailing_newline(&original)
+                .into_iter()
+                .filter(|line| line.trim_end_matches('\r') != path_line)
+                .collect::<Vec<_>>();
+            let rewritten = filtered_lines.join("\n");
+            if rewritten != original {
+                fs::write(&profile, rewritten)
+                    .with_context(|| format!("failed to update `{}`", profile.display()))?;
+                changed = true;
+            }
+        }
+
+        Ok(changed)
+    }
 }
 
 pub fn ensure_install_layout(root: &Path) -> Result<()> {
@@ -279,21 +348,19 @@ pub fn remove_install_record(root: &Path, version: &str) -> Result<Vec<String>> 
 }
 
 pub fn set_active_version(root: &Path, version: &str) -> Result<()> {
-    let installed = scan_installed_versions(root)?;
-    if !installed
-        .iter()
-        .any(|installed_version| installed_version == version)
-    {
-        bail!("Fidan version `{version}` is not installed");
-    }
+    ensure_installed_version(root, version)?;
+    persist_active_version(root, version)?;
+    ensure_current_points_to(root, version)
+}
 
+pub fn persist_active_version(root: &Path, version: &str) -> Result<()> {
+    ensure_installed_version(root, version)?;
     let active = ActiveVersionMetadata {
         schema_version: INSTALL_SCHEMA_VERSION,
         active_version: version.to_string(),
         updated_at_secs: now_secs(),
     };
-    write_json_atomic(&active_version_path(root), &active)?;
-    ensure_current_points_to(root, version)
+    write_json_atomic(&active_version_path(root), &active)
 }
 
 pub fn resolve_current_binary(root: &Path) -> Result<PathBuf> {
@@ -331,11 +398,40 @@ pub fn ensure_current_points_to(root: &Path, version: &str) -> Result<()> {
     }
 
     let current = current_dir(root);
+    if read_current_version_from_pointer(root)?.as_deref() == Some(version) {
+        return Ok(());
+    }
+
     if current.exists() {
         remove_existing_path(&current)?;
     }
 
     create_directory_pointer(&target, &current)
+}
+
+#[cfg(target_os = "windows")]
+pub fn schedule_current_pointer_update(root: &Path, version: &str) -> Result<()> {
+    let target = versions_dir(root).join(version);
+    if !target.is_dir() {
+        bail!(
+            "cannot activate Fidan version `{version}` because `{}` does not exist",
+            target.display()
+        );
+    }
+
+    let current = current_dir(root);
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; \
+         Start-Sleep -Milliseconds 900; \
+         if (Test-Path -LiteralPath {current}) {{ Remove-Item -LiteralPath {current} -Force -Recurse; }}; \
+         New-Item -ItemType Junction -Path {current} -Target {target} | Out-Null",
+        current = powershell_literal(&current),
+        target = powershell_literal(&target)
+    );
+
+    spawn_hidden_powershell(&script)
+        .context("failed to schedule Windows current-version switch")?;
+    Ok(())
 }
 
 pub fn installed_toolchains(home: &Path, kind: Option<&str>) -> Result<Vec<ResolvedToolchain>> {
@@ -468,6 +564,18 @@ fn normalize_installs(mut installs: InstallsMetadata) -> InstallsMetadata {
     installs
 }
 
+fn ensure_installed_version(root: &Path, version: &str) -> Result<()> {
+    let installed = scan_installed_versions(root)?;
+    if installed
+        .iter()
+        .any(|installed_version| installed_version == version)
+    {
+        Ok(())
+    } else {
+        bail!("Fidan version `{version}` is not installed");
+    }
+}
+
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let parent = path
         .parent()
@@ -482,6 +590,125 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         fs::remove_file(path).with_context(|| format!("failed to replace `{}`", path.display()))?;
     }
     fs::rename(&temp_path, path).with_context(|| format!("failed to finalize `{}`", path.display()))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn candidate_bootstrap_profiles() -> Result<Vec<PathBuf>> {
+    let home = home_dir()?;
+    Ok(vec![
+        home.join(".profile"),
+        home.join(".zprofile"),
+        home.join(".bash_profile"),
+    ])
+}
+
+#[cfg(not(target_os = "windows"))]
+fn split_lines_preserve_trailing_newline(text: &str) -> Vec<String> {
+    let mut lines = text
+        .lines()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+    if text.ends_with('\n') {
+        lines.push(String::new());
+    }
+    lines
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_literal(path: &Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "''"))
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_string_literal(text: &str) -> String {
+    format!("'{}'", text.replace('\'', "''"))
+}
+
+#[cfg(target_os = "windows")]
+fn normalize_windows_path_entry(text: &str) -> String {
+    text.trim()
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase()
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_hidden_powershell(script: &str) -> Result<std::process::Child> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            script,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .context("failed to spawn hidden Windows PowerShell helper")
+}
+
+#[cfg(target_os = "windows")]
+fn current_user_path_value() -> Result<Option<String>> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let output = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            "[Environment]::GetEnvironmentVariable('Path', 'User')",
+        ])
+        .stdin(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .context("failed to query Windows user PATH")?;
+    if !output.status.success() {
+        bail!("failed to query Windows user PATH");
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(text))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn persist_user_path_value(value: &str) -> Result<()> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    let script = format!(
+        "[Environment]::SetEnvironmentVariable('Path', {}, 'User')",
+        powershell_string_literal(value)
+    );
+    let status = std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &script,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .context("failed to persist Windows user PATH")?;
+    if !status.success() {
+        bail!("failed to persist Windows user PATH");
+    }
+    Ok(())
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {

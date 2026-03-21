@@ -6,12 +6,18 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use fidan_diagnostics::{Severity, render_message_to_stderr};
 use fidan_driver::install::{
-    load_or_repair_metadata, register_install, remove_install_record, resolve_current_binary,
-    scan_installed_versions, set_active_version,
+    load_or_repair_metadata, register_install, remove_bootstrap_path_entries,
+    remove_install_record, resolve_current_binary, scan_installed_versions, set_active_version,
+};
+#[cfg(target_os = "windows")]
+use fidan_driver::install::{
+    persist_active_version, read_current_version_from_pointer, schedule_current_pointer_update,
 };
 use fidan_driver::{resolve_fidan_home, resolve_install_root};
 use std::fs;
 use std::path::PathBuf;
+#[cfg(target_os = "windows")]
+use std::{os::windows::process::CommandExt, process::Stdio};
 
 #[derive(Subcommand)]
 pub(crate) enum SelfCommand {
@@ -135,6 +141,23 @@ fn run_install(version: &str) -> Result<()> {
 fn run_use(version: &str) -> Result<()> {
     let root = resolve_install_root()?;
     let version = resolve_version_selector(&root, version)?;
+
+    #[cfg(target_os = "windows")]
+    {
+        if read_current_version_from_pointer(&root)?.as_deref() != Some(version.as_str()) {
+            persist_active_version(&root, &version)?;
+            schedule_current_pointer_update(&root, &version)?;
+            render_message_to_stderr(
+                Severity::Note,
+                "self",
+                &format!(
+                    "scheduled active Fidan version switch to `{version}` — open a new shell after this command exits"
+                ),
+            );
+            return Ok(());
+        }
+    }
+
     set_active_version(&root, &version)?;
     render_message_to_stderr(
         Severity::Note,
@@ -159,6 +182,13 @@ fn run_remove(version: &str) -> Result<()> {
 
     if is_active && installed.len() == 1 {
         let purge_home = prompt_yes_no("also purge FIDAN_HOME shared data?", false)?;
+        if let Err(error) = remove_bootstrap_path_entries(&root) {
+            render_message_to_stderr(
+                Severity::Warning,
+                "self",
+                &format!("failed to remove the Fidan PATH entry automatically\n  cause: {error}"),
+            );
+        }
         schedule_last_uninstall_cleanup(
             &root,
             if purge_home {
@@ -230,16 +260,18 @@ fn schedule_last_uninstall_cleanup(
     #[cfg(target_os = "windows")]
     {
         let mut script = format!(
-            "ping 127.0.0.1 -n 3 > nul && rmdir /S /Q \"{}\"",
-            root.display()
+            "$ErrorActionPreference = 'SilentlyContinue'; \
+             Start-Sleep -Milliseconds 900; \
+             if (Test-Path -LiteralPath {root}) {{ Remove-Item -LiteralPath {root} -Force -Recurse; }}",
+            root = powershell_literal(root)
         );
         if let Some(home) = purge_home {
-            script.push_str(&format!(" && rmdir /S /Q \"{}\"", home.display()));
+            script.push_str(&format!(
+                "; if (Test-Path -LiteralPath {home}) {{ Remove-Item -LiteralPath {home} -Force -Recurse; }}",
+                home = powershell_literal(home)
+            ));
         }
-        std::process::Command::new("cmd")
-            .args(["/C", &script])
-            .spawn()
-            .context("failed to schedule Windows cleanup process")?;
+        spawn_hidden_powershell(&script).context("failed to schedule Windows cleanup process")?;
         Ok(())
     }
 
@@ -256,4 +288,32 @@ fn schedule_last_uninstall_cleanup(
             .context("failed to schedule POSIX cleanup process")?;
         Ok(())
     }
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_literal(path: &std::path::Path) -> String {
+    format!("'{}'", path.display().to_string().replace('\'', "''"))
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_hidden_powershell(script: &str) -> Result<std::process::Child> {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+    std::process::Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            script,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .context("failed to spawn hidden Windows PowerShell helper")
 }
