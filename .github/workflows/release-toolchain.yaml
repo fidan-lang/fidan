@@ -17,22 +17,30 @@ on:
         required: true
         default: "22.1.1"
         type: string
-      llvm_archive_url:
-        description: "Official upstream LLVM archive URL"
-        required: true
-        type: string
-      llvm_archive_sha256:
-        description: "SHA-256 of the upstream LLVM archive"
-        required: true
-        type: string
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-llvm-toolchain:
-    name: Build LLVM toolchain (Windows)
-    runs-on: windows-latest
+    name: Build LLVM toolchain (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            artifact_name: llvm-toolchain-windows
+            source_key: windows
+          - name: Linux
+            os: ubuntu-latest
+            artifact_name: llvm-toolchain-linux
+            source_key: linux
+          - name: macOS
+            os: macos-latest
+            artifact_name: llvm-toolchain-macos
+            source_key: macos
 
     steps:
       - uses: actions/checkout@v6
@@ -43,6 +51,24 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Resolve LLVM source metadata
+        id: source
+        shell: pwsh
+        run: |
+          $sources = Get-Content "config/llvm-toolchain-sources.json" -Raw | ConvertFrom-Json -AsHashtable
+          $version = "${{ inputs.llvm_tool_version }}"
+          $platform = "${{ matrix.source_key }}"
+          if (-not $sources.ContainsKey($version)) {
+            throw "Unsupported LLVM version '$version' in config/llvm-toolchain-sources.json"
+          }
+          $versionInfo = $sources[$version]
+          if (-not $versionInfo.ContainsKey($platform)) {
+            throw "Unsupported LLVM platform '$platform' for version '$version' in config/llvm-toolchain-sources.json"
+          }
+          $platformInfo = $versionInfo[$platform]
+          "archive_url=$($platformInfo.url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "archive_sha256=$($platformInfo.sha256)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
       - name: Package LLVM toolchain artifact
         shell: pwsh
         run: |
@@ -50,13 +76,13 @@ jobs:
             -Kind "llvm" `
             -ToolchainVersion "${{ inputs.toolchain_version }}" `
             -ToolVersion "${{ inputs.llvm_tool_version }}" `
-            -UpstreamArchiveUrl "${{ inputs.llvm_archive_url }}" `
-            -UpstreamArchiveSha256 "${{ inputs.llvm_archive_sha256 }}"
+            -UpstreamArchiveUrl "${{ steps.source.outputs.archive_url }}" `
+            -UpstreamArchiveSha256 "${{ steps.source.outputs.archive_sha256 }}"
 
       - name: Upload LLVM toolchain artifact bundle
         uses: actions/upload-artifact@v7
         with:
-          name: llvm-toolchain-windows
+          name: ${{ matrix.artifact_name }}
           path: dist/release
 
   bundle:
@@ -72,8 +98,9 @@ jobs:
       - name: Download LLVM toolchain artifacts
         uses: actions/download-artifact@v8
         with:
-          name: llvm-toolchain-windows
+          pattern: llvm-toolchain-*
           path: dist/release
+          merge-multiple: true
 
       - name: Fetch existing manifest if present
         shell: bash

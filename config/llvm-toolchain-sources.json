@@ -1,0 +1,16 @@
+{
+  "22.1.1": {
+    "windows": {
+      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.1/clang%2Bllvm-22.1.1-x86_64-pc-windows-msvc.tar.xz",
+      "sha256": "186f17ebedf13bae2835b2c0d5111a2a469ac241e7fc6387c9ce4585d6ef56ed"
+    },
+    "linux": {
+      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.1/LLVM-22.1.1-Linux-X64.tar.xz",
+      "sha256": "efc4d945744f951df00ec72c5b31da5d5a2eaf1d53cc7c9d0644f93f0f9e817d"
+    },
+    "macos": {
+      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.1/LLVM-22.1.1-macOS-ARM64.tar.xz",
+      "sha256": "3839802601439300fc8d1d378bc26732e879e1ca80a220f7d6764ed229053e92"
+    }
+  }
+}

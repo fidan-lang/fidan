@@ -139,7 +139,34 @@ function Get-WindowsLlvmBinKeepList {
   )
 }
 
-function Prune-WindowsLlvmPayload {
+function Get-UnixLlvmBinKeepList {
+  return @(
+    "clang",
+    "clang++",
+    "ld.lld",
+    "lld",
+    "llvm-ar",
+    "llvm-as",
+    "llvm-cov",
+    "llvm-dis",
+    "llvm-link",
+    "llvm-lto",
+    "llvm-lto2",
+    "llvm-nm",
+    "llvm-objcopy",
+    "llvm-objdump",
+    "llvm-profdata",
+    "llvm-ranlib",
+    "llvm-readelf",
+    "llvm-readobj",
+    "llvm-size",
+    "llvm-strip",
+    "llc",
+    "opt"
+  )
+}
+
+function Prune-LlvmPayload {
   param([string]$LlvmRoot)
 
   $binDir = Join-Path $LlvmRoot "bin"
@@ -159,7 +186,13 @@ function Prune-WindowsLlvmPayload {
   }
 
   $keep = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-  foreach ($name in (Get-WindowsLlvmBinKeepList)) {
+  $binKeep = if ($IsWindows) {
+    Get-WindowsLlvmBinKeepList
+  }
+  else {
+    Get-UnixLlvmBinKeepList
+  }
+  foreach ($name in $binKeep) {
     [void]$keep.Add($name)
   }
 
@@ -253,8 +286,8 @@ try {
   Copy-Item -LiteralPath $helperPath -Destination (Join-Path $helperDir $helperBinary)
   Copy-ArchiveRootContents -ExtractRoot $extractDir -Destination $llvmDir
 
-  if ($Kind -eq "llvm" -and $IsWindows) {
-    Prune-WindowsLlvmPayload -LlvmRoot $llvmDir
+  if ($Kind -eq "llvm") {
+    Prune-LlvmPayload -LlvmRoot $llvmDir
   }
 
   $metadata = @{
