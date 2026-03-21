@@ -11,7 +11,8 @@ use fidan_driver::install::{
 };
 #[cfg(target_os = "windows")]
 use fidan_driver::install::{
-    persist_active_version, read_current_version_from_pointer, schedule_current_pointer_update,
+    persist_active_version, read_current_version_from_pointer, resolve_powershell_exe,
+    schedule_current_pointer_update,
 };
 use fidan_driver::{resolve_fidan_home, resolve_install_root};
 use std::fs;
@@ -29,8 +30,8 @@ pub(crate) enum SelfCommand {
     Install { version: Option<String> },
     /// Switch the active Fidan version (default: `latest`)
     Use { version: Option<String> },
-    /// Remove an installed Fidan version
-    Remove { version: String },
+    /// Remove an installed Fidan version (default: `latest`)
+    Remove { version: Option<String> },
 }
 
 pub(crate) fn run(command: SelfCommand) -> Result<()> {
@@ -45,7 +46,10 @@ pub(crate) fn run(command: SelfCommand) -> Result<()> {
             let version = version.unwrap_or_else(|| "latest".to_string());
             run_use(&version)
         }
-        SelfCommand::Remove { version } => run_remove(&version),
+        SelfCommand::Remove { version } => {
+            let version = version.unwrap_or_else(|| "latest".to_string());
+            run_remove(&version)
+        }
     }
 }
 
@@ -299,7 +303,7 @@ fn powershell_literal(path: &std::path::Path) -> String {
 fn spawn_hidden_powershell(script: &str) -> Result<std::process::Child> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    std::process::Command::new("powershell.exe")
+    std::process::Command::new(resolve_powershell_exe())
         .args([
             "-NoProfile",
             "-NonInteractive",

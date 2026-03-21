@@ -4,6 +4,8 @@ use anyhow::{Context, Result, bail};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+#[cfg(target_os = "windows")]
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -635,7 +637,7 @@ fn normalize_windows_path_entry(text: &str) -> String {
 fn spawn_hidden_powershell(script: &str) -> Result<std::process::Child> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    std::process::Command::new("powershell.exe")
+    std::process::Command::new(resolve_powershell_exe())
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -658,7 +660,7 @@ fn spawn_hidden_powershell(script: &str) -> Result<std::process::Child> {
 fn current_user_path_value() -> Result<Option<String>> {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    let output = std::process::Command::new("powershell.exe")
+    let output = std::process::Command::new(resolve_powershell_exe())
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -690,7 +692,7 @@ fn persist_user_path_value(value: &str) -> Result<()> {
         "[Environment]::SetEnvironmentVariable('Path', {}, 'User')",
         powershell_string_literal(value)
     );
-    let status = std::process::Command::new("powershell.exe")
+    let status = std::process::Command::new(resolve_powershell_exe())
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -709,6 +711,40 @@ fn persist_user_path_value(value: &str) -> Result<()> {
         bail!("failed to persist Windows user PATH");
     }
     Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn resolve_powershell_exe() -> OsString {
+    let mut candidates = vec![OsString::from("pwsh.exe"), OsString::from("powershell.exe")];
+
+    if let Some(program_files) = std::env::var_os("ProgramFiles") {
+        candidates.push(
+            PathBuf::from(&program_files)
+                .join("PowerShell")
+                .join("7")
+                .join("pwsh.exe")
+                .into_os_string(),
+        );
+    }
+    if let Some(system_root) = std::env::var_os("SystemRoot") {
+        candidates.push(
+            PathBuf::from(system_root)
+                .join("System32")
+                .join("WindowsPowerShell")
+                .join("v1.0")
+                .join("powershell.exe")
+                .into_os_string(),
+        );
+    }
+
+    candidates
+        .into_iter()
+        .find(|candidate| {
+            let path = Path::new(candidate);
+            let has_explicit_path = path.components().count() > 1;
+            !has_explicit_path || path.is_file()
+        })
+        .unwrap_or_else(|| OsString::from("pwsh.exe"))
 }
 
 fn read_json<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T> {
