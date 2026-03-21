@@ -37,10 +37,23 @@ pub fn compile(
     match opts.mode {
         ExecutionMode::Build => match crate::install::resolve_effective_backend(opts.backend)? {
             crate::install::EffectiveBackend::Cranelift => {
-                compile_aot_cranelift(program, interner, opts, output)
+                let progress =
+                    crate::progress::ProgressReporter::spinner("build", "compiling with Cranelift");
+                let result = compile_aot_cranelift(program, interner, opts, output);
+                progress.finish_and_clear();
+                result
             }
             crate::install::EffectiveBackend::Llvm(toolchain) => {
-                let out = crate::llvm_helper::invoke_llvm_helper(&toolchain, opts, output)?;
+                let progress = crate::progress::ProgressReporter::spinner(
+                    "build",
+                    format!(
+                        "compiling with LLVM toolchain {}",
+                        toolchain.metadata.toolchain_version
+                    ),
+                );
+                let out = crate::llvm_helper::invoke_llvm_helper(&toolchain, opts, output);
+                progress.finish_and_clear();
+                let out = out?;
                 render_message_to_stderr(
                     Severity::Note,
                     "llvm",

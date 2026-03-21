@@ -5,7 +5,7 @@ use crate::distribution::{
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use fidan_diagnostics::{Severity, render_message_to_stderr};
-use fidan_driver::{ToolchainMetadata, resolve_fidan_home};
+use fidan_driver::{ToolchainMetadata, progress::ProgressReporter, resolve_fidan_home};
 use std::fs;
 use std::path::PathBuf;
 
@@ -96,15 +96,6 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
     let host = fidan_driver::install::host_triple();
     let release = select_toolchain_release(&manifest, name, version, &host)?;
     let home = resolve_fidan_home()?;
-    let cache_path = home.join("cache").join("downloads").join(format!(
-        "toolchain-{}-{}-{}.tar.gz",
-        name, release.toolchain_version, host
-    ));
-    let bytes = fetch_bytes(&release.url)?;
-    verify_sha256(&bytes, &release.sha256)?;
-    write_bytes(&cache_path, &bytes)?;
-    let archive = read_all(&cache_path)?;
-
     let parent = home.join("toolchains").join(name).join(&host);
     fs::create_dir_all(&parent)
         .with_context(|| format!("failed to create `{}`", parent.display()))?;
@@ -116,8 +107,26 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
         );
     }
 
+    let cache_path = home.join("cache").join("downloads").join(format!(
+        "toolchain-{}-{}-{}.tar.gz",
+        name, release.toolchain_version, host
+    ));
+    let bytes = fetch_bytes(&release.url)?;
+    verify_sha256(&bytes, &release.sha256)?;
+    write_bytes(&cache_path, &bytes)?;
+    let archive = read_all(&cache_path)?;
+
     let staging = stage_dir(&parent, &format!("{}-{}", name, release.toolchain_version));
-    extract_tar_gz(&archive, &staging)?;
+    let progress = ProgressReporter::spinner(
+        "extract",
+        format!(
+            "unpacking {} toolchain {}",
+            release.kind, release.toolchain_version
+        ),
+    );
+    let extract_result = extract_tar_gz(&archive, &staging);
+    progress.finish_and_clear();
+    extract_result?;
     materialize_release_root(
         &staging,
         &PathBuf::from(&release.helper_relpath),
@@ -152,6 +161,8 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
 fn run_remove(name: &str, version: Option<&str>) -> Result<()> {
     let home = resolve_fidan_home()?;
     let host = fidan_driver::install::host_triple();
+    let toolchains_root = home.join("toolchains");
+    let kind_root = toolchains_root.join(name);
     let parent = home.join("toolchains").join(name).join(&host);
     if !parent.exists() {
         bail!("no `{name}` toolchains are installed for `{host}`");
@@ -180,10 +191,26 @@ fn run_remove(name: &str, version: Option<&str>) -> Result<()> {
     }
     fs::remove_dir_all(&target)
         .with_context(|| format!("failed to remove `{}`", target.display()))?;
+    remove_dir_if_empty(&parent)?;
+    remove_dir_if_empty(&kind_root)?;
+    remove_dir_if_empty(&toolchains_root)?;
     render_message_to_stderr(
         Severity::Note,
         "toolchain",
         &format!("removed `{}`", target.display()),
     );
+    Ok(())
+}
+
+fn remove_dir_if_empty(path: &PathBuf) -> Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    let mut entries =
+        fs::read_dir(path).with_context(|| format!("failed to read `{}`", path.display()))?;
+    if entries.next().is_none() {
+        fs::remove_dir(path).with_context(|| format!("failed to remove `{}`", path.display()))?;
+    }
     Ok(())
 }

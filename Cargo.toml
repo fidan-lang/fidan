@@ -86,6 +86,7 @@ keyring = { version = "3", features = [
   "crypto-rust",
 ] }
 crossterm = "0.29"
+indicatif = "0.18"
 notify = { version = "8", features = ["macos_fsevent"] }
 sha2 = "0.10"
 cranelift-jit = "0.130.0"

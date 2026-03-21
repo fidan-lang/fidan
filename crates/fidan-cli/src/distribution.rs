@@ -77,10 +77,7 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
         .with_context(|| format!("failed to fetch `{url}`"))?
         .error_for_status()
         .with_context(|| format!("download failed for `{url}`"))?;
-    response
-        .bytes()
-        .map(|bytes| bytes.to_vec())
-        .context("failed to read download body")
+    read_response_bytes(response, url, "download")
 }
 
 pub fn fetch_text(url: &str) -> Result<String> {
@@ -88,12 +85,47 @@ pub fn fetch_text(url: &str) -> Result<String> {
         return fs::read_to_string(path).with_context(|| format!("failed to read `{path}`"));
     }
 
-    reqwest::blocking::get(url)
+    let response = reqwest::blocking::get(url)
         .with_context(|| format!("failed to fetch `{url}`"))?
         .error_for_status()
-        .with_context(|| format!("download failed for `{url}`"))?
-        .text()
-        .context("failed to read manifest body")
+        .with_context(|| format!("download failed for `{url}`"))?;
+    let bytes = read_response_bytes(response, url, "fetch")?;
+    String::from_utf8(bytes).with_context(|| format!("failed to decode text from `{url}`"))
+}
+
+fn read_response_bytes(
+    mut response: reqwest::blocking::Response,
+    url: &str,
+    prefix: &str,
+) -> Result<Vec<u8>> {
+    let label = download_label(url);
+    let total = response.content_length();
+    let progress = fidan_driver::progress::ProgressReporter::bytes(
+        prefix,
+        format!("retrieving {label}"),
+        total,
+    );
+    let mut out = Vec::with_capacity(total.unwrap_or(0).min(8 * 1024 * 1024) as usize);
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let read = response
+            .read(&mut buf)
+            .with_context(|| format!("failed to read download body from `{url}`"))?;
+        if read == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..read]);
+        progress.inc(read as u64);
+    }
+    progress.finish_and_clear();
+    Ok(out)
+}
+
+fn download_label(url: &str) -> String {
+    url.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| url.to_string())
 }
 
 pub fn verify_sha256(bytes: &[u8], expected: &str) -> Result<()> {

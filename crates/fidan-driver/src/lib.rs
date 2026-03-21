@@ -4,6 +4,7 @@ pub mod install;
 mod llvm_helper;
 mod options;
 mod pipeline;
+pub mod progress;
 mod session;
 
 pub use install::{

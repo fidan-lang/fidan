@@ -14,6 +14,7 @@ use fidan_driver::install::{
 use fidan_driver::install::{
     persist_active_version, read_current_version_from_pointer, schedule_current_pointer_update,
 };
+use fidan_driver::progress::ProgressReporter;
 use fidan_driver::{resolve_fidan_home, resolve_install_root};
 use std::fs;
 use std::path::PathBuf;
@@ -95,6 +96,13 @@ fn run_install(version: &str) -> Result<()> {
     let manifest = fetch_manifest(None)?;
     let host = fidan_driver::install::host_triple();
     let release = select_fidan_release(&manifest, Some(version), &host)?;
+    let versions_dir = fidan_driver::install::versions_dir(&root);
+    fs::create_dir_all(&versions_dir)
+        .with_context(|| format!("failed to create `{}`", versions_dir.display()))?;
+    let final_dir = versions_dir.join(&release.version);
+    if final_dir.exists() {
+        bail!("Fidan version `{}` is already installed", release.version);
+    }
 
     let cache_path = home
         .join("cache")
@@ -105,16 +113,12 @@ fn run_install(version: &str) -> Result<()> {
     write_bytes(&cache_path, &bytes)?;
     let archive = read_all(&cache_path)?;
 
-    let versions_dir = fidan_driver::install::versions_dir(&root);
-    fs::create_dir_all(&versions_dir)
-        .with_context(|| format!("failed to create `{}`", versions_dir.display()))?;
-    let final_dir = versions_dir.join(&release.version);
-    if final_dir.exists() {
-        bail!("Fidan version `{}` is already installed", release.version);
-    }
-
     let staging = stage_dir(&versions_dir, &format!("fidan-{}", release.version));
-    extract_tar_gz(&archive, &staging)?;
+    let progress =
+        ProgressReporter::spinner("extract", format!("unpacking Fidan {}", release.version));
+    let extract_result = extract_tar_gz(&archive, &staging);
+    progress.finish_and_clear();
+    extract_result?;
     let expected = PathBuf::from(
         release
             .binary_relpath
