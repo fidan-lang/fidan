@@ -16,6 +16,9 @@ on:
         default: false
         type: boolean
 
+permissions:
+  contents: write
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -162,3 +165,28 @@ jobs:
             --endpoint-url "$R2_ENDPOINT" \
             --content-type "application/json" \
             --cache-control "no-cache"
+
+      - name: Publish GitHub release assets
+        if: ${{ github.event_name == 'push' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/release/payload/fidan/**/*.tar.gz
+          generate_release_notes: true
+          make_latest: true
+          append_body: true
+          body: |
+            ## Installation
+
+            Bootstrap installers:
+            - Windows PowerShell: `./scripts/bootstrap.ps1`
+            - POSIX shell: `./scripts/bootstrap.sh`
+
+            Direct downloads:
+            - Release tarballs are attached to this GitHub Release.
+            - The machine-readable manifest is published at `https://releases.fidan.dev/manifest.json`.
+
+            ## Notes
+
+            - The `fidan` binaries published here are self-managed installs.
+            - Optional toolchains such as LLVM are distributed separately via `releases.fidan.dev`.
+            - By installing Fidan or any separately distributed toolchain component, you agree to the license and terms of the respective component.
