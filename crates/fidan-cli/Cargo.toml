@@ -10,6 +10,10 @@ repository.workspace = true
 name = "fidan"
 path = "src/main.rs"
 
+[[bin]]
+name = "fidan-llvm-helper"
+path = "src/bin/fidan-llvm-helper.rs"
+
 [dependencies]
 fidan-driver = { workspace = true }
 fidan-fmt = { workspace = true }

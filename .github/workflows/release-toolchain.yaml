@@ -1,13 +1,10 @@
-name: Release Distribution
+name: Release Toolchain
 
 on:
-  push:
-    tags:
-      - "v*.*.*"
   workflow_dispatch:
     inputs:
-      version:
-        description: "Release version to package (defaults to workspace version)"
+      toolchain_version:
+        description: "Fidan toolchain package version (defaults to workspace version)"
         required: false
         type: string
       publish:
@@ -15,21 +12,27 @@ on:
         required: true
         default: false
         type: boolean
+      llvm_tool_version:
+        description: "Upstream LLVM version for the toolchain package"
+        required: true
+        default: "22.1.1"
+        type: string
+      llvm_archive_url:
+        description: "Official upstream LLVM archive URL"
+        required: true
+        type: string
+      llvm_archive_sha256:
+        description: "SHA-256 of the upstream LLVM archive"
+        required: true
+        type: string
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build:
-    name: Build ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-          - windows-latest
-          - macos-latest
+  build-llvm-toolchain:
+    name: Build LLVM toolchain (Windows)
+    runs-on: windows-latest
 
     steps:
       - uses: actions/checkout@v6
@@ -40,53 +43,35 @@ jobs:
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install Linux packaging dependencies
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libdbus-1-dev
-
-      - name: Package release artifact
+      - name: Package LLVM toolchain artifact
         shell: pwsh
         run: |
-          $version = ""
-          if ("${{ github.event_name }}" -eq "push") {
-            $version = "${{ github.ref_name }}"
-            if ($version.StartsWith("v")) {
-              $version = $version.Substring(1)
-            }
-          } else {
-            $version = "${{ inputs.version }}"
-          }
-          if ($version) {
-            ./scripts/package-release.ps1 -Version $version
-          } else {
-            ./scripts/package-release.ps1
-          }
+          ./scripts/package-toolchain.ps1 `
+            -Kind "llvm" `
+            -ToolchainVersion "${{ inputs.toolchain_version }}" `
+            -ToolVersion "${{ inputs.llvm_tool_version }}" `
+            -UpstreamArchiveUrl "${{ inputs.llvm_archive_url }}" `
+            -UpstreamArchiveSha256 "${{ inputs.llvm_archive_sha256 }}"
 
-      - name: Upload release artifact bundle
+      - name: Upload LLVM toolchain artifact bundle
         uses: actions/upload-artifact@v7
         with:
-          name: release-${{ matrix.os }}
+          name: llvm-toolchain-windows
           path: dist/release
 
   bundle:
     name: Merge manifest
     runs-on: ubuntu-latest
-    needs: build
-    if: ${{ needs.build.result == 'success' }}
+    needs: build-llvm-toolchain
 
     steps:
       - uses: actions/checkout@v6
 
-      - name: Download release artifacts
+      - name: Download LLVM toolchain artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: release-*
+          name: llvm-toolchain-windows
           path: dist/release
-          merge-multiple: true
 
       - name: Fetch existing manifest if present
         shell: bash
@@ -116,20 +101,20 @@ jobs:
       - name: Upload merged distribution bundle
         uses: actions/upload-artifact@v7
         with:
-          name: distribution-bundle
+          name: toolchain-distribution-bundle
           path: dist/release
 
   publish:
     name: Publish to R2
     runs-on: ubuntu-latest
     needs: bundle
-    if: ${{ github.event_name == 'push' || inputs.publish }}
+    if: ${{ inputs.publish }}
     environment: releases
 
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: distribution-bundle
+          name: toolchain-distribution-bundle
           path: dist/release
 
       - name: Upload payload to R2
