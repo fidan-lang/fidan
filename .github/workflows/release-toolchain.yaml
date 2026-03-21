@@ -78,10 +78,20 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/release
-          if curl -fsSL "https://releases.fidan.dev/manifest.json" -o dist/release/existing-manifest.json; then
-            echo "Fetched existing manifest"
+          manifest_url="https://releases.fidan.dev/manifest.json"
+          status_code="$(curl -sS -o /dev/null -w "%{http_code}" "$manifest_url" || true)"
+          if [ "$status_code" = "404" ]; then
+            echo "No existing manifest present yet"
           else
-            echo "No existing manifest fetched"
+            if [ -z "$status_code" ] || [ "$status_code" = "000" ]; then
+              echo "Failed to probe existing manifest at $manifest_url" >&2
+              exit 1
+            fi
+            if ! curl -fsSL "$manifest_url" -o dist/release/existing-manifest.json; then
+              echo "Remote manifest exists but could not be fetched from $manifest_url" >&2
+              exit 1
+            fi
+            echo "Fetched existing manifest"
           fi
 
       - name: Merge distribution manifest
