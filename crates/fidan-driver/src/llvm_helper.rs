@@ -197,20 +197,9 @@ pub fn invoke_llvm_helper(
 
 fn configure_helper_environment(command: &mut Command, toolchain: &ResolvedToolchain) {
     let llvm_bin = toolchain.root.join("llvm").join("bin");
-    let llvm_lib = toolchain.root.join("llvm").join("lib");
 
     if llvm_bin.is_dir() {
         prepend_env_path(command, "PATH", &llvm_bin);
-    }
-
-    if llvm_lib.is_dir() {
-        #[cfg(target_os = "linux")]
-        prepend_env_path(command, "LD_LIBRARY_PATH", &llvm_lib);
-        #[cfg(target_os = "macos")]
-        {
-            prepend_env_path(command, "DYLD_LIBRARY_PATH", &llvm_lib);
-            prepend_env_path(command, "DYLD_FALLBACK_LIBRARY_PATH", &llvm_lib);
-        }
     }
 }
 

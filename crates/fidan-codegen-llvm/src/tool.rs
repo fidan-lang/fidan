@@ -221,8 +221,11 @@ fn configure_unix_link_environment(command: &mut Command, layout: &ToolchainLayo
     prepend_env_path(command, "LD_LIBRARY_PATH", &layout.lib_dir);
     #[cfg(target_os = "macos")]
     {
-        prepend_env_path(command, "DYLD_LIBRARY_PATH", &layout.lib_dir);
-        prepend_env_path(command, "DYLD_FALLBACK_LIBRARY_PATH", &layout.lib_dir);
+        // Do not force LLVM's bundled libc++/libunwind onto the packaged clang
+        // driver via DYLD_* on macOS. The official archive's driver expects the
+        // host runtime layout, and overriding it breaks clang startup itself.
+        command.env_remove("DYLD_LIBRARY_PATH");
+        command.env_remove("DYLD_FALLBACK_LIBRARY_PATH");
     }
 }
 
