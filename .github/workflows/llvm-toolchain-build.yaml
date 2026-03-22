@@ -61,18 +61,36 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libdbus-1-dev
 
+      - name: Cache Windows vcpkg artifacts
+        if: runner.os == 'Windows'
+        uses: actions/cache@v5
+        with:
+          path: |
+            .vcpkg
+            .vcpkg_installed
+            ~\AppData\Local\vcpkg\archives
+          key: windows-vcpkg-${{ env.VCPKG_COMMIT }}-${{ env.VCPKG_WINDOWS_TRIPLET }}-${{ hashFiles('vcpkg.json') }}
+
       - name: Setup Windows vcpkg dependencies
         if: runner.os == 'Windows'
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: vcpkg
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
-          runVcpkgInstall: true
-          vcpkgJsonGlob: vcpkg.json
-        env:
-          VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_WINDOWS_TRIPLET }}
-          VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_WINDOWS_TRIPLET }}
-          VCPKG_INSTALLED_DIR: ${{ github.workspace }}/.vcpkg_installed
+        shell: pwsh
+        run: |
+          $vcpkgDir = Join-Path $env:GITHUB_WORKSPACE ".vcpkg"
+          $installedDir = Join-Path $env:GITHUB_WORKSPACE ".vcpkg_installed"
+          if (-not (Test-Path -LiteralPath $vcpkgDir)) {
+            git clone https://github.com/microsoft/vcpkg.git $vcpkgDir
+          }
+
+          git -C $vcpkgDir fetch --force --tags origin
+          git -C $vcpkgDir checkout --force $env:VCPKG_COMMIT
+
+          & (Join-Path $vcpkgDir "bootstrap-vcpkg.bat") -disableMetrics
+
+          $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $env:LOCALAPPDATA "vcpkg\archives"
+          & (Join-Path $vcpkgDir "vcpkg.exe") install `
+            --triplet $env:VCPKG_WINDOWS_TRIPLET `
+            "--x-manifest-root=$env:GITHUB_WORKSPACE" `
+            "--x-install-root=$installedDir"
 
       - name: Resolve Windows vcpkg library path
         if: runner.os == 'Windows'

@@ -321,6 +321,34 @@ function New-HelperLibraryShim {
   return $null
 }
 
+function Get-UnixHostToolchainCommand {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Candidates,
+    [string]$XcrunFind = ""
+  )
+
+  if ($IsMacOS -and $XcrunFind) {
+    try {
+      $resolved = & xcrun --find $XcrunFind 2>$null
+      if ($LASTEXITCODE -eq 0 -and $resolved) {
+        return $resolved.Trim()
+      }
+    }
+    catch {
+    }
+  }
+
+  foreach ($candidate in $Candidates) {
+    $command = Get-Command $candidate -ErrorAction SilentlyContinue
+    if ($command) {
+      return $command.Source
+    }
+  }
+
+  throw "Failed to locate a host toolchain command (tried: $($Candidates -join ', '))"
+}
+
 function Invoke-HelperBuild {
   param(
     [string]$LlvmRoot,
@@ -336,6 +364,14 @@ function Invoke-HelperBuild {
   $hadLlvmConfigPath = [bool](Test-Path Env:LLVM_CONFIG_PATH)
   $previousReleaseLto = $env:CARGO_PROFILE_RELEASE_LTO
   $hadReleaseLto = [bool](Test-Path Env:CARGO_PROFILE_RELEASE_LTO)
+  $previousCc = $env:CC
+  $hadCc = [bool](Test-Path Env:CC)
+  $previousCxx = $env:CXX
+  $hadCxx = [bool](Test-Path Env:CXX)
+  $previousAr = $env:AR
+  $hadAr = [bool](Test-Path Env:AR)
+  $previousRanlib = $env:RANLIB
+  $hadRanlib = [bool](Test-Path Env:RANLIB)
   $helperLibShimDir = $null
   $hadLlvmSysPrefix = $false
   $previousLlvmSysPrefix = ""
@@ -390,6 +426,13 @@ function Invoke-HelperBuild {
       Remove-Item Env:LLVM_CONFIG_PATH -ErrorAction SilentlyContinue
     }
 
+    if (-not $IsWindows) {
+      $env:CC = Get-UnixHostToolchainCommand -Candidates @("cc", "clang", "gcc") -XcrunFind "clang"
+      $env:CXX = Get-UnixHostToolchainCommand -Candidates @("c++", "clang++", "g++") -XcrunFind "clang++"
+      $env:AR = Get-UnixHostToolchainCommand -Candidates @("ar", "llvm-ar") -XcrunFind "ar"
+      $env:RANLIB = Get-UnixHostToolchainCommand -Candidates @("ranlib", "llvm-ranlib") -XcrunFind "ranlib"
+    }
+
     if ($HelperCargoFeatures) {
       $env:CARGO_PROFILE_RELEASE_LTO = "false"
       cargo build -p fidan-llvm-helper --release --features $HelperCargoFeatures
@@ -414,6 +457,34 @@ function Invoke-HelperBuild {
     }
     else {
       Remove-Item Env:LLVM_CONFIG_PATH -ErrorAction SilentlyContinue
+    }
+
+    if ($hadCc) {
+      $env:CC = $previousCc
+    }
+    else {
+      Remove-Item Env:CC -ErrorAction SilentlyContinue
+    }
+
+    if ($hadCxx) {
+      $env:CXX = $previousCxx
+    }
+    else {
+      Remove-Item Env:CXX -ErrorAction SilentlyContinue
+    }
+
+    if ($hadAr) {
+      $env:AR = $previousAr
+    }
+    else {
+      Remove-Item Env:AR -ErrorAction SilentlyContinue
+    }
+
+    if ($hadRanlib) {
+      $env:RANLIB = $previousRanlib
+    }
+    else {
+      Remove-Item Env:RANLIB -ErrorAction SilentlyContinue
     }
 
     if ($hadReleaseLto) {
