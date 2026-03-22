@@ -17,7 +17,6 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$helperCargoProfileMacOS = "toolchain-helper-release-macos"
 
 function Get-WorkspaceVersion {
   $cargoToml = Get-Content "Cargo.toml" -Raw
@@ -380,8 +379,6 @@ function Invoke-HelperBuild {
   $hadAr = [bool](Test-Path Env:AR)
   $previousRanlib = $env:RANLIB
   $hadRanlib = [bool](Test-Path Env:RANLIB)
-  $previousRustFlags = $env:RUSTFLAGS
-  $hadRustFlags = [bool](Test-Path Env:RUSTFLAGS)
   $helperLibShimDir = $null
   $hadLlvmSysPrefix = $false
   $previousLlvmSysPrefix = ""
@@ -442,33 +439,12 @@ function Invoke-HelperBuild {
       $env:AR = Get-UnixHostToolchainCommand -Candidates @("ar", "llvm-ar") -XcrunFind "ar"
       $env:RANLIB = Get-UnixHostToolchainCommand -Candidates @("ranlib", "llvm-ranlib") -XcrunFind "ranlib"
     }
-    if ($IsMacOS) {
-      $embedBitcodeFlag = "-C embed-bitcode=no"
-      if ($hadRustFlags -and $previousRustFlags) {
-        if ($previousRustFlags -notmatch [regex]::Escape($embedBitcodeFlag)) {
-          $env:RUSTFLAGS = "$previousRustFlags $embedBitcodeFlag"
-        }
-      }
-      else {
-        $env:RUSTFLAGS = $embedBitcodeFlag
-      }
-    }
 
     if ($HelperCargoFeatures) {
-      if ($IsMacOS) {
-        cargo build -p fidan-llvm-helper --profile $helperCargoProfileMacOS --features $HelperCargoFeatures
-      }
-      else {
-        cargo build -p fidan-llvm-helper --release --features $HelperCargoFeatures
-      }
+      cargo build -p fidan-llvm-helper --release --features $HelperCargoFeatures
     }
     else {
-      if ($IsMacOS) {
-        cargo build -p fidan-llvm-helper --profile $helperCargoProfileMacOS
-      }
-      else {
-        cargo build -p fidan-llvm-helper --release
-      }
+      cargo build -p fidan-llvm-helper --release
     }
   }
   finally {
@@ -514,13 +490,6 @@ function Invoke-HelperBuild {
     }
     else {
       Remove-Item Env:RANLIB -ErrorAction SilentlyContinue
-    }
-
-    if ($hadRustFlags) {
-      $env:RUSTFLAGS = $previousRustFlags
-    }
-    else {
-      Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
     }
 
     if ($LlvmSysPrefixEnvVar) {
@@ -614,8 +583,7 @@ try {
       -HelperAdditionalLibPaths $HelperAdditionalLibPaths
   }
 
-  $helperOutputDir = if ($IsMacOS) { $helperCargoProfileMacOS } else { "release" }
-  $helperPath = Join-Path "target/$helperOutputDir" $helperBinary
+  $helperPath = Join-Path "target/release" $helperBinary
   if (-not (Test-Path -LiteralPath $helperPath)) {
     throw "Expected helper binary at '$helperPath'"
   }
