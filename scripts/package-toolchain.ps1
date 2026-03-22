@@ -4,7 +4,7 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$ToolVersion,
   [string]$SupportedFidanVersions = "",
-  [int]$BackendProtocolVersion = 1,
+  [int]$BackendProtocolVersion = 0,
   [string]$BaseUrl = "https://releases.fidan.dev",
   [string]$OutputRoot = "dist/release",
   [string]$UpstreamArchivePath = "",
@@ -25,6 +25,18 @@ function Get-WorkspaceVersion {
     throw "Failed to determine workspace version from Cargo.toml"
   }
   return $match.Groups[1].Value
+}
+
+function Get-LlvmBackendProtocolVersion {
+  $source = Get-Content "crates/fidan-driver/src/llvm_helper.rs" -Raw
+  $match = [regex]::Match(
+    $source,
+    'pub\s+const\s+LLVM_BACKEND_PROTOCOL_VERSION\s*:\s*u32\s*=\s*(\d+)\s*;'
+  )
+  if (-not $match.Success) {
+    throw "Failed to determine LLVM backend protocol version from crates/fidan-driver/src/llvm_helper.rs"
+  }
+  return [int]$match.Groups[1].Value
 }
 
 function Get-HostTriple {
@@ -621,6 +633,14 @@ if (-not $ToolchainVersion) {
 }
 if (-not $SupportedFidanVersions) {
   $SupportedFidanVersions = "^$ToolchainVersion"
+}
+if ($BackendProtocolVersion -le 0) {
+  if ($Kind -eq "llvm") {
+    $BackendProtocolVersion = Get-LlvmBackendProtocolVersion
+  }
+  else {
+    $BackendProtocolVersion = 1
+  }
 }
 if (-not $UpstreamArchiveSha256) {
   throw "-UpstreamArchiveSha256 is required for reproducible LLVM toolchain packaging"
