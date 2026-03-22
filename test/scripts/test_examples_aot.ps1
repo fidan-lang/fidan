@@ -81,8 +81,10 @@ function Invoke-ProgramWithTimeout {
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\\..")).Path
 $buildMode = if ($Release) { "--release" } else { "" }
 $binDir = Join-Path $repoRoot ($(if ($Release) { "target\\release" } else { "target\\debug" }))
-$fidan = Join-Path $binDir "fidan.exe"
+$fidanName = if ($IsWindows) { "fidan.exe" } else { "fidan" }
+$fidan = Join-Path $binDir $fidanName
 $outDir = Join-Path $repoRoot "target\\aot_examples"
+$binarySuffix = if ($IsWindows) { ".exe" } else { "" }
 
 if ($FidanHome) {
     $env:FIDAN_HOME = (Resolve-Path $FidanHome).Path
@@ -113,9 +115,13 @@ try {
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 
     $examples = Get-ChildItem (Join-Path $repoRoot "test") -Recurse -Filter *.fdn | Sort-Object FullName
+    if ($examples.Count -eq 0) {
+        throw "No .fdn examples were found under '$repoRoot\\test'"
+    }
     $pass = 0
     $fail = 0
     $skip = 0
+    $matched = 0
 
     foreach ($file in $examples) {
         $rel = $file.FullName.Substring($repoRoot.Length + 1)
@@ -125,8 +131,10 @@ try {
             continue
         }
 
+        $matched += 1
+
         $stem = [IO.Path]::GetFileNameWithoutExtension($baseName)
-        $bin = Join-Path $outDir ($stem + "_aot.exe")
+        $bin = Join-Path $outDir ($stem + "_aot" + $binarySuffix)
         $stdout = Join-Path $outDir ($stem + "_stdout.txt")
         $stderr = Join-Path $outDir ($stem + "_stderr.txt")
         $compileOut = Join-Path $outDir ($stem + "_compile.out.txt")
@@ -218,6 +226,13 @@ try {
 
         Write-Host "[PASS] $rel"
         $pass += 1
+    }
+
+    if ($Case -and $matched -eq 0) {
+        throw "No example matched case '$Case'"
+    }
+    if ($matched -eq 0) {
+        throw "Example sweep matched zero test cases"
     }
 
     Write-Host ""

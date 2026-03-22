@@ -78,12 +78,14 @@ fn link_windows(
 }
 
 fn link_unix(layout: &ToolchainLayout, request: &CompileRequest, input_path: &Path) -> Result<()> {
-    if request.lto != LtoMode::Off {
-        bail!("LLVM LTO is currently supported only on Windows");
-    }
     let clang = layout.clang_driver_path();
     let mut cmd = Command::new(&clang);
     cmd.arg("-o").arg(&request.output).arg(input_path);
+    if request.lto == LtoMode::Full {
+        cmd.arg("-flto=full");
+        #[cfg(target_os = "linux")]
+        cmd.arg("-fuse-ld=lld");
+    }
     for dir in &request.extra_lib_dirs {
         cmd.arg(format!("-L{}", dir.display()));
     }
@@ -103,6 +105,7 @@ fn link_unix(layout: &ToolchainLayout, request: &CompileRequest, input_path: &Pa
     cmd.args(["-lpthread", "-ldl", "-lm"]);
     #[cfg(target_os = "macos")]
     cmd.args(["-framework", "Security", "-framework", "CoreFoundation"]);
+    configure_unix_link_environment(&mut cmd, layout);
 
     let output = cmd
         .output()
@@ -124,6 +127,29 @@ fn link_unix(layout: &ToolchainLayout, request: &CompileRequest, input_path: &Pa
         );
     }
     Ok(())
+}
+
+fn configure_unix_link_environment(command: &mut Command, layout: &ToolchainLayout) {
+    if !layout.lib_dir.is_dir() {
+        return;
+    }
+
+    #[cfg(target_os = "linux")]
+    prepend_env_path(command, "LD_LIBRARY_PATH", &layout.lib_dir);
+    #[cfg(target_os = "macos")]
+    {
+        prepend_env_path(command, "DYLD_LIBRARY_PATH", &layout.lib_dir);
+        prepend_env_path(command, "DYLD_FALLBACK_LIBRARY_PATH", &layout.lib_dir);
+    }
+}
+
+fn prepend_env_path(command: &mut Command, key: &str, value: &Path) {
+    let existing = std::env::var_os(key).unwrap_or_default();
+    let mut paths = vec![value.to_path_buf()];
+    paths.extend(std::env::split_paths(&existing));
+    if let Ok(joined) = std::env::join_paths(paths) {
+        command.env(key, joined);
+    }
 }
 
 fn find_static_runtime_lib(dir: &Path) -> Option<PathBuf> {

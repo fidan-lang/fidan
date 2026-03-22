@@ -1,0 +1,181 @@
+name: LLVM Toolchain Build
+
+on:
+  workflow_call:
+    inputs:
+      toolchain_version:
+        description: "Fidan toolchain package version (defaults to workspace version)"
+        required: false
+        default: ""
+        type: string
+      llvm_tool_version:
+        description: "Upstream LLVM version for the toolchain package"
+        required: true
+        type: string
+      validate:
+        description: "Install the packaged toolchain into a temp FIDAN_HOME and run the LLVM example sweep"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  VCPKG_COMMIT: 13b4b3c14cf6fb2c35e8f5d6d8f94b0d7bbf5d90
+  VCPKG_WINDOWS_TRIPLET: x64-windows-static-md
+
+jobs:
+  build-llvm-toolchain:
+    name: Build LLVM toolchain (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            artifact_name: llvm-toolchain-windows
+            source_key: windows
+          - name: Linux
+            os: ubuntu-latest
+            artifact_name: llvm-toolchain-linux
+            source_key: linux
+          - name: macOS
+            os: macos-latest
+            artifact_name: llvm-toolchain-macos
+            source_key: macos
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev
+
+      - name: Setup Windows vcpkg dependencies
+        if: runner.os == 'Windows'
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: ${{ runner.temp }}/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
+          runVcpkgInstall: true
+          vcpkgJsonGlob: vcpkg.json
+        env:
+          VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_WINDOWS_TRIPLET }}
+          VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_WINDOWS_TRIPLET }}
+          VCPKG_INSTALLED_DIR: ${{ runner.temp }}/vcpkg_installed
+
+      - name: Resolve Windows vcpkg library path
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $libDir = Join-Path $env:RUNNER_TEMP "vcpkg_installed/$env:VCPKG_WINDOWS_TRIPLET/lib"
+          if (-not (Test-Path -LiteralPath $libDir)) {
+            throw "Expected vcpkg libxml2 library directory at '$libDir'"
+          }
+          "VCPKG_LIBXML2_LIB_DIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Free Linux runner disk space
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /opt/hostedtoolcache/CodeQL
+          df -h
+
+      - name: Resolve LLVM source metadata
+        id: source
+        shell: pwsh
+        run: |
+          $sources = Get-Content "config/llvm-toolchain-sources.json" -Raw | ConvertFrom-Json -AsHashtable
+          $version = "${{ inputs.llvm_tool_version }}"
+          $platform = "${{ matrix.source_key }}"
+          if (-not $sources.ContainsKey($version)) {
+            throw "Unsupported LLVM version '$version' in config/llvm-toolchain-sources.json"
+          }
+          $versionInfo = $sources[$version]
+          if (-not $versionInfo.ContainsKey($platform)) {
+            throw "Unsupported LLVM platform '$platform' for version '$version' in config/llvm-toolchain-sources.json"
+          }
+          $platformInfo = $versionInfo[$platform]
+          $backendFeature = $versionInfo["backend_feature"]
+          if (-not $backendFeature) {
+            throw "Missing backend_feature for version '$version' in config/llvm-toolchain-sources.json"
+          }
+          $llvmSysPrefixEnv = $versionInfo["llvm_sys_prefix_env"]
+          if (-not $llvmSysPrefixEnv) {
+            throw "Missing llvm_sys_prefix_env for version '$version' in config/llvm-toolchain-sources.json"
+          }
+          "archive_url=$($platformInfo.url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "archive_sha256=$($platformInfo.sha256)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "backend_feature=$backendFeature" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "llvm_sys_prefix_env=$llvmSysPrefixEnv" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Package LLVM toolchain artifact
+        shell: pwsh
+        run: |
+          ./scripts/package-toolchain.ps1 `
+            -Kind "llvm" `
+            -ToolchainVersion "${{ inputs.toolchain_version }}" `
+            -ToolVersion "${{ inputs.llvm_tool_version }}" `
+            -HelperCargoFeatures "${{ steps.source.outputs.backend_feature }}" `
+            -LlvmSysPrefixEnvVar "${{ steps.source.outputs.llvm_sys_prefix_env }}" `
+            -HelperAdditionalLibPaths @($env:VCPKG_LIBXML2_LIB_DIR) `
+            -UpstreamArchiveUrl "${{ steps.source.outputs.archive_url }}" `
+            -UpstreamArchiveSha256 "${{ steps.source.outputs.archive_sha256 }}"
+
+      - name: Install packaged LLVM toolchain into temp FIDAN_HOME
+        if: inputs.validate
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem "dist/release/payload/toolchains/llvm" -Recurse -Filter "*.tar.gz" | Select-Object -First 1
+          if (-not $archive) {
+            throw "Packaged LLVM archive not found under dist/release/payload/toolchains/llvm"
+          }
+          $hostTriple = $archive.Directory.Name
+          $toolchainVersion = $archive.Directory.Parent.Name
+          $fidanHome = Join-Path $env:RUNNER_TEMP "fidan-home"
+          $installRoot = Join-Path $fidanHome "toolchains/llvm/$hostTriple/$toolchainVersion"
+          if (Test-Path -LiteralPath $installRoot) {
+            Remove-Item -LiteralPath $installRoot -Force -Recurse
+          }
+          New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+          tar -xzf $archive.FullName -C $installRoot
+          "FIDAN_HOME=$fidanHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Validate packaged LLVM toolchain (Windows)
+        if: inputs.validate && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./test/scripts/test_examples_aot.ps1 `
+            -Backend llvm `
+            -Lto full `
+            -FidanHome $env:FIDAN_HOME
+
+      - name: Validate packaged LLVM toolchain (Unix)
+        if: inputs.validate && runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash ./test/scripts/test_examples_aot.sh \
+            --backend llvm \
+            --lto full \
+            --fidan-home "${FIDAN_HOME}"
+
+      - name: Upload LLVM toolchain artifact bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/release

@@ -139,6 +139,57 @@ function Get-UnixLlvmBinKeepList {
   )
 }
 
+function Add-UnixSymlinkClosure {
+  param(
+    [string]$BinDir,
+    [string[]]$InitialNames
+  )
+
+  $keep = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  $queue = [System.Collections.Generic.Queue[string]]::new()
+
+  foreach ($name in $InitialNames) {
+    if ($name) {
+      [void]$keep.Add($name)
+      $queue.Enqueue($name)
+    }
+  }
+
+  while ($queue.Count -gt 0) {
+    $name = $queue.Dequeue()
+    $path = Join-Path $BinDir $name
+    if (-not (Test-Path -LiteralPath $path)) {
+      continue
+    }
+
+    $entry = Get-Item -LiteralPath $path -Force
+    if (-not ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      continue
+    }
+
+    $targets = @($entry.Target | Where-Object { $_ })
+    foreach ($target in $targets) {
+      $targetPath = $target
+      if (-not [IO.Path]::IsPathRooted($targetPath)) {
+        $targetPath = [IO.Path]::GetFullPath((Join-Path $entry.DirectoryName $targetPath))
+      }
+
+      $binRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($BinDir))
+      $resolvedTarget = [IO.Path]::GetFullPath($targetPath)
+      if (-not $resolvedTarget.StartsWith($binRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        continue
+      }
+
+      $targetName = Split-Path -Leaf $resolvedTarget
+      if ($targetName -and $keep.Add($targetName)) {
+        $queue.Enqueue($targetName)
+      }
+    }
+  }
+
+  return @($keep)
+}
+
 function Remove-LlvmPayload {
   param([string]$LlvmRoot)
 
@@ -163,7 +214,7 @@ function Remove-LlvmPayload {
     Get-WindowsLlvmBinKeepList
   }
   else {
-    Get-UnixLlvmBinKeepList
+    Add-UnixSymlinkClosure -BinDir $binDir -InitialNames (Get-UnixLlvmBinKeepList)
   }
   foreach ($name in $binKeep) {
     [void]$keep.Add($name)

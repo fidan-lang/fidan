@@ -1,0 +1,39 @@
+name: Validate LLVM Toolchain
+
+on:
+  workflow_dispatch:
+    inputs:
+      toolchain_version:
+        description: "Fidan toolchain package version (defaults to workspace version)"
+        required: false
+        type: string
+      llvm_tool_version:
+        description: "Upstream LLVM version for the toolchain package"
+        required: true
+        default: "22.1.1"
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/llvm-toolchain-build.yaml"
+      - ".github/workflows/validate-llvm-toolchain.yaml"
+      - ".github/workflows/release-toolchain.yaml"
+      - "config/llvm-toolchain-sources.json"
+      - "scripts/package-toolchain.ps1"
+      - "test/scripts/test_examples_aot.ps1"
+      - "test/scripts/test_examples_aot.sh"
+      - "vcpkg.json"
+      - "crates/fidan-cli/**"
+      - "crates/fidan-codegen-llvm/**"
+      - "crates/fidan-driver/**"
+      - "crates/fidan-llvm-helper/**"
+      - "crates/fidan-mir/**"
+      - "crates/fidan-runtime/**"
+
+jobs:
+  validate:
+    name: Build and validate LLVM toolchains
+    uses: ./.github/workflows/llvm-toolchain-build.yaml
+    with:
+      toolchain_version: ${{ github.event.inputs.toolchain_version || '' }}
+      llvm_tool_version: ${{ github.event.inputs.llvm_tool_version || '22.1.1' }}
+      validate: true

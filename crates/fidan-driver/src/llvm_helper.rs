@@ -177,14 +177,28 @@ pub fn invoke_llvm_helper(
 
 fn configure_helper_environment(command: &mut Command, toolchain: &ResolvedToolchain) {
     let llvm_bin = toolchain.root.join("llvm").join("bin");
-    if !llvm_bin.is_dir() {
-        return;
+    let llvm_lib = toolchain.root.join("llvm").join("lib");
+
+    if llvm_bin.is_dir() {
+        prepend_env_path(command, "PATH", &llvm_bin);
     }
 
-    let existing_path = std::env::var_os("PATH").unwrap_or_default();
-    let mut paths = vec![llvm_bin];
-    paths.extend(std::env::split_paths(&existing_path));
+    if llvm_lib.is_dir() {
+        #[cfg(target_os = "linux")]
+        prepend_env_path(command, "LD_LIBRARY_PATH", &llvm_lib);
+        #[cfg(target_os = "macos")]
+        {
+            prepend_env_path(command, "DYLD_LIBRARY_PATH", &llvm_lib);
+            prepend_env_path(command, "DYLD_FALLBACK_LIBRARY_PATH", &llvm_lib);
+        }
+    }
+}
+
+fn prepend_env_path(command: &mut Command, key: &str, value: &std::path::Path) {
+    let existing = std::env::var_os(key).unwrap_or_default();
+    let mut paths = vec![value.to_path_buf()];
+    paths.extend(std::env::split_paths(&existing));
     if let Ok(joined) = std::env::join_paths(paths) {
-        command.env("PATH", joined);
+        command.env(key, joined);
     }
 }

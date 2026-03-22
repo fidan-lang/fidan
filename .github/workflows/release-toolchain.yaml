@@ -18,130 +18,14 @@ on:
         default: "22.1.1"
         type: string
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  VCPKG_COMMIT: 13b4b3c14cf6fb2c35e8f5d6d8f94b0d7bbf5d90
-  VCPKG_WINDOWS_TRIPLET: x64-windows-static-md
-  VCPKG_LIBXML2_LIB_DIR: ""
-
 jobs:
   build-llvm-toolchain:
-    name: Build LLVM toolchain (${{ matrix.name }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows
-            os: windows-latest
-            artifact_name: llvm-toolchain-windows
-            source_key: windows
-          - name: Linux
-            os: ubuntu-latest
-            artifact_name: llvm-toolchain-linux
-            source_key: linux
-          - name: macOS
-            os: macos-latest
-            artifact_name: llvm-toolchain-macos
-            source_key: macos
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Install Linux packaging dependencies
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libdbus-1-dev
-
-      - name: Setup Windows vcpkg dependencies
-        if: runner.os == 'Windows'
-        uses: lukka/run-vcpkg@v11
-        with:
-          vcpkgDirectory: ${{ runner.temp }}/vcpkg
-          vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
-          runVcpkgInstall: true
-          vcpkgJsonGlob: vcpkg.json
-        env:
-          VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_WINDOWS_TRIPLET }}
-          VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_WINDOWS_TRIPLET }}
-          VCPKG_INSTALLED_DIR: ${{ runner.temp }}/vcpkg_installed
-
-      - name: Resolve Windows vcpkg library path
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $libDir = Join-Path $env:RUNNER_TEMP "vcpkg_installed/$env:VCPKG_WINDOWS_TRIPLET/lib"
-          if (-not (Test-Path -LiteralPath $libDir)) {
-            throw "Expected vcpkg libxml2 library directory at '$libDir'"
-          }
-          "VCPKG_LIBXML2_LIB_DIR=$libDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Free Linux runner disk space
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /opt/ghc
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/hostedtoolcache/CodeQL
-          df -h
-
-      - name: Resolve LLVM source metadata
-        id: source
-        shell: pwsh
-        run: |
-          $sources = Get-Content "config/llvm-toolchain-sources.json" -Raw | ConvertFrom-Json -AsHashtable
-          $version = "${{ inputs.llvm_tool_version }}"
-          $platform = "${{ matrix.source_key }}"
-          if (-not $sources.ContainsKey($version)) {
-            throw "Unsupported LLVM version '$version' in config/llvm-toolchain-sources.json"
-          }
-          $versionInfo = $sources[$version]
-          if (-not $versionInfo.ContainsKey($platform)) {
-            throw "Unsupported LLVM platform '$platform' for version '$version' in config/llvm-toolchain-sources.json"
-          }
-          $platformInfo = $versionInfo[$platform]
-          $backendFeature = $versionInfo["backend_feature"]
-          if (-not $backendFeature) {
-            throw "Missing backend_feature for version '$version' in config/llvm-toolchain-sources.json"
-          }
-          $llvmSysPrefixEnv = $versionInfo["llvm_sys_prefix_env"]
-          if (-not $llvmSysPrefixEnv) {
-            throw "Missing llvm_sys_prefix_env for version '$version' in config/llvm-toolchain-sources.json"
-          }
-          "archive_url=$($platformInfo.url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "archive_sha256=$($platformInfo.sha256)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "backend_feature=$backendFeature" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "llvm_sys_prefix_env=$llvmSysPrefixEnv" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-      - name: Package LLVM toolchain artifact
-        shell: pwsh
-        run: |
-          ./scripts/package-toolchain.ps1 `
-            -Kind "llvm" `
-            -ToolchainVersion "${{ inputs.toolchain_version }}" `
-            -ToolVersion "${{ inputs.llvm_tool_version }}" `
-            -HelperCargoFeatures "${{ steps.source.outputs.backend_feature }}" `
-            -LlvmSysPrefixEnvVar "${{ steps.source.outputs.llvm_sys_prefix_env }}" `
-            -HelperAdditionalLibPaths @("${{ env.VCPKG_LIBXML2_LIB_DIR }}") `
-            -UpstreamArchiveUrl "${{ steps.source.outputs.archive_url }}" `
-            -UpstreamArchiveSha256 "${{ steps.source.outputs.archive_sha256 }}"
-
-      - name: Upload LLVM toolchain artifact bundle
-        uses: actions/upload-artifact@v7
-        with:
-          name: ${{ matrix.artifact_name }}
-          path: dist/release
+    name: Build LLVM toolchains
+    uses: ./.github/workflows/llvm-toolchain-build.yaml
+    with:
+      toolchain_version: ${{ inputs.toolchain_version }}
+      llvm_tool_version: ${{ inputs.llvm_tool_version }}
+      validate: false
 
   bundle:
     name: Merge manifest

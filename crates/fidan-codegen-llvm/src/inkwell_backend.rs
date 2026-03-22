@@ -158,9 +158,6 @@ pub fn compile_and_link_module(
             intermediate_object_path.clone()
         }
         LtoMode::Full => {
-            if !cfg!(target_os = "windows") {
-                bail!("LLVM LTO is currently supported only on Windows");
-            }
             if request.emit_obj {
                 trace("inkwell:write_object");
                 machine
