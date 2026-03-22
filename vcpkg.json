@@ -1,7 +1,7 @@
 {
   "name": "fidan-build-deps",
   "version-string": "1.0.0",
-  "builtin-baseline": "13b4b3c14cf6fb2c35e8f5d6d8f94b0d7bbf5d90",
+  "builtin-baseline": "b472291f295551b7127359ea38fdd2ca092f6f1b",
   "dependencies": [
     {
       "name": "libxml2",
