@@ -9,6 +9,7 @@ repository.workspace = true
 [features]
 default = []
 llvm-toolchain-22 = ["fidan-codegen-llvm/llvm-toolchain-22"]
+llvm-toolchain-22-dynamic = ["fidan-codegen-llvm/llvm-toolchain-22-dynamic"]
 
 [[bin]]
 name = "fidan-llvm-helper"

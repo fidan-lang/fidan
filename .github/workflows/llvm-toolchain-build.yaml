@@ -128,7 +128,12 @@ jobs:
             throw "Unsupported LLVM platform '$platform' for version '$version' in config/llvm-toolchain-sources.json"
           }
           $platformInfo = $versionInfo[$platform]
-          $backendFeature = $versionInfo["backend_feature"]
+          $backendFeature = if ($platform -eq "macos" -and $versionInfo.ContainsKey("backend_feature_macos")) {
+            $versionInfo["backend_feature_macos"]
+          }
+          else {
+            $versionInfo["backend_feature"]
+          }
           if (-not $backendFeature) {
             throw "Missing backend_feature for version '$version' in config/llvm-toolchain-sources.json"
           }

@@ -17,6 +17,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$helperCargoProfileMacOS = "toolchain-helper-release-macos"
 
 function Get-WorkspaceVersion {
   $cargoToml = Get-Content "Cargo.toml" -Raw
@@ -362,8 +363,6 @@ function Invoke-HelperBuild {
   $hadLib = [bool](Test-Path Env:LIB)
   $previousLlvmConfigPath = $env:LLVM_CONFIG_PATH
   $hadLlvmConfigPath = [bool](Test-Path Env:LLVM_CONFIG_PATH)
-  $previousReleaseLto = $env:CARGO_PROFILE_RELEASE_LTO
-  $hadReleaseLto = [bool](Test-Path Env:CARGO_PROFILE_RELEASE_LTO)
   $previousCc = $env:CC
   $hadCc = [bool](Test-Path Env:CC)
   $previousCxx = $env:CXX
@@ -434,12 +433,20 @@ function Invoke-HelperBuild {
     }
 
     if ($HelperCargoFeatures) {
-      $env:CARGO_PROFILE_RELEASE_LTO = "false"
-      cargo build -p fidan-llvm-helper --release --features $HelperCargoFeatures
+      if ($IsMacOS) {
+        cargo build -p fidan-llvm-helper --profile $helperCargoProfileMacOS --features $HelperCargoFeatures
+      }
+      else {
+        cargo build -p fidan-llvm-helper --release --features $HelperCargoFeatures
+      }
     }
     else {
-      $env:CARGO_PROFILE_RELEASE_LTO = "false"
-      cargo build -p fidan-llvm-helper --release
+      if ($IsMacOS) {
+        cargo build -p fidan-llvm-helper --profile $helperCargoProfileMacOS
+      }
+      else {
+        cargo build -p fidan-llvm-helper --release
+      }
     }
   }
   finally {
@@ -485,13 +492,6 @@ function Invoke-HelperBuild {
     }
     else {
       Remove-Item Env:RANLIB -ErrorAction SilentlyContinue
-    }
-
-    if ($hadReleaseLto) {
-      $env:CARGO_PROFILE_RELEASE_LTO = $previousReleaseLto
-    }
-    else {
-      Remove-Item Env:CARGO_PROFILE_RELEASE_LTO -ErrorAction SilentlyContinue
     }
 
     if ($LlvmSysPrefixEnvVar) {
@@ -585,7 +585,8 @@ try {
       -HelperAdditionalLibPaths $HelperAdditionalLibPaths
   }
 
-  $helperPath = Join-Path "target/release" $helperBinary
+  $helperOutputDir = if ($IsMacOS) { $helperCargoProfileMacOS } else { "release" }
+  $helperPath = Join-Path "target/$helperOutputDir" $helperBinary
   if (-not (Test-Path -LiteralPath $helperPath)) {
     throw "Expected helper binary at '$helperPath'"
   }
