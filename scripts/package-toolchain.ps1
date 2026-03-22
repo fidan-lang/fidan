@@ -168,7 +168,16 @@ function Get-WindowsLlvmBinKeepList {
   )
 }
 
-function Get-UnixLlvmBinKeepList {
+function Get-LinuxLlvmBinKeepList {
+  return @(
+    "clang",
+    "clang++",
+    "ld.lld",
+    "llvm-strip"
+  )
+}
+
+function Get-MacOsLlvmBinKeepList {
   return @(
     "clang",
     "clang++",
@@ -193,6 +202,14 @@ function Get-UnixLlvmBinKeepList {
     "llc",
     "opt"
   )
+}
+
+function Get-UnixLlvmBinKeepList {
+  if ($IsLinux) {
+    return Get-LinuxLlvmBinKeepList
+  }
+
+  return Get-MacOsLlvmBinKeepList
 }
 
 function Add-UnixSymlinkClosure {
@@ -295,6 +312,9 @@ function Remove-LlvmPayload {
   else {
     $keepLibTopLevel = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     [void]$keepLibTopLevel.Add("clang")
+    if ($IsLinux) {
+      [void]$keepLibTopLevel.Add("x86_64-unknown-linux-gnu")
+    }
     $libKeepCandidates = @(
       Get-ChildItem -LiteralPath $libDir -Force |
         Where-Object {
@@ -520,15 +540,14 @@ function Invoke-HelperBuild {
       $env:RANLIB = Get-UnixHostToolchainCommand -Candidates @("ranlib", "llvm-ranlib") -XcrunFind "ranlib"
     }
     if ($IsMacOS) {
-      $packagedClang = Join-Path $llvmBinDir "clang"
-      if (-not (Test-Path -LiteralPath $packagedClang)) {
-        throw "Expected packaged clang at '$packagedClang'"
-      }
-      Set-Item -Path "Env:$linkerEnvName" -Value $packagedClang
+      # Use the host C++ driver for the helper binary itself so it links against
+      # the platform runtime, while still routing through ld64.lld via RUSTFLAGS.
+      # Using the packaged LLVM clang here can bake in @rpath/libc++.1.dylib
+      # without an LC_RPATH on the helper binary.
+      Set-Item -Path "Env:$linkerEnvName" -Value $env:CXX
 
       $macOsRustFlags = @(
-        "-Clink-arg=-fuse-ld=lld",
-        "-Clink-arg=-lc++abi"
+        "-Clink-arg=-fuse-ld=lld"
       )
       if ($hadRustFlags -and $previousRustFlags) {
         $env:RUSTFLAGS = $previousRustFlags
