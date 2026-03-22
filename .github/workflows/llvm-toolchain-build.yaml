@@ -65,7 +65,7 @@ jobs:
         if: runner.os == 'Windows'
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgDirectory: ${{ github.workspace }}/.vcpkg
+          vcpkgDirectory: vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
           runVcpkgInstall: true
           vcpkgJsonGlob: vcpkg.json

@@ -99,6 +99,13 @@ stdout_path = pathlib.Path(sys.argv[2])
 stderr_path = pathlib.Path(sys.argv[3])
 cmd = sys.argv[4:]
 
+def normalize_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
 stdin_data = None
 if cmd and cmd[0] == "--stdin-lines":
     stdin_data = cmd[1].replace("\\n", "\n") + "\n"
@@ -113,12 +120,12 @@ try:
         timeout=timeout,
         check=False,
     )
-    stdout_path.write_text(completed.stdout)
-    stderr_path.write_text(completed.stderr)
+    stdout_path.write_text(normalize_text(completed.stdout))
+    stderr_path.write_text(normalize_text(completed.stderr))
     sys.exit(completed.returncode)
 except subprocess.TimeoutExpired as exc:
-    stdout_path.write_text(exc.stdout or "")
-    stderr_path.write_text(exc.stderr or "")
+    stdout_path.write_text(normalize_text(exc.stdout))
+    stderr_path.write_text(normalize_text(exc.stderr))
     sys.exit(124)
 PY
 }

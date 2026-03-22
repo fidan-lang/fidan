@@ -349,7 +349,12 @@ function Invoke-HelperBuild {
   try {
     $llvmBinDir = Join-Path $LlvmRoot "bin"
     if (Test-Path -LiteralPath $llvmBinDir) {
-      $env:PATH = "$llvmBinDir$([System.IO.Path]::PathSeparator)$previousPath"
+      if ($IsWindows) {
+        $env:PATH = "$llvmBinDir$([System.IO.Path]::PathSeparator)$previousPath"
+      }
+      else {
+        $env:PATH = "$previousPath$([System.IO.Path]::PathSeparator)$llvmBinDir"
+      }
     }
 
     if ($LlvmSysPrefixEnvVar) {
