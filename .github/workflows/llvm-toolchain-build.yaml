@@ -87,6 +87,7 @@ jobs:
           & (Join-Path $vcpkgDir "bootstrap-vcpkg.bat") -disableMetrics
 
           $env:VCPKG_DEFAULT_BINARY_CACHE = Join-Path $env:LOCALAPPDATA "vcpkg\archives"
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           & (Join-Path $vcpkgDir "vcpkg.exe") install `
             --triplet $env:VCPKG_WINDOWS_TRIPLET `
             "--x-manifest-root=$env:GITHUB_WORKSPACE" `
