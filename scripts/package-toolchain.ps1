@@ -309,7 +309,8 @@ function New-HelperLibraryShim {
 
   foreach ($libPath in $resolvedPaths) {
     $xml2sPath = Join-Path $libPath "xml2s.lib"
-    if (Test-Path -LiteralPath $xml2sPath) {
+    $libxml2sPath = Join-Path $libPath "libxml2s.lib"
+    if ((Test-Path -LiteralPath $xml2sPath) -and (Test-Path -LiteralPath $libxml2sPath)) {
       continue
     }
 
@@ -320,6 +321,7 @@ function New-HelperLibraryShim {
         $created = $true
       }
       Copy-Item -LiteralPath $libxml2Path -Destination (Join-Path $shimDir "xml2s.lib") -Force
+      Copy-Item -LiteralPath $libxml2Path -Destination (Join-Path $shimDir "libxml2s.lib") -Force
     }
   }
 
@@ -451,14 +453,20 @@ function Invoke-HelperBuild {
       }
       Set-Item -Path "Env:$linkerEnvName" -Value $packagedClang
 
-      $linkerFlag = "-Clink-arg=-fuse-ld=lld"
+      $macOsRustFlags = @(
+        "-Clink-arg=-fuse-ld=lld",
+        "-Clink-arg=-lc++abi"
+      )
       if ($hadRustFlags -and $previousRustFlags) {
-        if ($previousRustFlags -notmatch [regex]::Escape($linkerFlag)) {
-          $env:RUSTFLAGS = "$previousRustFlags $linkerFlag"
+        $env:RUSTFLAGS = $previousRustFlags
+        foreach ($flag in $macOsRustFlags) {
+          if ($env:RUSTFLAGS -notmatch [regex]::Escape($flag)) {
+            $env:RUSTFLAGS = "$($env:RUSTFLAGS) $flag"
+          }
         }
       }
       else {
-        $env:RUSTFLAGS = $linkerFlag
+        $env:RUSTFLAGS = ($macOsRustFlags -join " ")
       }
     }
 
