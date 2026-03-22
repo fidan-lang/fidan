@@ -15,7 +15,7 @@ on:
       llvm_tool_version:
         description: "Upstream LLVM version for the toolchain package"
         required: true
-        default: "21.1.8"
+        default: "22.1.1"
         type: string
 
 env:
@@ -85,8 +85,18 @@ jobs:
             throw "Unsupported LLVM platform '$platform' for version '$version' in config/llvm-toolchain-sources.json"
           }
           $platformInfo = $versionInfo[$platform]
+          $backendFeature = $versionInfo["backend_feature"]
+          if (-not $backendFeature) {
+            throw "Missing backend_feature for version '$version' in config/llvm-toolchain-sources.json"
+          }
+          $llvmSysPrefixEnv = $versionInfo["llvm_sys_prefix_env"]
+          if (-not $llvmSysPrefixEnv) {
+            throw "Missing llvm_sys_prefix_env for version '$version' in config/llvm-toolchain-sources.json"
+          }
           "archive_url=$($platformInfo.url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "archive_sha256=$($platformInfo.sha256)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "backend_feature=$backendFeature" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "llvm_sys_prefix_env=$llvmSysPrefixEnv" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Package LLVM toolchain artifact
         shell: pwsh
@@ -95,6 +105,8 @@ jobs:
             -Kind "llvm" `
             -ToolchainVersion "${{ inputs.toolchain_version }}" `
             -ToolVersion "${{ inputs.llvm_tool_version }}" `
+            -HelperCargoFeatures "${{ steps.source.outputs.backend_feature }}" `
+            -LlvmSysPrefixEnvVar "${{ steps.source.outputs.llvm_sys_prefix_env }}" `
             -UpstreamArchiveUrl "${{ steps.source.outputs.archive_url }}" `
             -UpstreamArchiveSha256 "${{ steps.source.outputs.archive_sha256 }}"
 

@@ -10,6 +10,8 @@ param(
   [string]$UpstreamArchivePath = "",
   [string]$UpstreamArchiveUrl = "",
   [string]$UpstreamArchiveSha256 = "",
+  [string]$HelperCargoFeatures = "",
+  [string]$LlvmSysPrefixEnvVar = "",
   [switch]$SkipBuild
 )
 
@@ -210,6 +212,84 @@ function Remove-LlvmPayload {
   }
 }
 
+function Get-LlvmConfigPath {
+  param([string]$LlvmRoot)
+
+  $llvmConfig = Join-Path (Join-Path $LlvmRoot "bin") (if ($IsWindows) { "llvm-config.exe" } else { "llvm-config" })
+  if (Test-Path -LiteralPath $llvmConfig) {
+    return $llvmConfig
+  }
+  return $null
+}
+
+function Invoke-HelperBuild {
+  param(
+    [string]$LlvmRoot,
+    [string]$HelperCargoFeatures,
+    [string]$LlvmSysPrefixEnvVar
+  )
+
+  $previousPath = $env:PATH
+  $previousLlvmConfigPath = $env:LLVM_CONFIG_PATH
+  $hadLlvmConfigPath = [bool](Test-Path Env:LLVM_CONFIG_PATH)
+  $hadLlvmSysPrefix = $false
+  $previousLlvmSysPrefix = ""
+  if ($LlvmSysPrefixEnvVar) {
+    $hadLlvmSysPrefix = [bool](Test-Path "Env:$LlvmSysPrefixEnvVar")
+    if ($hadLlvmSysPrefix) {
+      $previousLlvmSysPrefix = (Get-Item "Env:$LlvmSysPrefixEnvVar").Value
+    }
+  }
+
+  try {
+    $llvmBinDir = Join-Path $LlvmRoot "bin"
+    if (Test-Path -LiteralPath $llvmBinDir) {
+      $env:PATH = "$llvmBinDir$([System.IO.Path]::PathSeparator)$previousPath"
+    }
+
+    if ($LlvmSysPrefixEnvVar) {
+      Set-Item -Path "Env:$LlvmSysPrefixEnvVar" -Value $LlvmRoot
+    }
+
+    $llvmConfigPath = Get-LlvmConfigPath -LlvmRoot $LlvmRoot
+    if ($llvmConfigPath) {
+      $env:LLVM_CONFIG_PATH = $llvmConfigPath
+    }
+    elseif ($hadLlvmConfigPath) {
+      $env:LLVM_CONFIG_PATH = $previousLlvmConfigPath
+    }
+    else {
+      Remove-Item Env:LLVM_CONFIG_PATH -ErrorAction SilentlyContinue
+    }
+
+    if ($HelperCargoFeatures) {
+      cargo build -p fidan-llvm-helper --release --features $HelperCargoFeatures
+    }
+    else {
+      cargo build -p fidan-llvm-helper --release
+    }
+  }
+  finally {
+    $env:PATH = $previousPath
+
+    if ($hadLlvmConfigPath) {
+      $env:LLVM_CONFIG_PATH = $previousLlvmConfigPath
+    }
+    else {
+      Remove-Item Env:LLVM_CONFIG_PATH -ErrorAction SilentlyContinue
+    }
+
+    if ($LlvmSysPrefixEnvVar) {
+      if ($hadLlvmSysPrefix) {
+        Set-Item -Path "Env:$LlvmSysPrefixEnvVar" -Value $previousLlvmSysPrefix
+      }
+      else {
+        Remove-Item "Env:$LlvmSysPrefixEnvVar" -ErrorAction SilentlyContinue
+      }
+    }
+  }
+}
+
 if (($UpstreamArchivePath -eq "") -and ($UpstreamArchiveUrl -eq "")) {
   throw "Either -UpstreamArchivePath or -UpstreamArchiveUrl is required"
 }
@@ -226,15 +306,6 @@ if (-not $UpstreamArchiveSha256) {
 
 $hostTriple = Get-HostTriple
 $helperBinary = if ($IsWindows) { "fidan-llvm-helper.exe" } else { "fidan-llvm-helper" }
-
-if (-not $SkipBuild) {
-  cargo build -p fidan-llvm-helper --release
-}
-
-$helperPath = Join-Path "target/release" $helperBinary
-if (-not (Test-Path -LiteralPath $helperPath)) {
-  throw "Expected helper binary at '$helperPath'"
-}
 
 $payloadDir = Join-Path $OutputRoot "payload"
 $artifactDir = Join-Path (Join-Path (Join-Path $payloadDir "toolchains/$Kind") $ToolchainVersion) $hostTriple
@@ -285,8 +356,17 @@ try {
   $helperDir = Join-Path $stageDir "helper"
   $llvmDir = Join-Path $stageDir "llvm"
   New-Item -ItemType Directory -Force -Path $helperDir | Out-Null
-  Copy-Item -LiteralPath $helperPath -Destination (Join-Path $helperDir $helperBinary)
   Move-ArchiveRootContents -ExtractRoot $extractDir -Destination $llvmDir
+
+  if (-not $SkipBuild) {
+    Invoke-HelperBuild -LlvmRoot $llvmDir -HelperCargoFeatures $HelperCargoFeatures -LlvmSysPrefixEnvVar $LlvmSysPrefixEnvVar
+  }
+
+  $helperPath = Join-Path "target/release" $helperBinary
+  if (-not (Test-Path -LiteralPath $helperPath)) {
+    throw "Expected helper binary at '$helperPath'"
+  }
+  Copy-Item -LiteralPath $helperPath -Destination (Join-Path $helperDir $helperBinary)
 
   if ($Kind -eq "llvm") {
     Remove-LlvmPayload -LlvmRoot $llvmDir
