@@ -15,20 +15,21 @@
 use fidan_ast::{BinOp, UnOp};
 use fidan_lexer::Symbol;
 use fidan_source::Span;
+use serde::{Deserialize, Serialize};
 
 // ── Identifiers ────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct BlockId(pub u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LocalId(pub u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct FunctionId(pub u32);
 
 /// A module-level global variable slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct GlobalId(pub u32);
 
 // ── MIR Type ───────────────────────────────────────────────────────────────────
@@ -37,7 +38,7 @@ pub struct GlobalId(pub u32);
 ///
 /// Mirrors `FidanType` but lives in the MIR layer; may diverge over time
 /// (e.g., by adding ABI-specific types for codegen).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MirTy {
     Integer,
     Float,
@@ -65,7 +66,7 @@ impl MirTy {
 
 // ── Literals ───────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MirLit {
     Int(i64),
     Float(f64),
@@ -91,7 +92,7 @@ pub enum MirLit {
 
 /// A lightweight, copy-like reference to a value — either a local variable
 /// (SSA name) or a compile-time constant.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Operand {
     Local(LocalId),
     Const(MirLit),
@@ -99,7 +100,7 @@ pub enum Operand {
 
 // ── Callees ────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Callee {
     /// Direct function call (known at compile time).
     Fn(FunctionId),
@@ -114,7 +115,7 @@ pub enum Callee {
 
 // ── String interpolation ───────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MirStringPart {
     Literal(String),
     Operand(Operand),
@@ -123,7 +124,7 @@ pub enum MirStringPart {
 // ── Rvalues ────────────────────────────────────────────────────────────────────
 
 /// Right-hand side of an `Instr::Assign`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Rvalue {
     /// `dest = operand`  (copy / move).
     Use(Operand),
@@ -199,7 +200,7 @@ pub enum Rvalue {
 // ── Instructions ──────────────────────────────────────────────────────────────
 
 /// A single MIR instruction (not a terminator).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Instr {
     // ── Core ──────────────────────────────────────────────────────────────────
     /// `dest: ty = rhs`  (SSA definition — each local is defined exactly once)
@@ -312,7 +313,7 @@ pub enum Instr {
 // ── Terminators ────────────────────────────────────────────────────────────────
 
 /// The final instruction of a basic block — determines the block's successor(s).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Terminator {
     /// Return from the function (with optional value).
     Return(Option<Operand>),
@@ -337,7 +338,7 @@ pub enum Terminator {
 /// `result = φ(v1 from bb1, v2 from bb2, ...)`
 ///
 /// Merged value depends on which predecessor block was taken.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhiNode {
     pub result: LocalId,
     pub ty: MirTy,
@@ -347,7 +348,7 @@ pub struct PhiNode {
 
 // ── Basic blocks ──────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BasicBlock {
     pub id: BlockId,
     /// φ-nodes — must appear before all other instructions.
@@ -372,7 +373,7 @@ impl BasicBlock {
 /// A single function in the MIR.
 ///
 /// The entry block is always `blocks[0]`.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MirParam {
     pub local: LocalId,
     pub name: Symbol,
@@ -384,7 +385,7 @@ pub struct MirParam {
     pub default: Option<MirLit>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MirFunction {
     pub id: FunctionId,
     pub name: Symbol,
@@ -442,7 +443,7 @@ impl MirFunction {
 
 /// Object class information embedded in the MIR so the interpreter does not
 /// need the HIR at runtime.
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MirObjectInfo {
     pub name: Symbol,
     pub parent: Option<Symbol>,
@@ -459,7 +460,7 @@ pub struct MirObjectInfo {
 /// A module-level variable or constant registered in `MirProgram::globals`.
 ///
 /// The interpreter maintains a parallel `Vec<FidanValue>` indexed by `GlobalId`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MirGlobal {
     pub name: Symbol,
     pub ty: MirTy,
@@ -471,7 +472,7 @@ pub struct MirGlobal {
 ///
 /// The interpreter uses these at startup to register stdlib namespaces
 /// and free-function aliases.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MirUseDecl {
     /// Module name, e.g. `"io"`, `"math"`.
     pub module: String,
@@ -489,7 +490,7 @@ pub struct MirUseDecl {
 }
 
 /// Metadata for an enum type: name + variant list.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MirEnumInfo {
     pub name: Symbol,
     /// Each entry is `(variant_name, payload_arity)`. Arity 0 = unit variant.
@@ -499,7 +500,7 @@ pub struct MirEnumInfo {
 /// The entire program as a collection of MIR functions.
 ///
 /// `functions[0]` is conventionally the top-level initialisation function.
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MirProgram {
     pub functions: Vec<MirFunction>,
     /// Object class metadata.  Empty if no objects are defined.

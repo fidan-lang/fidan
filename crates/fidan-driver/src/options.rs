@@ -48,6 +48,8 @@ pub struct CompileOptions {
     /// of embedding `libfidan_runtime.a` into the binary.  Corresponds to
     /// `fidan build --link-runtime dynamic`.
     pub link_dynamic: bool,
+    /// Link-time optimization mode for AOT compilation.
+    pub lto: LtoMode,
     /// AOT codegen backend selection policy.
     pub backend: Backend,
 }
@@ -69,6 +71,7 @@ impl Default for CompileOptions {
             opt_level: OptLevel::O2,
             extra_lib_dirs: vec![],
             link_dynamic: false,
+            lto: LtoMode::Off,
             backend: Backend::Auto,
         }
     }
@@ -116,4 +119,12 @@ pub enum OptLevel {
     O3,
     Os,
     Oz,
+}
+
+/// Link-time optimization mode for AOT builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LtoMode {
+    #[default]
+    Off,
+    Full,
 }

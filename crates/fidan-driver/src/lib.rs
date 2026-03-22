@@ -12,10 +12,11 @@ pub use install::{
     ToolchainMetadata, resolve_fidan_home, resolve_install_root,
 };
 pub use llvm_helper::{
-    LLVM_BACKEND_PROTOCOL_VERSION, LlvmCompileRequest, LlvmCompileResponse, SerializableOptLevel,
+    LLVM_BACKEND_PROTOCOL_VERSION, LlvmBackendPayload, LlvmCompileRequest, LlvmCompileResponse,
+    SerializableLtoMode, SerializableOptLevel,
 };
 pub use options::{
-    Backend, CompileOptions, EmitKind, ExecutionMode, OptLevel, SandboxPolicy, TraceMode,
+    Backend, CompileOptions, EmitKind, ExecutionMode, LtoMode, OptLevel, SandboxPolicy, TraceMode,
 };
 pub use pipeline::compile;
 pub use session::Session;

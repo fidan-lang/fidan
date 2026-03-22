@@ -47,6 +47,7 @@ use crate::{
     parallel::{FidanPending, ParallelArgs, ParallelCapture},
     value::{FidanValue, FunctionId, display},
 };
+use std::io::BufRead;
 use std::sync::{Arc, LazyLock};
 
 use dashmap::DashMap;
@@ -2089,12 +2090,118 @@ pub unsafe extern "C" fn fdn_stdlib_call(
 /// not recognised, so the caller can fall through to user-namespace lookup
 /// without keeping a second copy of the module list.
 /// To add a new stdlib module, add one arm here — nothing else needs changing.
+fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut FidanValue> {
+    match func {
+        "print" => {
+            let parts: Vec<String> = args.iter().map(display).collect();
+            println!("{}", parts.join(" "));
+            Some(into_raw(FidanValue::Nothing))
+        }
+        "eprint" => {
+            let parts: Vec<String> = args.iter().map(display).collect();
+            eprintln!("{}", parts.join(" "));
+            Some(into_raw(FidanValue::Nothing))
+        }
+        "input" => {
+            let prompt = args.first().map(display).unwrap_or_default();
+            if !prompt.is_empty() {
+                use std::io::Write;
+                print!("{}", prompt);
+                let _ = std::io::stdout().flush();
+            }
+            let stdin = std::io::stdin();
+            let mut line = String::new();
+            stdin.lock().read_line(&mut line).ok()?;
+            if line.ends_with('\n') {
+                line.pop();
+                if line.ends_with('\r') {
+                    line.pop();
+                }
+            }
+            Some(into_raw(FidanValue::String(FidanString::new(&line))))
+        }
+        "string" | "str" => {
+            let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            Some(into_raw(FidanValue::String(FidanString::new(&display(
+                &value,
+            )))))
+        }
+        "integer" | "int" => {
+            let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            let converted = match &value {
+                FidanValue::Integer(n) => FidanValue::Integer(*n),
+                FidanValue::Float(f) => FidanValue::Integer(*f as i64),
+                FidanValue::Boolean(b) => FidanValue::Integer(if *b { 1 } else { 0 }),
+                FidanValue::String(s) => s
+                    .as_str()
+                    .parse::<i64>()
+                    .map(FidanValue::Integer)
+                    .unwrap_or(FidanValue::Nothing),
+                _ => FidanValue::Nothing,
+            };
+            Some(into_raw(converted))
+        }
+        "float" => {
+            let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            let converted = match &value {
+                FidanValue::Float(f) => FidanValue::Float(*f),
+                FidanValue::Integer(n) => FidanValue::Float(*n as f64),
+                FidanValue::String(s) => s
+                    .as_str()
+                    .parse::<f64>()
+                    .map(FidanValue::Float)
+                    .unwrap_or(FidanValue::Nothing),
+                _ => FidanValue::Nothing,
+            };
+            Some(into_raw(converted))
+        }
+        "boolean" | "bool" => {
+            let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            Some(into_raw(FidanValue::Boolean(value.truthy())))
+        }
+        "len" => {
+            let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            let length = match &value {
+                FidanValue::String(s) => s.len() as i64,
+                FidanValue::List(list) => list.borrow().len() as i64,
+                FidanValue::Dict(dict) => dict.borrow().len() as i64,
+                FidanValue::Tuple(tuple) => tuple.len() as i64,
+                FidanValue::Range {
+                    start,
+                    end,
+                    inclusive,
+                } => {
+                    if *inclusive {
+                        (end - start + 1).max(0)
+                    } else {
+                        (end - start).max(0)
+                    }
+                }
+                _ => return Some(into_raw(FidanValue::Nothing)),
+            };
+            Some(into_raw(FidanValue::Integer(length)))
+        }
+        "type" => {
+            let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            Some(into_raw(FidanValue::String(FidanString::new(
+                value.type_name(),
+            ))))
+        }
+        "Shared" => {
+            let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            Some(into_raw(FidanValue::Shared(SharedRef::new(inner))))
+        }
+        _ => None,
+    }
+}
+
 fn dispatch_stdlib_inline(
     module: &str,
     func: &str,
     args: Vec<FidanValue>,
 ) -> Option<*mut FidanValue> {
     match module {
+        "__builtin__" => dispatch_builtin_inline(func, args),
         "math" => Some(dispatch_math(func, args)),
         "string" => Some(dispatch_string_fn(func, args)),
         "io" => Some(dispatch_io(func, args)),

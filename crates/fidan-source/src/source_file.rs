@@ -1,7 +1,10 @@
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Opaque identifier for a loaded source file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
 pub struct FileId(pub u32);
 
 /// A loaded source file: its path, raw text, and pre-computed line start offsets.

@@ -1,14 +1,17 @@
 use crate::FileId;
+use serde::{Deserialize, Serialize};
 
 /// A byte offset into a source file. Zero-based.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default, Serialize, Deserialize,
+)]
 pub struct ByteOffset(pub u32);
 
 /// A half-open byte range `[start, end)` inside a single source file.
 ///
 /// Spans are intentionally cheap to copy (`Copy`).  They are *source-only*:
 /// they carry no semantic information, just a location.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct Span {
     pub file: FileId,
     pub start: u32, // byte offset, inclusive
@@ -53,7 +56,7 @@ impl Span {
 }
 
 /// A human-readable source location: 1-based line and column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Location {
     pub line: u32,
     pub col: u32,

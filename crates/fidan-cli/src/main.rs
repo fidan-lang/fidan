@@ -4,7 +4,9 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use fidan_diagnostics::{Severity, render_backtrace_to_stderr, render_message_to_stderr};
-use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, OptLevel, SandboxPolicy, TraceMode};
+use fidan_driver::{
+    CompileOptions, EmitKind, ExecutionMode, LtoMode, OptLevel, SandboxPolicy, TraceMode,
+};
 use std::path::PathBuf;
 
 mod dal;
@@ -116,8 +118,11 @@ enum Command {
         /// Shorthand for --opt O3 (release mode)
         #[arg(long, conflicts_with = "opt")]
         release: bool,
+        /// Link-time optimization mode for the LLVM backend: off | full
+        #[arg(long, value_name = "off|full", default_value = "off")]
+        lto: String,
         /// Emit intermediate representation: tokens | ast | hir | mir | obj
-        /// (`obj` keeps the intermediate .o/.obj file alongside the binary)
+        /// (`obj` keeps the generated native .o/.obj file alongside the binary)
         #[arg(long, value_delimiter = ',')]
         emit: Vec<String>,
         /// Additional library search directories for the system linker (repeatable)
@@ -308,6 +313,14 @@ fn parse_opt_level(raw: &str) -> Result<fidan_driver::OptLevel> {
     }
 }
 
+fn parse_lto_mode(raw: &str) -> Result<fidan_driver::LtoMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "off" | "none" | "false" | "0" => Ok(LtoMode::Off),
+        "full" | "true" | "1" => Ok(LtoMode::Full),
+        other => bail!("unknown --lto mode {:?}  (valid: off, full)", other),
+    }
+}
+
 fn main() {
     ensure_utf8_console();
 
@@ -460,6 +473,7 @@ fn run_cli() -> Result<()> {
             output,
             opt,
             release,
+            lto,
             emit,
             lib_dir,
             link_runtime,
@@ -482,6 +496,7 @@ fn run_cli() -> Result<()> {
             } else {
                 parse_opt_level(&opt)?
             };
+            let lto = parse_lto_mode(&lto)?;
             let link_dynamic = match link_runtime.trim().to_lowercase().as_str() {
                 "static" | "s" => false,
                 "dynamic" | "dyn" | "d" => true,
@@ -505,6 +520,7 @@ fn run_cli() -> Result<()> {
                 mode: ExecutionMode::Build,
                 emit: emit_kinds,
                 opt_level,
+                lto,
                 extra_lib_dirs: lib_dir,
                 link_dynamic,
                 strict_mode: strict,

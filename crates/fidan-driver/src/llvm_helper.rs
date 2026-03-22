@@ -1,9 +1,10 @@
 use crate::install::ResolvedToolchain;
-use crate::{CompileOptions, OptLevel};
+use crate::{CompileOptions, LtoMode, OptLevel};
 use anyhow::{Context, Result, bail};
+use fidan_mir::MirProgram;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Command, Stdio};
 
 pub const LLVM_BACKEND_PROTOCOL_VERSION: u32 = 1;
 
@@ -12,7 +13,10 @@ pub struct LlvmCompileRequest {
     pub protocol_version: u32,
     pub input: PathBuf,
     pub output: PathBuf,
+    pub runtime_dir: PathBuf,
+    pub payload: LlvmBackendPayload,
     pub opt_level: SerializableOptLevel,
+    pub lto: SerializableLtoMode,
     pub emit_obj: bool,
     pub extra_lib_dirs: Vec<PathBuf>,
     pub link_dynamic: bool,
@@ -37,6 +41,13 @@ pub enum SerializableOptLevel {
     Oz,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SerializableLtoMode {
+    Off,
+    Full,
+}
+
 impl From<OptLevel> for SerializableOptLevel {
     fn from(value: OptLevel) -> Self {
         match value {
@@ -50,8 +61,25 @@ impl From<OptLevel> for SerializableOptLevel {
     }
 }
 
+impl From<LtoMode> for SerializableLtoMode {
+    fn from(value: LtoMode) -> Self {
+        match value {
+            LtoMode::Off => Self::Off,
+            LtoMode::Full => Self::Full,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlvmBackendPayload {
+    pub program: MirProgram,
+    pub symbols: Vec<String>,
+}
+
 pub fn invoke_llvm_helper(
     toolchain: &ResolvedToolchain,
+    program: &MirProgram,
+    symbols: Vec<String>,
     opts: &CompileOptions,
     output: PathBuf,
 ) -> Result<PathBuf> {
@@ -64,53 +92,68 @@ pub fn invoke_llvm_helper(
         );
     }
 
-    let temp_dir = std::env::temp_dir().join(format!(
-        "fidan-llvm-helper-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-    ));
-    std::fs::create_dir_all(&temp_dir)
-        .context("failed to create temporary LLVM helper directory")?;
+    let runtime_dir = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|dir| dir.to_path_buf()))
+        .context("failed to resolve the running Fidan installation directory")?;
 
-    let request_path = temp_dir.join("request.json");
-    let response_path = temp_dir.join("response.json");
     let request = LlvmCompileRequest {
         protocol_version: LLVM_BACKEND_PROTOCOL_VERSION,
         input: opts.input.clone(),
         output: output.clone(),
+        runtime_dir,
+        payload: LlvmBackendPayload {
+            program: program.clone(),
+            symbols,
+        },
         opt_level: opts.opt_level.into(),
+        lto: opts.lto.into(),
         emit_obj: opts.emit.contains(&crate::EmitKind::Obj),
         extra_lib_dirs: opts.extra_lib_dirs.clone(),
         link_dynamic: opts.link_dynamic,
     };
     let request_bytes =
-        serde_json::to_vec_pretty(&request).context("failed to serialize LLVM compile request")?;
-    std::fs::write(&request_path, request_bytes)
-        .context("failed to write LLVM compile request file")?;
+        serde_json::to_vec(&request).context("failed to serialize LLVM compile request")?;
 
-    let status = std::process::Command::new(helper)
+    let mut command = Command::new(helper);
+    configure_helper_environment(&mut command, toolchain);
+
+    let mut child = command
         .arg("compile")
-        .arg("--request")
-        .arg(&request_path)
-        .arg("--response")
-        .arg(&response_path)
-        .status()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .with_context(|| format!("failed to launch LLVM helper `{}`", helper.display()))?;
 
-    if !status.success() {
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write as _;
+        stdin
+            .write_all(&request_bytes)
+            .context("failed to send LLVM compile request to helper")?;
+    }
+
+    let output_result = child
+        .wait_with_output()
+        .context("failed while waiting for LLVM helper to finish")?;
+
+    if !output_result.status.success() {
+        let stderr = String::from_utf8_lossy(&output_result.stderr)
+            .trim()
+            .to_string();
         bail!(
-            "LLVM helper exited with status {} — reinstall the toolchain or use `--backend cranelift`",
-            status
+            "LLVM helper exited with status {}{}",
+            output_result.status,
+            if stderr.is_empty() {
+                " — reinstall the toolchain or use `--backend cranelift`".to_string()
+            } else {
+                format!(": {stderr}")
+            }
         );
     }
 
-    let response_bytes =
-        std::fs::read(&response_path).context("LLVM helper did not produce a response file")?;
-    let response: LlvmCompileResponse =
-        serde_json::from_slice(&response_bytes).context("failed to parse LLVM helper response")?;
+    let response: LlvmCompileResponse = serde_json::from_slice(&output_result.stdout)
+        .context("failed to parse LLVM helper response")?;
     if response.protocol_version != LLVM_BACKEND_PROTOCOL_VERSION {
         bail!(
             "LLVM helper protocol mismatch (helper={}, cli={})",
@@ -130,4 +173,18 @@ pub fn invoke_llvm_helper(
     }
 
     Ok(response.output.unwrap_or(output))
+}
+
+fn configure_helper_environment(command: &mut Command, toolchain: &ResolvedToolchain) {
+    let llvm_bin = toolchain.root.join("llvm").join("bin");
+    if !llvm_bin.is_dir() {
+        return;
+    }
+
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = vec![llvm_bin];
+    paths.extend(std::env::split_paths(&existing_path));
+    if let Ok(joined) = std::env::join_paths(paths) {
+        command.env("PATH", joined);
+    }
 }

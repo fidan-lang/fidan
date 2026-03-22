@@ -2,6 +2,7 @@ use crate::ExprId;
 use crate::stmt::CheckArm;
 use fidan_lexer::Symbol;
 use fidan_source::Span;
+use serde::{Deserialize, Serialize};
 
 /// All expressions in the Fidan AST.
 #[derive(Debug, Clone)]
@@ -232,7 +233,7 @@ pub enum InterpPart {
     Expr(ExprId),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BinOp {
     Add,
     Sub,
@@ -257,7 +258,7 @@ pub enum BinOp {
     RangeInclusive, // `...` inclusive (start...end)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UnOp {
     Pos,
     Neg,

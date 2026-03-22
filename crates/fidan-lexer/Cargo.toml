@@ -13,3 +13,4 @@ phf = { workspace = true }
 smol_str = { workspace = true }
 dashmap = { workspace = true }
 rustc-hash = { workspace = true }
+serde = { workspace = true }

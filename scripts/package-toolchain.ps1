@@ -12,6 +12,7 @@ param(
   [string]$UpstreamArchiveSha256 = "",
   [string]$HelperCargoFeatures = "",
   [string]$LlvmSysPrefixEnvVar = "",
+  [string[]]$HelperAdditionalLibPaths = @(),
   [switch]$SkipBuild
 )
 
@@ -107,37 +108,7 @@ function Move-ArchiveRootContents {
 
 function Get-WindowsLlvmBinKeepList {
   return @(
-    "clang.exe",
-    "clang++.exe",
-    "clang-cl.exe",
-    "lld-link.exe",
-    "lld.exe",
-    "ld.lld.exe",
-    "llvm-ar.exe",
-    "llvm-lib.exe",
-    "llvm-ranlib.exe",
-    "llvm-rc.exe",
-    "llvm-mt.exe",
-    "llvm-nm.exe",
-    "llvm-objcopy.exe",
-    "llvm-objdump.exe",
-    "llvm-strip.exe",
-    "llvm-readobj.exe",
-    "llvm-readelf.exe",
-    "llvm-as.exe",
-    "llvm-dis.exe",
-    "llvm-link.exe",
-    "llvm-cvtres.exe",
-    "llc.exe",
-    "opt.exe",
-    "llvm-lto.exe",
-    "llvm-lto2.exe",
-    "libclang.dll",
-    "LLVM-C.dll",
-    "LTO.dll",
-    "Remarks.dll",
-    "libomp.dll",
-    "libiomp5md.dll"
+    "lld-link.exe"
   )
 }
 
@@ -184,7 +155,7 @@ function Remove-LlvmPayload {
     throw "Expected LLVM lib directory at '$libDir'"
   }
   if (-not (Test-Path -LiteralPath $includeDir)) {
-    throw "Expected LLVM include directory at '$includeDir'"
+    New-Item -ItemType Directory -Force -Path $includeDir | Out-Null
   }
 
   $keep = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -204,6 +175,42 @@ function Remove-LlvmPayload {
     }
   }
 
+  if (Test-Path -LiteralPath $includeDir) {
+    Remove-Item -LiteralPath $includeDir -Force -Recurse
+    New-Item -ItemType Directory -Force -Path $includeDir | Out-Null
+  }
+
+  if ($IsWindows) {
+    foreach ($entry in (Get-ChildItem -LiteralPath $libDir -Force)) {
+      Remove-Item -LiteralPath $entry.FullName -Force -Recurse
+    }
+  }
+  else {
+    $keepLibTopLevel = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    [void]$keepLibTopLevel.Add("clang")
+
+    foreach ($entry in (Get-ChildItem -LiteralPath $libDir -Force)) {
+      if ($entry.PSIsContainer) {
+        if (-not $keepLibTopLevel.Contains($entry.Name)) {
+          Remove-Item -LiteralPath $entry.FullName -Force -Recurse
+        }
+        continue
+      }
+
+      $name = $entry.Name
+      $keepSharedLib = (
+        $name -like "*.so" -or
+        $name -like "*.so.*" -or
+        $name -like "*.dylib" -or
+        $name -like "*.dylib.*"
+      )
+
+      if (-not $keepSharedLib) {
+        Remove-Item -LiteralPath $entry.FullName -Force
+      }
+    }
+  }
+
   if (Test-Path -LiteralPath $shareDir) {
     Remove-Item -LiteralPath $shareDir -Force -Recurse
   }
@@ -215,10 +222,51 @@ function Remove-LlvmPayload {
 function Get-LlvmConfigPath {
   param([string]$LlvmRoot)
 
-  $llvmConfig = Join-Path (Join-Path $LlvmRoot "bin") (if ($IsWindows) { "llvm-config.exe" } else { "llvm-config" })
+  $llvmConfigName = if ($IsWindows) { "llvm-config.exe" } else { "llvm-config" }
+  $llvmConfig = Join-Path (Join-Path $LlvmRoot "bin") $llvmConfigName
   if (Test-Path -LiteralPath $llvmConfig) {
     return $llvmConfig
   }
+  return $null
+}
+
+function New-HelperLibraryShim {
+  param(
+    [string[]]$LibraryPaths
+  )
+
+  if (-not $IsWindows) {
+    return $null
+  }
+
+  $resolvedPaths = @($LibraryPaths | Where-Object { $_ -and (Test-Path -LiteralPath $_) })
+  if ($resolvedPaths.Count -eq 0) {
+    return $null
+  }
+
+  $shimDir = Join-Path ([System.IO.Path]::GetTempPath()) ("fidan-helper-libshim-" + [Guid]::NewGuid().ToString("N"))
+  $created = $false
+
+  foreach ($libPath in $resolvedPaths) {
+    $xml2sPath = Join-Path $libPath "xml2s.lib"
+    if (Test-Path -LiteralPath $xml2sPath) {
+      continue
+    }
+
+    $libxml2Path = Join-Path $libPath "libxml2.lib"
+    if (Test-Path -LiteralPath $libxml2Path) {
+      if (-not $created) {
+        New-Item -ItemType Directory -Force -Path $shimDir | Out-Null
+        $created = $true
+      }
+      Copy-Item -LiteralPath $libxml2Path -Destination (Join-Path $shimDir "xml2s.lib") -Force
+    }
+  }
+
+  if ($created) {
+    return $shimDir
+  }
+
   return $null
 }
 
@@ -226,12 +274,16 @@ function Invoke-HelperBuild {
   param(
     [string]$LlvmRoot,
     [string]$HelperCargoFeatures,
-    [string]$LlvmSysPrefixEnvVar
+    [string]$LlvmSysPrefixEnvVar,
+    [string[]]$HelperAdditionalLibPaths
   )
 
   $previousPath = $env:PATH
+  $previousLib = $env:LIB
+  $hadLib = [bool](Test-Path Env:LIB)
   $previousLlvmConfigPath = $env:LLVM_CONFIG_PATH
   $hadLlvmConfigPath = [bool](Test-Path Env:LLVM_CONFIG_PATH)
+  $helperLibShimDir = $null
   $hadLlvmSysPrefix = $false
   $previousLlvmSysPrefix = ""
   if ($LlvmSysPrefixEnvVar) {
@@ -249,6 +301,24 @@ function Invoke-HelperBuild {
 
     if ($LlvmSysPrefixEnvVar) {
       Set-Item -Path "Env:$LlvmSysPrefixEnvVar" -Value $LlvmRoot
+    }
+
+    $effectiveLibPaths = @($HelperAdditionalLibPaths | Where-Object { $_ })
+    $helperLibShimDir = New-HelperLibraryShim -LibraryPaths $effectiveLibPaths
+    if ($helperLibShimDir) {
+      $effectiveLibPaths = @($helperLibShimDir) + $effectiveLibPaths
+    }
+
+    if ($effectiveLibPaths.Count -gt 0) {
+      $libPathValue = $effectiveLibPaths -join [System.IO.Path]::PathSeparator
+      if ($libPathValue) {
+        if ($hadLib -and $previousLib) {
+          $env:LIB = "$libPathValue$([System.IO.Path]::PathSeparator)$previousLib"
+        }
+        else {
+          $env:LIB = $libPathValue
+        }
+      }
     }
 
     $llvmConfigPath = Get-LlvmConfigPath -LlvmRoot $LlvmRoot
@@ -272,6 +342,13 @@ function Invoke-HelperBuild {
   finally {
     $env:PATH = $previousPath
 
+    if ($hadLib) {
+      $env:LIB = $previousLib
+    }
+    else {
+      Remove-Item Env:LIB -ErrorAction SilentlyContinue
+    }
+
     if ($hadLlvmConfigPath) {
       $env:LLVM_CONFIG_PATH = $previousLlvmConfigPath
     }
@@ -286,6 +363,10 @@ function Invoke-HelperBuild {
       else {
         Remove-Item "Env:$LlvmSysPrefixEnvVar" -ErrorAction SilentlyContinue
       }
+    }
+
+    if ($helperLibShimDir -and (Test-Path -LiteralPath $helperLibShimDir)) {
+      Remove-Item -LiteralPath $helperLibShimDir -Force -Recurse
     }
   }
 }
@@ -359,7 +440,11 @@ try {
   Move-ArchiveRootContents -ExtractRoot $extractDir -Destination $llvmDir
 
   if (-not $SkipBuild) {
-    Invoke-HelperBuild -LlvmRoot $llvmDir -HelperCargoFeatures $HelperCargoFeatures -LlvmSysPrefixEnvVar $LlvmSysPrefixEnvVar
+    Invoke-HelperBuild `
+      -LlvmRoot $llvmDir `
+      -HelperCargoFeatures $HelperCargoFeatures `
+      -LlvmSysPrefixEnvVar $LlvmSysPrefixEnvVar `
+      -HelperAdditionalLibPaths $HelperAdditionalLibPaths
   }
 
   $helperPath = Join-Path "target/release" $helperBinary

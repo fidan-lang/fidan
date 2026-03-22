@@ -51,7 +51,14 @@ pub fn compile(
                         toolchain.metadata.toolchain_version
                     ),
                 );
-                let out = crate::llvm_helper::invoke_llvm_helper(&toolchain, opts, output);
+                let symbols = interner
+                    .snapshot()
+                    .into_iter()
+                    .map(|symbol| symbol.as_ref().to_owned())
+                    .collect();
+                let out = crate::llvm_helper::invoke_llvm_helper(
+                    &toolchain, &program, symbols, opts, output,
+                );
                 progress.finish_and_clear();
                 let out = out?;
                 render_message_to_stderr(

@@ -1,9 +1,19 @@
-//! `fidan-codegen-llvm` — LLVM AOT backend.
-//! Used only for `fidan build --release`. Requires the `llvm` feature flag.
-//! Not compiled unless LLVM is installed and the feature is enabled.
+//! `fidan-codegen-llvm` — LLVM AOT backend support for the external helper.
 
-#[cfg(feature = "llvm")]
-mod aot;
+mod compile;
+mod context;
+#[cfg(feature = "llvm-toolchain-22")]
+mod inkwell_backend;
+mod model;
+#[cfg(feature = "llvm-toolchain-22")]
+mod tool;
+mod validate;
 
-#[cfg(feature = "llvm")]
-pub use aot::AotCompiler;
+pub use compile::compile_request;
+#[cfg(feature = "llvm-toolchain-22")]
+pub(crate) use compile::{dump_ir, env_flag_enabled, trace};
+pub use context::{BackendContext, mangle_fn};
+pub use model::{
+    BackendPayload, CompileRequest, LtoMode, OptLevel, ToolchainLayout, ToolchainMetadata,
+};
+pub use validate::validate_toolchain_layout;

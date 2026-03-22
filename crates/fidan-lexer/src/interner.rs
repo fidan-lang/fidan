@@ -1,9 +1,10 @@
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// An interned identifier. Equality and hashing are O(1) (`u32` compare).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Symbol(pub u32);
 
 /// Global symbol interner. All identifiers produced by the lexer go through here.

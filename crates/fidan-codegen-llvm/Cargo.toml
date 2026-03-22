@@ -6,12 +6,19 @@ license-file.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-# inkwell (safe LLVM bindings) added in Phase 11 only.
-# Gated behind a feature flag so the workspace builds without LLVM installed.
 [features]
-llvm = []
+default = []
+llvm-toolchain-22 = ["dep:inkwell", "dep:llvm-sys", "inkwell/llvm22-1"]
 
 [dependencies]
+anyhow = { workspace = true }
+fidan-ast = { workspace = true }
+fidan-lexer = { workspace = true }
 fidan-source = { workspace = true }
 fidan-mir = { workspace = true }
 fidan-runtime = { workspace = true }
+fidan-stdlib = { workspace = true }
+inkwell = { workspace = true, optional = true }
+llvm-sys = { version = "221.0.0", optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
