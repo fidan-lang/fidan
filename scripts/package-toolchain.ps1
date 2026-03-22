@@ -632,7 +632,7 @@ if (-not $ToolchainVersion) {
   $ToolchainVersion = Get-WorkspaceVersion
 }
 if (-not $SupportedFidanVersions) {
-  $SupportedFidanVersions = "^$ToolchainVersion"
+  $SupportedFidanVersions = "^$(Get-WorkspaceVersion)"
 }
 if ($BackendProtocolVersion -le 0) {
   if ($Kind -eq "llvm") {
