@@ -108,7 +108,8 @@ function Move-ArchiveRootContents {
 
 function Get-WindowsLlvmBinKeepList {
   return @(
-    "lld-link.exe"
+    "lld-link.exe",
+    "llvm-strip.exe"
   )
 }
 

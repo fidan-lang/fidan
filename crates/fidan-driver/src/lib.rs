@@ -13,10 +13,11 @@ pub use install::{
 };
 pub use llvm_helper::{
     LLVM_BACKEND_PROTOCOL_VERSION, LlvmBackendPayload, LlvmCompileRequest, LlvmCompileResponse,
-    SerializableLtoMode, SerializableOptLevel,
+    SerializableLtoMode, SerializableOptLevel, SerializableStripMode,
 };
 pub use options::{
-    Backend, CompileOptions, EmitKind, ExecutionMode, LtoMode, OptLevel, SandboxPolicy, TraceMode,
+    Backend, CompileOptions, EmitKind, ExecutionMode, LtoMode, OptLevel, SandboxPolicy, StripMode,
+    TraceMode,
 };
 pub use pipeline::compile;
 pub use session::Session;

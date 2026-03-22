@@ -1,4 +1,4 @@
-use crate::model::{CompileRequest, LtoMode, ToolchainLayout};
+use crate::model::{CompileRequest, LtoMode, StripMode, ToolchainLayout};
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,7 +22,7 @@ fn link_windows(
     input_path: &Path,
     _object_output_path: &Path,
 ) -> Result<()> {
-    let linker = layout.linker_path();
+    let linker = resolve_windows_linker(layout)?;
     let mut cmd = Command::new(&linker);
     cmd.arg(format!("/OUT:{}", request.output.display()));
     cmd.arg("/SUBSYSTEM:CONSOLE");
@@ -74,11 +74,12 @@ fn link_windows(
             detail
         );
     }
+    strip_binary(layout, request)?;
     Ok(())
 }
 
 fn link_unix(layout: &ToolchainLayout, request: &CompileRequest, input_path: &Path) -> Result<()> {
-    let clang = layout.clang_driver_path();
+    let clang = resolve_unix_linker_driver(layout)?;
     let mut cmd = Command::new(&clang);
     cmd.arg("-o").arg(&request.output).arg(input_path);
     if request.lto == LtoMode::Full {
@@ -122,6 +123,88 @@ fn link_unix(layout: &ToolchainLayout, request: &CompileRequest, input_path: &Pa
         bail!(
             "linker driver `{}` exited with code {:?}{}",
             clang.display(),
+            output.status.code(),
+            detail
+        );
+    }
+    strip_binary(layout, request)?;
+    Ok(())
+}
+
+fn resolve_windows_linker(layout: &ToolchainLayout) -> Result<PathBuf> {
+    let linker = std::env::var_os("FIDAN_LINKER")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| layout.linker_path());
+    let stem = linker
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(stem.as_str(), "link" | "lld-link") {
+        Ok(linker)
+    } else {
+        bail!(
+            "LLVM backend on Windows requires a LINK-style linker (`link.exe` or `lld-link.exe`), got `{}`",
+            linker.display()
+        )
+    }
+}
+
+fn resolve_unix_linker_driver(layout: &ToolchainLayout) -> Result<PathBuf> {
+    let linker = std::env::var_os("FIDAN_LINKER")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| layout.clang_driver_path());
+    let stem = linker
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    if matches!(stem.as_str(), "cc" | "gcc" | "clang" | "clang++") {
+        Ok(linker)
+    } else {
+        bail!(
+            "LLVM backend on Unix requires a compiler-driver linker override (`cc`, `gcc`, `clang`, or `clang++`), got `{}`",
+            linker.display()
+        )
+    }
+}
+
+fn strip_binary(layout: &ToolchainLayout, request: &CompileRequest) -> Result<()> {
+    let mode = request.strip;
+    if mode == StripMode::Off {
+        return Ok(());
+    }
+
+    let strip = layout.strip_path()?;
+    let mut cmd = Command::new(&strip);
+    match mode {
+        StripMode::Off => return Ok(()),
+        StripMode::Symbols => {
+            cmd.arg("--strip-unneeded");
+        }
+        StripMode::All => {
+            cmd.arg("--strip-all");
+        }
+    }
+    cmd.arg(&request.output);
+
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to launch strip tool `{}`", strip.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let detail = match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!(": {stdout}"),
+            (true, false) => format!(": {stderr}"),
+            (false, false) => format!(":\n{stdout}\n{stderr}"),
+        };
+        bail!(
+            "strip tool `{}` exited with code {:?}{}",
+            strip.display(),
             output.status.code(),
             detail
         );

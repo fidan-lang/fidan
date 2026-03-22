@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 use fidan_diagnostics::{Severity, render_backtrace_to_stderr, render_message_to_stderr};
 use fidan_driver::{
-    CompileOptions, EmitKind, ExecutionMode, LtoMode, OptLevel, SandboxPolicy, TraceMode,
+    CompileOptions, EmitKind, ExecutionMode, LtoMode, OptLevel, SandboxPolicy, StripMode, TraceMode,
 };
 use std::path::PathBuf;
 
@@ -118,9 +118,12 @@ enum Command {
         /// Shorthand for --opt O3 (release mode)
         #[arg(long, conflicts_with = "opt")]
         release: bool,
-        /// Link-time optimization mode for the LLVM backend: off | full
+        /// Link-time optimization mode for AOT builds: off | full
         #[arg(long, value_name = "off|full", default_value = "off")]
         lto: String,
+        /// Strip the produced binary after linking: off | symbols | all
+        #[arg(long, value_name = "off|symbols|all", default_value = "off")]
+        strip: String,
         /// Emit intermediate representation: tokens | ast | hir | mir | obj
         /// (`obj` keeps the generated native .o/.obj file alongside the binary)
         #[arg(long, value_delimiter = ',')]
@@ -321,6 +324,18 @@ fn parse_lto_mode(raw: &str) -> Result<fidan_driver::LtoMode> {
     }
 }
 
+fn parse_strip_mode(raw: &str) -> Result<fidan_driver::StripMode> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "off" | "none" | "false" | "0" => Ok(StripMode::Off),
+        "symbols" | "sym" => Ok(StripMode::Symbols),
+        "all" | "true" | "1" => Ok(StripMode::All),
+        other => bail!(
+            "unknown --strip mode {:?}  (valid: off, symbols, all)",
+            other
+        ),
+    }
+}
+
 fn main() {
     ensure_utf8_console();
 
@@ -474,6 +489,7 @@ fn run_cli() -> Result<()> {
             opt,
             release,
             lto,
+            strip,
             emit,
             lib_dir,
             link_runtime,
@@ -497,6 +513,7 @@ fn run_cli() -> Result<()> {
                 parse_opt_level(&opt)?
             };
             let lto = parse_lto_mode(&lto)?;
+            let strip = parse_strip_mode(&strip)?;
             let link_dynamic = match link_runtime.trim().to_lowercase().as_str() {
                 "static" | "s" => false,
                 "dynamic" | "dyn" | "d" => true,
@@ -521,6 +538,7 @@ fn run_cli() -> Result<()> {
                 emit: emit_kinds,
                 opt_level,
                 lto,
+                strip,
                 extra_lib_dirs: lib_dir,
                 link_dynamic,
                 strict_mode: strict,

@@ -50,6 +50,8 @@ pub struct CompileOptions {
     pub link_dynamic: bool,
     /// Link-time optimization mode for AOT compilation.
     pub lto: LtoMode,
+    /// Post-link stripping mode for the produced native binary.
+    pub strip: StripMode,
     /// AOT codegen backend selection policy.
     pub backend: Backend,
 }
@@ -72,6 +74,7 @@ impl Default for CompileOptions {
             extra_lib_dirs: vec![],
             link_dynamic: false,
             lto: LtoMode::Off,
+            strip: StripMode::Off,
             backend: Backend::Auto,
         }
     }
@@ -127,4 +130,15 @@ pub enum LtoMode {
     #[default]
     Off,
     Full,
+}
+
+/// Post-link stripping mode for AOT builds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StripMode {
+    #[default]
+    Off,
+    /// Remove non-essential symbols while preserving a loadable binary.
+    Symbols,
+    /// Remove as much symbol/debug information as the platform tool allows.
+    All,
 }

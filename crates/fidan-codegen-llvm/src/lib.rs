@@ -14,6 +14,7 @@ pub use compile::compile_request;
 pub(crate) use compile::{dump_ir, env_flag_enabled, trace};
 pub use context::{BackendContext, mangle_fn};
 pub use model::{
-    BackendPayload, CompileRequest, LtoMode, OptLevel, ToolchainLayout, ToolchainMetadata,
+    BackendPayload, CompileRequest, LtoMode, OptLevel, StripMode, ToolchainLayout,
+    ToolchainMetadata,
 };
 pub use validate::validate_toolchain_layout;

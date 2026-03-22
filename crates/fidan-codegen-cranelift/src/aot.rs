@@ -58,11 +58,31 @@ pub enum OptLevel {
     SpeedAndSize,
 }
 
+/// Link-time optimization mode for the Cranelift AOT linker step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LtoMode {
+    #[default]
+    Off,
+    /// Best-effort linker-driven LTO for toolchains that support it.
+    Full,
+}
+
+/// Post-link stripping mode for Cranelift AOT binaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StripMode {
+    #[default]
+    Off,
+    Symbols,
+    All,
+}
+
 /// Options for a Cranelift AOT compilation.
 pub struct AotOptions {
     /// Path for the final binary.
     pub output: PathBuf,
     pub opt_level: OptLevel,
+    pub lto: LtoMode,
+    pub strip: StripMode,
     /// Emit the object file (`.o`) even after linking succeeds.
     pub emit_obj: bool,
     /// Extra `-L` / `/LIBPATH:` dirs for the linker.
@@ -76,6 +96,8 @@ impl Default for AotOptions {
         AotOptions {
             output: PathBuf::from("a.out"),
             opt_level: OptLevel::Speed,
+            lto: LtoMode::Off,
+            strip: StripMode::Off,
             emit_obj: false,
             extra_lib_dirs: vec![],
             link_dynamic: false,
@@ -218,8 +240,13 @@ impl AotCompiler {
             &opts.output,
             &opts.extra_lib_dirs,
             opts.link_dynamic,
+            opts.lto,
         )
         .context("Cranelift AOT: linker failed")?;
+
+        if opts.strip != StripMode::Off {
+            strip_binary(&opts.output, opts.strip).context("Cranelift AOT: strip failed")?;
+        }
 
         if !opts.emit_obj {
             let _ = std::fs::remove_file(&obj_path);
@@ -3370,6 +3397,7 @@ fn link(
     output_path: &Path,
     extra_lib_dirs: &[PathBuf],
     link_dynamic: bool,
+    lto: LtoMode,
 ) -> Result<()> {
     let linker = find_linker()?;
     let runtime_dir = std::env::current_exe()
@@ -3397,6 +3425,9 @@ fn link(
         // Tell the linker this is a console app so it includes mainCRTStartup.
         cmd.arg("/SUBSYSTEM:CONSOLE");
         cmd.arg(obj_path);
+        if lto == LtoMode::Full {
+            cmd.arg("/LTCG");
+        }
 
         // Dynamically locate MSVC + Windows SDK lib dirs so the linker can
         // resolve the CRT (msvcrt.lib, vcruntime.lib, ucrt.lib) and Win32
@@ -3431,6 +3462,9 @@ fn link(
         // GNU driver on any platform — covers Linux, macOS, and Windows MinGW.
         cmd.arg("-o").arg(output_path);
         cmd.arg(obj_path);
+        if lto == LtoMode::Full {
+            cmd.arg("-flto=full");
+        }
         for dir in extra_lib_dirs {
             cmd.arg(format!("-L{}", dir.display()));
         }
@@ -3451,13 +3485,124 @@ fn link(
         cmd.args(["-framework", "Security", "-framework", "CoreFoundation"]);
     }
 
-    let status = cmd
-        .status()
+    let output = cmd
+        .output()
         .with_context(|| format!("failed to spawn linker `{linker}`"))?;
-    if !status.success() {
-        bail!("linker `{linker}` exited with code {:?}", status.code());
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let detail = match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!(": {stdout}"),
+            (true, false) => format!(": {stderr}"),
+            (false, false) => format!(":\n{stdout}\n{stderr}"),
+        };
+        bail!(
+            "linker `{linker}` exited with code {:?}{}",
+            output.status.code(),
+            detail
+        );
     }
     Ok(())
+}
+
+fn strip_binary(output_path: &Path, mode: StripMode) -> Result<()> {
+    let (tool, kind) = find_strip_tool()?;
+    let mut cmd = std::process::Command::new(&tool);
+
+    match kind {
+        StripToolKind::Llvm | StripToolKind::Gnu => match mode {
+            StripMode::Off => return Ok(()),
+            StripMode::Symbols => {
+                cmd.arg("--strip-unneeded");
+            }
+            StripMode::All => {
+                cmd.arg("--strip-all");
+            }
+        },
+        StripToolKind::MacOs => match mode {
+            StripMode::Off => return Ok(()),
+            StripMode::Symbols => {
+                cmd.arg("-x");
+            }
+            StripMode::All => {
+                cmd.args(["-x", "-S"]);
+            }
+        },
+    }
+
+    cmd.arg(output_path);
+    let output = cmd
+        .output()
+        .with_context(|| format!("failed to launch strip tool `{}`", tool.display()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let detail = match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!(": {stdout}"),
+            (true, false) => format!(": {stderr}"),
+            (false, false) => format!(":\n{stdout}\n{stderr}"),
+        };
+        bail!(
+            "strip tool `{}` exited with code {:?}{}",
+            tool.display(),
+            output.status.code(),
+            detail
+        );
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StripToolKind {
+    Llvm,
+    Gnu,
+    MacOs,
+}
+
+fn find_strip_tool() -> Result<(PathBuf, StripToolKind)> {
+    let candidates: &[(&str, StripToolKind)] = if cfg!(windows) {
+        &[
+            ("llvm-strip.exe", StripToolKind::Llvm),
+            ("strip.exe", StripToolKind::Gnu),
+        ]
+    } else if cfg!(target_os = "macos") {
+        &[
+            ("llvm-strip", StripToolKind::Llvm),
+            ("strip", StripToolKind::MacOs),
+        ]
+    } else {
+        &[
+            ("llvm-strip", StripToolKind::Llvm),
+            ("strip", StripToolKind::Gnu),
+        ]
+    };
+
+    for &(name, kind) in candidates {
+        if std::process::Command::new(name)
+            .arg(if matches!(kind, StripToolKind::MacOs) {
+                "-h"
+            } else {
+                "--version"
+            })
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+        {
+            return Ok((PathBuf::from(name), kind));
+        }
+    }
+
+    bail!(
+        "no standalone strip tool found (tried: {}); install llvm-strip or a compatible system strip",
+        candidates
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn find_linker() -> Result<String> {

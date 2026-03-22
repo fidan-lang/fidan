@@ -1,12 +1,12 @@
 use crate::install::ResolvedToolchain;
-use crate::{CompileOptions, LtoMode, OptLevel};
+use crate::{CompileOptions, LtoMode, OptLevel, StripMode};
 use anyhow::{Context, Result, bail};
 use fidan_mir::MirProgram;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-pub const LLVM_BACKEND_PROTOCOL_VERSION: u32 = 1;
+pub const LLVM_BACKEND_PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlvmCompileRequest {
@@ -17,6 +17,7 @@ pub struct LlvmCompileRequest {
     pub payload: LlvmBackendPayload,
     pub opt_level: SerializableOptLevel,
     pub lto: SerializableLtoMode,
+    pub strip: SerializableStripMode,
     pub emit_obj: bool,
     pub extra_lib_dirs: Vec<PathBuf>,
     pub link_dynamic: bool,
@@ -48,6 +49,14 @@ pub enum SerializableLtoMode {
     Full,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SerializableStripMode {
+    Off,
+    Symbols,
+    All,
+}
+
 impl From<OptLevel> for SerializableOptLevel {
     fn from(value: OptLevel) -> Self {
         match value {
@@ -66,6 +75,16 @@ impl From<LtoMode> for SerializableLtoMode {
         match value {
             LtoMode::Off => Self::Off,
             LtoMode::Full => Self::Full,
+        }
+    }
+}
+
+impl From<StripMode> for SerializableStripMode {
+    fn from(value: StripMode) -> Self {
+        match value {
+            StripMode::Off => Self::Off,
+            StripMode::Symbols => Self::Symbols,
+            StripMode::All => Self::All,
         }
     }
 }
@@ -108,6 +127,7 @@ pub fn invoke_llvm_helper(
         },
         opt_level: opts.opt_level.into(),
         lto: opts.lto.into(),
+        strip: opts.strip.into(),
         emit_obj: opts.emit.contains(&crate::EmitKind::Obj),
         extra_lib_dirs: opts.extra_lib_dirs.clone(),
         link_dynamic: opts.link_dynamic,

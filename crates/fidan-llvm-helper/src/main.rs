@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use fidan_codegen_llvm::{CompileRequest as LlvmBackendRequest, compile_request};
 use fidan_driver::{
     LLVM_BACKEND_PROTOCOL_VERSION, LlvmCompileRequest, LlvmCompileResponse, SerializableLtoMode,
-    SerializableOptLevel,
+    SerializableOptLevel, SerializableStripMode,
 };
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -137,6 +137,11 @@ fn to_backend_request(value: LlvmCompileRequest) -> LlvmBackendRequest {
         lto: match value.lto {
             SerializableLtoMode::Off => fidan_codegen_llvm::LtoMode::Off,
             SerializableLtoMode::Full => fidan_codegen_llvm::LtoMode::Full,
+        },
+        strip: match value.strip {
+            SerializableStripMode::Off => fidan_codegen_llvm::StripMode::Off,
+            SerializableStripMode::Symbols => fidan_codegen_llvm::StripMode::Symbols,
+            SerializableStripMode::All => fidan_codegen_llvm::StripMode::All,
         },
         emit_obj: value.emit_obj,
         extra_lib_dirs: value.extra_lib_dirs,

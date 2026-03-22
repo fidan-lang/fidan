@@ -20,6 +20,14 @@ pub enum LtoMode {
     Full,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StripMode {
+    #[default]
+    Off,
+    Symbols,
+    All,
+}
+
 #[derive(Debug, Clone)]
 pub struct CompileRequest {
     pub input: PathBuf,
@@ -28,6 +36,7 @@ pub struct CompileRequest {
     pub payload: BackendPayload,
     pub opt_level: OptLevel,
     pub lto: LtoMode,
+    pub strip: StripMode,
     pub emit_obj: bool,
     pub extra_lib_dirs: Vec<PathBuf>,
     pub link_dynamic: bool,
@@ -81,6 +90,14 @@ impl CompileRequest {
             LtoMode::Full => "full",
         }
     }
+
+    pub fn strip_name(&self) -> &'static str {
+        match self.strip {
+            StripMode::Off => "off",
+            StripMode::Symbols => "symbols",
+            StripMode::All => "all",
+        }
+    }
 }
 
 impl ToolchainLayout {
@@ -122,6 +139,22 @@ impl ToolchainLayout {
         } else {
             "llc"
         })
+    }
+
+    pub fn strip_path(&self) -> Result<PathBuf> {
+        let path = self.bin_dir.join(if cfg!(target_os = "windows") {
+            "llvm-strip.exe"
+        } else {
+            "llvm-strip"
+        });
+        if path.is_file() {
+            Ok(path)
+        } else {
+            bail!(
+                "LLVM toolchain is missing required strip tool at `{}`",
+                path.display()
+            )
+        }
     }
 
     pub fn libclang_path(&self) -> Result<PathBuf> {

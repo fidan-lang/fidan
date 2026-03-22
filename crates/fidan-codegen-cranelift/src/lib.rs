@@ -7,6 +7,6 @@ mod jit;
 
 pub use aot::{
     AotCompiler as CraneliftAotCompiler, AotOptions as CraneliftAotOptions,
-    OptLevel as CraneliftOptLevel,
+    LtoMode as CraneliftLtoMode, OptLevel as CraneliftOptLevel, StripMode as CraneliftStripMode,
 };
 pub use jit::{JitCompiler, JitFnEntry, call_jit_fn};

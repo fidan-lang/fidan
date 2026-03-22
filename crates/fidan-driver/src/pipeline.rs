@@ -84,8 +84,8 @@ fn compile_aot_cranelift(
     opts: &CompileOptions,
     output: std::path::PathBuf,
 ) -> Result<()> {
-    use fidan_codegen_cranelift::CraneliftOptLevel;
     use fidan_codegen_cranelift::{CraneliftAotCompiler, CraneliftAotOptions};
+    use fidan_codegen_cranelift::{CraneliftLtoMode, CraneliftOptLevel, CraneliftStripMode};
 
     let cl_opt = match opts.opt_level {
         crate::options::OptLevel::O0 => CraneliftOptLevel::None,
@@ -98,6 +98,15 @@ fn compile_aot_cranelift(
     let aot_opts = CraneliftAotOptions {
         output: output.clone(),
         opt_level: cl_opt,
+        lto: match opts.lto {
+            crate::options::LtoMode::Off => CraneliftLtoMode::Off,
+            crate::options::LtoMode::Full => CraneliftLtoMode::Full,
+        },
+        strip: match opts.strip {
+            crate::options::StripMode::Off => CraneliftStripMode::Off,
+            crate::options::StripMode::Symbols => CraneliftStripMode::Symbols,
+            crate::options::StripMode::All => CraneliftStripMode::All,
+        },
         emit_obj: opts.emit.contains(&crate::options::EmitKind::Obj),
         extra_lib_dirs: opts.extra_lib_dirs.clone(),
         link_dynamic: opts.link_dynamic,
