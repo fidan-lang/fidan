@@ -243,12 +243,29 @@ function Remove-LlvmPayload {
     $libKeepCandidates = @(
       Get-ChildItem -LiteralPath $libDir -Force |
         Where-Object {
-          -not $_.PSIsContainer -and (
+          if ($_.PSIsContainer) {
+            return $false
+          }
+
+          $isRuntimeLib = (
             $_.Name -like "*.so" -or
             $_.Name -like "*.so.*" -or
             $_.Name -like "*.dylib" -or
             $_.Name -like "*.dylib.*"
           )
+          if (-not $isRuntimeLib) {
+            return $false
+          }
+
+          if ($IsMacOS -and (
+            $_.Name -like "libc++*.dylib*" -or
+            $_.Name -like "libc++abi*.dylib*" -or
+            $_.Name -like "libunwind*.dylib*"
+          )) {
+            return $false
+          }
+
+          return $true
         } |
         Select-Object -ExpandProperty Name
     )
