@@ -380,6 +380,8 @@ function Invoke-HelperBuild {
   $hadAr = [bool](Test-Path Env:AR)
   $previousRanlib = $env:RANLIB
   $hadRanlib = [bool](Test-Path Env:RANLIB)
+  $previousRustFlags = $env:RUSTFLAGS
+  $hadRustFlags = [bool](Test-Path Env:RUSTFLAGS)
   $helperLibShimDir = $null
   $hadLlvmSysPrefix = $false
   $previousLlvmSysPrefix = ""
@@ -439,6 +441,17 @@ function Invoke-HelperBuild {
       $env:CXX = Get-UnixHostToolchainCommand -Candidates @("c++", "clang++", "g++") -XcrunFind "clang++"
       $env:AR = Get-UnixHostToolchainCommand -Candidates @("ar", "llvm-ar") -XcrunFind "ar"
       $env:RANLIB = Get-UnixHostToolchainCommand -Candidates @("ranlib", "llvm-ranlib") -XcrunFind "ranlib"
+    }
+    if ($IsMacOS) {
+      $embedBitcodeFlag = "-C embed-bitcode=no"
+      if ($hadRustFlags -and $previousRustFlags) {
+        if ($previousRustFlags -notmatch [regex]::Escape($embedBitcodeFlag)) {
+          $env:RUSTFLAGS = "$previousRustFlags $embedBitcodeFlag"
+        }
+      }
+      else {
+        $env:RUSTFLAGS = $embedBitcodeFlag
+      }
     }
 
     if ($HelperCargoFeatures) {
@@ -501,6 +514,13 @@ function Invoke-HelperBuild {
     }
     else {
       Remove-Item Env:RANLIB -ErrorAction SilentlyContinue
+    }
+
+    if ($hadRustFlags) {
+      $env:RUSTFLAGS = $previousRustFlags
+    }
+    else {
+      Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
     }
 
     if ($LlvmSysPrefixEnvVar) {

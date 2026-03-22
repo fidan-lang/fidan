@@ -9,12 +9,6 @@ repository.workspace = true
 [features]
 default = []
 llvm-toolchain-22 = ["dep:inkwell", "dep:llvm-sys", "inkwell/llvm22-1"]
-llvm-toolchain-22-dynamic = [
-  "dep:inkwell",
-  "dep:llvm-sys",
-  "inkwell/llvm22-1-force-dynamic",
-  "llvm-sys/force-dynamic",
-]
 
 [dependencies]
 anyhow = { workspace = true }
