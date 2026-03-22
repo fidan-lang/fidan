@@ -166,7 +166,7 @@ function Get-UnixLlvmBinKeepList {
   )
 }
 
-function Prune-LlvmPayload {
+function Remove-LlvmPayload {
   param([string]$LlvmRoot)
 
   $binDir = Join-Path $LlvmRoot "bin"
@@ -228,7 +228,7 @@ $hostTriple = Get-HostTriple
 $helperBinary = if ($IsWindows) { "fidan-llvm-helper.exe" } else { "fidan-llvm-helper" }
 
 if (-not $SkipBuild) {
-  cargo build -p fidan-cli --release --bin fidan-llvm-helper
+  cargo build -p fidan-llvm-helper --release
 }
 
 $helperPath = Join-Path "target/release" $helperBinary
@@ -289,18 +289,18 @@ try {
   Move-ArchiveRootContents -ExtractRoot $extractDir -Destination $llvmDir
 
   if ($Kind -eq "llvm") {
-    Prune-LlvmPayload -LlvmRoot $llvmDir
+    Remove-LlvmPayload -LlvmRoot $llvmDir
   }
 
   $metadata = @{
-    schema_version            = 1
-    kind                      = $Kind
-    toolchain_version         = $ToolchainVersion
-    tool_version              = $ToolVersion
-    host_triple               = $hostTriple
-    supported_fidan_versions  = $SupportedFidanVersions
-    backend_protocol_version  = $BackendProtocolVersion
-    helper_relpath            = $helperRelPath
+    schema_version           = 1
+    kind                     = $Kind
+    toolchain_version        = $ToolchainVersion
+    tool_version             = $ToolVersion
+    host_triple              = $hostTriple
+    supported_fidan_versions = $SupportedFidanVersions
+    backend_protocol_version = $BackendProtocolVersion
+    helper_relpath           = $helperRelPath
   }
   $metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $stageDir "metadata.json") -Encoding UTF8
 
