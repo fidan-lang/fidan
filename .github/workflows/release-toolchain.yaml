@@ -15,7 +15,7 @@ on:
       llvm_tool_version:
         description: "Upstream LLVM version for the toolchain package"
         required: true
-        default: "22.1.1"
+        default: "21.1.8"
         type: string
 
 jobs:

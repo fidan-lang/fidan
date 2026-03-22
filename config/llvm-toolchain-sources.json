@@ -1,18 +1,18 @@
 {
-  "22.1.1": {
-    "backend_feature": "llvm-toolchain-22",
-    "llvm_sys_prefix_env": "LLVM_SYS_221_PREFIX",
+  "21.1.8": {
+    "backend_feature": "llvm-toolchain-21",
+    "llvm_sys_prefix_env": "LLVM_SYS_211_PREFIX",
     "windows": {
-      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.1/clang%2Bllvm-22.1.1-x86_64-pc-windows-msvc.tar.xz",
-      "sha256": "186f17ebedf13bae2835b2c0d5111a2a469ac241e7fc6387c9ce4585d6ef56ed"
+      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/clang%2Bllvm-21.1.8-x86_64-pc-windows-msvc.tar.xz",
+      "sha256": "749d22f565fcd5718dbed06512572d0e5353b502c03fe1f7f17ee8b8aca21a47"
     },
     "linux": {
-      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.1/LLVM-22.1.1-Linux-X64.tar.xz",
-      "sha256": "efc4d945744f951df00ec72c5b31da5d5a2eaf1d53cc7c9d0644f93f0f9e817d"
+      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-Linux-X64.tar.xz",
+      "sha256": "b3b7f2801d15d50736acea3c73982994d025b01c2f035b91ae3b49d1b575732b"
     },
     "macos": {
-      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.1/LLVM-22.1.1-macOS-ARM64.tar.xz",
-      "sha256": "3839802601439300fc8d1d378bc26732e879e1ca80a220f7d6764ed229053e92"
+      "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-macOS-ARM64.tar.xz",
+      "sha256": "b95bdd32a33a81ee4d40363aaeb26728a26783fcef26a4d80f65457433ea4669"
     }
   }
 }
