@@ -182,25 +182,7 @@ function Get-MacOsLlvmBinKeepList {
     "clang",
     "clang++",
     "ld.lld",
-    "lld",
-    "llvm-ar",
-    "llvm-as",
-    "llvm-cov",
-    "llvm-dis",
-    "llvm-link",
-    "llvm-lto",
-    "llvm-lto2",
-    "llvm-nm",
-    "llvm-objcopy",
-    "llvm-objdump",
-    "llvm-profdata",
-    "llvm-ranlib",
-    "llvm-readelf",
-    "llvm-readobj",
-    "llvm-size",
-    "llvm-strip",
-    "llc",
-    "opt"
+    "llvm-strip"
   )
 }
 
@@ -491,6 +473,7 @@ function Invoke-HelperBuild {
 
   try {
     $llvmBinDir = Join-Path $LlvmRoot "bin"
+    $llvmLibDir = Join-Path $LlvmRoot "lib"
     if (Test-Path -LiteralPath $llvmBinDir) {
       if ($IsWindows) {
         $env:PATH = "$llvmBinDir$([System.IO.Path]::PathSeparator)$previousPath"
@@ -540,6 +523,18 @@ function Invoke-HelperBuild {
       $env:RANLIB = Get-UnixHostToolchainCommand -Candidates @("ranlib", "llvm-ranlib") -XcrunFind "ranlib"
     }
     if ($IsMacOS) {
+      if (Test-Path -LiteralPath $llvmLibDir) {
+        Get-ChildItem -LiteralPath $llvmLibDir -Force |
+          Where-Object {
+            -not $_.PSIsContainer -and (
+              $_.Name -like "libc++*.dylib*" -or
+              $_.Name -like "libc++abi*.dylib*" -or
+              $_.Name -like "libunwind*.dylib*"
+            )
+          } |
+          Remove-Item -Force
+      }
+
       # Use the host C++ driver for the helper binary itself so it links against
       # the platform runtime, while still routing through ld64.lld via RUSTFLAGS.
       # Using the packaged LLVM clang here can bake in @rpath/libc++.1.dylib
@@ -547,7 +542,8 @@ function Invoke-HelperBuild {
       Set-Item -Path "Env:$linkerEnvName" -Value $env:CXX
 
       $macOsRustFlags = @(
-        "-Clink-arg=-fuse-ld=lld"
+        "-Clink-arg=-fuse-ld=lld",
+        "-Clink-arg=-lc++abi"
       )
       if ($hadRustFlags -and $previousRustFlags) {
         $env:RUSTFLAGS = $previousRustFlags
