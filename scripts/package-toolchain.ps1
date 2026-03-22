@@ -142,7 +142,7 @@ function Get-UnixLlvmBinKeepList {
 
 function Add-UnixSymlinkClosure {
   param(
-    [string]$BinDir,
+    [string]$DirectoryPath,
     [string[]]$InitialNames
   )
 
@@ -158,7 +158,7 @@ function Add-UnixSymlinkClosure {
 
   while ($queue.Count -gt 0) {
     $name = $queue.Dequeue()
-    $path = Join-Path $BinDir $name
+    $path = Join-Path $DirectoryPath $name
     if (-not (Test-Path -LiteralPath $path)) {
       continue
     }
@@ -175,9 +175,9 @@ function Add-UnixSymlinkClosure {
         $targetPath = [IO.Path]::GetFullPath((Join-Path $entry.DirectoryName $targetPath))
       }
 
-      $binRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($BinDir))
+      $directoryRoot = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($DirectoryPath))
       $resolvedTarget = [IO.Path]::GetFullPath($targetPath)
-      if (-not $resolvedTarget.StartsWith($binRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+      if (-not $resolvedTarget.StartsWith($directoryRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
         continue
       }
 
@@ -215,7 +215,7 @@ function Remove-LlvmPayload {
     Get-WindowsLlvmBinKeepList
   }
   else {
-    Add-UnixSymlinkClosure -BinDir $binDir -InitialNames (Get-UnixLlvmBinKeepList)
+    Add-UnixSymlinkClosure -DirectoryPath $binDir -InitialNames (Get-UnixLlvmBinKeepList)
   }
   foreach ($name in $binKeep) {
     [void]$keep.Add($name)
@@ -240,6 +240,23 @@ function Remove-LlvmPayload {
   else {
     $keepLibTopLevel = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     [void]$keepLibTopLevel.Add("clang")
+    $libKeepCandidates = @(
+      Get-ChildItem -LiteralPath $libDir -Force |
+        Where-Object {
+          -not $_.PSIsContainer -and (
+            $_.Name -like "*.so" -or
+            $_.Name -like "*.so.*" -or
+            $_.Name -like "*.dylib" -or
+            $_.Name -like "*.dylib.*"
+          )
+        } |
+        Select-Object -ExpandProperty Name
+    )
+    $libKeep = Add-UnixSymlinkClosure -DirectoryPath $libDir -InitialNames $libKeepCandidates
+    $keepLibNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($name in $libKeep) {
+      [void]$keepLibNames.Add($name)
+    }
 
     foreach ($entry in (Get-ChildItem -LiteralPath $libDir -Force)) {
       if ($entry.PSIsContainer) {
@@ -249,15 +266,7 @@ function Remove-LlvmPayload {
         continue
       }
 
-      $name = $entry.Name
-      $keepSharedLib = (
-        $name -like "*.so" -or
-        $name -like "*.so.*" -or
-        $name -like "*.dylib" -or
-        $name -like "*.dylib.*"
-      )
-
-      if (-not $keepSharedLib) {
+      if (-not $keepLibNames.Contains($entry.Name)) {
         Remove-Item -LiteralPath $entry.FullName -Force
       }
     }
