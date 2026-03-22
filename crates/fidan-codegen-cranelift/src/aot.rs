@@ -3480,9 +3480,8 @@ fn link(
                 .context("cannot find the Fidan runtime library — build Fidan first")?;
             cmd.arg(&lib);
         }
+        #[cfg(target_os = "linux")]
         cmd.args(["-lpthread", "-ldl", "-lm"]);
-        #[cfg(target_os = "macos")]
-        cmd.args(["-framework", "Security", "-framework", "CoreFoundation"]);
     }
 
     let output = cmd
