@@ -379,6 +379,11 @@ function Invoke-HelperBuild {
   $hadAr = [bool](Test-Path Env:AR)
   $previousRanlib = $env:RANLIB
   $hadRanlib = [bool](Test-Path Env:RANLIB)
+  $linkerEnvName = "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER"
+  $hadMacOsLinker = [bool](Test-Path "Env:$linkerEnvName")
+  $previousMacOsLinker = if ($hadMacOsLinker) { (Get-Item "Env:$linkerEnvName").Value } else { "" }
+  $previousRustFlags = $env:RUSTFLAGS
+  $hadRustFlags = [bool](Test-Path Env:RUSTFLAGS)
   $helperLibShimDir = $null
   $hadLlvmSysPrefix = $false
   $previousLlvmSysPrefix = ""
@@ -439,6 +444,23 @@ function Invoke-HelperBuild {
       $env:AR = Get-UnixHostToolchainCommand -Candidates @("ar", "llvm-ar") -XcrunFind "ar"
       $env:RANLIB = Get-UnixHostToolchainCommand -Candidates @("ranlib", "llvm-ranlib") -XcrunFind "ranlib"
     }
+    if ($IsMacOS) {
+      $packagedClang = Join-Path $llvmBinDir "clang"
+      if (-not (Test-Path -LiteralPath $packagedClang)) {
+        throw "Expected packaged clang at '$packagedClang'"
+      }
+      Set-Item -Path "Env:$linkerEnvName" -Value $packagedClang
+
+      $linkerFlag = "-Clink-arg=-fuse-ld=lld"
+      if ($hadRustFlags -and $previousRustFlags) {
+        if ($previousRustFlags -notmatch [regex]::Escape($linkerFlag)) {
+          $env:RUSTFLAGS = "$previousRustFlags $linkerFlag"
+        }
+      }
+      else {
+        $env:RUSTFLAGS = $linkerFlag
+      }
+    }
 
     if ($HelperCargoFeatures) {
       cargo build -p fidan-llvm-helper --release --features $HelperCargoFeatures
@@ -490,6 +512,20 @@ function Invoke-HelperBuild {
     }
     else {
       Remove-Item Env:RANLIB -ErrorAction SilentlyContinue
+    }
+
+    if ($hadMacOsLinker) {
+      Set-Item -Path "Env:$linkerEnvName" -Value $previousMacOsLinker
+    }
+    else {
+      Remove-Item "Env:$linkerEnvName" -ErrorAction SilentlyContinue
+    }
+
+    if ($hadRustFlags) {
+      $env:RUSTFLAGS = $previousRustFlags
+    }
+    else {
+      Remove-Item Env:RUSTFLAGS -ErrorAction SilentlyContinue
     }
 
     if ($LlvmSysPrefixEnvVar) {
