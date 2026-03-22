@@ -103,9 +103,16 @@ fn link_unix(layout: &ToolchainLayout, request: &CompileRequest, input_path: &Pa
                 .context("cannot find the Fidan runtime library — install/rebuild Fidan first")?,
         );
     }
+    #[cfg(target_os = "linux")]
     cmd.args(["-lpthread", "-ldl", "-lm"]);
     #[cfg(target_os = "macos")]
-    cmd.args(["-framework", "Security", "-framework", "CoreFoundation"]);
+    cmd.args([
+        "-lm",
+        "-framework",
+        "Security",
+        "-framework",
+        "CoreFoundation",
+    ]);
     configure_unix_link_environment(&mut cmd, layout);
 
     let output = cmd
