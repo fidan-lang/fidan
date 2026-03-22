@@ -106,6 +106,49 @@ function Move-ArchiveRootContents {
   }
 }
 
+function Copy-UpstreamLegalFiles {
+  param(
+    [string]$SourceRoot,
+    [string]$StageDir,
+    [string]$Kind
+  )
+
+  $licensesDir = Join-Path $StageDir "licenses"
+  $copied = $false
+
+  $licenseCandidates = @(
+    "LICENSE.TXT",
+    "LICENSE.txt",
+    "LICENSE",
+    "NOTICE.TXT",
+    "NOTICE.txt",
+    "NOTICE"
+  )
+
+  foreach ($candidate in $licenseCandidates) {
+    $sourcePath = Join-Path $SourceRoot $candidate
+    if (-not (Test-Path -LiteralPath $sourcePath)) {
+      continue
+    }
+
+    if (-not $copied) {
+      New-Item -ItemType Directory -Force -Path $licensesDir | Out-Null
+      $copied = $true
+    }
+
+    $targetName = "$($Kind.ToUpperInvariant())-$candidate"
+    Copy-Item -LiteralPath $sourcePath -Destination (Join-Path $licensesDir $targetName) -Force
+  }
+
+  if ((-not $copied) -and $Kind -eq "llvm") {
+    $fallbackLicense = Join-Path $PSScriptRoot "..\\assets\\licenses\\llvm\\LICENSE.txt"
+    if (Test-Path -LiteralPath $fallbackLicense) {
+      New-Item -ItemType Directory -Force -Path $licensesDir | Out-Null
+      Copy-Item -LiteralPath $fallbackLicense -Destination (Join-Path $licensesDir "LLVM-LICENSE.txt") -Force
+    }
+  }
+}
+
 function Get-WindowsLlvmBinKeepList {
   return @(
     "lld-link.exe",
@@ -636,6 +679,7 @@ try {
   $llvmDir = Join-Path $stageDir "llvm"
   New-Item -ItemType Directory -Force -Path $helperDir | Out-Null
   Move-ArchiveRootContents -ExtractRoot $extractDir -Destination $llvmDir
+  Copy-UpstreamLegalFiles -SourceRoot $llvmDir -StageDir $stageDir -Kind $Kind
 
   if (-not $SkipBuild) {
     Invoke-HelperBuild `
