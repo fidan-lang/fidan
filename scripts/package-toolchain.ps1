@@ -334,6 +334,8 @@ function Invoke-HelperBuild {
   $hadLib = [bool](Test-Path Env:LIB)
   $previousLlvmConfigPath = $env:LLVM_CONFIG_PATH
   $hadLlvmConfigPath = [bool](Test-Path Env:LLVM_CONFIG_PATH)
+  $previousReleaseLto = $env:CARGO_PROFILE_RELEASE_LTO
+  $hadReleaseLto = [bool](Test-Path Env:CARGO_PROFILE_RELEASE_LTO)
   $helperLibShimDir = $null
   $hadLlvmSysPrefix = $false
   $previousLlvmSysPrefix = ""
@@ -384,9 +386,11 @@ function Invoke-HelperBuild {
     }
 
     if ($HelperCargoFeatures) {
+      $env:CARGO_PROFILE_RELEASE_LTO = "false"
       cargo build -p fidan-llvm-helper --release --features $HelperCargoFeatures
     }
     else {
+      $env:CARGO_PROFILE_RELEASE_LTO = "false"
       cargo build -p fidan-llvm-helper --release
     }
   }
@@ -405,6 +409,13 @@ function Invoke-HelperBuild {
     }
     else {
       Remove-Item Env:LLVM_CONFIG_PATH -ErrorAction SilentlyContinue
+    }
+
+    if ($hadReleaseLto) {
+      $env:CARGO_PROFILE_RELEASE_LTO = $previousReleaseLto
+    }
+    else {
+      Remove-Item Env:CARGO_PROFILE_RELEASE_LTO -ErrorAction SilentlyContinue
     }
 
     if ($LlvmSysPrefixEnvVar) {

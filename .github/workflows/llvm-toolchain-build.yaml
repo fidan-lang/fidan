@@ -13,7 +13,7 @@ on:
         required: true
         type: string
       validate:
-        description: "Install the packaged toolchain into a temp FIDAN_HOME and run the LLVM example sweep"
+        description: "Install the packaged toolchain into a workspace-local FIDAN_HOME and run the LLVM example sweep"
         required: false
         default: false
         type: boolean
@@ -65,20 +65,20 @@ jobs:
         if: runner.os == 'Windows'
         uses: lukka/run-vcpkg@v11
         with:
-          vcpkgDirectory: ${{ runner.temp }}/vcpkg
+          vcpkgDirectory: ${{ github.workspace }}/.vcpkg
           vcpkgGitCommitId: ${{ env.VCPKG_COMMIT }}
           runVcpkgInstall: true
           vcpkgJsonGlob: vcpkg.json
         env:
           VCPKG_DEFAULT_TRIPLET: ${{ env.VCPKG_WINDOWS_TRIPLET }}
           VCPKG_DEFAULT_HOST_TRIPLET: ${{ env.VCPKG_WINDOWS_TRIPLET }}
-          VCPKG_INSTALLED_DIR: ${{ runner.temp }}/vcpkg_installed
+          VCPKG_INSTALLED_DIR: ${{ github.workspace }}/.vcpkg_installed
 
       - name: Resolve Windows vcpkg library path
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $libDir = Join-Path $env:RUNNER_TEMP "vcpkg_installed/$env:VCPKG_WINDOWS_TRIPLET/lib"
+          $libDir = Join-Path $env:GITHUB_WORKSPACE ".vcpkg_installed/$env:VCPKG_WINDOWS_TRIPLET/lib"
           if (-not (Test-Path -LiteralPath $libDir)) {
             throw "Expected vcpkg libxml2 library directory at '$libDir'"
           }
@@ -136,7 +136,7 @@ jobs:
             -UpstreamArchiveUrl "${{ steps.source.outputs.archive_url }}" `
             -UpstreamArchiveSha256 "${{ steps.source.outputs.archive_sha256 }}"
 
-      - name: Install packaged LLVM toolchain into temp FIDAN_HOME
+      - name: Install packaged LLVM toolchain into validation FIDAN_HOME
         if: inputs.validate
         shell: pwsh
         run: |
@@ -146,7 +146,7 @@ jobs:
           }
           $hostTriple = $archive.Directory.Name
           $toolchainVersion = $archive.Directory.Parent.Name
-          $fidanHome = Join-Path $env:RUNNER_TEMP "fidan-home"
+          $fidanHome = Join-Path $env:GITHUB_WORKSPACE ".fidan-home-validation"
           $installRoot = Join-Path $fidanHome "toolchains/llvm/$hostTriple/$toolchainVersion"
           if (Test-Path -LiteralPath $installRoot) {
             Remove-Item -LiteralPath $installRoot -Force -Recurse

@@ -49,6 +49,9 @@ perf.data.old
 flamegraph.svg
 /scripts/*.log
 LOCAL/
+.vcpkg/
+.vcpkg_installed/
+.fidan-home-validation/
 
 # ── Misc ──────────────────────────────────────────────────────────────────────
 *.log
