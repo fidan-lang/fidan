@@ -26,6 +26,8 @@ pub struct ActiveVersionMetadata {
 pub struct InstallEntry {
     pub version: String,
     pub installed_at_secs: u64,
+    #[serde(default)]
+    pub archive_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +47,8 @@ pub struct ToolchainMetadata {
     pub supported_fidan_versions: String,
     pub backend_protocol_version: u32,
     pub helper_relpath: String,
+    #[serde(default)]
+    pub archive_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +219,7 @@ pub fn load_or_repair_metadata(root: &Path) -> Result<(ActiveVersionMetadata, In
                 .map(|version| InstallEntry {
                     version: version.clone(),
                     installed_at_secs: now_secs(),
+                    archive_sha256: None,
                 })
                 .collect(),
             updated_at_secs: now_secs(),
@@ -251,7 +256,7 @@ pub fn load_or_repair_metadata(root: &Path) -> Result<(ActiveVersionMetadata, In
     Ok((active, installs))
 }
 
-pub fn register_install(root: &Path, version: &str) -> Result<bool> {
+pub fn register_install(root: &Path, version: &str, archive_sha256: Option<&str>) -> Result<bool> {
     ensure_install_layout(root)?;
     let scanned = scan_installed_versions(root)?;
     let first_install = scanned.len() <= 1;
@@ -263,14 +268,17 @@ pub fn register_install(root: &Path, version: &str) -> Result<bool> {
             updated_at_secs: now_secs(),
         });
     installs.schema_version = INSTALL_SCHEMA_VERSION;
-    if !installs
+    if let Some(entry) = installs
         .installs
-        .iter()
-        .any(|entry| entry.version == version)
+        .iter_mut()
+        .find(|entry| entry.version == version)
     {
+        entry.archive_sha256 = archive_sha256.map(ToOwned::to_owned);
+    } else {
         installs.installs.push(InstallEntry {
             version: version.to_string(),
             installed_at_secs: now_secs(),
+            archive_sha256: archive_sha256.map(ToOwned::to_owned),
         });
     }
     installs = normalize_installs(installs);
@@ -393,6 +401,18 @@ pub fn schedule_current_pointer_update(root: &Path, version: &str) -> Result<()>
     let current = current_dir(root);
     windows_support::schedule_directory_pointer_update(&current, &target)
         .context("failed to schedule Windows current-version switch")
+}
+
+#[cfg(target_os = "windows")]
+pub fn schedule_active_version_refresh(
+    root: &Path,
+    version: &str,
+    replacement: &Path,
+) -> Result<()> {
+    let target = versions_dir(root).join(version);
+    let current = current_dir(root);
+    windows_support::schedule_directory_replace_and_pointer_update(&current, &target, replacement)
+        .context("failed to schedule Windows active-version refresh")
 }
 
 pub fn schedule_last_uninstall_cleanup(root: &Path, purge_home: Option<&Path>) -> Result<()> {

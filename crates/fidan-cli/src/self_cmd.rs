@@ -6,13 +6,14 @@ use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use fidan_diagnostics::{Severity, render_message_to_stderr};
 use fidan_driver::install::{
-    load_or_repair_metadata, register_install, remove_bootstrap_path_entries,
+    InstallEntry, load_or_repair_metadata, register_install, remove_bootstrap_path_entries,
     remove_install_record, resolve_current_binary, scan_installed_versions,
     schedule_last_uninstall_cleanup, set_active_version,
 };
 #[cfg(target_os = "windows")]
 use fidan_driver::install::{
-    persist_active_version, read_current_version_from_pointer, schedule_current_pointer_update,
+    persist_active_version, read_current_version_from_pointer, schedule_active_version_refresh,
+    schedule_current_pointer_update,
 };
 use fidan_driver::progress::ProgressReporter;
 use fidan_driver::{resolve_fidan_home, resolve_install_root};
@@ -100,8 +101,63 @@ fn run_install(version: &str) -> Result<()> {
     fs::create_dir_all(&versions_dir)
         .with_context(|| format!("failed to create `{}`", versions_dir.display()))?;
     let final_dir = versions_dir.join(&release.version);
+    #[cfg(target_os = "windows")]
+    let mut refresh_active_version = false;
+    #[cfg(target_os = "windows")]
+    let replacement_dir = versions_dir.join(format!(
+        "{}.refresh-{}-{}",
+        release.version,
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+    let existing_install = load_or_repair_metadata(&root)
+        .ok()
+        .and_then(|(_, installs)| {
+            installs
+                .installs
+                .into_iter()
+                .find(|entry: &InstallEntry| entry.version == release.version)
+        });
     if final_dir.exists() {
-        bail!("Fidan version `{}` is already installed", release.version);
+        if existing_install
+            .as_ref()
+            .and_then(|entry| entry.archive_sha256.as_deref())
+            == Some(release.sha256.as_str())
+        {
+            bail!("Fidan version `{}` is already installed", release.version);
+        }
+
+        #[cfg(target_os = "windows")]
+        {
+            if let Ok((active, _)) = load_or_repair_metadata(&root)
+                && active.active_version == release.version
+            {
+                refresh_active_version = true;
+            }
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            fs::remove_dir_all(&final_dir).with_context(|| {
+                format!(
+                    "failed to replace existing Fidan version directory `{}`",
+                    final_dir.display()
+                )
+            })?;
+        }
+
+        #[cfg(target_os = "windows")]
+        if !refresh_active_version {
+            fs::remove_dir_all(&final_dir).with_context(|| {
+                format!(
+                    "failed to replace existing Fidan version directory `{}`",
+                    final_dir.display()
+                )
+            })?;
+        }
     }
 
     let cache_path = home
@@ -125,9 +181,32 @@ fn run_install(version: &str) -> Result<()> {
             .as_deref()
             .unwrap_or(binary_relpath()),
     );
-    materialize_release_root(&staging, &expected, &final_dir)?;
+    #[cfg(target_os = "windows")]
+    let install_dir = if refresh_active_version {
+        &replacement_dir
+    } else {
+        &final_dir
+    };
+    #[cfg(not(target_os = "windows"))]
+    let install_dir = &final_dir;
 
-    let first_install = register_install(&root, &release.version)?;
+    materialize_release_root(&staging, &expected, install_dir)?;
+
+    let first_install = register_install(&root, &release.version, Some(&release.sha256))?;
+    #[cfg(target_os = "windows")]
+    if refresh_active_version {
+        schedule_active_version_refresh(&root, &release.version, &replacement_dir)?;
+        render_message_to_stderr(
+            Severity::Note,
+            "self",
+            &format!(
+                "scheduled refresh of active Fidan {} — open a new shell after this command exits",
+                release.version
+            ),
+        );
+        return Ok(());
+    }
+
     let message = if first_install {
         format!(
             "installed Fidan {} and made it active — PATH should point to `{}`",

@@ -100,11 +100,30 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
     fs::create_dir_all(&parent)
         .with_context(|| format!("failed to create `{}`", parent.display()))?;
     let final_dir = parent.join(&release.toolchain_version);
+    let mut refreshed = false;
     if final_dir.exists() {
-        bail!(
-            "toolchain `{name}` version `{}` is already installed",
-            release.toolchain_version
-        );
+        let metadata_path = final_dir.join("metadata.json");
+        let existing = fs::read(&metadata_path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ToolchainMetadata>(&bytes).ok());
+        if existing
+            .as_ref()
+            .and_then(|metadata| metadata.archive_sha256.as_deref())
+            == Some(release.sha256.as_str())
+        {
+            bail!(
+                "toolchain `{name}` version `{}` is already installed",
+                release.toolchain_version
+            );
+        }
+
+        fs::remove_dir_all(&final_dir).with_context(|| {
+            format!(
+                "failed to replace existing toolchain directory `{}`",
+                final_dir.display()
+            )
+        })?;
+        refreshed = true;
     }
 
     let cache_path = home.join("cache").join("downloads").join(format!(
@@ -142,6 +161,7 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
         supported_fidan_versions: release.supported_fidan_versions.clone(),
         backend_protocol_version: release.backend_protocol_version,
         helper_relpath: release.helper_relpath.clone(),
+        archive_sha256: Some(release.sha256.clone()),
     };
     let metadata_bytes =
         serde_json::to_vec_pretty(&metadata).context("failed to serialize toolchain metadata")?;
@@ -151,8 +171,11 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
         Severity::Note,
         "toolchain",
         &format!(
-            "installed {} toolchain {} for {}",
-            release.kind, release.toolchain_version, host
+            "{} {} toolchain {} for {}",
+            if refreshed { "refreshed" } else { "installed" },
+            release.kind,
+            release.toolchain_version,
+            host
         ),
     );
     Ok(())

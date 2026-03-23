@@ -53,6 +53,36 @@ pub fn schedule_directory_pointer_update(current: &Path, target: &Path) -> Resul
     Ok(())
 }
 
+pub fn schedule_directory_replace_and_pointer_update(
+    current: &Path,
+    target: &Path,
+    replacement: &Path,
+) -> Result<()> {
+    let script = format!(
+        "$ErrorActionPreference = 'Stop'; \
+         $deadline = (Get-Date).AddSeconds(20); \
+         while ((Get-Date) -lt $deadline) {{ \
+             try {{ \
+                 if (Test-Path -LiteralPath {current}) {{ Remove-Item -LiteralPath {current} -Force -Recurse -ErrorAction Stop; }}; \
+                 if (Test-Path -LiteralPath {target}) {{ Remove-Item -LiteralPath {target} -Force -Recurse -ErrorAction Stop; }}; \
+                 Move-Item -LiteralPath {replacement} -Destination {target} -ErrorAction Stop; \
+                 New-Item -ItemType Junction -Path {current} -Target {target} | Out-Null; \
+                 exit 0; \
+             }} catch {{ \
+                 Start-Sleep -Milliseconds 500; \
+             }} \
+         }}; \
+         throw 'timed out waiting to refresh active Fidan installation'",
+        current = powershell_literal(current),
+        target = powershell_literal(target),
+        replacement = powershell_literal(replacement),
+    );
+
+    spawn_hidden_powershell(&script)
+        .context("failed to schedule Windows active-version refresh")?;
+    Ok(())
+}
+
 pub fn schedule_cleanup(paths: &[&Path]) -> Result<()> {
     let joined = paths
         .iter()
