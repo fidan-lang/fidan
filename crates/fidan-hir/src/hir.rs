@@ -127,9 +127,25 @@ pub struct HirFunction {
     /// `true` when the `@precompile` decorator was applied — the JIT should
     /// compile this function eagerly before the first call.
     pub precompile: bool,
+    /// Built-in foreign-function metadata for `@extern`.
+    pub extern_decl: Option<HirExternDecl>,
     /// User-defined (custom) decorators applied to this function.
     pub custom_decorators: Vec<CustomDecorator>,
     pub span: Span,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HirExternAbi {
+    Native,
+    Fidan,
+}
+
+#[derive(Debug, Clone)]
+pub struct HirExternDecl {
+    pub lib: String,
+    pub symbol: String,
+    pub link: Option<String>,
+    pub abi: HirExternAbi,
 }
 
 /// A compile-time literal argument to a user-defined decorator.

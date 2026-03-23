@@ -6,8 +6,8 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use fidan_ast::{BinOp, UnOp};
 use fidan_lexer::Symbol;
 use fidan_mir::{
-    BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirFunction, MirLit, MirStringPart,
-    Operand, Rvalue, Terminator,
+    BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirExternAbi, MirFunction, MirLit,
+    MirStringPart, Operand, Rvalue, Terminator,
 };
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
@@ -20,6 +20,7 @@ use inkwell::module::{Linkage, Module};
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
+use inkwell::types::{BasicMetadataTypeEnum, BasicType};
 use inkwell::values::{
     BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue, IntValue,
     PointerValue,
@@ -252,10 +253,12 @@ struct ModuleCodegen<'ctx, 'a> {
     f64_type: inkwell::types::FloatType<'ctx>,
     runtime: HashMap<&'static str, FunctionValue<'ctx>>,
     functions: HashMap<u32, FunctionValue<'ctx>>,
+    externs: HashMap<u32, FunctionValue<'ctx>>,
     trampolines: HashMap<u32, FunctionValue<'ctx>>,
     globals: HashMap<u32, GlobalValue<'ctx>>,
     strings: BTreeMap<String, GlobalValue<'ctx>>,
     next_string_id: usize,
+    next_temp_id: usize,
 }
 
 struct FunctionState<'m, 'ctx, 'a> {
@@ -294,10 +297,12 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             f64_type,
             runtime: HashMap::new(),
             functions: HashMap::new(),
+            externs: HashMap::new(),
             trampolines: HashMap::new(),
             globals: HashMap::new(),
             strings: BTreeMap::new(),
             next_string_id: 0,
+            next_temp_id: 0,
         };
         this.declare_runtime();
         Ok(this)
@@ -339,8 +344,71 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             let fn_type = self.ptr_type.fn_type(&params, false);
             let value = self.module.add_function(&name, fn_type, None);
             self.functions.insert(function.id.0, value);
+            if function.extern_decl.is_some() {
+                let imported = self.declare_extern_import(function)?;
+                self.externs.insert(function.id.0, imported);
+            }
         }
         Ok(())
+    }
+
+    fn declare_extern_import(&mut self, function: &MirFunction) -> Result<FunctionValue<'ctx>> {
+        let decl = function
+            .extern_decl
+            .as_ref()
+            .ok_or_else(|| anyhow!("missing extern metadata for function {}", function.id.0))?;
+
+        if let Some(existing) = self.module.get_function(&decl.symbol) {
+            return Ok(existing);
+        }
+
+        let imported = match decl.abi {
+            MirExternAbi::Native => {
+                let params = function
+                    .params
+                    .iter()
+                    .map(|param| self.native_extern_param_type(&param.ty))
+                    .collect::<Vec<_>>();
+                let fn_type = match function.return_ty {
+                    fidan_mir::MirTy::Nothing | fidan_mir::MirTy::Error => {
+                        self.context.void_type().fn_type(&params, false)
+                    }
+                    _ => self
+                        .native_extern_return_type(&function.return_ty)?
+                        .fn_type(&params, false),
+                };
+                self.module
+                    .add_function(&decl.symbol, fn_type, Some(Linkage::External))
+            }
+            MirExternAbi::Fidan => self.module.add_function(
+                &decl.symbol,
+                self.ptr_type
+                    .fn_type(&[self.ptr_type.into(), self.i64_type.into()], false),
+                Some(Linkage::External),
+            ),
+        };
+        Ok(imported)
+    }
+
+    fn native_extern_param_type(&self, ty: &fidan_mir::MirTy) -> BasicMetadataTypeEnum<'ctx> {
+        match ty {
+            fidan_mir::MirTy::Integer | fidan_mir::MirTy::Handle => self.i64_type.into(),
+            fidan_mir::MirTy::Float => self.f64_type.into(),
+            fidan_mir::MirTy::Boolean => self.i8_type.into(),
+            other => panic!("unsupported native @extern parameter type in LLVM backend: {other:?}"),
+        }
+    }
+
+    fn native_extern_return_type(
+        &self,
+        ty: &fidan_mir::MirTy,
+    ) -> Result<inkwell::types::BasicTypeEnum<'ctx>> {
+        Ok(match ty {
+            fidan_mir::MirTy::Integer | fidan_mir::MirTy::Handle => self.i64_type.into(),
+            fidan_mir::MirTy::Float => self.f64_type.into(),
+            fidan_mir::MirTy::Boolean => self.i8_type.into(),
+            other => bail!("unsupported native @extern return type in LLVM backend: {other:?}"),
+        })
     }
 
     fn emit_entry_main(&mut self) -> Result<()> {
@@ -429,6 +497,9 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             .get(&function.id.0)
             .copied()
             .ok_or_else(|| anyhow!("missing declared function {}", function.id.0))?;
+        if function.extern_decl.is_some() {
+            return self.lower_extern_wrapper(function, function_value);
+        }
         let entry = self.context.append_basic_block(function_value, "entry");
         let mut blocks = HashMap::new();
         for block in &function.blocks {
@@ -444,6 +515,151 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
         state.initialize_entry()?;
         state.lower_blocks()?;
         Ok(())
+    }
+
+    fn lower_extern_wrapper(
+        &mut self,
+        function: &MirFunction,
+        wrapper: FunctionValue<'ctx>,
+    ) -> Result<()> {
+        let decl = function
+            .extern_decl
+            .as_ref()
+            .ok_or_else(|| anyhow!("missing extern metadata for function {}", function.id.0))?;
+        let imported = self
+            .externs
+            .get(&function.id.0)
+            .copied()
+            .ok_or_else(|| anyhow!("missing imported extern function {}", function.id.0))?;
+
+        let entry = self.context.append_basic_block(wrapper, "entry");
+        self.builder.position_at_end(entry);
+
+        let boxed_params = (0..function.params.len())
+            .map(|index| {
+                wrapper
+                    .get_nth_param(index as u32)
+                    .ok_or_else(|| anyhow!("missing extern wrapper param {index}"))
+                    .map(BasicValueEnum::into_pointer_value)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let result = match decl.abi {
+            MirExternAbi::Native => self.call_native_extern(imported, function, &boxed_params)?,
+            MirExternAbi::Fidan => self.call_fidan_extern(imported, &boxed_params)?,
+        };
+
+        self.builder
+            .build_return(Some(&result))
+            .map_err(|err| anyhow!("{err}"))?;
+        Ok(())
+    }
+
+    fn call_native_extern(
+        &mut self,
+        imported: FunctionValue<'ctx>,
+        function: &MirFunction,
+        boxed_params: &[PointerValue<'ctx>],
+    ) -> Result<PointerValue<'ctx>> {
+        let mut args = Vec::with_capacity(function.params.len());
+        for (param, boxed) in function.params.iter().zip(boxed_params.iter().copied()) {
+            let value: BasicMetadataValueEnum<'ctx> = match param.ty {
+                fidan_mir::MirTy::Integer => self
+                    .call_runtime_i64("fdn_unbox_int", &[boxed.into()])?
+                    .into(),
+                fidan_mir::MirTy::Float => self
+                    .call_runtime_f64("fdn_unbox_float", &[boxed.into()])?
+                    .into(),
+                fidan_mir::MirTy::Boolean => self
+                    .call_runtime_i8("fdn_unbox_bool", &[boxed.into()])?
+                    .into(),
+                fidan_mir::MirTy::Handle => self
+                    .call_runtime_i64("fdn_unbox_handle", &[boxed.into()])?
+                    .into(),
+                ref other => {
+                    bail!("unsupported native @extern parameter type `{other:?}` in LLVM backend")
+                }
+            };
+            args.push(value);
+        }
+
+        let call_name = self.temp("extern.native");
+        let call = self
+            .builder
+            .build_call(imported, &args, &call_name)
+            .map_err(|err| anyhow!("{err}"))?;
+
+        match function.return_ty {
+            fidan_mir::MirTy::Nothing | fidan_mir::MirTy::Error => {
+                self.call_runtime_ptr("fdn_box_nothing", &[])
+            }
+            fidan_mir::MirTy::Integer => {
+                let value = call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("expected integer native @extern result"))?
+                    .into_int_value();
+                self.call_runtime_ptr("fdn_box_int", &[value.into()])
+            }
+            fidan_mir::MirTy::Float => {
+                let value = call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("expected float native @extern result"))?
+                    .into_float_value();
+                self.call_runtime_ptr("fdn_box_float", &[value.into()])
+            }
+            fidan_mir::MirTy::Boolean => {
+                let value = call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("expected boolean native @extern result"))?
+                    .into_int_value();
+                self.call_runtime_ptr("fdn_box_bool", &[value.into()])
+            }
+            fidan_mir::MirTy::Handle => {
+                let value = call
+                    .try_as_basic_value()
+                    .basic()
+                    .ok_or_else(|| anyhow!("expected handle native @extern result"))?
+                    .into_int_value();
+                self.call_runtime_ptr("fdn_box_handle", &[value.into()])
+            }
+            ref other => {
+                bail!("unsupported native @extern return type `{other:?}` in LLVM backend")
+            }
+        }
+    }
+
+    fn call_fidan_extern(
+        &mut self,
+        imported: FunctionValue<'ctx>,
+        boxed_params: &[PointerValue<'ctx>],
+    ) -> Result<PointerValue<'ctx>> {
+        let (args_ptr, args_cnt) = self.build_ptr_array(boxed_params)?;
+        let call_name = self.temp("extern.fidan");
+        let call_args: [BasicMetadataValueEnum<'ctx>; 2] = [args_ptr.into(), args_cnt.into()];
+        let call = self
+            .builder
+            .build_call(imported, &call_args, &call_name)
+            .map_err(|err| anyhow!("{err}"))?;
+        let raw = call
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("expected raw Fidan ABI extern result"))?
+            .into_pointer_value();
+        let is_null_name = self.temp("extern.fidan.is_null");
+        let is_null = self
+            .builder
+            .build_is_null(raw, &is_null_name)
+            .map_err(|err| anyhow!("{err}"))?;
+        let nothing = self.call_runtime_ptr("fdn_box_nothing", &[])?;
+        let select_name = self.temp("extern.fidan.value");
+        let select = self
+            .builder
+            .build_select(is_null, nothing, raw, &select_name)
+            .map_err(|err| anyhow!("{err}"))?;
+        Ok(select.into_pointer_value())
     }
 
     fn emit_trampolines(&mut self) -> Result<()> {
@@ -581,6 +797,10 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             "fdn_box_bool",
             self.ptr_type.fn_type(&[self.i8_type.into()], false),
         );
+        self.declare_runtime_fn(
+            "fdn_box_handle",
+            self.ptr_type.fn_type(&[self.i64_type.into()], false),
+        );
         self.declare_runtime_fn("fdn_box_nothing", self.ptr_type.fn_type(&[], false));
         self.declare_runtime_fn(
             "fdn_box_str",
@@ -620,6 +840,18 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
         );
         self.declare_runtime_fn(
             "fdn_unbox_int",
+            self.i64_type.fn_type(&[self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_unbox_float",
+            self.f64_type.fn_type(&[self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_unbox_bool",
+            self.i8_type.fn_type(&[self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_unbox_handle",
             self.i64_type.fn_type(&[self.ptr_type.into()], false),
         );
         self.declare_runtime_fn(
@@ -998,6 +1230,57 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
         self.call_decl_value(function, args)
     }
 
+    fn call_runtime_i8(
+        &mut self,
+        name: &'static str,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> Result<IntValue<'ctx>> {
+        let function = self.runtime_fn(name)?;
+        let call_name = self.temp("module.call.i8");
+        let call = self
+            .builder
+            .build_call(function, args, &call_name)
+            .map_err(|err| anyhow!("{err}"))?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("expected i8 call result"))
+            .map(BasicValueEnum::into_int_value)
+    }
+
+    fn call_runtime_i64(
+        &mut self,
+        name: &'static str,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> Result<IntValue<'ctx>> {
+        let function = self.runtime_fn(name)?;
+        let call_name = self.temp("module.call.i64");
+        let call = self
+            .builder
+            .build_call(function, args, &call_name)
+            .map_err(|err| anyhow!("{err}"))?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("expected i64 call result"))
+            .map(BasicValueEnum::into_int_value)
+    }
+
+    fn call_runtime_f64(
+        &mut self,
+        name: &'static str,
+        args: &[BasicMetadataValueEnum<'ctx>],
+    ) -> Result<inkwell::values::FloatValue<'ctx>> {
+        let function = self.runtime_fn(name)?;
+        let call_name = self.temp("module.call.f64");
+        let call = self
+            .builder
+            .build_call(function, args, &call_name)
+            .map_err(|err| anyhow!("{err}"))?;
+        call.try_as_basic_value()
+            .basic()
+            .ok_or_else(|| anyhow!("expected f64 call result"))
+            .map(BasicValueEnum::into_float_value)
+    }
+
     fn call_decl_value(
         &mut self,
         function: FunctionValue<'ctx>,
@@ -1023,6 +1306,48 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             .build_call(function, args, "")
             .map_err(|err| anyhow!("{err}"))?;
         Ok(())
+    }
+
+    fn build_ptr_array(
+        &mut self,
+        values: &[PointerValue<'ctx>],
+    ) -> Result<(PointerValue<'ctx>, IntValue<'ctx>)> {
+        if values.is_empty() {
+            return Ok((self.ptr_type.const_null(), self.i64_type.const_zero()));
+        }
+
+        let array_type = self.ptr_type.array_type(values.len() as u32);
+        let array_name = self.temp("extern.arr");
+        let array = self
+            .builder
+            .build_alloca(array_type, &array_name)
+            .map_err(|err| anyhow!("{err}"))?;
+        let zero = self.i32_type.const_zero();
+
+        for (index, value) in values.iter().enumerate() {
+            let elt_name = self.temp("extern.arr.elt");
+            let gep = unsafe {
+                self.builder.build_in_bounds_gep(
+                    array_type,
+                    array,
+                    &[zero, self.i32_type.const_int(index as u64, false)],
+                    &elt_name,
+                )
+            }
+            .map_err(|err| anyhow!("{err}"))?;
+            self.builder
+                .build_store(gep, *value)
+                .map_err(|err| anyhow!("{err}"))?;
+        }
+
+        let first_name = self.temp("extern.arr.ptr");
+        let first = unsafe {
+            self.builder
+                .build_in_bounds_gep(array_type, array, &[zero, zero], &first_name)
+        }
+        .map_err(|err| anyhow!("{err}"))?;
+
+        Ok((first, self.i64_type.const_int(values.len() as u64, false)))
     }
 
     fn box_literal(&mut self, literal: &MirLit) -> Result<PointerValue<'ctx>> {
@@ -1091,6 +1416,12 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
         global.set_initializer(&constant);
         self.strings.insert(value.to_owned(), global);
         global
+    }
+
+    fn temp(&mut self, prefix: &str) -> String {
+        let name = format!("{prefix}.{}", self.next_temp_id);
+        self.next_temp_id += 1;
+        name
     }
 }
 

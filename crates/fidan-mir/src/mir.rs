@@ -44,6 +44,7 @@ pub enum MirTy {
     Float,
     Boolean,
     String,
+    Handle,
     Nothing,
     Dynamic,
     List(Box<MirTy>),
@@ -396,10 +397,26 @@ pub struct MirFunction {
     pub local_count: u32,
     /// `true` when `@precompile` was applied — JIT should compile eagerly.
     pub precompile: bool,
+    /// Foreign-function metadata for `@extern` declarations.
+    pub extern_decl: Option<MirExternDecl>,
     /// User-defined decorator calls to fire at program startup before the init function.
     /// Each entry is `(decorator_fn_id, extra_args)`.  The runtime prepends the decorated
     /// function's name as the first string argument when dispatching.
     pub custom_decorators: Vec<(FunctionId, Vec<MirLit>)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MirExternAbi {
+    Native,
+    Fidan,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirExternDecl {
+    pub lib: String,
+    pub symbol: String,
+    pub link: Option<String>,
+    pub abi: MirExternAbi,
 }
 
 impl MirFunction {
@@ -412,6 +429,7 @@ impl MirFunction {
             blocks: vec![],
             local_count: 0,
             precompile: false,
+            extern_decl: None,
             custom_decorators: vec![],
         }
     }

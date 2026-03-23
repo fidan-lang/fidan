@@ -241,6 +241,7 @@ fn fmt_ty(ty: &MirTy) -> String {
         MirTy::String => "string".to_string(),
         MirTy::Nothing => "nothing".to_string(),
         MirTy::Dynamic => "dynamic".to_string(),
+        MirTy::Handle => "handle".to_string(),
         MirTy::List(e) => format!("list<{}>", fmt_ty(e)),
         MirTy::Dict(k, v) => format!("dict<{}, {}>", fmt_ty(k), fmt_ty(v)),
         MirTy::Tuple(ts) => format!("({})", ts.iter().map(fmt_ty).collect::<Vec<_>>().join(", ")),

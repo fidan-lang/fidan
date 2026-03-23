@@ -8,11 +8,119 @@
 // These tests guard against regressions across the entire front-to-back path
 // and also verify the static analysis passes (E0401, W1004) through real MIR.
 
+use std::ffi::c_void;
 use std::sync::Arc;
 
-use fidan_interp::{RunError, run_mir};
+use fidan_interp::{FidanValue, RunError, register_self_symbol, run_mir};
 use fidan_lexer::{Lexer, SymbolInterner};
 use fidan_source::SourceMap;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fidan_test_native_add(a: i64, b: i64) -> i64 {
+    a + b
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fidan_test_float_scale(x: f64, scale: f64) -> f64 {
+    x * scale
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fidan_test_negate_bool(v: i8) -> i8 {
+    if v == 0 { 1 } else { 0 }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fidan_test_make_handle() -> usize {
+    41
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fidan_test_inc_handle(h: usize) -> usize {
+    h + 1
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fidan_test_read_handle(h: usize) -> i64 {
+    h as i64
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fidan_test_free_handle(_: usize) {}
+
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `args_ptr` must point to `args_cnt` valid `*mut FidanValue` entries, and
+/// each pointed-to value must remain valid for the duration of the call.
+pub unsafe extern "C" fn fidan_test_add_boxed(
+    args_ptr: *const *mut FidanValue,
+    args_cnt: i64,
+) -> *mut FidanValue {
+    let args = unsafe { std::slice::from_raw_parts(args_ptr, args_cnt as usize) };
+    let a = match unsafe { &*args[0] } {
+        FidanValue::Integer(n) => *n,
+        _ => 0,
+    };
+    let b = match unsafe { &*args[1] } {
+        FidanValue::Integer(n) => *n,
+        _ => 0,
+    };
+    Box::into_raw(Box::new(FidanValue::Integer(a + b)))
+}
+
+#[unsafe(no_mangle)]
+/// # Safety
+///
+/// `args_ptr` must point to `args_cnt` valid `*mut FidanValue` entries, and
+/// each pointed-to value must remain valid for the duration of the call.
+pub unsafe extern "C" fn fidan_test_echo_boxed(
+    args_ptr: *const *mut FidanValue,
+    args_cnt: i64,
+) -> *mut FidanValue {
+    let args = unsafe { std::slice::from_raw_parts(args_ptr, args_cnt as usize) };
+    let first = unsafe { &*args[0] }.clone();
+    Box::into_raw(Box::new(first))
+}
+
+fn register_extern_test_symbols() {
+    register_self_symbol(
+        "fidan_test_native_add",
+        fidan_test_native_add as *const () as *mut c_void,
+    );
+    register_self_symbol(
+        "fidan_test_float_scale",
+        fidan_test_float_scale as *const () as *mut c_void,
+    );
+    register_self_symbol(
+        "fidan_test_negate_bool",
+        fidan_test_negate_bool as *const () as *mut c_void,
+    );
+    register_self_symbol(
+        "fidan_test_make_handle",
+        fidan_test_make_handle as *const () as *mut c_void,
+    );
+    register_self_symbol(
+        "fidan_test_inc_handle",
+        fidan_test_inc_handle as *const () as *mut c_void,
+    );
+    register_self_symbol(
+        "fidan_test_read_handle",
+        fidan_test_read_handle as *const () as *mut c_void,
+    );
+    register_self_symbol(
+        "fidan_test_free_handle",
+        fidan_test_free_handle as *const () as *mut c_void,
+    );
+    register_self_symbol(
+        "fidan_test_add_boxed",
+        fidan_test_add_boxed as *const () as *mut c_void,
+    );
+    register_self_symbol(
+        "fidan_test_echo_boxed",
+        fidan_test_echo_boxed as *const () as *mut c_void,
+    );
+}
 
 // ── Pipeline helper ───────────────────────────────────────────────────────────
 
@@ -168,6 +276,134 @@ fn null_coalesce_ok() {
 #[test]
 fn list_literal_ok() {
     assert!(run_src("var xs = [1, 2, 3]").is_ok());
+}
+
+#[test]
+fn extern_native_integer_call_ok() {
+    register_extern_test_symbols();
+    let (mut mir, interner) = build_mir(
+        r#"@extern("self", symbol = "fidan_test_native_add")
+        action nativeAdd with (a oftype integer, b oftype integer) returns integer
+
+        assert_eq(nativeAdd(20, 22), 42)"#,
+    );
+    fidan_passes::run_all(&mut mir);
+    let native_add = interner.intern("nativeAdd");
+    let extern_fn = mir
+        .functions
+        .iter()
+        .find(|f| f.name == native_add)
+        .expect("missing nativeAdd function in MIR");
+    assert!(
+        extern_fn.extern_decl.is_some(),
+        "nativeAdd lost extern metadata in MIR"
+    );
+    assert!(
+        matches!(extern_fn.return_ty, fidan_mir::MirTy::Integer),
+        "nativeAdd return type lowered incorrectly: {:?}",
+        extern_fn.return_ty
+    );
+    let builtin_call_found = mir.functions.iter().any(|func| {
+        func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|instr| {
+                matches!(instr,
+                    fidan_mir::Instr::Call {
+                        callee: fidan_mir::Callee::Builtin(sym),
+                        ..
+                    } if *sym == native_add
+                ) || matches!(instr,
+                    fidan_mir::Instr::Assign {
+                        rhs: fidan_mir::Rvalue::Call {
+                            callee: fidan_mir::Callee::Builtin(sym),
+                            ..
+                        },
+                        ..
+                    } if *sym == native_add
+                )
+            })
+        })
+    });
+    let dynamic_call_found = mir.functions.iter().any(|func| {
+        func.blocks.iter().any(|block| {
+            block.instructions.iter().any(|instr| {
+                matches!(
+                    instr,
+                    fidan_mir::Instr::Call {
+                        callee: fidan_mir::Callee::Dynamic(_),
+                        ..
+                    }
+                ) || matches!(
+                    instr,
+                    fidan_mir::Instr::Assign {
+                        rhs: fidan_mir::Rvalue::Call {
+                            callee: fidan_mir::Callee::Dynamic(_),
+                            ..
+                        },
+                        ..
+                    }
+                )
+            })
+        })
+    });
+    assert!(
+        !(builtin_call_found || dynamic_call_found),
+        "call lowering debug: builtin={builtin_call_found} dynamic={dynamic_call_found}"
+    );
+    let result = run_src(
+        r#"@extern("self", symbol = "fidan_test_native_add")
+        action nativeAdd with (a oftype integer, b oftype integer) returns integer
+
+        assert_eq(nativeAdd(20, 22), 42)"#,
+    );
+    if let Err(err) = result {
+        panic!("{}: {}", err.code, err.message);
+    }
+}
+
+#[test]
+fn extern_native_handle_lifecycle_ok() {
+    register_extern_test_symbols();
+    let result = run_src(
+        r#"@extern("self", symbol = "fidan_test_make_handle")
+        action makeHandle returns handle
+
+        @extern("self", symbol = "fidan_test_inc_handle")
+        action incHandle with (h oftype handle) returns handle
+
+        @extern("self", symbol = "fidan_test_read_handle")
+        action readHandle with (h oftype handle) returns integer
+
+        @extern("self", symbol = "fidan_test_free_handle")
+        action freeHandle with (h oftype handle)
+
+        var h = makeHandle()
+        h = incHandle(h)
+        assert_eq(readHandle(h), 42)
+        freeHandle(h)"#,
+    );
+    if let Err(err) = result {
+        panic!("{}: {}", err.code, err.message);
+    }
+}
+
+#[test]
+fn extern_fidan_abi_boxed_call_ok() {
+    register_extern_test_symbols();
+    let result = run_src(
+        r#"@unsafe
+        @extern("self", symbol = "fidan_test_add_boxed", abi = "fidan")
+        action boxedAdd with (a oftype integer, b oftype integer) returns integer
+
+        @unsafe
+        @extern("self", symbol = "fidan_test_echo_boxed", abi = "fidan")
+        action boxedEcho with (text oftype string) returns string
+
+        assert_eq(boxedAdd(10, 32), 42)
+        assert_eq(boxedEcho("hello"), "hello")"#,
+    );
+    if let Err(err) = result {
+        panic!("{}: {}", err.code, err.message);
+    }
 }
 
 // ── Runtime error paths (Err with correct code) ───────────────────────────────

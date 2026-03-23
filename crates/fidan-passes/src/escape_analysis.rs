@@ -228,6 +228,7 @@ mod tests {
                 terminator: term,
             }],
             precompile: false,
+            extern_decl: None,
             custom_decorators: vec![],
         }
     }

@@ -87,6 +87,9 @@ impl crate::Pass for Inlining {
 // ── Callee eligibility ─────────────────────────────────────────────────────
 
 fn is_inlinable(func: &MirFunction, self_id: FunctionId) -> bool {
+    if func.extern_decl.is_some() {
+        return false;
+    }
     if func.blocks.len() != 1 {
         return false;
     }

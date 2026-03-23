@@ -22,6 +22,7 @@ pub enum FidanValue {
     Integer(i64),
     Float(f64),
     Boolean(bool),
+    Handle(usize),
     Nothing,
     String(FidanString),
     List(OwnedRef<FidanList>),
@@ -74,6 +75,7 @@ impl FidanValue {
             FidanValue::Integer(_) => "integer",
             FidanValue::Float(_) => "float",
             FidanValue::Boolean(_) => "boolean",
+            FidanValue::Handle(_) => "handle",
             FidanValue::Nothing => "nothing",
             FidanValue::String(_) => "string",
             FidanValue::List(_) => "list",
@@ -103,6 +105,7 @@ impl FidanValue {
             FidanValue::Nothing => false,
             FidanValue::Integer(n) => *n != 0,
             FidanValue::Float(f) => *f != 0.0,
+            FidanValue::Handle(h) => *h != 0,
             FidanValue::String(s) => !s.is_empty(),
             // A Range is truthy when it contains at least one element.
             FidanValue::Range {
@@ -135,6 +138,7 @@ impl FidanValue {
             FidanValue::Integer(n) => FidanValue::Integer(*n),
             FidanValue::Float(f) => FidanValue::Float(*f),
             FidanValue::Boolean(b) => FidanValue::Boolean(*b),
+            FidanValue::Handle(h) => FidanValue::Handle(*h),
             FidanValue::Nothing => FidanValue::Nothing,
             FidanValue::Function(id) => FidanValue::Function(*id),
 
@@ -227,6 +231,7 @@ pub fn display(val: &FidanValue) -> String {
             }
         }
         FidanValue::Boolean(b) => b.to_string(),
+        FidanValue::Handle(h) => format!("handle({h:#x})"),
         FidanValue::Nothing => "nothing".to_string(),
         FidanValue::String(s) => s.as_str().to_string(),
         FidanValue::List(l) => {

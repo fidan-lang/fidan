@@ -10,6 +10,21 @@ use fidan_source::{FileId, Span};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExternAbiKind {
+    Native,
+    Fidan,
+}
+
+#[derive(Debug, Clone)]
+struct ExternSpec {
+    lib: String,
+    symbol: String,
+    link: Option<String>,
+    abi: ExternAbiKind,
+    span: Span,
+}
+
 // ── Data structures ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -50,6 +65,15 @@ struct ActionBody<'a> {
     body: &'a [StmtId],
     inject_this: Option<FidanType>,
     implicit_return_ty: Option<FidanType>,
+    span: Span,
+}
+
+struct ExternActionContext<'a> {
+    params: &'a [Param],
+    body: &'a [StmtId],
+    decorators: &'a [Decorator],
+    is_parallel: bool,
+    is_extension: bool,
     span: Span,
 }
 
@@ -873,15 +897,31 @@ impl TypeChecker {
                 body,
                 decorators,
                 span,
+                is_parallel,
                 ..
             } => {
-                self.check_decorators(decorators);
+                self.check_decorators(decorators, params);
+                self.validate_extern_action(
+                    module,
+                    *name,
+                    ExternActionContext {
+                        params,
+                        body,
+                        decorators,
+                        is_parallel: *is_parallel,
+                        is_extension: false,
+                        span: *span,
+                    },
+                );
                 // Track @deprecated actions for call-site warnings (W2005).
                 if decorators
                     .iter()
                     .any(|d| self.interner.resolve(d.name).as_ref() == "deprecated")
                 {
                     self.deprecated_actions.insert(*name);
+                }
+                if self.has_marker_decorator(decorators, "extern") {
+                    return;
                 }
                 // A `new` constructor inside an object always returns nothing — the
                 // runtime constructs the object itself and discards any return value.
@@ -914,9 +954,22 @@ impl TypeChecker {
                 body,
                 decorators,
                 span,
+                is_parallel,
                 ..
             } => {
-                self.check_decorators(decorators);
+                self.check_decorators(decorators, params);
+                self.validate_extern_action(
+                    module,
+                    *name,
+                    ExternActionContext {
+                        params,
+                        body,
+                        decorators,
+                        is_parallel: *is_parallel,
+                        is_extension: true,
+                        span: *span,
+                    },
+                );
                 // Track @deprecated extension actions.
                 if decorators
                     .iter()
@@ -926,6 +979,10 @@ impl TypeChecker {
                 }
                 let ext_ty = FidanType::Object(*extends);
                 let prev_this = self.this_ty.replace(ext_ty.clone());
+                if self.has_marker_decorator(decorators, "extern") {
+                    self.this_ty = prev_this;
+                    return;
+                }
                 self.check_action_body(
                     ActionBody {
                         params,
@@ -2584,6 +2641,7 @@ impl TypeChecker {
             "float" | "decimal" => FidanType::Float,
             "boolean" | "bool" => FidanType::Boolean,
             "string" | "text" => FidanType::String,
+            "handle" => FidanType::Handle,
             "nothing" | "null" | "none" => FidanType::Nothing,
             "dynamic" | "any" | "flexible" => FidanType::Dynamic,
             // First-class action/callable type
@@ -2607,8 +2665,8 @@ impl TypeChecker {
                     return FidanType::Error;
                 }
                 let builtin_names = [
-                    "integer", "float", "boolean", "string", "nothing", "dynamic", "list", "dict",
-                    "map", "shared", "pending",
+                    "integer", "float", "boolean", "string", "handle", "nothing", "dynamic",
+                    "list", "dict", "map", "shared", "pending",
                 ];
                 let obj_names: Vec<String> = self
                     .objects
@@ -2733,6 +2791,237 @@ impl TypeChecker {
         self.diags.push(Diagnostic::warning(code, message, span));
     }
 
+    fn decorator_has_name(&self, decorator: &Decorator, name: &str) -> bool {
+        self.interner.resolve(decorator.name).as_ref() == name
+    }
+
+    fn has_marker_decorator(&self, decorators: &[Decorator], name: &str) -> bool {
+        decorators.iter().any(|d| self.decorator_has_name(d, name))
+    }
+
+    fn extract_string_literal(&self, module: &Module, expr_id: ExprId) -> Option<String> {
+        match module.arena.get_expr(expr_id) {
+            Expr::StrLit { value, .. } => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    fn parse_extern_spec(
+        &mut self,
+        module: &Module,
+        function_name: Symbol,
+        decorators: &[Decorator],
+    ) -> Option<ExternSpec> {
+        let decorator = decorators
+            .iter()
+            .find(|d| self.decorator_has_name(d, "extern"))?;
+        let mut positional = decorator.args.iter().filter(|arg| arg.name.is_none());
+        let Some(lib_arg) = positional.next() else {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0304"),
+                "@extern requires a library identifier string as its first positional argument",
+                decorator.span,
+            );
+            return None;
+        };
+        let Some(lib) = self.extract_string_literal(module, lib_arg.value) else {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0304"),
+                "@extern library identifier must be a string literal",
+                decorator.span,
+            );
+            return None;
+        };
+        if positional.next().is_some() {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0304"),
+                "@extern accepts at most one positional argument",
+                decorator.span,
+            );
+        }
+
+        let mut symbol: Option<String> = None;
+        let mut link: Option<String> = None;
+        let mut abi = ExternAbiKind::Native;
+        for arg in decorator.args.iter().filter(|arg| arg.name.is_some()) {
+            let Some(name) = arg.name else { continue };
+            let key = self.interner.resolve(name);
+            match key.as_ref() {
+                "symbol" => {
+                    if let Some(value) = self.extract_string_literal(module, arg.value) {
+                        symbol = Some(value);
+                    } else {
+                        self.emit_error(
+                            fidan_diagnostics::diag_code!("E0304"),
+                            "@extern `symbol` must be a string literal",
+                            decorator.span,
+                        );
+                    }
+                }
+                "link" => {
+                    if let Some(value) = self.extract_string_literal(module, arg.value) {
+                        link = Some(value);
+                    } else {
+                        self.emit_error(
+                            fidan_diagnostics::diag_code!("E0304"),
+                            "@extern `link` must be a string literal",
+                            decorator.span,
+                        );
+                    }
+                }
+                "abi" => {
+                    if let Some(value) = self.extract_string_literal(module, arg.value) {
+                        if value.eq_ignore_ascii_case("native") {
+                            abi = ExternAbiKind::Native;
+                        } else if value.eq_ignore_ascii_case("fidan") {
+                            abi = ExternAbiKind::Fidan;
+                        } else {
+                            self.emit_error(
+                                fidan_diagnostics::diag_code!("E0304"),
+                                format!(
+                                    "@extern `abi` must be either \"native\" or \"fidan\", got `{value}`"
+                                ),
+                                decorator.span,
+                            );
+                        }
+                    } else {
+                        self.emit_error(
+                            fidan_diagnostics::diag_code!("E0304"),
+                            "@extern `abi` must be a string literal",
+                            decorator.span,
+                        );
+                    }
+                }
+                other => {
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0304"),
+                        format!("@extern does not support named argument `{other}`"),
+                        decorator.span,
+                    );
+                }
+            }
+        }
+
+        Some(ExternSpec {
+            lib,
+            symbol: symbol.unwrap_or_else(|| self.interner.resolve(function_name).to_string()),
+            link,
+            abi,
+            span: decorator.span,
+        })
+    }
+
+    fn native_extern_type_allowed(ty: &FidanType) -> bool {
+        matches!(
+            ty,
+            FidanType::Integer | FidanType::Float | FidanType::Boolean | FidanType::Handle
+        )
+    }
+
+    fn native_extern_return_type_allowed(ty: &FidanType) -> bool {
+        Self::native_extern_type_allowed(ty) || matches!(ty, FidanType::Nothing)
+    }
+
+    fn validate_extern_action(
+        &mut self,
+        module: &Module,
+        name: Symbol,
+        ctx: ExternActionContext<'_>,
+    ) {
+        let Some(spec) = self.parse_extern_spec(module, name, ctx.decorators) else {
+            if self.has_marker_decorator(ctx.decorators, "unsafe")
+                && !self.has_marker_decorator(ctx.decorators, "extern")
+            {
+                self.emit_warning(
+                    fidan_diagnostics::diag_code!("W2004"),
+                    "@unsafe has no effect without @extern",
+                    ctx.span,
+                );
+            }
+            return;
+        };
+
+        if self.this_ty.is_some() || ctx.is_extension {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0304"),
+                "@extern is only allowed on top-level actions",
+                ctx.span,
+            );
+        }
+        if ctx.is_parallel {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0304"),
+                "@extern actions cannot be declared `parallel`",
+                ctx.span,
+            );
+        }
+        if self.has_marker_decorator(ctx.decorators, "precompile") {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0304"),
+                "@precompile cannot be used together with @extern",
+                ctx.span,
+            );
+        }
+        if !ctx.body.is_empty() {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0304"),
+                "@extern actions must omit their body",
+                ctx.span,
+            );
+        }
+        if matches!(spec.abi, ExternAbiKind::Fidan)
+            && !self.has_marker_decorator(ctx.decorators, "unsafe")
+        {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0304"),
+                "@extern(..., abi = \"fidan\") requires the @unsafe decorator",
+                spec.span,
+            );
+        }
+
+        for param in ctx.params {
+            if param.optional || param.default.is_some() {
+                let pname = self.interner.resolve(param.name);
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0304"),
+                    format!(
+                        "@extern parameter `{pname}` cannot be optional or have a default value"
+                    ),
+                    param.span,
+                );
+            }
+            if matches!(spec.abi, ExternAbiKind::Native) {
+                let ty = self.resolve_type_expr(&param.ty);
+                if !Self::native_extern_type_allowed(&ty) {
+                    let ty_name = self.ty_name(&ty);
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0304"),
+                        format!(
+                            "native @extern parameter `{}` has unsupported type `{ty_name}`; use integer, float, boolean, or handle",
+                            self.interner.resolve(param.name)
+                        ),
+                        param.span,
+                    );
+                }
+            }
+        }
+
+        if matches!(spec.abi, ExternAbiKind::Native)
+            && let Some(action_info) = self.actions.get(&name)
+            && !Self::native_extern_return_type_allowed(&action_info.return_ty)
+        {
+            let ty_name = self.ty_name(&action_info.return_ty);
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0304"),
+                format!(
+                    "native @extern action `{}` has unsupported return type `{ty_name}`; use integer, float, boolean, nothing, or handle",
+                    self.interner.resolve(name)
+                ),
+                ctx.span,
+            );
+        }
+    }
+
     /// Validate a list of decorators, emitting W2004 for any that are not
     /// recognised by the compiler, and E0303 / E0304 for signature mismatches.
     ///
@@ -2749,8 +3038,8 @@ impl TypeChecker {
     /// - **E0304**: extra arguments passed to the decorator (`@dec(arg1, …)`)
     ///   must match the number of *remaining* parameters (params after the first
     ///   `action` param).  Too many or too few is an error.
-    fn check_decorators(&mut self, decorators: &[Decorator]) {
-        const KNOWN: &[&str] = &["precompile", "deprecated"];
+    fn check_decorators(&mut self, decorators: &[Decorator], params: &[Param]) {
+        const KNOWN: &[&str] = &["precompile", "deprecated", "extern", "unsafe"];
         for dec in decorators {
             let name = self.interner.resolve(dec.name);
             if KNOWN.contains(&name.as_ref()) {
@@ -2813,6 +3102,8 @@ impl TypeChecker {
                 }
             }
         }
+
+        let _ = params;
     }
 
     /// Emit W2002 if `expr_id` is a bare literal with no side effects.

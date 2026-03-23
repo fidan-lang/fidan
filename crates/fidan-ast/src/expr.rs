@@ -222,7 +222,7 @@ impl Expr {
 
 #[derive(Debug, Clone)]
 pub struct Arg {
-    pub name: Option<Symbol>, // `name:` for named args; None for positional
+    pub name: Option<Symbol>, // named arg when present; None for positional
     pub value: ExprId,
     pub span: Span,
 }

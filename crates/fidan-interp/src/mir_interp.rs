@@ -26,6 +26,7 @@ use fidan_stdlib::{SandboxPolicy, SandboxViolation, StdlibResult, parallel::Para
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::builtins;
+use crate::externs;
 use crate::profiler::{FnProfileEntry, FnProfileItem, ProfileReport};
 use fidan_codegen_cranelift::{JitCompiler, JitFnEntry, call_jit_fn};
 
@@ -645,6 +646,21 @@ impl MirMachine {
 
     fn call_function(&mut self, fn_id: FunctionId, args: Vec<FidanValue>) -> MirResult {
         let func = self.program.function(fn_id);
+
+        if func.extern_decl.is_some() {
+            if self.sandbox.is_some() {
+                return Err(MirSignal::SandboxViolation(
+                    fidan_diagnostics::diag_code!("R4003"),
+                    format!(
+                        "foreign call to `{}` is denied under --sandbox",
+                        self.interner.resolve(func.name)
+                    ),
+                ));
+            }
+            return externs::call_extern(func, args).map_err(|msg| {
+                MirSignal::RuntimeError(fidan_diagnostics::diag_code!("R0001"), msg)
+            });
+        }
 
         // ── JIT hot-path check ────────────────────────────────────────────────
         // NOTE: Profiling disables JIT (jit_threshold is set to 0 by
@@ -1489,6 +1505,14 @@ impl MirMachine {
         match callee {
             Callee::Fn(fn_id) => self.call_function(*fn_id, args),
             Callee::Builtin(sym) => {
+                if let Some(extern_fn) = self
+                    .program
+                    .functions
+                    .iter()
+                    .find(|f| f.name == *sym && f.extern_decl.is_some())
+                {
+                    return self.call_function(extern_fn.id, args);
+                }
                 let name: Arc<str> = self.sym_str(*sym);
                 // Check if this is a free-imported stdlib function (e.g. `use std.io.{readFile}`).
                 if let Some(module) = self.stdlib_free_fns.get(&name).cloned() {

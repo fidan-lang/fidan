@@ -9,10 +9,17 @@ pub fn link_codegen_input(
     input_path: &Path,
     object_output_path: &Path,
 ) -> Result<()> {
+    let extern_link_inputs = collect_extern_link_inputs(request);
     if cfg!(target_os = "windows") {
-        link_windows(layout, request, input_path, object_output_path)
+        link_windows(
+            layout,
+            request,
+            input_path,
+            object_output_path,
+            &extern_link_inputs,
+        )
     } else {
-        link_unix(layout, request, input_path)
+        link_unix(layout, request, input_path, &extern_link_inputs)
     }
 }
 
@@ -21,6 +28,7 @@ fn link_windows(
     request: &CompileRequest,
     input_path: &Path,
     _object_output_path: &Path,
+    extern_link_inputs: &[String],
 ) -> Result<()> {
     let linker = resolve_windows_linker(layout)?;
     let mut cmd = Command::new(&linker);
@@ -42,6 +50,9 @@ fn link_windows(
             find_static_runtime_lib(&request.runtime_dir)
                 .context("cannot find fidan_runtime.lib — install/rebuild Fidan first")?,
         );
+    }
+    for input in extern_link_inputs {
+        append_windows_link_input(&mut cmd, input);
     }
     cmd.args([
         "kernel32.lib",
@@ -78,7 +89,12 @@ fn link_windows(
     Ok(())
 }
 
-fn link_unix(layout: &ToolchainLayout, request: &CompileRequest, input_path: &Path) -> Result<()> {
+fn link_unix(
+    layout: &ToolchainLayout,
+    request: &CompileRequest,
+    input_path: &Path,
+    extern_link_inputs: &[String],
+) -> Result<()> {
     let clang = resolve_unix_linker_driver(layout)?;
     let mut cmd = Command::new(&clang);
     cmd.arg("-o").arg(&request.output).arg(input_path);
@@ -109,6 +125,9 @@ fn link_unix(layout: &ToolchainLayout, request: &CompileRequest, input_path: &Pa
                 .context("cannot find the Fidan runtime library — install/rebuild Fidan first")?,
         );
     }
+    for input in extern_link_inputs {
+        append_unix_link_input(&mut cmd, input);
+    }
     #[cfg(target_os = "linux")]
     cmd.args(["-lpthread", "-ldl", "-lm"]);
     configure_unix_link_environment(&mut cmd, layout);
@@ -134,6 +153,63 @@ fn link_unix(layout: &ToolchainLayout, request: &CompileRequest, input_path: &Pa
     }
     strip_binary(layout, request)?;
     Ok(())
+}
+
+fn collect_extern_link_inputs(request: &CompileRequest) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut inputs = Vec::new();
+    for function in &request.payload.program.functions {
+        let Some(extern_decl) = &function.extern_decl else {
+            continue;
+        };
+        let raw = extern_decl
+            .link
+            .as_deref()
+            .unwrap_or(extern_decl.lib.as_str())
+            .trim();
+        if raw.is_empty() || raw == "self" {
+            continue;
+        }
+        if seen.insert(raw.to_owned()) {
+            inputs.push(raw.to_owned());
+        }
+    }
+    inputs
+}
+
+fn append_windows_link_input(command: &mut Command, input: &str) {
+    let path_like = input.contains(std::path::MAIN_SEPARATOR)
+        || input.contains('/')
+        || input.contains('\\')
+        || input.contains(':');
+    if path_like {
+        command.arg(input);
+        return;
+    }
+
+    let has_lib_suffix = Path::new(input)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("lib"))
+        .unwrap_or(false);
+    if has_lib_suffix {
+        command.arg(input);
+    } else {
+        command.arg(format!("{input}.lib"));
+    }
+}
+
+fn append_unix_link_input(command: &mut Command, input: &str) {
+    let path_like =
+        input.contains(std::path::MAIN_SEPARATOR) || input.contains('/') || input.contains('\\');
+    let explicit_library = [".a", ".so", ".dylib", ".tbd"]
+        .iter()
+        .any(|suffix| input.ends_with(suffix));
+    if path_like || explicit_library {
+        command.arg(input);
+    } else {
+        command.arg(format!("-l{input}"));
+    }
 }
 
 fn resolve_windows_linker(layout: &ToolchainLayout) -> Result<PathBuf> {
@@ -217,23 +293,24 @@ fn strip_binary(layout: &ToolchainLayout, request: &CompileRequest) -> Result<()
     Ok(())
 }
 
-fn configure_unix_link_environment(command: &mut Command, layout: &ToolchainLayout) {
+fn configure_unix_link_environment(_command: &mut Command, layout: &ToolchainLayout) {
     if !layout.lib_dir.is_dir() {
         return;
     }
 
     #[cfg(target_os = "linux")]
-    prepend_env_path(command, "LD_LIBRARY_PATH", &layout.lib_dir);
+    prepend_env_path(_command, "LD_LIBRARY_PATH", &layout.lib_dir);
     #[cfg(target_os = "macos")]
     {
         // Do not force LLVM's bundled libc++/libunwind onto the packaged clang
         // driver via DYLD_* on macOS. The official archive's driver expects the
         // host runtime layout, and overriding it breaks clang startup itself.
-        command.env_remove("DYLD_LIBRARY_PATH");
-        command.env_remove("DYLD_FALLBACK_LIBRARY_PATH");
+        _command.env_remove("DYLD_LIBRARY_PATH");
+        _command.env_remove("DYLD_FALLBACK_LIBRARY_PATH");
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn prepend_env_path(command: &mut Command, key: &str, value: &Path) {
     let existing = std::env::var_os(key).unwrap_or_default();
     let mut paths = vec![value.to_path_buf()];

@@ -5,6 +5,12 @@ use crate::emit_stmt::{emit_block, emit_stmt};
 use crate::printer::Printer;
 use fidan_ast::{Item, ItemId, Module, Param};
 
+fn has_extern_decorator(p: &Printer<'_>, decorators: &[fidan_ast::Decorator]) -> bool {
+    decorators
+        .iter()
+        .any(|decorator| p.sym_s(decorator.name).as_ref() == "extern")
+}
+
 // ── Top-level module ──────────────────────────────────────────────────────────
 
 /// Returns `true` for items that warrant surrounding blank lines (actions,
@@ -253,11 +259,16 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
                 p.w(&dn);
                 if !dec.args.is_empty() {
                     p.w("(");
-                    for (i, &arg) in dec.args.iter().enumerate() {
+                    for (i, arg) in dec.args.iter().enumerate() {
                         if i > 0 {
                             p.w(", ");
                         }
-                        emit_expr(p, arg);
+                        if let Some(name) = arg.name {
+                            let n = p.sym_s(name);
+                            p.w(&n);
+                            p.w(" = ");
+                        }
+                        emit_expr(p, arg.value);
                     }
                     p.w(")");
                 }
@@ -292,6 +303,10 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
                 emit_type(p, rt);
             }
 
+            if has_extern_decorator(p, decorators) && body.is_empty() {
+                return;
+            }
+
             p.w(" {");
             emit_block(p, body);
             p.w("}");
@@ -314,11 +329,16 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
                 p.w(&dn);
                 if !dec.args.is_empty() {
                     p.w("(");
-                    for (i, &arg) in dec.args.iter().enumerate() {
+                    for (i, arg) in dec.args.iter().enumerate() {
                         if i > 0 {
                             p.w(", ");
                         }
-                        emit_expr(p, arg);
+                        if let Some(name) = arg.name {
+                            let n = p.sym_s(name);
+                            p.w(&n);
+                            p.w(" = ");
+                        }
+                        emit_expr(p, arg.value);
                     }
                     p.w(")");
                 }

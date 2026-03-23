@@ -724,7 +724,8 @@ the Fidan compiler.  Recognised decorators are:
 
     @precompile   — eagerly JIT-compile the action before the first call
     @deprecated   — mark the action as deprecated; callers receive W2005
-    @extern       — (reserved, not yet implemented)
+    @extern       — declare a foreign function imported from a native library
+    @unsafe       — acknowledge an intentionally unsafe extern boundary
     @gpu          — (reserved, not yet implemented)
 
 The unrecognised decorator is silently ignored at runtime, but it is

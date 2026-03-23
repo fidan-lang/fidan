@@ -12,6 +12,7 @@ members = [
   "crates/fidan-passes",
   "crates/fidan-runtime",
   "crates/fidan-interp",
+  "crates/fidan-extern-fixture",
   "crates/libfidan",
   "crates/fidan-embed",
   "crates/fidan-codegen-cranelift",

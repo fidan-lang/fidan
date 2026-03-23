@@ -1,6 +1,6 @@
 // fidan-parser — Pratt (top-down operator precedence) expression parser
 use crate::parser::Parser;
-use fidan_ast::{Arg, BinOp, CheckArm, Expr, ExprId, InterpPart, Stmt, UnOp};
+use fidan_ast::{BinOp, CheckArm, Expr, ExprId, InterpPart, Stmt, UnOp};
 use fidan_lexer::{Lexer, TokenKind};
 use fidan_source::{SourceFile, Span};
 use std::sync::Arc;
@@ -673,52 +673,7 @@ impl<'t> Parser<'t> {
     // `(` already consumed by caller.
 
     fn parse_call(&mut self, callee: ExprId, start: u32) -> ExprId {
-        let mut args = vec![];
-        while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
-            self.skip_terminators();
-            if matches!(self.peek(), TokenKind::RParen) {
-                break;
-            }
-
-            let arg_start = self.current_span().start;
-
-            // Named argument: `name set value` or `name = value`
-            let arg = if let TokenKind::Ident(sym) = self.peek().clone() {
-                if matches!(self.peek_nth(1), TokenKind::Set | TokenKind::Assign) {
-                    let name = sym;
-                    self.advance(); // eat ident
-                    self.advance(); // eat set/=
-                    let value = self.parse_expr();
-                    let end = self.module.arena.get_expr(value).span().end;
-                    Arg {
-                        name: Some(name),
-                        value,
-                        span: Span::new(self.module.file, arg_start, end),
-                    }
-                } else {
-                    let value = self.parse_expr();
-                    let end = self.module.arena.get_expr(value).span().end;
-                    Arg {
-                        name: None,
-                        value,
-                        span: Span::new(self.module.file, arg_start, end),
-                    }
-                }
-            } else {
-                let value = self.parse_expr();
-                let end = self.module.arena.get_expr(value).span().end;
-                Arg {
-                    name: None,
-                    value,
-                    span: Span::new(self.module.file, arg_start, end),
-                }
-            };
-
-            args.push(arg);
-            if !self.eat(&TokenKind::Comma) {
-                break;
-            }
-        }
+        let args = self.parse_arg_list();
         let end = self.current_span().end;
         self.expect_tok(&TokenKind::RParen);
         self.module.arena.alloc_expr(Expr::Call {

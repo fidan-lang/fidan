@@ -123,6 +123,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn extern_action_without_body_parses() {
+        let (_, diags) = parse_src(
+            r#"@extern("self", symbol = "native_add")
+            action nativeAdd with (a oftype integer, b oftype integer) returns integer"#,
+        );
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn decorator_positional_after_named_is_rejected() {
+        let (_, diags) = parse_src(
+            r#"@extern("self", symbol = "native_add", "oops")
+            action nativeAdd returns integer"#,
+        );
+        assert!(
+            errors(&diags)
+                .iter()
+                .any(|msg| msg.contains("positional arguments must come before named arguments")),
+            "expected positional-after-named error, got {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn decorator_duplicate_named_arg_is_rejected() {
+        let (_, diags) = parse_src(
+            r#"@extern("self", symbol = "a", symbol = "b")
+            action nativeAdd returns integer"#,
+        );
+        assert!(
+            errors(&diags)
+                .iter()
+                .any(|msg| msg.contains("duplicate named argument")),
+            "expected duplicate named arg error, got {:?}",
+            errors(&diags)
+        );
+    }
+
     // ── Object declarations ───────────────────────────────────────────────────
 
     #[test]

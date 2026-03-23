@@ -133,6 +133,11 @@ pub extern "C" fn fdn_box_bool(v: i8) -> *mut FidanValue {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn fdn_box_handle(v: usize) -> *mut FidanValue {
+    into_raw(FidanValue::Handle(v))
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn fdn_box_nothing() -> *mut FidanValue {
     into_raw(FidanValue::Nothing)
 }
@@ -232,6 +237,15 @@ pub unsafe extern "C" fn fdn_unbox_bool(ptr: *mut FidanValue) -> i8 {
     match borrow(ptr) {
         FidanValue::Boolean(b) => *b as i8,
         FidanValue::Integer(n) => (*n != 0) as i8,
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_unbox_handle(ptr: *mut FidanValue) -> usize {
+    match borrow(ptr) {
+        FidanValue::Handle(h) => *h,
+        FidanValue::Integer(n) => (*n).max(0) as usize,
         _ => 0,
     }
 }

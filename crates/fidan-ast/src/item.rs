@@ -125,6 +125,6 @@ pub struct Param {
 #[derive(Debug, Clone)]
 pub struct Decorator {
     pub name: Symbol,
-    pub args: Vec<crate::ExprId>,
+    pub args: Vec<crate::Arg>,
     pub span: Span,
 }

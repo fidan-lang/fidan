@@ -9,20 +9,27 @@
 use fidan_ast::{Arg, AstArena, Expr, ExprId, InterpPart, Item, Module, Param, Stmt, StmtId};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::Span;
-use fidan_typeck::{FidanType, TypedModule};
+use fidan_typeck::{ActionInfo, FidanType, TypedModule};
 
 /// Decorator name for JIT pre-compilation.  Used in three places during lowering;
 /// a single constant prevents typo-divergence.
 const DECORATOR_PRECOMPILE: &str = "precompile";
+const DECORATOR_EXTERN: &str = "extern";
+const DECORATOR_UNSAFE: &str = "unsafe";
 
 /// All built-in decorator names.  Any decorator NOT in this list and present in
 /// the symbol table as an `Action` is treated as a user-defined custom decorator.
-const BUILTIN_DECORATORS: &[&str] = &[DECORATOR_PRECOMPILE, "deprecated"];
+const BUILTIN_DECORATORS: &[&str] = &[
+    DECORATOR_PRECOMPILE,
+    "deprecated",
+    DECORATOR_EXTERN,
+    DECORATOR_UNSAFE,
+];
 
 use crate::hir::{
     CustomDecorator, DecoratorArg, HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf,
-    HirExpr, HirExprKind, HirField, HirFunction, HirGlobal, HirInterpPart, HirModule, HirObject,
-    HirParam, HirStmt, HirTask, HirTestDecl, HirUseDecl,
+    HirExpr, HirExprKind, HirExternAbi, HirExternDecl, HirField, HirFunction, HirGlobal,
+    HirInterpPart, HirModule, HirObject, HirParam, HirStmt, HirTask, HirTestDecl, HirUseDecl,
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -36,6 +43,7 @@ fn extract_custom_decorators(
     arena: &AstArena,
     decorators: &[fidan_ast::Decorator],
     interner: &SymbolInterner,
+    actions: &rustc_hash::FxHashMap<Symbol, ActionInfo>,
 ) -> Vec<CustomDecorator> {
     decorators
         .iter()
@@ -44,20 +52,108 @@ fn extract_custom_decorators(
             !BUILTIN_DECORATORS.contains(&name.as_ref())
         })
         .map(|d| {
-            let args: Vec<DecoratorArg> = d
-                .args
-                .iter()
-                .filter_map(|&id| match arena.get_expr(id) {
-                    Expr::IntLit { value, .. } => Some(DecoratorArg::Int(*value)),
-                    Expr::FloatLit { value, .. } => Some(DecoratorArg::Float(*value)),
-                    Expr::StrLit { value, .. } => Some(DecoratorArg::Str(value.clone())),
-                    Expr::BoolLit { value, .. } => Some(DecoratorArg::Bool(*value)),
-                    _ => None,
-                })
+            let ordered_args = order_decorator_args(d, actions.get(&d.name));
+            let args: Vec<DecoratorArg> = ordered_args
+                .into_iter()
+                .filter_map(|arg| literal_decorator_arg(arena, arg))
                 .collect();
             CustomDecorator { name: d.name, args }
         })
         .collect()
+}
+
+fn literal_decorator_arg(arena: &AstArena, arg: &Arg) -> Option<DecoratorArg> {
+    match arena.get_expr(arg.value) {
+        Expr::IntLit { value, .. } => Some(DecoratorArg::Int(*value)),
+        Expr::FloatLit { value, .. } => Some(DecoratorArg::Float(*value)),
+        Expr::StrLit { value, .. } => Some(DecoratorArg::Str(value.clone())),
+        Expr::BoolLit { value, .. } => Some(DecoratorArg::Bool(*value)),
+        _ => None,
+    }
+}
+
+fn order_decorator_args<'a>(
+    decorator: &'a fidan_ast::Decorator,
+    info: Option<&'a ActionInfo>,
+) -> Vec<&'a Arg> {
+    let Some(info) = info else {
+        return decorator.args.iter().collect();
+    };
+    if decorator.args.iter().all(|arg| arg.name.is_none()) {
+        return decorator.args.iter().collect();
+    }
+
+    let mut positional = decorator.args.iter().filter(|arg| arg.name.is_none());
+    let named: rustc_hash::FxHashMap<Symbol, &Arg> = decorator
+        .args
+        .iter()
+        .filter_map(|arg| arg.name.map(|name| (name, arg)))
+        .collect();
+
+    info.params
+        .iter()
+        .skip(1)
+        .filter_map(|param| {
+            named
+                .get(&param.name)
+                .copied()
+                .or_else(|| positional.next())
+        })
+        .collect()
+}
+
+fn lower_extern_decl(
+    arena: &AstArena,
+    decorators: &[fidan_ast::Decorator],
+    interner: &SymbolInterner,
+    function_name: Symbol,
+) -> Option<HirExternDecl> {
+    let decorator = decorators
+        .iter()
+        .find(|d| interner.resolve(d.name).as_ref() == DECORATOR_EXTERN)?;
+    let mut positional = decorator.args.iter().filter(|arg| arg.name.is_none());
+    let lib = positional
+        .next()
+        .and_then(|arg| match arena.get_expr(arg.value) {
+            Expr::StrLit { value, .. } => Some(value.clone()),
+            _ => None,
+        })?;
+
+    let mut symbol: Option<String> = None;
+    let mut link: Option<String> = None;
+    let mut abi = HirExternAbi::Native;
+
+    for arg in decorator.args.iter().filter(|arg| arg.name.is_some()) {
+        let Some(name) = arg.name else { continue };
+        let key = interner.resolve(name);
+        match key.as_ref() {
+            "symbol" => {
+                if let Expr::StrLit { value, .. } = arena.get_expr(arg.value) {
+                    symbol = Some(value.clone());
+                }
+            }
+            "link" => {
+                if let Expr::StrLit { value, .. } = arena.get_expr(arg.value) {
+                    link = Some(value.clone());
+                }
+            }
+            "abi" => {
+                if let Expr::StrLit { value, .. } = arena.get_expr(arg.value)
+                    && value.eq_ignore_ascii_case("fidan")
+                {
+                    abi = HirExternAbi::Fidan;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Some(HirExternDecl {
+        lib,
+        symbol: symbol.unwrap_or_else(|| interner.resolve(function_name).to_string()),
+        link,
+        abi,
+    })
 }
 
 // ── Context ────────────────────────────────────────────────────────────────────
@@ -76,6 +172,7 @@ struct LowerFunction<'a> {
     body: &'a [StmtId],
     is_parallel: bool,
     precompile: bool,
+    extern_decl: Option<HirExternDecl>,
     custom_decorators: Vec<crate::hir::CustomDecorator>,
     span: Span,
 }
@@ -580,6 +677,7 @@ impl<'a> Ctx<'a> {
             body,
             is_parallel,
             precompile,
+            extern_decl,
             custom_decorators,
             span,
         } = function;
@@ -592,6 +690,7 @@ impl<'a> Ctx<'a> {
             body: self.lower_stmts(body),
             is_parallel,
             precompile,
+            extern_decl,
             custom_decorators,
             span,
         }
@@ -613,6 +712,7 @@ fn resolve_type_expr_simple(te: &fidan_ast::TypeExpr, interner: &SymbolInterner)
             "integer" => FidanType::Integer,
             "float" => FidanType::Float,
             "boolean" => FidanType::Boolean,
+            "handle" => FidanType::Handle,
             "nothing" => FidanType::Nothing,
             "dynamic" => FidanType::Dynamic,
             _ => FidanType::Object(*name),
@@ -716,8 +816,14 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                             let precompile = decorators.iter().any(|d| {
                                 ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE
                             });
-                            let custom_decs =
-                                extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
+                            let extern_decl =
+                                lower_extern_decl(ctx.arena, &decorators, ctx.interner, mname);
+                            let custom_decs = extract_custom_decorators(
+                                ctx.arena,
+                                &decorators,
+                                ctx.interner,
+                                &typed.actions,
+                            );
                             Some(ctx.lower_function(LowerFunction {
                                 name: mname,
                                 extends: None,
@@ -726,6 +832,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                                 body: &body,
                                 is_parallel,
                                 precompile,
+                                extern_decl,
                                 custom_decorators: custom_decs,
                                 span: mspan,
                             }))
@@ -762,7 +869,9 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 let precompile = decorators
                     .iter()
                     .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
-                let custom_decs = extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
+                let extern_decl = lower_extern_decl(ctx.arena, &decorators, ctx.interner, name);
+                let custom_decs =
+                    extract_custom_decorators(ctx.arena, &decorators, ctx.interner, &typed.actions);
                 functions.push(ctx.lower_function(LowerFunction {
                     name,
                     extends: None,
@@ -771,6 +880,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     body: &body,
                     is_parallel,
                     precompile,
+                    extern_decl,
                     custom_decorators: custom_decs,
                     span,
                 }));
@@ -796,7 +906,9 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 let precompile = decorators
                     .iter()
                     .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
-                let custom_decs = extract_custom_decorators(ctx.arena, &decorators, ctx.interner);
+                let extern_decl = lower_extern_decl(ctx.arena, &decorators, ctx.interner, name);
+                let custom_decs =
+                    extract_custom_decorators(ctx.arena, &decorators, ctx.interner, &typed.actions);
                 functions.push(ctx.lower_function(LowerFunction {
                     name,
                     extends: Some(extends),
@@ -805,6 +917,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     body: &body,
                     is_parallel,
                     precompile,
+                    extern_decl,
                     custom_decorators: custom_decs,
                     span,
                 }));

@@ -17,15 +17,15 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use fidan_ast::BinOp;
 use fidan_hir::{
     DecoratorArg, HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr,
-    HirExprKind, HirFunction, HirInterpPart, HirModule, HirStmt,
+    HirExprKind, HirExternAbi, HirExternDecl, HirFunction, HirInterpPart, HirModule, HirStmt,
 };
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_typeck::FidanType;
 
 use crate::mir::{
-    BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirEnumInfo, MirFunction, MirGlobal,
-    MirLit, MirObjectInfo, MirParam, MirProgram, MirStringPart, MirTy, MirUseDecl, Operand,
-    PhiNode, Rvalue, Terminator,
+    BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirEnumInfo, MirExternAbi,
+    MirExternDecl, MirFunction, MirGlobal, MirLit, MirObjectInfo, MirParam, MirProgram,
+    MirStringPart, MirTy, MirUseDecl, Operand, PhiNode, Rvalue, Terminator,
 };
 
 // ── Parallel-for deferred body ───────────────────────────────────────────────
@@ -286,6 +286,7 @@ fn fidan_ty_to_mir(ty: &FidanType) -> MirTy {
         FidanType::Float => MirTy::Float,
         FidanType::Boolean => MirTy::Boolean,
         FidanType::String => MirTy::String,
+        FidanType::Handle => MirTy::Handle,
         FidanType::Nothing => MirTy::Nothing,
         FidanType::Dynamic => MirTy::Dynamic,
         FidanType::List(e) => MirTy::List(Box::new(fidan_ty_to_mir(e))),
@@ -300,6 +301,18 @@ fn fidan_ty_to_mir(ty: &FidanType) -> MirTy {
         FidanType::Pending(t) => MirTy::Pending(Box::new(fidan_ty_to_mir(t))),
         FidanType::Function => MirTy::Function,
         FidanType::Unknown | FidanType::Error => MirTy::Error,
+    }
+}
+
+fn hir_extern_to_mir(extern_decl: &HirExternDecl) -> MirExternDecl {
+    MirExternDecl {
+        lib: extern_decl.lib.clone(),
+        symbol: extern_decl.symbol.clone(),
+        link: extern_decl.link.clone(),
+        abi: match extern_decl.abi {
+            HirExternAbi::Native => MirExternAbi::Native,
+            HirExternAbi::Fidan => MirExternAbi::Fidan,
+        },
     }
 }
 
@@ -2858,6 +2871,8 @@ pub fn lower_program(
             fidan_ty_to_mir(&func.return_ty),
         ));
         prog.functions.last_mut().unwrap().precompile = func.precompile;
+        prog.functions.last_mut().unwrap().extern_decl =
+            func.extern_decl.as_ref().map(hir_extern_to_mir);
         if let Some(cls) = func.extends {
             ext_fn_map.insert(func.name, cls);
         }
@@ -2892,6 +2907,8 @@ pub fn lower_program(
                 fidan_ty_to_mir(&method.return_ty),
             ));
             prog.functions.last_mut().unwrap().precompile = method.precompile;
+            prog.functions.last_mut().unwrap().extern_decl =
+                method.extern_decl.as_ref().map(hir_extern_to_mir);
             obj_info.methods.insert(method.name, id);
             if method.name == new_sym {
                 obj_info.init_fn = Some(id);

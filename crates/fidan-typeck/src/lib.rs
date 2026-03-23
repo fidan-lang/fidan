@@ -205,6 +205,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn extern_native_action_is_clean() {
+        assert!(
+            check_errors(
+                r#"@extern("self", symbol = "native_add")
+                action nativeAdd with (a oftype integer, b oftype integer) returns integer"#
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn extern_fidan_requires_unsafe() {
+        let errors = check_errors(
+            r#"@extern("self", abi = "fidan")
+            action echo with (text oftype string) returns string"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("requires the @unsafe decorator")),
+            "expected missing @unsafe error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn extern_native_rejects_string_params() {
+        let errors = check_errors(
+            r#"@extern("self")
+            action bad with (text oftype string) returns integer"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("unsupported type `string`")),
+            "expected unsupported native type error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn extern_body_is_rejected() {
+        let errors = check_errors(
+            r#"@extern("self")
+            action bad returns integer {
+                return 1
+            }"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("must omit their body")),
+            "expected bodyless extern error, got {errors:?}"
+        );
+    }
+
     // ── Parallel-safety diagnostics ───────────────────────────────────────────
 
     #[test]

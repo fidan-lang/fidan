@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-pub const LLVM_BACKEND_PROTOCOL_VERSION: u32 = 2;
+pub const LLVM_BACKEND_PROTOCOL_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlvmCompileRequest {

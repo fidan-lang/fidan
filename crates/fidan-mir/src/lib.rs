@@ -7,9 +7,9 @@ mod mir;
 pub use display::print_program;
 pub use lower::lower_program;
 pub use mir::{
-    BasicBlock, BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirEnumInfo, MirFunction,
-    MirGlobal, MirLit, MirObjectInfo, MirParam, MirProgram, MirStringPart, MirTy, MirUseDecl,
-    Operand, PhiNode, Rvalue, Terminator,
+    BasicBlock, BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirEnumInfo, MirExternAbi,
+    MirExternDecl, MirFunction, MirGlobal, MirLit, MirObjectInfo, MirParam, MirProgram,
+    MirStringPart, MirTy, MirUseDecl, Operand, PhiNode, Rvalue, Terminator,
 };
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

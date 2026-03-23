@@ -396,6 +396,7 @@ fn validate_type(ty: &MirTy, backend: &BackendContext<'_>) -> Result<()> {
         MirTy::Integer
         | MirTy::Float
         | MirTy::Boolean
+        | MirTy::Handle
         | MirTy::String
         | MirTy::Nothing
         | MirTy::Dynamic

@@ -37,7 +37,8 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{
     BlockId as MirBlockId, Callee, FunctionId as MirFunctionId, GlobalId, Instr, LocalId,
-    MirFunction, MirLit, MirProgram, MirStringPart, MirTy, Operand, Rvalue, Terminator,
+    MirExternAbi, MirFunction, MirLit, MirProgram, MirStringPart, MirTy, Operand, Rvalue,
+    Terminator,
 };
 use fidan_stdlib::{
     MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_receiver_method, infer_stdlib_method,
@@ -151,6 +152,7 @@ impl AotCompiler {
 
         // ── Forward-declare all Fidan functions ────────────────────────────────
         let fn_ids = declare_all_functions(&mut module, program, &interner)?;
+        let extern_fn_ids = declare_all_extern_functions(&mut module, program)?;
 
         // ── Declare writable global data slots (one 8-byte slot per MirGlobal) ──
         let global_data_ids: Vec<cranelift_module::DataId> = program
@@ -186,6 +188,7 @@ impl AotCompiler {
                 &mut module,
                 &rt,
                 &fn_ids,
+                &extern_fn_ids,
                 &global_data_ids,
                 &mut ctx,
                 &mut builder_ctx,
@@ -241,6 +244,7 @@ impl AotCompiler {
             &opts.extra_lib_dirs,
             opts.link_dynamic,
             opts.lto,
+            &collect_extern_link_inputs(program),
         )
         .context("Cranelift AOT: linker failed")?;
 
@@ -265,6 +269,7 @@ struct RuntimeDecls {
     box_int: cranelift_module::FuncId,
     box_float: cranelift_module::FuncId,
     box_bool: cranelift_module::FuncId,
+    box_handle: cranelift_module::FuncId,
     box_nothing: cranelift_module::FuncId,
     box_str: cranelift_module::FuncId,
     box_fn_ref: cranelift_module::FuncId,
@@ -276,6 +281,7 @@ struct RuntimeDecls {
     unbox_int: cranelift_module::FuncId,
     unbox_float: cranelift_module::FuncId,
     unbox_bool: cranelift_module::FuncId,
+    unbox_handle: cranelift_module::FuncId,
     // Reference counting
     clone_any: cranelift_module::FuncId,
     drop_any: cranelift_module::FuncId,
@@ -411,6 +417,7 @@ impl RuntimeDecls {
             box_int: decl!("fdn_box_int", sig!((i64t) -> ptr)),
             box_float: decl!("fdn_box_float", sig!((f64t) -> ptr)),
             box_bool: decl!("fdn_box_bool", sig!((i8t) -> ptr)),
+            box_handle: decl!("fdn_box_handle", sig!((i64t) -> ptr)),
             box_nothing: decl!("fdn_box_nothing", sig!(() -> ptr)),
             box_str: decl!("fdn_box_str", sig!((p, i64t) -> ptr)),
             box_fn_ref: decl!("fdn_box_fn_ref", sig!((i64t) -> ptr)),
@@ -427,6 +434,7 @@ impl RuntimeDecls {
                 s
             }),
             unbox_bool: decl!("fdn_unbox_bool", sig!((p) -> i8)),
+            unbox_handle: decl!("fdn_unbox_handle", sig!((p) -> i64)),
             clone_any: decl!("fdn_clone", sig!((p) -> ptr)),
             drop_any: decl!("fdn_drop", sig!((p) -> void)),
             truthy: decl!("fdn_truthy", sig!((p) -> i8)),
@@ -535,12 +543,16 @@ fn mir_ty_to_cl(ty: &MirTy) -> cranelift_codegen::ir::Type {
         MirTy::Integer => I64,
         MirTy::Float => F64,
         MirTy::Boolean => I8,
+        MirTy::Handle => I64,
         _ => PTR_TY, // heap pointer
     }
 }
 
 fn is_scalar(ty: &MirTy) -> bool {
-    matches!(ty, MirTy::Integer | MirTy::Float | MirTy::Boolean)
+    matches!(
+        ty,
+        MirTy::Integer | MirTy::Float | MirTy::Boolean | MirTy::Handle
+    )
 }
 
 // ── Function declaration ───────────────────────────────────────────────────────
@@ -579,6 +591,63 @@ fn declare_all_functions(
         ids.push(id);
     }
     Ok(ids)
+}
+
+fn declare_all_extern_functions(
+    module: &mut ObjectModule,
+    program: &MirProgram,
+) -> Result<HashMap<u32, cranelift_module::FuncId>> {
+    let mut ids = HashMap::new();
+    for mf in &program.functions {
+        let Some(extern_decl) = &mf.extern_decl else {
+            continue;
+        };
+
+        let mut sig = module.make_signature();
+        match extern_decl.abi {
+            MirExternAbi::Native => {
+                for param in &mf.params {
+                    sig.params.push(AbiParam::new(mir_ty_to_cl(&param.ty)));
+                }
+                if !matches!(mf.return_ty, MirTy::Nothing | MirTy::Error) {
+                    sig.returns.push(AbiParam::new(mir_ty_to_cl(&mf.return_ty)));
+                }
+            }
+            MirExternAbi::Fidan => {
+                sig.params.push(AbiParam::new(PTR_TY));
+                sig.params.push(AbiParam::new(I64));
+                sig.returns.push(AbiParam::new(PTR_TY));
+            }
+        }
+
+        let id = module
+            .declare_function(&extern_decl.symbol, Linkage::Import, &sig)
+            .with_context(|| format!("declaring extern symbol `{}`", extern_decl.symbol))?;
+        ids.insert(mf.id.0, id);
+    }
+    Ok(ids)
+}
+
+fn collect_extern_link_inputs(program: &MirProgram) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut inputs = Vec::new();
+    for function in &program.functions {
+        let Some(extern_decl) = &function.extern_decl else {
+            continue;
+        };
+        let raw = extern_decl
+            .link
+            .as_deref()
+            .unwrap_or(extern_decl.lib.as_str())
+            .trim();
+        if raw.is_empty() || raw == "self" {
+            continue;
+        }
+        if seen.insert(raw.to_owned()) {
+            inputs.push(raw.to_owned());
+        }
+    }
+    inputs
 }
 
 fn mangle_fn(name: &str, id: u32) -> String {
@@ -705,11 +774,93 @@ fn compute_catch_stacks(mf: &MirFunction) -> Vec<Vec<MirBlockId>> {
 
 // ── Main function lowering ─────────────────────────────────────────────────────
 
+fn lower_extern_wrapper(
+    module: &mut ObjectModule,
+    rt: &RuntimeDecls,
+    _fn_ids: &[cranelift_module::FuncId],
+    extern_fn_ids: &HashMap<u32, cranelift_module::FuncId>,
+    ctx: &mut Context,
+    builder_ctx: &mut FunctionBuilderContext,
+    mf: &MirFunction,
+) -> Result<()> {
+    let extern_decl = mf
+        .extern_decl
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("missing extern metadata for wrapper {}", mf.id.0))?;
+
+    let mut sig = module.make_signature();
+    for param in &mf.params {
+        sig.params.push(AbiParam::new(mir_ty_to_cl(&param.ty)));
+    }
+    if !matches!(mf.return_ty, MirTy::Nothing | MirTy::Error) {
+        sig.returns.push(AbiParam::new(mir_ty_to_cl(&mf.return_ty)));
+    }
+
+    let wrapper_name = mangle_fn("__extern_wrapper", mf.id.0);
+    ctx.func = Function::with_name_signature(UserFuncName::testcase(wrapper_name.as_str()), sig);
+
+    let mut builder = FunctionBuilder::new(&mut ctx.func, builder_ctx);
+    let entry = builder.create_block();
+    builder.append_block_params_for_function_params(entry);
+    builder.switch_to_block(entry);
+    builder.seal_block(entry);
+
+    let imported_id = extern_fn_ids
+        .get(&mf.id.0)
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("missing imported extern function {}", mf.id.0))?;
+    let imported_ref = module.declare_func_in_func(imported_id, builder.func);
+    let params = builder.block_params(entry).to_vec();
+
+    match extern_decl.abi {
+        MirExternAbi::Native => {
+            let call = builder.ins().call(imported_ref, &params);
+            let results = builder.inst_results(call).to_vec();
+            if results.is_empty() {
+                builder.ins().return_(&[]);
+            } else {
+                builder.ins().return_(&[results[0]]);
+            }
+        }
+        MirExternAbi::Fidan => {
+            let boxed_args = box_fidan_abi_params(module, rt, &mut builder, mf, &params)?;
+            let (args_ptr, args_cnt) = build_boxed_value_array(&mut builder, &boxed_args)?;
+            let call = builder.ins().call(imported_ref, &[args_ptr, args_cnt]);
+            let raw_result = builder.inst_results(call)[0];
+
+            for boxed in &boxed_args {
+                call_rt(module, &mut builder, rt.drop_any, &[*boxed])?;
+            }
+
+            let result_ptr = coalesce_null_ptr_to_nothing(module, rt, &mut builder, raw_result)?;
+            if matches!(mf.return_ty, MirTy::Nothing | MirTy::Error) {
+                call_rt(module, &mut builder, rt.drop_any, &[result_ptr])?;
+                builder.ins().return_(&[]);
+            } else {
+                let value =
+                    unbox_for_declared_type(module, rt, &mut builder, result_ptr, &mf.return_ty)?;
+                if matches!(
+                    mf.return_ty,
+                    MirTy::Integer | MirTy::Float | MirTy::Boolean | MirTy::Handle
+                ) {
+                    call_rt(module, &mut builder, rt.drop_any, &[result_ptr])?;
+                }
+                builder.ins().return_(&[value]);
+            }
+        }
+    }
+
+    builder.finalize();
+
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn lower_function(
     module: &mut ObjectModule,
     rt: &RuntimeDecls,
     fn_ids: &[cranelift_module::FuncId],
+    extern_fn_ids: &HashMap<u32, cranelift_module::FuncId>,
     global_data_ids: &[cranelift_module::DataId],
     ctx: &mut Context,
     builder_ctx: &mut FunctionBuilderContext,
@@ -717,6 +868,10 @@ fn lower_function(
     mf: &MirFunction,
     interner: &SymbolInterner,
 ) -> Result<()> {
+    if mf.extern_decl.is_some() {
+        return lower_extern_wrapper(module, rt, fn_ids, extern_fn_ids, ctx, builder_ctx, mf);
+    }
+
     let global_ns_map = build_global_namespace_map(program, interner);
 
     // Build the Cranelift function signature.
@@ -867,6 +1022,89 @@ fn lower_function(
     builder.seal_all_blocks();
     builder.finalize();
     Ok(())
+}
+
+fn box_fidan_abi_params(
+    module: &mut ObjectModule,
+    rt: &RuntimeDecls,
+    builder: &mut FunctionBuilder<'_>,
+    mf: &MirFunction,
+    params: &[cranelift_codegen::ir::Value],
+) -> Result<Vec<cranelift_codegen::ir::Value>> {
+    let mut boxed = Vec::with_capacity(params.len());
+    for (param, value) in mf.params.iter().zip(params.iter().copied()) {
+        boxed.push(box_raw_value_for_type(
+            module, rt, builder, value, &param.ty,
+        )?);
+    }
+    Ok(boxed)
+}
+
+fn box_raw_value_for_type(
+    module: &mut ObjectModule,
+    rt: &RuntimeDecls,
+    builder: &mut FunctionBuilder<'_>,
+    value: cranelift_codegen::ir::Value,
+    ty: &MirTy,
+) -> Result<cranelift_codegen::ir::Value> {
+    match ty {
+        MirTy::Integer => Ok(call_rt(module, builder, rt.box_int, &[value])?.unwrap()),
+        MirTy::Float => Ok(call_rt(module, builder, rt.box_float, &[value])?.unwrap()),
+        MirTy::Boolean => Ok(call_rt(module, builder, rt.box_bool, &[value])?.unwrap()),
+        MirTy::Handle => Ok(call_rt(module, builder, rt.box_handle, &[value])?.unwrap()),
+        _ => Ok(call_rt(module, builder, rt.clone_any, &[value])?.unwrap_or(value)),
+    }
+}
+
+fn build_boxed_value_array(
+    builder: &mut FunctionBuilder<'_>,
+    values: &[cranelift_codegen::ir::Value],
+) -> Result<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> {
+    if values.is_empty() {
+        return Ok((
+            builder.ins().iconst(PTR_TY, 0),
+            builder.ins().iconst(I64, 0),
+        ));
+    }
+
+    let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+        (values.len() * 8) as u32,
+        3u8,
+    ));
+    for (index, value) in values.iter().enumerate() {
+        builder.ins().stack_store(*value, slot, (index as i32) * 8);
+    }
+    let ptr = builder.ins().stack_addr(PTR_TY, slot, 0);
+    let cnt = builder.ins().iconst(I64, values.len() as i64);
+    Ok((ptr, cnt))
+}
+
+fn coalesce_null_ptr_to_nothing(
+    module: &mut ObjectModule,
+    rt: &RuntimeDecls,
+    builder: &mut FunctionBuilder<'_>,
+    value: cranelift_codegen::ir::Value,
+) -> Result<cranelift_codegen::ir::Value> {
+    let is_null = builder.ins().icmp_imm(IntCC::Equal, value, 0);
+    let nothing = call_rt(module, builder, rt.box_nothing, &[])?.unwrap();
+    Ok(builder.ins().select(is_null, nothing, value))
+}
+
+fn unbox_for_declared_type(
+    module: &mut ObjectModule,
+    rt: &RuntimeDecls,
+    builder: &mut FunctionBuilder<'_>,
+    value: cranelift_codegen::ir::Value,
+    ty: &MirTy,
+) -> Result<cranelift_codegen::ir::Value> {
+    match ty {
+        MirTy::Integer => Ok(call_rt(module, builder, rt.unbox_int, &[value])?.unwrap()),
+        MirTy::Float => Ok(call_rt(module, builder, rt.unbox_float, &[value])?.unwrap()),
+        MirTy::Boolean => Ok(call_rt(module, builder, rt.unbox_bool, &[value])?.unwrap()),
+        MirTy::Handle => Ok(call_rt(module, builder, rt.unbox_handle, &[value])?.unwrap()),
+        _ => Ok(value),
+    }
 }
 
 // ── Instruction lowering ───────────────────────────────────────────────────────
@@ -1378,6 +1616,9 @@ fn lower_terminator(
                             MirTy::Boolean => {
                                 call_rt(module, builder, rt.unbox_bool, &[raw])?.unwrap_or(raw)
                             }
+                            MirTy::Handle => {
+                                call_rt(module, builder, rt.unbox_handle, &[raw])?.unwrap_or(raw)
+                            }
                             _ => raw,
                         }
                     } else {
@@ -1515,6 +1756,9 @@ fn lower_rvalue(
                     }
                     MirTy::Boolean => {
                         Ok(call_rt(module, builder, rt.unbox_bool, &[raw])?.unwrap_or(raw))
+                    }
+                    MirTy::Handle => {
+                        Ok(call_rt(module, builder, rt.unbox_handle, &[raw])?.unwrap_or(raw))
                     }
                     _ => Ok(raw),
                 }
@@ -2021,6 +2265,9 @@ fn dyn_binop(
             MirTy::Boolean => {
                 Ok(call_rt(module, builder, rt.unbox_bool, &[boxed])?.unwrap_or(boxed))
             }
+            MirTy::Handle => {
+                Ok(call_rt(module, builder, rt.unbox_handle, &[boxed])?.unwrap_or(boxed))
+            }
             _ => Ok(boxed), // Dynamic / String / Range: keep the boxed ptr
         }
     }
@@ -2217,6 +2464,7 @@ fn coerce_boxed_call_result(
         MirTy::Integer => call_rt(module, builder, rt.unbox_int, &[boxed])?.unwrap_or(boxed),
         MirTy::Float => call_rt(module, builder, rt.unbox_float, &[boxed])?.unwrap_or(boxed),
         MirTy::Boolean => call_rt(module, builder, rt.unbox_bool, &[boxed])?.unwrap_or(boxed),
+        MirTy::Handle => call_rt(module, builder, rt.unbox_handle, &[boxed])?.unwrap_or(boxed),
         _ => boxed,
     };
 
@@ -2553,6 +2801,7 @@ fn emit_trampoline_default_value(
         MirTy::Integer => builder.ins().iconst(I64, 0),
         MirTy::Float => builder.ins().f64const(0.0),
         MirTy::Boolean => builder.ins().iconst(I8, 0),
+        MirTy::Handle => builder.ins().iconst(I64, 0),
         _ => call_rt(module, builder, rt.box_nothing, &[])?
             .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)),
     };
@@ -2629,6 +2878,11 @@ fn emit_trampolines(
                     let inst = builder.ins().call(r, &[raw]);
                     builder.inst_results(inst)[0]
                 }
+                MirTy::Handle => {
+                    let r = module.declare_func_in_func(rt.unbox_handle, builder.func);
+                    let inst = builder.ins().call(r, &[raw]);
+                    builder.inst_results(inst)[0]
+                }
                 _ => raw,
             };
             builder.ins().jump(
@@ -2679,6 +2933,11 @@ fn emit_trampolines(
                 }
                 MirTy::Boolean => {
                     let r = module.declare_func_in_func(rt.box_bool, builder.func);
+                    let inst = builder.ins().call(r, &[raw_ret]);
+                    builder.inst_results(inst)[0]
+                }
+                MirTy::Handle => {
+                    let r = module.declare_func_in_func(rt.box_handle, builder.func);
                     let inst = builder.ins().call(r, &[raw_ret]);
                     builder.inst_results(inst)[0]
                 }
@@ -2854,6 +3113,7 @@ fn collect_phi_args(
                 MirTy::Integer => call_rt(module, builder, rt.box_int, &[val])?.unwrap_or(val),
                 MirTy::Float => call_rt(module, builder, rt.box_float, &[val])?.unwrap_or(val),
                 MirTy::Boolean => call_rt(module, builder, rt.box_bool, &[val])?.unwrap_or(val),
+                MirTy::Handle => call_rt(module, builder, rt.box_handle, &[val])?.unwrap_or(val),
                 _ => val,
             }
         } else if is_scalar(&phi_result_ty) && matches!(op_mir_ty, MirTy::Dynamic) {
@@ -2862,6 +3122,7 @@ fn collect_phi_args(
                 MirTy::Integer => call_rt(module, builder, rt.unbox_int, &[val])?.unwrap_or(val),
                 MirTy::Float => call_rt(module, builder, rt.unbox_float, &[val])?.unwrap_or(val),
                 MirTy::Boolean => call_rt(module, builder, rt.unbox_bool, &[val])?.unwrap_or(val),
+                MirTy::Handle => call_rt(module, builder, rt.unbox_handle, &[val])?.unwrap_or(val),
                 _ => val,
             }
         } else {
@@ -3160,6 +3421,7 @@ fn lower_operand_boxed(
         MirTy::Integer => Ok(call_rt(module, builder, rt.box_int, &[val])?.unwrap()),
         MirTy::Float => Ok(call_rt(module, builder, rt.box_float, &[val])?.unwrap()),
         MirTy::Boolean => Ok(call_rt(module, builder, rt.box_bool, &[val])?.unwrap()),
+        MirTy::Handle => Ok(call_rt(module, builder, rt.box_handle, &[val])?.unwrap()),
         // Error type: infer boxing from the actual Cranelift value type
         // (happens for inline expressions like `{1 + 2 * 3}` whose MIR type is <error>)
         MirTy::Error => {
@@ -3213,6 +3475,9 @@ fn lower_operand_coerced(
                 }
                 MirTy::Boolean => {
                     Ok(call_rt(module, builder, rt.unbox_bool, &[raw])?.unwrap_or(raw))
+                }
+                MirTy::Handle => {
+                    Ok(call_rt(module, builder, rt.unbox_handle, &[raw])?.unwrap_or(raw))
                 }
                 _ => Ok(raw),
             };
@@ -3398,6 +3663,7 @@ fn link(
     extra_lib_dirs: &[PathBuf],
     link_dynamic: bool,
     lto: LtoMode,
+    extern_link_inputs: &[String],
 ) -> Result<()> {
     let linker = find_linker()?;
     let runtime_dir = std::env::current_exe()
@@ -3446,6 +3712,9 @@ fn link(
                 .context("cannot find fidan_runtime.lib — build Fidan first")?;
             cmd.arg(&lib);
         }
+        for input in extern_link_inputs {
+            append_windows_link_input(&mut cmd, input);
+        }
         // Always-needed Windows system libs for a Rust staticlib.
         cmd.args([
             "kernel32.lib",
@@ -3480,6 +3749,9 @@ fn link(
                 .context("cannot find the Fidan runtime library — build Fidan first")?;
             cmd.arg(&lib);
         }
+        for input in extern_link_inputs {
+            append_unix_link_input(&mut cmd, input);
+        }
         #[cfg(target_os = "linux")]
         cmd.args(["-lpthread", "-ldl", "-lm"]);
     }
@@ -3503,6 +3775,41 @@ fn link(
         );
     }
     Ok(())
+}
+
+fn append_windows_link_input(command: &mut std::process::Command, input: &str) {
+    let path_like = input.contains(std::path::MAIN_SEPARATOR)
+        || input.contains('/')
+        || input.contains('\\')
+        || input.contains(':');
+    if path_like {
+        command.arg(input);
+        return;
+    }
+
+    let has_lib_suffix = std::path::Path::new(input)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("lib"))
+        .unwrap_or(false);
+    if has_lib_suffix {
+        command.arg(input);
+    } else {
+        command.arg(format!("{input}.lib"));
+    }
+}
+
+fn append_unix_link_input(command: &mut std::process::Command, input: &str) {
+    let path_like =
+        input.contains(std::path::MAIN_SEPARATOR) || input.contains('/') || input.contains('\\');
+    let explicit_library = [".a", ".so", ".dylib", ".tbd"]
+        .iter()
+        .any(|suffix| input.ends_with(suffix));
+    if path_like || explicit_library {
+        command.arg(input);
+    } else {
+        command.arg(format!("-l{input}"));
+    }
 }
 
 fn strip_binary(output_path: &Path, mode: StripMode) -> Result<()> {

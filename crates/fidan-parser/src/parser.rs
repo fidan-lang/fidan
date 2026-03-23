@@ -450,19 +450,14 @@ impl<'t> Parser<'t> {
 
     fn parse_decorators(&mut self) -> Vec<Decorator> {
         let mut decs = vec![];
+        self.skip_terminators();
         while matches!(self.peek(), TokenKind::At) {
             let start = self.current_span().start;
             self.advance(); // eat `@`
             let name = self.expect_ident_sym("expected decorator name");
             let args = if matches!(self.peek(), TokenKind::LParen) {
                 self.advance();
-                let mut args = vec![];
-                while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
-                    args.push(self.parse_expr());
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
-                }
+                let args = self.parse_arg_list();
                 self.expect_tok(&TokenKind::RParen);
                 args
             } else {
@@ -474,8 +469,76 @@ impl<'t> Parser<'t> {
                 args,
                 span: Span::new(self.module.file, start, end),
             });
+            self.skip_terminators();
         }
         decs
+    }
+
+    pub(crate) fn parse_arg_list(&mut self) -> Vec<fidan_ast::Arg> {
+        let mut args = vec![];
+        let mut saw_named = false;
+        let mut named_syms = std::collections::HashSet::new();
+
+        while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
+            let arg_start = self.current_span().start;
+
+            let arg = if let TokenKind::Ident(sym) = self.peek().clone() {
+                if matches!(self.peek_nth(1), TokenKind::Set | TokenKind::Assign) {
+                    let name = sym;
+                    self.advance(); // eat ident
+                    self.advance(); // eat set/=
+                    let value = self.parse_expr();
+                    let end = self.module.arena.get_expr(value).span().end;
+                    saw_named = true;
+                    if !named_syms.insert(name) {
+                        self.error(
+                            "duplicate named argument",
+                            Span::new(self.module.file, arg_start, end),
+                        );
+                    }
+                    fidan_ast::Arg {
+                        name: Some(name),
+                        value,
+                        span: Span::new(self.module.file, arg_start, end),
+                    }
+                } else {
+                    let value = self.parse_expr();
+                    let end = self.module.arena.get_expr(value).span().end;
+                    if saw_named {
+                        self.error(
+                            "positional arguments must come before named arguments",
+                            Span::new(self.module.file, arg_start, end),
+                        );
+                    }
+                    fidan_ast::Arg {
+                        name: None,
+                        value,
+                        span: Span::new(self.module.file, arg_start, end),
+                    }
+                }
+            } else {
+                let value = self.parse_expr();
+                let end = self.module.arena.get_expr(value).span().end;
+                if saw_named {
+                    self.error(
+                        "positional arguments must come before named arguments",
+                        Span::new(self.module.file, arg_start, end),
+                    );
+                }
+                fidan_ast::Arg {
+                    name: None,
+                    value,
+                    span: Span::new(self.module.file, arg_start, end),
+                }
+            };
+
+            args.push(arg);
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+
+        args
     }
 
     // ── Object declaration ────────────────────────────────────────────────────
@@ -699,8 +762,16 @@ impl<'t> Parser<'t> {
             None
         };
 
+        let is_extern = decorators
+            .iter()
+            .any(|d| self.interner.resolve(d.name).as_ref() == "extern");
+
         self.skip_terminators();
-        let body = self.parse_block();
+        let body = if is_extern && !matches!(self.peek(), TokenKind::LBrace) {
+            vec![]
+        } else {
+            self.parse_block()
+        };
         let end = self.current_span().end;
 
         if let Some(ext) = extends {

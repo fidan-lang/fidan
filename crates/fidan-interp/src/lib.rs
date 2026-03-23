@@ -6,9 +6,11 @@
 
 mod bootstrap;
 mod builtins;
+mod externs;
 mod mir_interp;
 mod profiler;
 
+pub use externs::register_self_symbol;
 pub use fidan_runtime::{FidanValue, display as display_value};
 pub use mir_interp::{
     MirMachine, MirReplState, RunError, TestResult, TraceFrame, run_mir, run_mir_repl_line,

@@ -12,6 +12,7 @@ pub enum FidanType {
     Float,
     Boolean,
     String,
+    Handle,
     Nothing,
     Dynamic,
     // Composite
@@ -117,6 +118,7 @@ impl FidanType {
             FidanType::Float => "float".into(),
             FidanType::Boolean => "boolean".into(),
             FidanType::String => "string".into(),
+            FidanType::Handle => "handle".into(),
             FidanType::Nothing => "nothing".into(),
             FidanType::Dynamic => "dynamic".into(),
             FidanType::Function => "action".into(),

@@ -413,6 +413,7 @@ mod tests {
             }],
             local_count: 0,
             precompile: false,
+            extern_decl: None,
             custom_decorators: vec![],
         }
     }
@@ -454,6 +455,7 @@ mod tests {
             }],
             local_count: 3,
             precompile: false,
+            extern_decl: None,
             custom_decorators: vec![],
         }
     }
