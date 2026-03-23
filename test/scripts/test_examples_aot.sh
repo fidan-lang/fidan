@@ -206,7 +206,11 @@ while IFS= read -r file; do
     esac
 
     set +e
-    run_with_timeout "$timeout_secs" "$stdout" "$stderr" "${stdin_flag[@]}" "$bin"
+    if [ "${#stdin_flag[@]}" -gt 0 ]; then
+        run_with_timeout "$timeout_secs" "$stdout" "$stderr" "${stdin_flag[@]}" "$bin"
+    else
+        run_with_timeout "$timeout_secs" "$stdout" "$stderr" "$bin"
+    fi
     exit_code=$?
     set -e
 
