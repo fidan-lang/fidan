@@ -171,7 +171,6 @@ function Get-WindowsLlvmBinKeepList {
 function Get-LinuxLlvmBinKeepList {
   return @(
     "clang",
-    "clang++",
     "ld.lld",
     "llvm-strip"
   )
@@ -180,7 +179,6 @@ function Get-LinuxLlvmBinKeepList {
 function Get-MacOsLlvmBinKeepList {
   return @(
     "clang",
-    "clang++",
     "ld.lld",
     "llvm-strip"
   )
@@ -299,32 +297,27 @@ function Remove-LlvmPayload {
     }
     $libKeepCandidates = @(
       Get-ChildItem -LiteralPath $libDir -Force |
-        Where-Object {
-          if ($_.PSIsContainer) {
-            return $false
-          }
+      Where-Object {
+        if ($_.PSIsContainer) {
+          return $false
+        }
 
-          $isRuntimeLib = (
-            $_.Name -like "*.so" -or
-            $_.Name -like "*.so.*" -or
-            $_.Name -like "*.dylib" -or
-            $_.Name -like "*.dylib.*"
-          )
-          if (-not $isRuntimeLib) {
-            return $false
-          }
-
-          if ($IsMacOS -and (
-            $_.Name -like "libc++*.dylib*" -or
-            $_.Name -like "libc++abi*.dylib*" -or
-            $_.Name -like "libunwind*.dylib*"
-          )) {
-            return $false
-          }
-
-          return $true
-        } |
-        Select-Object -ExpandProperty Name
+        return (
+          $_.Name -like "libclang.so" -or
+          $_.Name -like "libclang.so.*" -or
+          $_.Name -like "libclang-cpp.so" -or
+          $_.Name -like "libclang-cpp.so.*" -or
+          $_.Name -like "libLTO.so" -or
+          $_.Name -like "libLTO.so.*" -or
+          $_.Name -like "libclang.dylib" -or
+          $_.Name -like "libclang.dylib.*" -or
+          $_.Name -like "libclang-cpp.dylib" -or
+          $_.Name -like "libclang-cpp.dylib.*" -or
+          $_.Name -like "libLTO.dylib" -or
+          $_.Name -like "libLTO.dylib.*"
+        )
+      } |
+      Select-Object -ExpandProperty Name
     )
     $libKeep = Add-UnixSymlinkClosure -DirectoryPath $libDir -InitialNames $libKeepCandidates
     $keepLibNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
@@ -525,14 +518,14 @@ function Invoke-HelperBuild {
     if ($IsMacOS) {
       if (Test-Path -LiteralPath $llvmLibDir) {
         Get-ChildItem -LiteralPath $llvmLibDir -Force |
-          Where-Object {
-            -not $_.PSIsContainer -and (
-              $_.Name -like "libc++*.dylib*" -or
-              $_.Name -like "libc++abi*.dylib*" -or
-              $_.Name -like "libunwind*.dylib*"
-            )
-          } |
-          Remove-Item -Force
+        Where-Object {
+          -not $_.PSIsContainer -and (
+            $_.Name -like "libc++*.dylib*" -or
+            $_.Name -like "libc++abi*.dylib*" -or
+            $_.Name -like "libunwind*.dylib*"
+          )
+        } |
+        Remove-Item -Force
       }
 
       # Use the host C++ driver for the helper binary itself so it links against

@@ -91,11 +91,55 @@ Most languages make a trade-off: either **readable** (Python) or **fast** (C++/R
 
 ## Getting Started
 
-### Prerequisites
+### Install from a published release
 
-- **Rust toolchain** (1.82+): [rustup.rs](https://rustup.rs)
+If you just want to use Fidan, you do not need to build the compiler from source.
+
+Use the bootstrap script from this repository:
+
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/fidan-lang/fidan/main/scripts/bootstrap.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+iwr https://raw.githubusercontent.com/fidan-lang/fidan/main/scripts/bootstrap.ps1 -UseBasicParsing | iex
+```
+
+The bootstrap installer downloads the latest published Fidan release for your host, installs it into the standard Fidan install directory, and makes the first installed version active.
+
+Published archives are also available from GitHub Releases if you prefer downloading them manually:
+
+- https://github.com/fidan-lang/fidan/releases
+
+After bootstrap install, verify it with:
+
+```bash
+fidan --version
+```
+
+#### Updates and uninstall
+
+To update to the latest version:
+
+```bash
+fidan self install
+```
+
+To uninstall:
+
+```bash
+fidan self remove
+```
+
+`fidan self install` defaults to `latest`, so you only need to pass an explicit version when installing or refreshing a specific release.
 
 ### Build from source
+
+#### Prerequisites
+
+- To build from source: **Rust toolchain** (1.82+): [rustup.rs](https://rustup.rs)
 
 ```bash
 git clone https://github.com/fidan-lang/fidan.git
