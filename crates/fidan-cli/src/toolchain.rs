@@ -2,6 +2,7 @@ use crate::distribution::{
     extract_tar_gz, fetch_bytes, fetch_manifest, materialize_release_root, read_all,
     select_toolchain_release, stage_dir, verify_sha256, write_bytes,
 };
+use crate::prompts::prompt_yes_no;
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use fidan_diagnostics::{Severity, render_message_to_stderr};
@@ -26,6 +27,9 @@ pub(crate) enum ToolchainCommand {
         name: String,
         #[arg(long)]
         version: Option<String>,
+        /// Skip the interactive confirmation prompt
+        #[arg(long)]
+        confirm: bool,
     },
 }
 
@@ -34,7 +38,11 @@ pub(crate) fn run(command: ToolchainCommand) -> Result<()> {
         ToolchainCommand::Available => run_available(),
         ToolchainCommand::List => run_list(),
         ToolchainCommand::Add { name, version } => run_add(&name, version.as_deref()),
-        ToolchainCommand::Remove { name, version } => run_remove(&name, version.as_deref()),
+        ToolchainCommand::Remove {
+            name,
+            version,
+            confirm,
+        } => run_remove(&name, version.as_deref(), confirm),
     }
 }
 
@@ -181,7 +189,7 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn run_remove(name: &str, version: Option<&str>) -> Result<()> {
+fn run_remove(name: &str, version: Option<&str>, confirm: bool) -> Result<()> {
     let home = resolve_fidan_home()?;
     let host = fidan_driver::install::host_triple();
     let toolchains_root = home.join("toolchains");
@@ -211,6 +219,20 @@ fn run_remove(name: &str, version: Option<&str>) -> Result<()> {
             "toolchain `{name}` version `{}` is not installed",
             version.unwrap_or("<latest>")
         );
+    }
+
+    let target_label = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("<unknown>");
+    if !confirm
+        && !prompt_yes_no(
+            &format!("remove toolchain `{name}` version `{target_label}`?"),
+            false,
+        )?
+    {
+        render_message_to_stderr(Severity::Note, "toolchain", "cancelled");
+        return Ok(());
     }
     fs::remove_dir_all(&target)
         .with_context(|| format!("failed to remove `{}`", target.display()))?;

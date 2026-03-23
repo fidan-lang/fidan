@@ -130,17 +130,67 @@ pub fn current_binary_for_version(root: &Path, version: &str) -> PathBuf {
 }
 
 pub fn remove_bootstrap_path_entries(root: &Path) -> Result<bool> {
-    let current = current_dir(root);
+    remove_persistent_path_entry(&current_dir(root))
+}
 
+pub fn ensure_persistent_path_entry(path: &Path) -> Result<bool> {
     #[cfg(target_os = "windows")]
     {
-        windows_support::remove_user_path_entries(&current)
+        windows_support::ensure_user_path_entry(path)
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let current_text = current.to_string_lossy().to_string();
-        let path_line = format!("export PATH=\"{}:$PATH\"", current_text);
+        let path_line = bootstrap_path_line(path);
+        let profiles = candidate_bootstrap_profiles()?;
+        let already_present = profiles.iter().any(|profile| {
+            profile.exists()
+                && fs::read_to_string(profile)
+                    .map(|text| {
+                        split_lines_preserve_trailing_newline(&text)
+                            .into_iter()
+                            .any(|line| line.trim_end_matches('\r') == path_line)
+                    })
+                    .unwrap_or(false)
+        });
+
+        if already_present {
+            return Ok(false);
+        }
+
+        let target_profile = primary_bootstrap_profile()?;
+        let mut contents = if target_profile.exists() {
+            fs::read_to_string(&target_profile)
+                .with_context(|| format!("failed to read `{}`", target_profile.display()))?
+        } else {
+            String::new()
+        };
+
+        if !contents.is_empty() && !contents.ends_with('\n') {
+            contents.push('\n');
+        }
+        contents.push_str(&path_line);
+        contents.push('\n');
+
+        if let Some(parent) = target_profile.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create `{}`", parent.display()))?;
+        }
+        fs::write(&target_profile, contents)
+            .with_context(|| format!("failed to update `{}`", target_profile.display()))?;
+        Ok(true)
+    }
+}
+
+pub fn remove_persistent_path_entry(path: &Path) -> Result<bool> {
+    #[cfg(target_os = "windows")]
+    {
+        windows_support::remove_user_path_entry(path)
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let path_line = bootstrap_path_line(path);
         let mut changed = false;
 
         for profile in candidate_bootstrap_profiles()? {
@@ -607,6 +657,16 @@ fn candidate_bootstrap_profiles() -> Result<Vec<PathBuf>> {
         home.join(".zprofile"),
         home.join(".bash_profile"),
     ])
+}
+
+#[cfg(not(target_os = "windows"))]
+fn primary_bootstrap_profile() -> Result<PathBuf> {
+    Ok(home_dir()?.join(".profile"))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn bootstrap_path_line(path: &Path) -> String {
+    format!("export PATH=\"{}:$PATH\"", path.to_string_lossy())
 }
 
 #[cfg(not(target_os = "windows"))]

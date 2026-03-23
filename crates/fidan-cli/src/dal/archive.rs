@@ -1,18 +1,18 @@
 use anyhow::{Context, Result, bail};
+use fidan_driver::dal::{
+    DalManifest, package_install_dir, read_manifest, remap_source_relative_path,
+};
 use flate2::Compression;
 use flate2::write::GzEncoder;
-use semver::{Version, VersionReq};
-use serde::Deserialize;
 use std::collections::HashSet;
 use std::fs;
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 use tar::{Archive, Builder, EntryType};
 
-use crate::dal::api::IndexEntry;
-
 const ALLOWED_TOP_FILES: &[&str] = &[
     "dal.toml",
+    "dal.lock",
     "README",
     "README.md",
     "README.txt",
@@ -21,21 +21,9 @@ const ALLOWED_TOP_FILES: &[&str] = &[
 
 const ALLOWED_TOP_DIRS: &[&str] = &["src", "examples", "tests", "docs", "assets"];
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct Manifest {
-    pub package: PackageMeta,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct PackageMeta {
-    pub name: String,
-    pub version: String,
-    pub readme: Option<String>,
-}
-
 #[derive(Debug, Clone)]
 pub struct BuiltPackage {
-    pub manifest: Manifest,
+    pub manifest: DalManifest,
     pub archive_name: String,
     pub archive_bytes: Vec<u8>,
 }
@@ -44,13 +32,7 @@ pub fn build_package_archive(project_dir: &Path) -> Result<BuiltPackage> {
     let project_dir = project_dir
         .canonicalize()
         .with_context(|| format!("cannot access {}", project_dir.display()))?;
-    let manifest_path = project_dir.join("dal.toml");
-    let manifest_text = fs::read_to_string(&manifest_path)
-        .with_context(|| format!("cannot read {}", manifest_path.display()))?;
-    let manifest: Manifest = toml::from_str(&manifest_text)
-        .with_context(|| format!("invalid {}", manifest_path.display()))?;
-
-    validate_manifest(&manifest)?;
+    let manifest = read_manifest(&project_dir)?;
     validate_package_dir(&project_dir, &manifest)?;
 
     let root_name = package_root_name(&manifest);
@@ -82,13 +64,10 @@ pub fn install_downloaded_package(
     into_dir: &Path,
     force: bool,
 ) -> Result<PathBuf> {
-    let target_dir = into_dir.join(module_dir_name(package));
+    let target_dir = package_install_dir(into_dir, package, version);
     if target_dir.exists() {
         if !force {
-            bail!(
-                "target directory {} already exists; use --force to overwrite",
-                target_dir.display()
-            );
+            return Ok(target_dir);
         }
         fs::remove_dir_all(&target_dir)
             .with_context(|| format!("cannot remove {}", target_dir.display()))?;
@@ -154,63 +133,7 @@ pub fn install_downloaded_package(
     Ok(target_dir)
 }
 
-pub fn module_dir_name(package: &str) -> String {
-    let mut normalized = package.replace('-', "_");
-    if normalized
-        .chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_digit())
-    {
-        normalized.insert(0, '_');
-    }
-    normalized
-}
-
-pub fn select_version<'a>(
-    entries: &'a [IndexEntry],
-    version_req: Option<&str>,
-) -> Result<&'a IndexEntry> {
-    let requirement = match version_req {
-        Some(raw) if !raw.trim().is_empty() => parse_version_req(raw)?,
-        _ => VersionReq::STAR,
-    };
-
-    let mut candidates: Vec<(&IndexEntry, Version)> = entries
-        .iter()
-        .filter(|entry| !entry.yanked)
-        .filter_map(|entry| {
-            Version::parse(&entry.vers)
-                .ok()
-                .map(|version| (entry, version))
-        })
-        .filter(|(_, version)| requirement.matches(version))
-        .collect();
-
-    candidates.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-    candidates
-        .into_iter()
-        .map(|(entry, _)| entry)
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no non-yanked version satisfies `{}`", requirement))
-}
-
-fn parse_version_req(raw: &str) -> Result<VersionReq> {
-    let raw = raw.trim();
-    if let Ok(version) = Version::parse(raw) {
-        return VersionReq::parse(&format!("={version}"))
-            .with_context(|| format!("invalid exact version requirement `{raw}`"));
-    }
-    VersionReq::parse(raw).with_context(|| format!("invalid version requirement `{raw}`"))
-}
-
-fn validate_manifest(manifest: &Manifest) -> Result<()> {
-    validate_package_name(&manifest.package.name)?;
-    Version::parse(&manifest.package.version)
-        .with_context(|| format!("invalid semver version `{}`", manifest.package.version))?;
-    Ok(())
-}
-
-fn validate_package_dir(project_dir: &Path, manifest: &Manifest) -> Result<()> {
+fn validate_package_dir(project_dir: &Path, manifest: &DalManifest) -> Result<()> {
     let mut allowed = HashSet::new();
     for name in ALLOWED_TOP_FILES {
         allowed.insert((*name).to_string());
@@ -228,6 +151,17 @@ fn validate_package_dir(project_dir: &Path, manifest: &Manifest) -> Result<()> {
     let init_path = project_dir.join("src").join("init.fdn");
     if !init_path.is_file() {
         bail!("package must contain src/init.fdn");
+    }
+
+    if !manifest.dependencies.is_empty() && !project_dir.join("dal.lock").is_file() {
+        bail!("packages with `[dependencies]` must include a dal.lock file");
+    }
+
+    if let Some(cli) = &manifest.cli {
+        let entry_path = project_dir.join(&cli.entry);
+        if !entry_path.is_file() {
+            bail!("declared CLI entry `{}` not found", cli.entry);
+        }
     }
 
     for entry in fs::read_dir(project_dir)
@@ -382,25 +316,6 @@ fn validate_file(path: &Path, project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn validate_package_name(name: &str) -> Result<()> {
-    if name.is_empty() || name.len() > 64 {
-        bail!("invalid package name `{name}`");
-    }
-    let bytes = name.as_bytes();
-    if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
-        bail!("invalid package name `{name}`");
-    }
-    for &b in bytes {
-        if !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
-            bail!("invalid package name `{name}`");
-        }
-    }
-    if name.contains("--") {
-        bail!("invalid package name `{name}`");
-    }
-    Ok(())
-}
-
 fn is_license_file(name: &str) -> bool {
     name == "LICENSE" || name.starts_with("LICENSE.")
 }
@@ -416,20 +331,17 @@ fn is_safe_relative_path(path: &Path) -> bool {
 }
 
 fn remap_install_path(target_dir: &Path, remainder: &Path) -> PathBuf {
-    let remainder_string = remainder.to_string_lossy().replace('\\', "/");
-    if let Some(stripped) = remainder_string.strip_prefix("src/") {
-        return target_dir.join(stripped);
-    }
-    target_dir.join(remainder)
+    target_dir.join(remap_source_relative_path(remainder))
 }
 
-fn package_root_name(manifest: &Manifest) -> String {
+fn package_root_name(manifest: &DalManifest) -> String {
     format!("{}-{}", manifest.package.name, manifest.package.version)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fidan_driver::dal::module_dir_name;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -468,12 +380,44 @@ readme = "README.md"
             false,
         )?;
 
-        assert_eq!(installed_to, install_dir.join("my_package"));
+        assert_eq!(installed_to, install_dir.join("my_package").join("0.1.0"));
         assert!(installed_to.join("init.fdn").is_file());
         assert!(installed_to.join("README.md").is_file());
 
         fs::remove_dir_all(&sandbox).ok();
         Ok(())
+    }
+
+    #[test]
+    fn package_with_dependencies_requires_lockfile() {
+        let sandbox = make_temp_dir("fidan_dal_archive_lock_test");
+        let project_dir = sandbox.join("project");
+
+        fs::create_dir_all(project_dir.join("src")).expect("create src");
+        fs::write(
+            project_dir.join("dal.toml"),
+            r#"[package]
+name = "my-package"
+version = "0.1.0"
+readme = "README.md"
+
+[dependencies]
+other-package = "^1.2"
+"#,
+        )
+        .expect("write dal.toml");
+        fs::write(project_dir.join("README.md"), "# My Package\n").expect("write readme");
+        fs::write(project_dir.join("src").join("init.fdn"), "action main {}\n")
+            .expect("write init");
+
+        let error = build_package_archive(&project_dir).expect_err("missing dal.lock should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("packages with `[dependencies]` must include a dal.lock file")
+        );
+
+        fs::remove_dir_all(&sandbox).ok();
     }
 
     fn make_temp_dir(prefix: &str) -> PathBuf {

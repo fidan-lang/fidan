@@ -1,3 +1,8 @@
+use crate::dal::{
+    global_package_store, local_package_store, lock_entry_for_module, package_install_dir,
+    project_root_from, read_lock_if_exists,
+};
+use crate::install::resolve_fidan_home;
 use anyhow::{Context, Result, bail};
 use fidan_diagnostics::{Diagnostic, Severity, diag_code};
 use fidan_lexer::{Lexer, SymbolInterner};
@@ -17,6 +22,64 @@ pub struct FrontendOutput {
     pub interner: Arc<SymbolInterner>,
     pub source_map: Arc<SourceMap>,
     pub mir: MirProgram,
+}
+
+pub fn detect_import_cycles(entry_path: &Path) -> Vec<String> {
+    fn visit(
+        path: &Path,
+        interner: &Arc<SymbolInterner>,
+        visited: &mut HashSet<PathBuf>,
+        stack: &mut Vec<PathBuf>,
+        errors: &mut Vec<String>,
+    ) {
+        let canon = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        if let Some(pos) = stack.iter().position(|entry| entry == &canon) {
+            let mut cycle = stack[pos..]
+                .iter()
+                .map(|entry| entry.display().to_string())
+                .collect::<Vec<_>>();
+            cycle.push(canon.display().to_string());
+            errors.push(format!(
+                "{}: import cycle detected: {}",
+                diag_code!("E0106"),
+                cycle.join(" -> ")
+            ));
+            return;
+        }
+        if !visited.insert(canon.clone()) {
+            return;
+        }
+
+        let src = match std::fs::read_to_string(&canon) {
+            Ok(src) => src,
+            Err(_) => return,
+        };
+        let name = canon.display().to_string();
+        let source_map = Arc::new(SourceMap::new());
+        let file = source_map.add_file(name.as_str(), src.as_str());
+        let (tokens, _) = Lexer::new(&file, Arc::clone(interner)).tokenise();
+        let (module, _) = fidan_parser::parse(&tokens, file.id, Arc::clone(interner));
+        let base_dir = canon
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        stack.push(canon);
+        let (imports, _) = collect_file_import_paths(&module, interner, &base_dir);
+        for (import_path, _, _) in imports {
+            visit(&import_path, interner, visited, stack, errors);
+        }
+        stack.pop();
+    }
+
+    let interner = Arc::new(SymbolInterner::new());
+    let mut visited = HashSet::new();
+    let mut stack = Vec::new();
+    let mut errors = Vec::new();
+    visit(entry_path, &interner, &mut visited, &mut stack, &mut errors);
+    errors.sort();
+    errors.dedup();
+    errors
 }
 
 fn find_relative(base_dir: &Path, segments: &[String]) -> Option<PathBuf> {
@@ -40,6 +103,57 @@ fn find_relative(base_dir: &Path, segments: &[String]) -> Option<PathBuf> {
     }
 
     None
+}
+
+fn find_in_package_root(package_root: &Path, segments: &[String]) -> Option<PathBuf> {
+    if segments.is_empty() {
+        let init = package_root.join("init.fdn");
+        if init.exists() {
+            return Some(init);
+        }
+        return None;
+    }
+
+    find_relative(package_root, segments)
+}
+
+fn find_in_ancestor_local_package_stores(
+    start_root: &Path,
+    package: &str,
+    version: &str,
+    segments: &[String],
+) -> Option<PathBuf> {
+    let mut current = start_root.to_path_buf();
+    loop {
+        let package_root = package_install_dir(&local_package_store(&current), package, version);
+        if let Some(path) = find_in_package_root(&package_root, segments) {
+            return Some(path);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn find_locked_package_import(base_dir: &Path, segments: &[String]) -> Option<PathBuf> {
+    let module = segments.first()?;
+    let project_root = project_root_from(base_dir)?;
+    let lock = read_lock_if_exists(&project_root).ok().flatten()?;
+    let locked = lock_entry_for_module(&lock, module)?;
+
+    if let Some(path) = find_in_ancestor_local_package_stores(
+        &project_root,
+        &locked.name,
+        &locked.version,
+        &segments[1..],
+    ) {
+        return Some(path);
+    }
+
+    let home = resolve_fidan_home().ok()?;
+    let global_root =
+        package_install_dir(&global_package_store(&home), &locked.name, &locked.version);
+    find_in_package_root(&global_root, &segments[1..])
 }
 
 pub fn collect_file_import_paths(
@@ -131,17 +245,25 @@ pub fn collect_file_import_paths(
                     let specific_name = segments.last().cloned().unwrap_or_default();
                     if let Some(resolved) = find_relative(base_dir, prefix) {
                         add(resolved, *re_export, Mode::Flat(specific_name));
+                    } else if let Some(resolved) = find_locked_package_import(base_dir, prefix) {
+                        add(resolved, *re_export, Mode::Flat(specific_name));
                     } else if let Some(resolved) = find_relative(base_dir, &segments) {
+                        add(resolved, *re_export, Mode::Namespace);
+                    } else if let Some(resolved) = find_locked_package_import(base_dir, &segments) {
                         add(resolved, *re_export, Mode::Namespace);
                     } else {
                         unresolved.push((segments.join("."), *span));
                     }
                 } else if let Some(resolved) = find_relative(base_dir, &segments) {
                     add(resolved, *re_export, Mode::Namespace);
+                } else if let Some(resolved) = find_locked_package_import(base_dir, &segments) {
+                    add(resolved, *re_export, Mode::Namespace);
                 } else {
                     unresolved.push((segments.join("."), *span));
                 }
             } else if let Some(resolved) = find_relative(base_dir, &segments) {
+                add(resolved, *re_export, Mode::Namespace);
+            } else if let Some(resolved) = find_locked_package_import(base_dir, &segments) {
                 add(resolved, *re_export, Mode::Namespace);
             } else {
                 unresolved.push((segments.join("."), *span));
@@ -478,6 +600,10 @@ pub fn compile_source_to_mir(
 }
 
 pub fn compile_file_to_mir(path: &Path) -> Result<FrontendOutput> {
+    let cycle_errors = detect_import_cycles(path);
+    if !cycle_errors.is_empty() {
+        bail!(join_errors(cycle_errors));
+    }
     let src = std::fs::read_to_string(path)
         .with_context(|| format!("cannot read `{}`", path.display()))?;
     let base_dir = path
@@ -485,4 +611,38 @@ pub fn compile_file_to_mir(path: &Path) -> Result<FrontendOutput> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     compile_source_to_mir(&path.display().to_string(), &src, &base_dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn detect_import_cycles_reports_file_cycle() {
+        let sandbox = make_temp_dir("fidan_import_cycle_test");
+        let a = sandbox.join("a.fdn");
+        let b = sandbox.join("b.fdn");
+        fs::write(&a, "use \"./b.fdn\"\naction main {}\n").expect("write a");
+        fs::write(&b, "use \"./a.fdn\"\naction helper {}\n").expect("write b");
+
+        let errors = detect_import_cycles(&a);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("import cycle detected"));
+        assert!(errors[0].contains("a.fdn"));
+        assert!(errors[0].contains("b.fdn"));
+
+        fs::remove_dir_all(&sandbox).ok();
+    }
+
+    fn make_temp_dir(prefix: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), nonce));
+        fs::create_dir_all(&dir).expect("failed to create temp test dir");
+        dir
+    }
 }

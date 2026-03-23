@@ -2,13 +2,14 @@ use crate::distribution::{
     binary_relpath, extract_tar_gz, fetch_bytes, fetch_manifest, materialize_release_root,
     read_all, select_fidan_release, stage_dir, verify_sha256, write_bytes,
 };
+use crate::prompts::prompt_yes_no;
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use fidan_diagnostics::{Severity, render_message_to_stderr};
 use fidan_driver::install::{
     InstallEntry, load_or_repair_metadata, register_install, remove_bootstrap_path_entries,
-    remove_install_record, resolve_current_binary, scan_installed_versions,
-    schedule_last_uninstall_cleanup, set_active_version,
+    remove_install_record, remove_persistent_path_entry, resolve_current_binary,
+    scan_installed_versions, schedule_last_uninstall_cleanup, set_active_version,
 };
 #[cfg(target_os = "windows")]
 use fidan_driver::install::{
@@ -31,7 +32,12 @@ pub(crate) enum SelfCommand {
     /// Switch the active Fidan version (default: `latest`)
     Use { version: Option<String> },
     /// Remove an installed Fidan version (default: `latest`)
-    Remove { version: Option<String> },
+    Remove {
+        version: Option<String>,
+        /// Skip the interactive confirmation prompt for removing the selected version
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 pub(crate) fn run(command: SelfCommand) -> Result<()> {
@@ -46,9 +52,9 @@ pub(crate) fn run(command: SelfCommand) -> Result<()> {
             let version = version.unwrap_or_else(|| "latest".to_string());
             run_use(&version)
         }
-        SelfCommand::Remove { version } => {
+        SelfCommand::Remove { version, confirm } => {
             let version = version.unwrap_or_else(|| "latest".to_string());
-            run_remove(&version)
+            run_remove(&version, confirm)
         }
     }
 }
@@ -252,10 +258,19 @@ fn run_use(version: &str) -> Result<()> {
     Ok(())
 }
 
-fn run_remove(version: &str) -> Result<()> {
+fn run_remove(version: &str, confirm: bool) -> Result<()> {
     let root = resolve_install_root()?;
     let home = resolve_fidan_home()?;
     let version = resolve_version_selector(&root, version)?;
+    if !confirm
+        && !prompt_yes_no(
+            &format!("remove installed Fidan version `{version}`?"),
+            false,
+        )?
+    {
+        render_message_to_stderr(Severity::Note, "self", "cancelled");
+        return Ok(());
+    }
     let installed = scan_installed_versions(&root)?;
     let (active, _) = load_or_repair_metadata(&root)?;
     let is_active = active.active_version == version;
@@ -273,6 +288,18 @@ fn run_remove(version: &str) -> Result<()> {
                 "self",
                 &format!("failed to remove the Fidan PATH entry automatically\n  cause: {error}"),
             );
+        }
+        if purge_home {
+            let global_bin = home.join("bin");
+            if let Err(error) = remove_persistent_path_entry(&global_bin) {
+                render_message_to_stderr(
+                    Severity::Warning,
+                    "self",
+                    &format!(
+                        "failed to remove the global DAL bin PATH entry automatically\n  cause: {error}"
+                    ),
+                );
+            }
         }
         schedule_last_uninstall_cleanup(
             &root,
@@ -319,21 +346,4 @@ fn resolve_version_selector(root: &std::path::Path, version: &str) -> Result<Str
     } else {
         bail!("Fidan version `{version}` is not installed");
     }
-}
-
-fn prompt_yes_no(prompt: &str, default: bool) -> Result<bool> {
-    use std::io::{self, Write};
-
-    let suffix = if default { "[Y/n]" } else { "[y/N]" };
-    print!("{prompt} {suffix} ");
-    io::stdout().flush().ok();
-    let mut line = String::new();
-    io::stdin()
-        .read_line(&mut line)
-        .context("failed to read response")?;
-    let trimmed = line.trim().to_ascii_lowercase();
-    if trimmed.is_empty() {
-        return Ok(default);
-    }
-    Ok(matches!(trimmed.as_str(), "y" | "yes"))
 }

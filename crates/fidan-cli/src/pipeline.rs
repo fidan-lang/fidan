@@ -1,8 +1,8 @@
-use crate::dal::validate_package_name;
 use crate::imports::{collect_file_import_paths, filter_hir_module, pre_register_hir_into_tc};
 use crate::replay::save_replay_bundle;
 use anyhow::{Context, Result, bail};
 use fidan_diagnostics::{Severity, render_message_to_stderr};
+use fidan_driver::dal::validate_package_name;
 use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, TraceMode};
 use std::path::PathBuf;
 
@@ -612,6 +612,13 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     };
+
+    if !is_stdin {
+        for message in fidan_driver::detect_import_cycles(&opts.input) {
+            error_count += 1;
+            render_message_to_stderr(Severity::Error, "", &message);
+        }
+    }
 
     let imported_hirs: Vec<(
         fidan_hir::HirModule,

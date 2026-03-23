@@ -15,6 +15,7 @@ mod explain;
 mod fix;
 mod imports;
 mod pipeline;
+mod prompts;
 mod repl;
 mod replay;
 mod self_cmd;

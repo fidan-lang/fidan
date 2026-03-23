@@ -3,9 +3,44 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::{os::windows::process::CommandExt, process::Stdio};
 
-pub fn remove_user_path_entries(current: &Path) -> Result<bool> {
-    let current_text = current.to_string_lossy().to_string();
-    let normalized_current = normalize_windows_path_entry(&current_text);
+pub fn ensure_user_path_entry(path: &Path) -> Result<bool> {
+    let path_text = path.to_string_lossy().to_string();
+    let normalized_target = normalize_windows_path_entry(&path_text);
+    let stored_path = current_user_path_value()?.unwrap_or_default();
+    let mut entries = stored_path
+        .split(';')
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if entries
+        .iter()
+        .any(|entry| normalize_windows_path_entry(entry) == normalized_target)
+    {
+        return Ok(false);
+    }
+
+    entries.push(path_text);
+    let updated = entries.join(";");
+    persist_user_path_value(&updated)?;
+    // SAFETY: this short-lived CLI updates its own environment after persisting the
+    // user PATH so child processes launched afterward observe the same value.
+    unsafe {
+        std::env::set_var("Path", &updated);
+        std::env::set_var("PATH", &updated);
+    }
+    Ok(true)
+}
+
+pub fn remove_user_path_entry(path: &Path) -> Result<bool> {
+    let path_text = path.to_string_lossy().to_string();
+    let normalized_path = normalize_windows_path_entry(&path_text);
     let stored_path = current_user_path_value()?.unwrap_or_default();
     let mut changed = false;
     let filtered = stored_path
@@ -15,7 +50,7 @@ pub fn remove_user_path_entries(current: &Path) -> Result<bool> {
             if trimmed.is_empty() {
                 return None;
             }
-            if normalize_windows_path_entry(trimmed) == normalized_current {
+            if normalize_windows_path_entry(trimmed) == normalized_path {
                 changed = true;
                 None
             } else {
