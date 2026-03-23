@@ -2445,18 +2445,26 @@ Cranelift's **permanent, final role** in the architecture — it will never be r
 **Goal:** `fidan build --release` produces C++-competitive native binaries.
 This phase replaces Cranelift as the AOT backend with LLVM and adds all performance features.
 
-- [ ] Add `fidan-codegen-llvm` crate with `inkwell` dependency
-- [ ] MIR → LLVM IR translation for all instruction types
-- [ ] LLVM optimization pass pipeline (`-O2` then `-O3`)
+**Status (2026-03):** The first LLVM AOT/toolchain slice is now live:
+`fidan-codegen-llvm`, packaged LLVM toolchains, `fidan toolchain add llvm`,
+backend auto-selection, and cross-platform validation are all in place. The
+remaining work in this phase is the deeper performance layer
+(monomorphisation, extra LLVM tuning, PGO, broader benchmark work), not the
+existence of the backend itself.
+
+- [x] Add `fidan-codegen-llvm` crate with `inkwell` dependency
+- [x] MIR → LLVM IR translation for the current tested language surface
+- [x] Basic LLVM optimisation level plumbing (`-O0`…`-Oz`)
 - [ ] Auto-vectorization enabled (`-loop-vectorize`, `-slp-vectorize`)
-- [ ] LTO support (`fidan build --release --lto`)
+- [x] LTO support (`fidan build --release --lto`)
 - [ ] Monomorphization collector in `fidan-typeck`: track all concrete generic instantiations
 - [ ] Specialized LLVM function emission per concrete instantiation
-- [ ] Escape analysis MIR pass: stack-allocate non-escaping objects
-- [ ] `fidan build --release` links against LLVM AOT object; `fidan run` still uses Cranelift JIT
+- [x] Escape analysis MIR pass: stack-allocate non-escaping objects
+- [x] `fidan build --release` links against LLVM AOT object; `fidan run` still uses Cranelift JIT
+- [x] `fidan toolchain add llvm` installs per-host packaged LLVM toolchains
 - [ ] Benchmark suite: compare Cranelift AOT vs LLVM AOT vs equivalent C++ on compute benchmarks
 - [ ] PGO instrumentation mode: `fidan build --instrument` → `fidan build --use-profile`
-- [ ] All correctness tests from Phase 8 pass with the LLVM backend
+- [x] All correctness tests from Phase 8 pass with the LLVM backend
 
 ---
 

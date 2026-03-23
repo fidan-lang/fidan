@@ -1,0 +1,17 @@
+[package]
+name = "libfidan"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[dependencies]
+fidan-driver = { workspace = true }
+fidan-interp = { workspace = true }
+fidan-lexer = { workspace = true }
+fidan-mir = { workspace = true }
+fidan-runtime = { workspace = true }

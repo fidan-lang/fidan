@@ -10,7 +10,7 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; ![Build](https://img.shields.io/badge/build-passing-brightgreen.svg) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://github.com/fidan-lang/fidan-editors/tree/main/vscode)
 
-[Getting Started](#-getting-started) • [Language Tour](#-language-tour) • [CLI Reference](#-cli-reference) • [Standard Library](#-standard-library) • [VS Code Extension](#-vs-code-extension) • [Contributing](#-contributing)
+[Getting Started](#getting-started) • [Language Tour](#language-tour) • [CLI Reference](#cli-reference) • [Standard Library](#standard-library) • [VS Code Extension](#vs-code-extension) • [Contributing](#contributing)
 
 </div>
 
@@ -113,6 +113,18 @@ Published archives are also available from GitHub Releases if you prefer downloa
 
 - https://github.com/fidan-lang/fidan/releases
 
+Stable release archives also ship the `libfidan` embedding bundle:
+
+- the platform `libfidan` shared library
+- the platform `libfidan` static library
+- `include/fidan.h`
+- a tiny C embedding example under `examples/embed_c/`
+
+For Rust hosts built from source, the workspace also includes a small safe
+wrapper crate:
+
+- `crates/fidan-embed`
+
 After bootstrap install, verify it with:
 
 ```bash
@@ -121,10 +133,16 @@ fidan --version
 
 #### Updates and uninstall
 
-To update to the latest version:
+To install or refresh the latest published version:
 
 ```bash
 fidan self install
+```
+
+To switch to the newest installed version:
+
+```bash
+fidan self use
 ```
 
 To uninstall:
@@ -162,6 +180,26 @@ $env:PATH = "$PWD\target\release;" + $env:PATH
 ```bash
 fidan --version
 ```
+
+### Embedding with `libfidan`
+
+If you are embedding Fidan into another host application, use the `libfidan`
+artifacts shipped in the stable release archives rather than linking directly
+against the internal workspace crates.
+
+Current embedding contract:
+
+- create a VM with `fidan_vm_new()`
+- evaluate source or a file with `fidan_eval()` / `fidan_eval_file()`
+- inspect values through the `fidan_value_*` helpers
+- free returned values with `fidan_value_free()`
+
+The initial `libfidan` slice returns the top-level `result` binding when the
+program defines one. If no `result` binding exists, a successful run returns
+`nothing`.
+
+For Rust embedders working from the repository, `crates/fidan-embed` wraps the
+raw C ABI with safe `Vm` / `Value` types and `Result`-based error handling.
 
 ---
 

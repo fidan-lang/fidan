@@ -1,0 +1,11 @@
+[package]
+name = "fidan-embed"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+libfidan = { workspace = true }
+thiserror = { workspace = true }

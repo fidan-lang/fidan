@@ -12,6 +12,8 @@ members = [
   "crates/fidan-passes",
   "crates/fidan-runtime",
   "crates/fidan-interp",
+  "crates/libfidan",
+  "crates/fidan-embed",
   "crates/fidan-codegen-cranelift",
   "crates/fidan-codegen-llvm",
   "crates/fidan-llvm-helper",
@@ -41,6 +43,7 @@ fidan-mir = { path = "crates/fidan-mir" }
 fidan-passes = { path = "crates/fidan-passes" }
 fidan-runtime = { path = "crates/fidan-runtime" }
 fidan-interp = { path = "crates/fidan-interp" }
+libfidan = { path = "crates/libfidan" }
 fidan-stdlib = { path = "crates/fidan-stdlib" }
 fidan-driver = { path = "crates/fidan-driver" }
 fidan-codegen-cranelift = { path = "crates/fidan-codegen-cranelift" }

@@ -477,15 +477,13 @@ stdin sequence with `fidan run <file> --replay <id>`.
 
 ---
 
-## Phase 11 – Cranelift AOT + Performance
+## Phase 11 – AOT Backends + LLVM Toolchains
 
-> **Note:** Cranelift AOT is complete and production-ready.
-> LLVM backend is a future phase (stub crate exists; no code yet).
-> Cranelift AOT uses `cranelift-object` to emit native object files.
->
-> **LLVM backend (deferred):** Will be implemented in a later phase with an
-> optional `fidan toolchain add llvm` command and a `--backend llvm|cranelift`
-> flag on `fidan build`. Nothing LLVM-related is active today.
+> **Note:** Both AOT backends are active now.
+> Cranelift is the self-contained / no-extra-toolchain path and remains the
+> safe fallback. LLVM is the preferred AOT backend whenever a compatible LLVM
+> toolchain is installed. `fidan build` supports `--backend auto|cranelift|llvm`;
+> `auto` resolves to LLVM when possible, otherwise falls back to Cranelift.
 
 | Item | Status | Notes |
 |---|---|---|
@@ -496,18 +494,22 @@ stdin sequence with `fidan run <file> --replay <id>`.
 | Frontend pipeline wired into `fidan build` | ✅ | lex→parse→typecheck→HIR→MIR→passes→AOT |
 | Cranelift `speed` / `speed_and_size` opt presets | ✅ | `CraneliftOptLevel` wired via `AotOptions::opt_level` |
 | Escape analysis MIR pass | ✅ | `fidan-passes/src/escape_analysis.rs`; tags non-escaping locals for future clone-elision and stack-alloc optimisations |
+| `fidan-codegen-llvm` AOT crate | ✅ | Inkwell-based lowering + helper process / packaged toolchain protocol |
+| LLVM helper / protocol validation | ✅ | Driver validates helper protocol version and compatible Fidan version range before enabling LLVM |
+| `fidan toolchain add llvm` on-demand | ✅ | Installs per-host packaged LLVM toolchains; same-version refresh supported via archive SHA tracking |
+| LLVM as default, Cranelift as fallback | ✅ | `--backend auto` prefers compatible LLVM, otherwise Cranelift; explicit backend override supported |
+| MIR → LLVM IR for the current tested language surface | ✅ | Example sweep and syntax suite validated across Windows, Linux, and macOS |
+| LLVM build flags wired | ✅ | `--opt`, `--lto`, `--strip`, `--emit obj`, link-runtime mode, and linker override flow through the LLVM backend |
+| Cross-platform packaged LLVM toolchains | ✅ | Windows, Linux, and macOS packages validate and run with the bundled helper/toolchain layout |
+| LLVM package licensing | ✅ | LLVM license text is bundled with toolchain artifacts |
 | Binary output matches interpreter output | ✅ | Golden-file correctness suite: `test/golden/*.expected`; verified via `scripts/test_aot.bat` / `test_aot.sh` |
-| All correctness examples pass under AOT | ✅ | `test/examples/test.fdn` + additional examples; all 7 output lines match |
+| All correctness examples pass under AOT | ✅ | Example sweep is green with the current LLVM toolchain packages on all three supported host OSes |
 | C++ benchmark comparison | ✅ | `test/cpp_benchmark/benchmark.cpp` + `scripts/cpp_benchmark.bat` / `cpp_benchmark.sh` |
-| `fidan-codegen-llvm` crate stub | ⬜ | 3-line stub (`#[cfg(feature = "llvm")]`); not compiled; deferred |
-| MIR → LLVM IR | ⬜ | Deferred; requires `inkwell` + full lowering pass |
-| LLVM as default, Cranelift as fallback | ⬜ | Deferred; driver only uses Cranelift today |
-| `fidan toolchain add llvm` on-demand | ⬜ | Deferred; no toolchain subcommand yet |
-| LLVM `-O2` / `-O3` pass pipeline | ⬜ | Deferred (LLVM backend) |
+| Advanced LLVM tuning (`-O2` / `-O3` / size presets) | ⬜ | Core opt plumbing is live; deeper backend-specific tuning remains future polish |
 | Stack root tracking (unwind maps) | ⬜ | Deferred; requires GC-safe-point infrastructure |
 | DWARF / SEH unwind info | ⬜ | Deferred; frame pointers can be enabled via Cranelift flag; full DWARF requires `gimli` writer |
 | Auto-vectorisation | ⬜ | Deferred; requires LLVM or explicit Cranelift SIMD lowering |
-| LTO | ⬜ | Deferred; requires LLVM or Cranelift multi-module merge |
+| LTO | ✅ | `--lto off|full` is implemented on the LLVM build path |
 | Monomorphisation collector | ⬜ | Deferred; MIR pass to specialise generic actions for known types |
 | Specialised function emission | ⬜ | Deferred; depends on monomorphisation collector |
 | PGO instrumentation mode | ⬜ | Deferred; requires LLVM PGO hooks |
@@ -524,16 +526,16 @@ stdin sequence with `fidan run <file> --replay <id>`.
 
 | Item | Status | Notes |
 |---|---|---|
-| C-ABI header (`fidan.h`) | ⬜ | Declares `fidan_vm_new`, `fidan_eval`, `fidan_eval_file`, `fidan_vm_free`, `fidan_value_*` helpers |
-| `libfidan` crate (`crate-type = ["cdylib", "staticlib"]`) | ⬜ | Wraps fidan-interp + fidan-runtime; deliberately excludes CLI frontend (no parser/typeck/formatter in the public API surface) |
-| `fidan_vm_new() -> *mut FidanVm` | ⬜ | Allocates interpreter + runtime state |
-| `fidan_eval(vm, source, len) -> FidanValue` | ⬜ | Full pipeline: lex → parse → typecheck → MIR → interp |
-| `fidan_eval_file(vm, path) -> FidanValue` | ⬜ | Convenience wrapper over `fidan_eval` |
-| `fidan_value_*` type/extract helpers | ⬜ | `fidan_value_type`, `fidan_value_as_int`, `fidan_value_as_str`, `fidan_value_as_float`, `fidan_value_is_nothing` |
-| `fidan_vm_free(vm)` | ⬜ | Drops all VM state; safe to call with null |
-| CI artifact: `libfidan-{os}-{arch}.{so,dll,dylib}` | ⬜ | Published alongside `fidan.exe` in GitHub Releases |
-| Example: embed in C program | ⬜ | `examples/embed_c/main.c` |
-| Example: embed in Rust crate | ⬜ | `fidan-embed` crate with a safe Rust wrapper |
+| C-ABI header (`fidan.h`) | ✅ | Added at `crates/libfidan/include/fidan.h`; documents VM lifecycle, eval entry points, value helpers, and the current `result` return contract |
+| `libfidan` crate (`crate-type = ["cdylib", "staticlib"]`) | ✅ | New workspace crate `crates/libfidan`; wraps driver frontend + interpreter/runtime without depending on CLI modules |
+| `fidan_vm_new() -> *mut FidanVm` | ✅ | Allocates VM state (`base_dir`, last-error buffer) |
+| `fidan_eval(vm, source, len) -> FidanValue` | ✅ | Initial slice: full frontend pipeline (including file-import resolution) + MIR interpreter; returns top-level `result` binding when present, otherwise `nothing` |
+| `fidan_eval_file(vm, path) -> FidanValue` | ✅ | Convenience wrapper over the same frontend pipeline for on-disk source files |
+| `fidan_value_*` type/extract helpers | ✅ | Initial helpers: clone/free, type name, string conversion, int/float/bool extraction, `is_nothing`, string bytes/len |
+| `fidan_vm_free(vm)` | ✅ | Drops all VM state; safe to call with null |
+| CI artifact: `libfidan-{os}-{arch}.{so,dll,dylib}` | ✅ | Stable release packaging now builds and stages `libfidan` shared/static artifacts, header, and C example alongside `fidan.exe` |
+| Example: embed in C program | ✅ | `crates/libfidan/examples/embed_c/main.c` |
+| Example: embed in Rust crate | ✅ | `crates/fidan-embed` provides safe `Vm` / `Value` wrappers over the raw `libfidan` C ABI and includes smoke tests |
 
 ---
 

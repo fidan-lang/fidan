@@ -66,6 +66,28 @@ function Get-RuntimeArtifactNames {
   )
 }
 
+function Get-LibFidanArtifactNames {
+  if ($IsWindows) {
+    return @(
+      "libfidan.lib",
+      "libfidan.dll",
+      "libfidan.dll.lib"
+    )
+  }
+
+  if ($IsMacOS) {
+    return @(
+      "liblibfidan.a",
+      "libfidan.dylib"
+    )
+  }
+
+  return @(
+    "liblibfidan.a",
+    "libfidan.so"
+  )
+}
+
 if (-not $Version) {
   $Version = Get-WorkspaceVersion
 }
@@ -74,7 +96,7 @@ $hostTriple = Get-HostTriple
 $binaryName = if ($IsWindows) { "fidan.exe" } else { "fidan" }
 
 if (-not $SkipBuild) {
-  cargo build -p fidan-cli -p fidan-runtime --release
+  cargo build -p fidan-cli -p fidan-runtime -p libfidan --release
 }
 
 $binaryPath = Join-Path "target/release" $binaryName
@@ -89,6 +111,25 @@ foreach ($name in (Get-RuntimeArtifactNames)) {
     throw "Expected runtime artifact at '$path'"
   }
   $runtimeArtifacts += $path
+}
+
+$libfidanArtifacts = @()
+foreach ($name in (Get-LibFidanArtifactNames)) {
+  $path = Join-Path "target/release" $name
+  if (-not (Test-Path -LiteralPath $path)) {
+    throw "Expected libfidan artifact at '$path'"
+  }
+  $libfidanArtifacts += $path
+}
+
+$libfidanHeader = "crates/libfidan/include/fidan.h"
+if (-not (Test-Path -LiteralPath $libfidanHeader)) {
+  throw "Expected libfidan header at '$libfidanHeader'"
+}
+
+$libfidanExample = "crates/libfidan/examples/embed_c/main.c"
+if (-not (Test-Path -LiteralPath $libfidanExample)) {
+  throw "Expected libfidan example at '$libfidanExample'"
 }
 
 $payloadDir = Join-Path $OutputRoot "payload"
@@ -109,6 +150,13 @@ Copy-Item -LiteralPath $binaryPath -Destination (Join-Path $stageDir $binaryName
 foreach ($artifact in $runtimeArtifacts) {
   Copy-Item -LiteralPath $artifact -Destination (Join-Path $stageDir (Split-Path -Leaf $artifact))
 }
+foreach ($artifact in $libfidanArtifacts) {
+  Copy-Item -LiteralPath $artifact -Destination (Join-Path $stageDir (Split-Path -Leaf $artifact))
+}
+New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "include") | Out-Null
+Copy-Item -LiteralPath $libfidanHeader -Destination (Join-Path $stageDir "include/fidan.h")
+New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "examples/embed_c") | Out-Null
+Copy-Item -LiteralPath $libfidanExample -Destination (Join-Path $stageDir "examples/embed_c/main.c")
 if (Test-Path -LiteralPath "README.md") {
   Copy-Item -LiteralPath "README.md" -Destination (Join-Path $stageDir "README.md")
 }
