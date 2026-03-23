@@ -406,6 +406,28 @@ fn extern_fidan_abi_boxed_call_ok() {
     }
 }
 
+#[test]
+fn extern_mixed_native_signatures_do_not_corrupt_param_types() {
+    register_extern_test_symbols();
+    let result = run_src(
+        r#"@extern("self", symbol = "fidan_test_native_add")
+        action nativeAdd with (a oftype integer, b oftype integer) returns integer
+
+        @extern("self", symbol = "fidan_test_float_scale")
+        action floatScale with (value oftype float, factor oftype float) returns float
+
+        @extern("self", symbol = "fidan_test_negate_bool")
+        action negateBool with (value oftype boolean) returns boolean
+
+        assert_eq(nativeAdd(20, 22), 42)
+        assert_eq(floatScale(2.5, 4.0), 10.0)
+        assert_eq(negateBool(true), false)"#,
+    );
+    if let Err(err) = result {
+        panic!("{}: {}", err.code, err.message);
+    }
+}
+
 // ── Runtime error paths (Err with correct code) ───────────────────────────────
 
 #[test]
@@ -466,6 +488,18 @@ fn integer_invalid_type_returns_runtime_error() {
     assert!(
         err.message.contains("list") && err.message.contains("integer"),
         "unexpected conversion error message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn len_invalid_type_returns_runtime_error() {
+    let err =
+        run_src("var n = len(42)").expect_err("expected len on integer to produce runtime error");
+    assert_eq!(err.code.0, "R0001");
+    assert!(
+        err.message.contains("len()") && err.message.contains("integer"),
+        "unexpected len error message: {}",
         err.message
     );
 }

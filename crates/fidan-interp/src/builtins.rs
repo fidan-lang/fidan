@@ -131,7 +131,12 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanVal
                         (end - start).max(0)
                     }
                 }
-                _ => return Ok(Some(FidanValue::Nothing)),
+                _ => {
+                    return Err(BuiltinError::runtime(format!(
+                        "len() is not supported for {}",
+                        v.type_name()
+                    )));
+                }
             };
             Ok(Some(FidanValue::Integer(n)))
         }

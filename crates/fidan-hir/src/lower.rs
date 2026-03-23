@@ -168,6 +168,7 @@ struct LowerFunction<'a> {
     name: Symbol,
     extends: Option<Symbol>,
     params: &'a [Param],
+    info: Option<&'a ActionInfo>,
     return_ty: FidanType,
     body: &'a [StmtId],
     is_parallel: bool,
@@ -637,18 +638,16 @@ impl<'a> Ctx<'a> {
 
     // ── Parameter lowering ────────────────────────────────────────────────────
 
-    fn lower_params(&self, params: &[Param]) -> Vec<HirParam> {
+    fn lower_params(&self, params: &[Param], info: Option<&ActionInfo>) -> Vec<HirParam> {
         params
             .iter()
-            .map(|p| {
+            .enumerate()
+            .map(|(index, p)| {
                 // Resolve parameter type from typeck's type table (based on the
-                // type annotation expression). Fall back to Dynamic if unknown.
-                let ty = self
-                    .typed
-                    .actions
-                    .values()
-                    .flat_map(|a| a.params.iter())
-                    .find(|pi| pi.name == p.name)
+                // current function's parameter order. Fall back to a local
+                // type-expression resolver if the info is missing or out of sync.
+                let ty = info
+                    .and_then(|action| action.params.get(index))
                     .map(|pi| pi.ty.clone())
                     .unwrap_or_else(|| {
                         // Resolve from the type expression directly.
@@ -673,6 +672,7 @@ impl<'a> Ctx<'a> {
             name,
             extends,
             params,
+            info,
             return_ty,
             body,
             is_parallel,
@@ -685,7 +685,7 @@ impl<'a> Ctx<'a> {
         HirFunction {
             name,
             extends,
-            params: self.lower_params(params),
+            params: self.lower_params(params, info),
             return_ty,
             body: self.lower_stmts(body),
             is_parallel,
@@ -813,6 +813,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                                 .and_then(|o| o.methods.get(&mname))
                                 .map(|a| a.return_ty.clone())
                                 .unwrap_or(FidanType::Nothing);
+                            let info = typed.objects.get(&name).and_then(|o| o.methods.get(&mname));
                             let precompile = decorators.iter().any(|d| {
                                 ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE
                             });
@@ -828,6 +829,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                                 name: mname,
                                 extends: None,
                                 params: &params,
+                                info,
                                 return_ty: ret,
                                 body: &body,
                                 is_parallel,
@@ -866,6 +868,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     .get(&name)
                     .map(|a| a.return_ty.clone())
                     .unwrap_or(FidanType::Nothing);
+                let info = typed.actions.get(&name);
                 let precompile = decorators
                     .iter()
                     .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
@@ -876,6 +879,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     name,
                     extends: None,
                     params: &params,
+                    info,
                     return_ty: ret,
                     body: &body,
                     is_parallel,
@@ -903,6 +907,10 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     .and_then(|o| o.methods.get(&name))
                     .map(|a| a.return_ty.clone())
                     .unwrap_or(FidanType::Nothing);
+                let info = typed
+                    .objects
+                    .get(&extends)
+                    .and_then(|o| o.methods.get(&name));
                 let precompile = decorators
                     .iter()
                     .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
@@ -913,6 +921,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     name,
                     extends: Some(extends),
                     params: &params,
+                    info,
                     return_ty: ret,
                     body: &body,
                     is_parallel,
