@@ -82,6 +82,12 @@ fn link_unix(layout: &ToolchainLayout, request: &CompileRequest, input_path: &Pa
     let clang = resolve_unix_linker_driver(layout)?;
     let mut cmd = Command::new(&clang);
     cmd.arg("-o").arg(&request.output).arg(input_path);
+    #[cfg(target_os = "macos")]
+    {
+        let sdk_root = resolve_macos_sdk_root()?;
+        cmd.arg("-isysroot").arg(&sdk_root);
+        cmd.env("SDKROOT", sdk_root);
+    }
     if request.lto == LtoMode::Full {
         cmd.arg("-flto=full");
         #[cfg(target_os = "linux")]
@@ -235,6 +241,34 @@ fn prepend_env_path(command: &mut Command, key: &str, value: &Path) {
     if let Ok(joined) = std::env::join_paths(paths) {
         command.env(key, joined);
     }
+}
+
+#[cfg(target_os = "macos")]
+fn resolve_macos_sdk_root() -> Result<PathBuf> {
+    let output = Command::new("xcrun")
+        .args(["--show-sdk-path"])
+        .output()
+        .context("failed to launch `xcrun --show-sdk-path` for macOS LLVM linking")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let detail = match (stdout.is_empty(), stderr.is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => format!(": {stdout}"),
+            (true, false) => format!(": {stderr}"),
+            (false, false) => format!(":\n{stdout}\n{stderr}"),
+        };
+        bail!(
+            "failed to resolve macOS SDK path with `xcrun --show-sdk-path`{}",
+            detail
+        );
+    }
+
+    let sdk = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if sdk.is_empty() {
+        bail!("`xcrun --show-sdk-path` returned an empty macOS SDK path");
+    }
+    Ok(PathBuf::from(sdk))
 }
 
 fn find_static_runtime_lib(dir: &Path) -> Option<PathBuf> {
