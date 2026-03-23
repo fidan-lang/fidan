@@ -92,6 +92,9 @@ function Expand-AnyArchive {
   }
 
   tar -xf $ArchivePath -C $Destination
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to extract archive '$ArchivePath'"
+  }
 }
 
 function Get-Sha256 {
@@ -465,6 +468,11 @@ function Invoke-HelperBuild {
   }
 
   try {
+    $helperPath = Join-Path "target/release" (if ($IsWindows) { "fidan-llvm-helper.exe" } else { "fidan-llvm-helper" })
+    if (Test-Path -LiteralPath $helperPath) {
+      Remove-Item -LiteralPath $helperPath -Force
+    }
+
     $llvmBinDir = Join-Path $LlvmRoot "bin"
     $llvmLibDir = Join-Path $LlvmRoot "lib"
     if (Test-Path -LiteralPath $llvmBinDir) {
@@ -556,6 +564,9 @@ function Invoke-HelperBuild {
     }
     else {
       cargo build -p fidan-llvm-helper --release
+    }
+    if ($LASTEXITCODE -ne 0) {
+      throw "Failed to build fidan-llvm-helper"
     }
   }
   finally {
@@ -740,6 +751,9 @@ try {
   $metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $stageDir "metadata.json") -Encoding UTF8
 
   tar -czf $archivePath -C $stageDir .
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to create archive '$archivePath'"
+  }
 }
 finally {
   if (Test-Path -LiteralPath $tempRoot) {
