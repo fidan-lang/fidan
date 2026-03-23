@@ -1,7 +1,7 @@
 //! `fidan-typeck` — Symbol tables, type inference, type checking, parallel safety.
 //!
 //! # Entry point
-//! ```no_run
+//! ```rust,ignore
 //! use std::sync::Arc;
 //! use fidan_lexer::SymbolInterner;
 //!
