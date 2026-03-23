@@ -798,8 +798,15 @@ mod tests {
 
     #[test]
     fn auto_backend_falls_back_to_cranelift_without_toolchain() {
-        unsafe { std::env::remove_var("FIDAN_HOME") };
+        let root = sandbox();
+        let previous = std::env::var_os("FIDAN_HOME");
+        unsafe { std::env::set_var("FIDAN_HOME", &root) };
         let backend = resolve_effective_backend(Backend::Auto).unwrap();
+        if let Some(previous) = previous {
+            unsafe { std::env::set_var("FIDAN_HOME", previous) };
+        } else {
+            unsafe { std::env::remove_var("FIDAN_HOME") };
+        }
         assert!(matches!(backend, EffectiveBackend::Cranelift));
     }
 }
