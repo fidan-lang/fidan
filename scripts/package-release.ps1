@@ -69,22 +69,22 @@ function Get-RuntimeArtifactNames {
 function Get-LibFidanArtifactNames {
   if ($IsWindows) {
     return @(
-      "libfidan.lib",
-      "libfidan.dll",
-      "libfidan.dll.lib"
+      @{ Source = "libfidan.lib"; Destination = "libfidan.lib" },
+      @{ Source = "libfidan.dll"; Destination = "libfidan.dll" },
+      @{ Source = "libfidan.dll.lib"; Destination = "libfidan.dll.lib" }
     )
   }
 
   if ($IsMacOS) {
     return @(
-      "liblibfidan.a",
-      "libfidan.dylib"
+      @{ Source = "liblibfidan.a"; Destination = "libfidan.a" },
+      @{ Source = "libfidan.dylib"; Destination = "libfidan.dylib" }
     )
   }
 
   return @(
-    "liblibfidan.a",
-    "libfidan.so"
+    @{ Source = "liblibfidan.a"; Destination = "libfidan.a" },
+    @{ Source = "libfidan.so"; Destination = "libfidan.so" }
   )
 }
 
@@ -114,12 +114,15 @@ foreach ($name in (Get-RuntimeArtifactNames)) {
 }
 
 $libfidanArtifacts = @()
-foreach ($name in (Get-LibFidanArtifactNames)) {
-  $path = Join-Path "target/release" $name
+foreach ($artifact in (Get-LibFidanArtifactNames)) {
+  $path = Join-Path "target/release" $artifact.Source
   if (-not (Test-Path -LiteralPath $path)) {
     throw "Expected libfidan artifact at '$path'"
   }
-  $libfidanArtifacts += $path
+  $libfidanArtifacts += [PSCustomObject]@{
+    SourcePath = $path
+    DestinationName = $artifact.Destination
+  }
 }
 
 $libfidanHeader = "crates/libfidan/include/fidan.h"
@@ -151,7 +154,7 @@ foreach ($artifact in $runtimeArtifacts) {
   Copy-Item -LiteralPath $artifact -Destination (Join-Path $stageDir (Split-Path -Leaf $artifact))
 }
 foreach ($artifact in $libfidanArtifacts) {
-  Copy-Item -LiteralPath $artifact -Destination (Join-Path $stageDir (Split-Path -Leaf $artifact))
+  Copy-Item -LiteralPath $artifact.SourcePath -Destination (Join-Path $stageDir $artifact.DestinationName)
 }
 New-Item -ItemType Directory -Force -Path (Join-Path $stageDir "include") | Out-Null
 Copy-Item -LiteralPath $libfidanHeader -Destination (Join-Path $stageDir "include/fidan.h")
