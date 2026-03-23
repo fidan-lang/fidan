@@ -1,6 +1,32 @@
+use fidan_diagnostics::{DiagCode, diag_code};
 use fidan_runtime::display as runtime_display;
 use fidan_runtime::{FidanString, FidanValue, SharedRef};
 use std::io::BufRead;
+
+pub struct BuiltinError {
+    pub code: DiagCode,
+    pub message: String,
+}
+
+impl BuiltinError {
+    fn runtime(message: String) -> Self {
+        Self {
+            code: diag_code!("R0001"),
+            message,
+        }
+    }
+}
+
+fn invalid_conversion(target: &str, value: &FidanValue) -> BuiltinError {
+    let rendered = match value {
+        FidanValue::String(s) => format!("{:?}", s.as_str()),
+        other => display(other),
+    };
+    BuiltinError::runtime(format!(
+        "cannot convert {rendered} ({}) to {target}",
+        value.type_name()
+    ))
+}
 
 /// Try to handle a call to a core language built-in function.
 ///
@@ -11,19 +37,20 @@ use std::io::BufRead;
 /// All other functions (`abs`, `sqrt`, `floor`, `ceil`, `round`, `max`, `min`,
 /// time utilities, etc.) require the appropriate `use std.*` import.
 ///
-/// Returns `Some(value)` if handled, `None` if the name is not a built-in.
-pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
+/// Returns `Ok(Some(value))` if handled, `Ok(None)` if the name is not a built-in,
+/// or `Err(...)` if the built-in itself failed at runtime.
+pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanValue>, BuiltinError> {
     match name {
         // ── I/O ──────────────────────────────────────────────────────────────
         "print" => {
             let parts: Vec<String> = args.iter().map(display).collect();
             println!("{}", parts.join(" "));
-            Some(FidanValue::Nothing)
+            Ok(Some(FidanValue::Nothing))
         }
         "eprint" => {
             let parts: Vec<String> = args.iter().map(display).collect();
             eprintln!("{}", parts.join(" "));
-            Some(FidanValue::Nothing)
+            Ok(Some(FidanValue::Nothing))
         }
         "input" => {
             let prompt = args.first().map(display).unwrap_or_default();
@@ -34,7 +61,10 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             }
             let stdin = std::io::stdin();
             let mut line = String::new();
-            stdin.lock().read_line(&mut line).ok()?;
+            stdin
+                .lock()
+                .read_line(&mut line)
+                .map_err(|err| BuiltinError::runtime(format!("failed to read input: {err}")))?;
             // Strip trailing newline
             if line.ends_with('\n') {
                 line.pop();
@@ -42,17 +72,17 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                     line.pop();
                 }
             }
-            Some(FidanValue::String(FidanString::new(&line)))
+            Ok(Some(FidanValue::String(FidanString::new(&line))))
         }
 
         // ── Type conversion ───────────────────────────────────────────────────
         "string" => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            Some(FidanValue::String(FidanString::new(&display(&v))))
+            Ok(Some(FidanValue::String(FidanString::new(&display(&v)))))
         }
         "integer" => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            Some(match &v {
+            Ok(Some(match &v {
                 FidanValue::Integer(n) => FidanValue::Integer(*n),
                 FidanValue::Float(f) => FidanValue::Integer(*f as i64),
                 FidanValue::Boolean(b) => FidanValue::Integer(if *b { 1 } else { 0 }),
@@ -60,26 +90,26 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                     .as_str()
                     .parse::<i64>()
                     .map(FidanValue::Integer)
-                    .unwrap_or(FidanValue::Nothing),
-                _ => FidanValue::Nothing,
-            })
+                    .map_err(|_| invalid_conversion("integer", &v))?,
+                _ => return Err(invalid_conversion("integer", &v)),
+            }))
         }
         "float" => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            Some(match &v {
+            Ok(Some(match &v {
                 FidanValue::Float(f) => FidanValue::Float(*f),
                 FidanValue::Integer(n) => FidanValue::Float(*n as f64),
                 FidanValue::String(s) => s
                     .as_str()
                     .parse::<f64>()
                     .map(FidanValue::Float)
-                    .unwrap_or(FidanValue::Nothing),
-                _ => FidanValue::Nothing,
-            })
+                    .map_err(|_| invalid_conversion("float", &v))?,
+                _ => return Err(invalid_conversion("float", &v)),
+            }))
         }
         "boolean" => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            Some(FidanValue::Boolean(v.truthy()))
+            Ok(Some(FidanValue::Boolean(v.truthy())))
         }
 
         // ── Collections ───────────────────────────────────────────────────────
@@ -101,16 +131,16 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                         (end - start).max(0)
                     }
                 }
-                _ => return Some(FidanValue::Nothing),
+                _ => return Ok(Some(FidanValue::Nothing)),
             };
-            Some(FidanValue::Integer(n))
+            Ok(Some(FidanValue::Integer(n)))
         }
         "type" => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            Some(FidanValue::String(FidanString::new(v.type_name())))
+            Ok(Some(FidanValue::String(FidanString::new(v.type_name()))))
         }
 
-        _ => None,
+        _ => Ok(None),
     }
 }
 

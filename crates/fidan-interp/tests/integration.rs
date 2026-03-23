@@ -430,6 +430,46 @@ fn uncaught_throw_returns_r1002() {
     assert_eq!(err.code.0, "R1002");
 }
 
+#[test]
+fn integer_invalid_string_returns_runtime_error() {
+    let err = run_src(r#"var n = integer("cls")"#)
+        .expect_err("expected invalid integer conversion to fail");
+    assert_eq!(err.code.0, "R0001");
+    assert!(
+        err.message.contains("cannot convert")
+            && err.message.contains("\"cls\"")
+            && err.message.contains("integer"),
+        "unexpected conversion error message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn float_invalid_string_returns_runtime_error() {
+    let err =
+        run_src(r#"var n = float("wat")"#).expect_err("expected invalid float conversion to fail");
+    assert_eq!(err.code.0, "R0001");
+    assert!(
+        err.message.contains("cannot convert")
+            && err.message.contains("\"wat\"")
+            && err.message.contains("float"),
+        "unexpected conversion error message: {}",
+        err.message
+    );
+}
+
+#[test]
+fn integer_invalid_type_returns_runtime_error() {
+    let err = run_src("var n = integer([1, 2, 3])")
+        .expect_err("expected invalid integer conversion from list to fail");
+    assert_eq!(err.code.0, "R0001");
+    assert!(
+        err.message.contains("list") && err.message.contains("integer"),
+        "unexpected conversion error message: {}",
+        err.message
+    );
+}
+
 // ── Parallel execution ────────────────────────────────────────────────────────
 
 #[test]

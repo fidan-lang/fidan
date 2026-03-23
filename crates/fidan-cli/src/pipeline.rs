@@ -951,6 +951,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                                 ),
                             }
                         }
+                        std::process::exit(1);
                     }
                 }
             }

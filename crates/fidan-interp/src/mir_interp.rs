@@ -1569,8 +1569,9 @@ impl MirMachine {
                             return Ok(FidanValue::String(FidanString::new(&line)));
                         }
                         // Normal mode: delegate to the builtin (reads stdin) and capture.
-                        let v =
-                            builtins::call_builtin("input", args).unwrap_or(FidanValue::Nothing);
+                        let v = builtins::call_builtin("input", args)
+                            .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
+                            .unwrap_or(FidanValue::Nothing);
                         if let FidanValue::String(ref s) = v {
                             self.stdin_capture.push(s.as_str().to_string());
                         }
@@ -1582,9 +1583,15 @@ impl MirMachine {
                 // true language builtins (print, input, len, type conversions, math).
                 // String/list/dict receiver methods are NOT free functions and must
                 // be invoked via `receiver.method()` — they live in call_bootstrap_method.
-                builtins::call_builtin_constructor(&name, args.clone())
-                    .or_else(|| builtins::call_builtin(&name, args))
-                    .ok_or_else(|| MirSignal::Panic(format!("unknown builtin `{}`", name)))
+                if let Some(value) = builtins::call_builtin_constructor(&name, args.clone()) {
+                    return Ok(value);
+                }
+                if let Some(value) = builtins::call_builtin(&name, args)
+                    .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
+                {
+                    return Ok(value);
+                }
+                Err(MirSignal::Panic(format!("unknown builtin `{}`", name)))
             }
             Callee::Method { receiver, method } => {
                 let recv = self.eval_operand(receiver, frame);
