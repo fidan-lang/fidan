@@ -258,6 +258,5 @@ pub struct MessageOnly {
 #[derive(Debug, Clone, Deserialize)]
 pub struct IndexEntry {
     pub vers: String,
-    pub deps: Vec<Value>,
     pub yanked: bool,
 }

@@ -133,6 +133,32 @@ pub fn install_downloaded_package(
     Ok(target_dir)
 }
 
+pub fn read_manifest_from_archive(archive_bytes: &[u8]) -> Result<DalManifest> {
+    let decoder = flate2::read::GzDecoder::new(Cursor::new(archive_bytes));
+    let mut archive = Archive::new(decoder);
+    for entry in archive.entries().context("cannot read archive entries")? {
+        let mut entry = entry.context("invalid archive entry")?;
+        let path = entry
+            .path()
+            .context("cannot read archive path")?
+            .to_path_buf();
+        let file_name = path.file_name().and_then(|name| name.to_str());
+        if file_name != Some("dal.toml") {
+            continue;
+        }
+        let mut manifest_bytes = Vec::new();
+        use std::io::Read;
+        entry
+            .read_to_end(&mut manifest_bytes)
+            .context("cannot read `dal.toml` from archive")?;
+        let manifest: DalManifest =
+            toml::from_slice(&manifest_bytes).context("invalid `dal.toml` inside archive")?;
+        fidan_driver::dal::validate_manifest(&manifest)?;
+        return Ok(manifest);
+    }
+    bail!("downloaded archive did not contain `dal.toml`");
+}
+
 fn validate_package_dir(project_dir: &Path, manifest: &DalManifest) -> Result<()> {
     let mut allowed = HashSet::new();
     for name in ALLOWED_TOP_FILES {
@@ -153,8 +179,10 @@ fn validate_package_dir(project_dir: &Path, manifest: &DalManifest) -> Result<()
         bail!("package must contain src/init.fdn");
     }
 
-    if !manifest.dependencies.is_empty() && !project_dir.join("dal.lock").is_file() {
-        bail!("packages with `[dependencies]` must include a dal.lock file");
+    if (!manifest.dependencies.is_empty() || !manifest.optional_dependencies.is_empty())
+        && !project_dir.join("dal.lock").is_file()
+    {
+        bail!("packages with dependencies must include a `dal.lock` file");
     }
 
     if let Some(cli) = &manifest.cli {
@@ -410,11 +438,48 @@ other-package = "^1.2"
         fs::write(project_dir.join("src").join("init.fdn"), "action main {}\n")
             .expect("write init");
 
-        let error = build_package_archive(&project_dir).expect_err("missing dal.lock should fail");
+        let error =
+            build_package_archive(&project_dir).expect_err("missing `dal.lock` should fail");
         assert!(
             error
                 .to_string()
-                .contains("packages with `[dependencies]` must include a dal.lock file")
+                .contains("packages with dependencies must include a `dal.lock` file")
+        );
+
+        fs::remove_dir_all(&sandbox).ok();
+    }
+
+    #[test]
+    fn package_with_optional_dependencies_requires_lockfile() {
+        let sandbox = make_temp_dir("fidan_dal_archive_optional_lock_test");
+        let project_dir = sandbox.join("project");
+
+        fs::create_dir_all(project_dir.join("src")).expect("create src");
+        fs::write(
+            project_dir.join("dal.toml"),
+            r#"[package]
+name = "my-package"
+version = "0.1.0"
+readme = "README.md"
+
+[optional-dependencies]
+python-runtime = "^3"
+
+[features]
+pybindings = ["dep:python-runtime"]
+"#,
+        )
+        .expect("write dal.toml");
+        fs::write(project_dir.join("README.md"), "# My Package\n").expect("write readme");
+        fs::write(project_dir.join("src").join("init.fdn"), "action main {}\n")
+            .expect("write init");
+
+        let error =
+            build_package_archive(&project_dir).expect_err("missing `dal.lock` should fail");
+        assert!(
+            error
+                .to_string()
+                .contains("packages with dependencies must include a `dal.lock` file")
         );
 
         fs::remove_dir_all(&sandbox).ok();

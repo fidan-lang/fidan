@@ -349,6 +349,11 @@ mod tests {
         );
     }
 
+    #[test]
+    fn handle_var_shadowing_remains_legal() {
+        assert!(check_errors("var handle = 1").is_empty());
+    }
+
     // ── Parallel-safety diagnostics ───────────────────────────────────────────
 
     #[test]

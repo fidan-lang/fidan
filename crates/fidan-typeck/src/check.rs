@@ -22,7 +22,6 @@ const RESERVED_BUILTIN_BINDINGS: &[&str] = &[
     "integer",
     "float",
     "boolean",
-    "handle",
     "Shared",
     "assert",
     "assert_eq",

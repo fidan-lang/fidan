@@ -9,25 +9,27 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use fidan_diagnostics::{Severity, render_message_to_stderr};
 use fidan_driver::dal::{
-    DalCliMeta, DalLock, DalLockedPackage, DalManifest, cli_binary_stem, global_bin_dir,
-    global_dal_dir, global_lock_path, global_package_store, global_roots_path, local_bin_dir,
-    local_package_store, lock_path, module_dir_name, package_install_dir, parse_dependency_req,
-    project_root_or_fallback, prune_lock_to_dependencies, read_dependency_roots_if_exists,
-    read_lock_from_path, read_lock_if_exists, read_manifest, read_manifest_if_exists,
+    DalCliMeta, DalDependencySpec, DalLock, DalLockedPackage, DalManifest, cli_binary_stem,
+    global_bin_dir, global_dal_dir, global_lock_path, global_package_store, global_roots_path,
+    local_bin_dir, local_package_store, lock_path, module_dir_name, package_install_dir,
+    parse_dependency_req, project_root_or_fallback, prune_lock_to_dependencies,
+    read_dependency_roots_if_exists, read_lock_from_path, read_lock_if_exists, read_manifest,
+    read_manifest_if_exists, resolve_manifest_dependencies, validate_feature_name,
     validate_package_name, write_dependency_roots, write_lock, write_lock_to_path, write_manifest,
 };
 use fidan_driver::install::ensure_persistent_path_entry;
 use fidan_driver::{
     CompileOptions, ExecutionMode, Session, compile, compile_file_to_mir, resolve_fidan_home,
 };
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use self::api::DalClient;
-use self::archive::{build_package_archive, install_downloaded_package};
+use self::archive::{
+    build_package_archive, install_downloaded_package, read_manifest_from_archive,
+};
 
 #[derive(Subcommand)]
 pub(crate) enum DalCommand {
@@ -97,7 +99,7 @@ pub(crate) enum DalCommand {
     },
     /// Build a canonical Dal .tar.gz archive locally without publishing
     Package {
-        /// Package project directory containing dal.toml
+        /// Package project directory containing `dal.toml`
         #[arg(default_value = ".")]
         path: PathBuf,
         /// Output archive path (default: {name}-{version}.tar.gz in current dir)
@@ -106,7 +108,7 @@ pub(crate) enum DalCommand {
     },
     /// Build and publish the current package to Dal
     Publish {
-        /// Package project directory containing dal.toml
+        /// Package project directory containing `dal.toml`
         #[arg(default_value = ".")]
         path: PathBuf,
         #[arg(long)]
@@ -298,14 +300,47 @@ fn run_info(package: &str, registry: Option<String>) -> Result<()> {
     Ok(())
 }
 
+fn parse_package_request(raw: &str) -> Result<(String, Vec<String>)> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        bail!("package name must not be empty");
+    }
+    let Some(open) = raw.find('[') else {
+        validate_package_name(raw)?;
+        return Ok((raw.to_string(), vec![]));
+    };
+    let Some(close) = raw.strip_suffix(']').map(|_| raw.len() - 1) else {
+        bail!("invalid package feature syntax `{raw}`; expected `name[feature]`");
+    };
+    if close < open {
+        bail!("invalid package feature syntax `{raw}`");
+    }
+    let package = raw[..open].trim();
+    validate_package_name(package)?;
+    let feature_text = &raw[open + 1..close];
+    let mut features = Vec::new();
+    for feature in feature_text.split(',') {
+        let feature = feature.trim();
+        if feature.is_empty() {
+            bail!("invalid package feature syntax `{raw}`");
+        }
+        validate_feature_name(feature)?;
+        if !features.iter().any(|existing| existing == feature) {
+            features.push(feature.to_string());
+        }
+    }
+    Ok((package.to_string(), features))
+}
+
 fn run_add(
-    package: &str,
+    package_arg: &str,
     version_req: Option<&str>,
     into: Option<PathBuf>,
     global: bool,
     force: bool,
     registry: Option<String>,
 ) -> Result<()> {
+    let (package, requested_features) = parse_package_request(package_arg)?;
     let registry = config::resolve_registry(registry.as_deref())?;
     let client = DalClient::new(registry, None)?;
     if global && into.is_some() {
@@ -332,7 +367,7 @@ fn run_add(
         None
     };
 
-    let mut requested_requirements = BTreeMap::new();
+    let mut requested_requirements: BTreeMap<String, DalDependencySpec> = BTreeMap::new();
     if let Some(manifest) = &existing_manifest {
         for (name, req) in &manifest.dependencies {
             requested_requirements.insert(name.clone(), req.clone());
@@ -344,14 +379,30 @@ fn run_add(
         }
     }
 
+    let existing_spec = requested_requirements.get(&package).cloned();
     let top_requirement = version_req
         .map(ToOwned::to_owned)
-        .or_else(|| requested_requirements.get(package).cloned())
+        .or_else(|| {
+            existing_spec
+                .as_ref()
+                .map(|spec| spec.version_req().to_string())
+        })
         .unwrap_or_else(|| "*".to_string());
-    requested_requirements.insert(package.to_string(), top_requirement);
+    let top_features = if requested_features.is_empty() {
+        existing_spec
+            .as_ref()
+            .map(|spec| spec.features().to_vec())
+            .unwrap_or_default()
+    } else {
+        requested_features
+    };
+    requested_requirements.insert(
+        package.clone(),
+        DalDependencySpec::detailed(top_requirement, top_features),
+    );
 
     let resolver = PackageResolver::new(&client);
-    let resolved = resolver.resolve_all(package, &requested_requirements)?;
+    let resolved = resolver.resolve_all(&package, &requested_requirements)?;
 
     let install_root = if let Some(into_dir) = &into {
         into_dir.clone()
@@ -364,9 +415,14 @@ fn run_add(
         .with_context(|| format!("cannot create {}", install_root.display()))?;
 
     for package_state in resolved.packages.values() {
-        let archive = client.download_archive(&package_state.name, &package_state.version)?;
+        let archive = resolved
+            .archives
+            .get(&package_state.name)
+            .with_context(|| {
+                format!("resolved archives did not contain `{}`", package_state.name)
+            })?;
         install_downloaded_package(
-            &archive,
+            archive,
             &package_state.name,
             &package_state.version,
             &install_root,
@@ -377,9 +433,12 @@ fn run_add(
     let manifest_requirement = version_req
         .map(ToOwned::to_owned)
         .or_else(|| {
-            existing_manifest
-                .as_ref()
-                .and_then(|manifest| manifest.dependencies.get(package).cloned())
+            existing_manifest.as_ref().and_then(|manifest| {
+                manifest
+                    .dependencies
+                    .get(&package)
+                    .map(|spec| spec.version_req().to_string())
+            })
         })
         .unwrap_or_else(|| format!("={}", resolved.top_version));
 
@@ -395,18 +454,30 @@ fn run_add(
                 readme: Some("README.md".to_string()),
             },
             dependencies: BTreeMap::new(),
+            optional_dependencies: BTreeMap::new(),
+            features: BTreeMap::new(),
             cli: None,
         });
-        manifest
-            .dependencies
-            .insert(package.to_string(), manifest_requirement);
+        let features = requested_requirements
+            .get(&package)
+            .map(|spec| spec.features().to_vec())
+            .unwrap_or_default();
+        manifest.dependencies.insert(
+            package.clone(),
+            DalDependencySpec::detailed(manifest_requirement, features),
+        );
         write_manifest(&project_root, &manifest)?;
         write_lock(&project_root, &resolved.to_lock())?;
     } else if into.is_none() && global {
         let mut roots = existing_global_roots.unwrap_or_default();
-        roots
-            .dependencies
-            .insert(package.to_string(), manifest_requirement);
+        let features = requested_requirements
+            .get(&package)
+            .map(|spec| spec.features().to_vec())
+            .unwrap_or_default();
+        roots.dependencies.insert(
+            package.clone(),
+            DalDependencySpec::detailed(manifest_requirement, features),
+        );
         write_dependency_roots(
             &global_roots_path(global_home.as_ref().expect("global home is set")),
             &roots,
@@ -419,10 +490,10 @@ fn run_add(
 
     let requested_package = resolved
         .packages
-        .get(package)
+        .get(&package)
         .with_context(|| format!("resolved package graph did not contain `{package}`"))?;
-    let installed_to = package_install_dir(&install_root, package, &requested_package.version);
-    let import_name = module_dir_name(package);
+    let installed_to = package_install_dir(&install_root, &package, &requested_package.version);
+    let import_name = module_dir_name(&package);
 
     let mut extra_note = None;
     if into.is_none()
@@ -510,7 +581,7 @@ struct RemovedInstalledPackage {
 
 fn remove_local_package(package: &str, project_root: &Path) -> Result<()> {
     let mut manifest = read_manifest(project_root)
-        .with_context(|| format!("cannot remove `{package}` without a local dal.toml"))?;
+        .with_context(|| format!("cannot remove `{package}` without a local `dal.toml`"))?;
     let Some(_) = manifest.dependencies.remove(package) else {
         bail!("package `{package}` is not a direct dependency in this project");
     };
@@ -763,22 +834,18 @@ fn run_package(path: &std::path::Path, output: Option<PathBuf>) -> Result<()> {
 }
 
 #[derive(Debug, Clone)]
-struct SparseDependency {
-    name: String,
-    req: String,
-}
-
-#[derive(Debug, Clone)]
 struct ResolvedPackageState {
     name: String,
     version: String,
-    dependencies: BTreeMap<String, String>,
+    dependencies: BTreeMap<String, DalDependencySpec>,
+    features: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 struct ResolvedGraph {
     top_version: String,
     packages: BTreeMap<String, ResolvedPackageState>,
+    archives: BTreeMap<String, Vec<u8>>,
 }
 
 impl ResolvedGraph {
@@ -791,7 +858,16 @@ impl ResolvedGraph {
                     name: pkg.name.clone(),
                     module: module_dir_name(&pkg.name),
                     version: pkg.version.clone(),
-                    dependencies: pkg.dependencies.clone(),
+                    dependencies: pkg
+                        .dependencies
+                        .keys()
+                        .filter_map(|dep_name| {
+                            self.packages
+                                .get(dep_name)
+                                .map(|dep| (dep_name.clone(), format!("={}", dep.version)))
+                        })
+                        .collect(),
+                    features: pkg.features.clone(),
                 })
                 .collect(),
             ..Default::default()
@@ -802,7 +878,9 @@ impl ResolvedGraph {
 struct PackageResolver<'a> {
     client: &'a DalClient,
     constraints: BTreeMap<String, Vec<semver::VersionReq>>,
+    requested_features: BTreeMap<String, BTreeSet<String>>,
     packages: BTreeMap<String, ResolvedPackageState>,
+    archives: BTreeMap<String, Vec<u8>>,
     stack: Vec<String>,
 }
 
@@ -811,7 +889,9 @@ impl<'a> PackageResolver<'a> {
         Self {
             client,
             constraints: BTreeMap::new(),
+            requested_features: BTreeMap::new(),
             packages: BTreeMap::new(),
+            archives: BTreeMap::new(),
             stack: vec![],
         }
     }
@@ -819,11 +899,11 @@ impl<'a> PackageResolver<'a> {
     fn resolve_all(
         &self,
         top_package: &str,
-        root_requirements: &BTreeMap<String, String>,
+        root_requirements: &BTreeMap<String, DalDependencySpec>,
     ) -> Result<ResolvedGraph> {
         let mut resolver = PackageResolver::new(self.client);
-        for (package, req) in root_requirements {
-            resolver.resolve_package(package, req)?;
+        for (package, spec) in root_requirements {
+            resolver.resolve_package(package, spec)?;
         }
 
         let top_version = resolver
@@ -835,16 +915,21 @@ impl<'a> PackageResolver<'a> {
         Ok(ResolvedGraph {
             top_version,
             packages: resolver.packages,
+            archives: resolver.archives,
         })
     }
 
-    fn resolve_package(&mut self, package: &str, req: &str) -> Result<()> {
+    fn resolve_package(&mut self, package: &str, spec: &DalDependencySpec) -> Result<()> {
         validate_package_name(package)?;
-        let requirement = parse_dependency_req(req)?;
+        let requirement = parse_dependency_req(spec.version_req())?;
         self.constraints
             .entry(package.to_string())
             .or_default()
             .push(requirement);
+        self.requested_features
+            .entry(package.to_string())
+            .or_default()
+            .extend(spec.features().iter().cloned());
         self.resolve_locked(package)
     }
 
@@ -861,16 +946,37 @@ impl<'a> PackageResolver<'a> {
             bail!("package `{package}` has no published versions");
         }
         let chosen = select_version_with_constraints(&index, &constraints)?;
-        let deps = parse_sparse_dependencies(&chosen.deps)?;
-        let dependency_versions = deps
-            .iter()
-            .map(|dep| (dep.name.clone(), dep.req.clone()))
-            .collect::<BTreeMap<_, _>>();
+        let needs_archive_refresh = self
+            .packages
+            .get(package)
+            .map(|pkg| pkg.version != chosen.vers)
+            .unwrap_or(true)
+            || !self.archives.contains_key(package);
+        if needs_archive_refresh {
+            let archive = self.client.download_archive(package, &chosen.vers)?;
+            self.archives.insert(package.to_string(), archive);
+        }
+        let archive = self
+            .archives
+            .get(package)
+            .cloned()
+            .with_context(|| format!("missing downloaded archive for `{package}`"))?;
+        let manifest = read_manifest_from_archive(&archive)?;
+        let requested_features = self
+            .requested_features
+            .get(package)
+            .map(|features| features.iter().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let dependency_versions = resolve_manifest_dependencies(&manifest, &requested_features)?;
 
         let needs_update = self
             .packages
             .get(package)
-            .map(|pkg| pkg.version != chosen.vers || pkg.dependencies != dependency_versions)
+            .map(|pkg| {
+                pkg.version != chosen.vers
+                    || pkg.dependencies != dependency_versions
+                    || pkg.features != requested_features
+            })
             .unwrap_or(true);
         if !needs_update {
             return Ok(());
@@ -883,11 +989,17 @@ impl<'a> PackageResolver<'a> {
                 name: package.to_string(),
                 version: chosen.vers.clone(),
                 dependencies: dependency_versions,
+                features: requested_features.clone(),
             },
         );
 
-        for dep in deps {
-            self.resolve_package(&dep.name, &dep.req)?;
+        for (dep_name, dep_spec) in self
+            .packages
+            .get(package)
+            .map(|pkg| pkg.dependencies.clone())
+            .unwrap_or_default()
+        {
+            self.resolve_package(&dep_name, &dep_spec)?;
         }
         self.stack.pop();
         Ok(())
@@ -914,43 +1026,6 @@ fn select_version_with_constraints<'a>(
         .map(|(entry, _)| entry)
         .next()
         .ok_or_else(|| anyhow::anyhow!("no non-yanked version satisfies all requested constraints"))
-}
-
-fn parse_sparse_dependencies(values: &[Value]) -> Result<Vec<SparseDependency>> {
-    let mut dependencies = Vec::with_capacity(values.len());
-    for value in values {
-        match value {
-            Value::String(name) => dependencies.push(SparseDependency {
-                name: name.clone(),
-                req: "*".to_string(),
-            }),
-            Value::Object(map) => {
-                let name = map
-                    .get("package")
-                    .or_else(|| map.get("name"))
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("dependency entry is missing `package`/`name`")
-                    })?;
-                let req = map
-                    .get("req")
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .or_else(|| {
-                        map.get("version")
-                            .and_then(Value::as_str)
-                            .map(ToOwned::to_owned)
-                    })
-                    .unwrap_or_else(|| "*".to_string());
-                dependencies.push(SparseDependency {
-                    name: name.to_string(),
-                    req,
-                });
-            }
-            _ => bail!("unsupported dependency entry in sparse index"),
-        }
-    }
-    Ok(dependencies)
 }
 
 fn build_package_cli(package_root: &Path, cli: &DalCliMeta, bin_root: &Path) -> Result<PathBuf> {
@@ -1137,7 +1212,12 @@ mod tests {
                 version: "0.1.0".to_string(),
                 readme: Some("README.md".to_string()),
             },
-            dependencies: BTreeMap::from([("tool-package".to_string(), "=1.0.0".to_string())]),
+            dependencies: BTreeMap::from([(
+                "tool-package".to_string(),
+                DalDependencySpec::simple("=1.0.0"),
+            )]),
+            optional_dependencies: BTreeMap::new(),
+            features: BTreeMap::new(),
             cli: None,
         };
         write_manifest(&project_root, &manifest)?;
@@ -1154,12 +1234,14 @@ mod tests {
                             "leaf-package".to_string(),
                             "=1.0.0".to_string(),
                         )]),
+                        features: vec![],
                     },
                     DalLockedPackage {
                         name: "leaf-package".to_string(),
                         module: "leaf_package".to_string(),
                         version: "1.0.0".to_string(),
                         dependencies: BTreeMap::new(),
+                        features: vec![],
                     },
                 ],
             },
@@ -1192,7 +1274,10 @@ mod tests {
         write_dependency_roots(
             &global_roots_path(&home),
             &DalDependencyRoots {
-                dependencies: BTreeMap::from([("tool-package".to_string(), "=1.0.0".to_string())]),
+                dependencies: BTreeMap::from([(
+                    "tool-package".to_string(),
+                    DalDependencySpec::simple("=1.0.0"),
+                )]),
             },
         )?;
         write_lock_to_path(
@@ -1208,12 +1293,14 @@ mod tests {
                             "leaf-package".to_string(),
                             "=1.0.0".to_string(),
                         )]),
+                        features: vec![],
                     },
                     DalLockedPackage {
                         name: "leaf-package".to_string(),
                         module: "leaf_package".to_string(),
                         version: "1.0.0".to_string(),
                         dependencies: BTreeMap::new(),
+                        features: vec![],
                     },
                 ],
             },
@@ -1239,6 +1326,23 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn parse_package_request_supports_feature_suffix() -> Result<()> {
+        let (package, features) = parse_package_request("torch[pybindings,gpu]")?;
+        assert_eq!(package, "torch");
+        assert_eq!(features, vec!["pybindings".to_string(), "gpu".to_string()]);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_package_request_rejects_invalid_feature_syntax() {
+        let err = parse_package_request("torch[pybindings").expect_err("missing ] should fail");
+        assert!(
+            err.to_string().contains("invalid package feature syntax"),
+            "unexpected error: {err}"
+        );
+    }
+
     fn write_installed_package(root: &Path, with_cli: bool) -> Result<()> {
         fs::create_dir_all(root)?;
         let package_name = root
@@ -1254,6 +1358,8 @@ mod tests {
                 readme: Some("README.md".to_string()),
             },
             dependencies: BTreeMap::new(),
+            optional_dependencies: BTreeMap::new(),
+            features: BTreeMap::new(),
             cli: with_cli.then(|| DalCliMeta {
                 entry: "src/main.fdn".to_string(),
                 name: Some(package_name),

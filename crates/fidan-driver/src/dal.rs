@@ -2,18 +2,42 @@ use anyhow::{Context, Result, bail};
 use semver::VersionReq;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const DAL_LOCK_SCHEMA_VERSION: u32 = 1;
 
+fn default_dependency_version() -> String {
+    "*".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DalManifest {
     pub package: DalPackageMeta,
     #[serde(default)]
-    pub dependencies: BTreeMap<String, String>,
+    pub dependencies: BTreeMap<String, DalDependencySpec>,
+    #[serde(rename = "optional-dependencies", default)]
+    pub optional_dependencies: BTreeMap<String, DalDependencySpec>,
+    #[serde(default)]
+    pub features: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub cli: Option<DalCliMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DalDependencySpec {
+    Simple(String),
+    Detailed(DalDependencyDetail),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DalDependencyDetail {
+    #[serde(default = "default_dependency_version")]
+    pub version: String,
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,12 +66,14 @@ pub struct DalLockedPackage {
     pub version: String,
     #[serde(default)]
     pub dependencies: BTreeMap<String, String>,
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DalDependencyRoots {
     #[serde(default)]
-    pub dependencies: BTreeMap<String, String>,
+    pub dependencies: BTreeMap<String, DalDependencySpec>,
 }
 
 impl Default for DalLock {
@@ -56,6 +82,64 @@ impl Default for DalLock {
             schema_version: DAL_LOCK_SCHEMA_VERSION,
             packages: vec![],
         }
+    }
+}
+
+impl DalDependencySpec {
+    pub fn simple(version: impl Into<String>) -> Self {
+        Self::Simple(version.into())
+    }
+
+    pub fn detailed(version: impl Into<String>, features: Vec<String>) -> Self {
+        let mut detail = DalDependencyDetail {
+            version: version.into(),
+            features,
+        };
+        detail.normalize();
+        if detail.features.is_empty() {
+            Self::Simple(detail.version)
+        } else {
+            Self::Detailed(detail)
+        }
+    }
+
+    pub fn version_req(&self) -> &str {
+        match self {
+            DalDependencySpec::Simple(version) => version.as_str(),
+            DalDependencySpec::Detailed(detail) => detail.version.as_str(),
+        }
+    }
+
+    pub fn features(&self) -> &[String] {
+        match self {
+            DalDependencySpec::Simple(_) => &[],
+            DalDependencySpec::Detailed(detail) => &detail.features,
+        }
+    }
+
+    pub fn normalized(&self) -> Self {
+        match self {
+            DalDependencySpec::Simple(version) => {
+                DalDependencySpec::Simple(version.trim().to_string())
+            }
+            DalDependencySpec::Detailed(detail) => {
+                let mut detail = detail.clone();
+                detail.normalize();
+                if detail.features.is_empty() {
+                    DalDependencySpec::Simple(detail.version)
+                } else {
+                    DalDependencySpec::Detailed(detail)
+                }
+            }
+        }
+    }
+}
+
+impl DalDependencyDetail {
+    fn normalize(&mut self) {
+        self.version = self.version.trim().to_string();
+        let mut seen = BTreeSet::new();
+        self.features.retain(|feature| seen.insert(feature.clone()));
     }
 }
 
@@ -97,8 +181,22 @@ pub fn validate_manifest(manifest: &DalManifest) -> Result<()> {
 
     for (name, req) in &manifest.dependencies {
         validate_package_name(name)?;
-        parse_dependency_req(req)
+        validate_dependency_spec(req)
             .with_context(|| format!("invalid dependency requirement for `{name}`"))?;
+    }
+    for (name, req) in &manifest.optional_dependencies {
+        validate_package_name(name)?;
+        validate_dependency_spec(req)
+            .with_context(|| format!("invalid optional dependency requirement for `{name}`"))?;
+    }
+    for (feature, members) in &manifest.features {
+        validate_feature_name(feature)
+            .with_context(|| format!("invalid feature name `{feature}`"))?;
+        for member in members {
+            validate_feature_member(manifest, member).with_context(|| {
+                format!("invalid feature member `{member}` in feature `{feature}`")
+            })?;
+        }
     }
 
     if let Some(cli) = &manifest.cli {
@@ -120,6 +218,16 @@ pub fn validate_manifest(manifest: &DalManifest) -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_dependency_spec(spec: &DalDependencySpec) -> Result<()> {
+    parse_dependency_req(spec.version_req())
+        .with_context(|| format!("invalid version requirement `{}`", spec.version_req()))?;
+    for feature in spec.features() {
+        validate_feature_name(feature)
+            .with_context(|| format!("invalid dependency feature `{feature}`"))?;
+    }
     Ok(())
 }
 
@@ -146,6 +254,38 @@ pub fn parse_dependency_req(raw: &str) -> Result<VersionReq> {
             .with_context(|| format!("invalid exact version requirement `{raw}`"));
     }
     VersionReq::parse(raw).with_context(|| format!("invalid version requirement `{raw}`"))
+}
+
+pub fn validate_feature_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.len() > 64 {
+        bail!("invalid feature name `{name}`");
+    }
+    if name.starts_with('-') || name.starts_with('_') || name.ends_with('-') || name.ends_with('_')
+    {
+        bail!("invalid feature name `{name}`");
+    }
+    for ch in name.chars() {
+        if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_') {
+            bail!("invalid feature name `{name}`");
+        }
+    }
+    Ok(())
+}
+
+fn validate_feature_member(manifest: &DalManifest, member: &str) -> Result<()> {
+    if let Some(dep_name) = member.strip_prefix("dep:") {
+        validate_package_name(dep_name)?;
+        if !manifest.optional_dependencies.contains_key(dep_name) {
+            bail!("unknown optional dependency `{dep_name}`");
+        }
+        return Ok(());
+    }
+
+    validate_feature_name(member)?;
+    if !manifest.features.contains_key(member) {
+        bail!("unknown feature `{member}`");
+    }
+    Ok(())
 }
 
 pub fn manifest_path(project_root: &Path) -> PathBuf {
@@ -189,7 +329,7 @@ pub fn write_manifest(project_root: &Path, manifest: &DalManifest) -> Result<()>
         fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
-    let text = toml::to_string_pretty(manifest).context("failed to encode dal.toml")?;
+    let text = toml::to_string_pretty(manifest).context("failed to encode `dal.toml`")?;
     fs::write(&path, format!("{text}\n"))
         .with_context(|| format!("cannot write {}", path.display()))
 }
@@ -228,7 +368,7 @@ pub fn write_lock_to_path(path: &Path, lock: &DalLock) -> Result<()> {
     }
     let mut normalized = lock.clone();
     normalize_lock(&mut normalized)?;
-    let text = toml::to_string_pretty(&normalized).context("failed to encode dal.lock")?;
+    let text = toml::to_string_pretty(&normalized).context("failed to encode `dal.lock`")?;
     fs::write(path, format!("{text}\n")).with_context(|| format!("cannot write {}", path.display()))
 }
 
@@ -264,7 +404,7 @@ pub fn normalize_lock(lock: &mut DalLock) -> Result<()> {
     }
     if lock.schema_version != DAL_LOCK_SCHEMA_VERSION {
         bail!(
-            "unsupported dal.lock schema version `{}` (expected {})",
+            "unsupported `dal.lock` schema version `{}` (expected {})",
             lock.schema_version,
             DAL_LOCK_SCHEMA_VERSION
         );
@@ -275,6 +415,14 @@ pub fn normalize_lock(lock: &mut DalLock) -> Result<()> {
         semver::Version::parse(&package.version)
             .with_context(|| format!("invalid locked version `{}`", package.version))?;
         package.module = module_dir_name(&package.name);
+        let mut seen = BTreeSet::new();
+        package
+            .features
+            .retain(|feature| seen.insert(feature.clone()));
+        for feature in &package.features {
+            validate_feature_name(feature)
+                .with_context(|| format!("invalid locked feature `{feature}`"))?;
+        }
     }
 
     lock.packages
@@ -286,7 +434,7 @@ pub fn normalize_lock(lock: &mut DalLock) -> Result<()> {
 
 pub fn prune_lock_to_dependencies(
     lock: &DalLock,
-    roots: &BTreeMap<String, String>,
+    roots: &BTreeMap<String, DalDependencySpec>,
 ) -> Result<DalLock> {
     let mut normalized = lock.clone();
     normalize_lock(&mut normalized)?;
@@ -313,10 +461,78 @@ pub fn prune_lock_to_dependencies(
     })
 }
 
+pub fn resolve_manifest_dependencies(
+    manifest: &DalManifest,
+    enabled_features: &[String],
+) -> Result<BTreeMap<String, DalDependencySpec>> {
+    let mut resolved = manifest
+        .dependencies
+        .iter()
+        .map(|(name, spec)| (name.clone(), spec.normalized()))
+        .collect::<BTreeMap<_, _>>();
+    let mut visiting = Vec::new();
+    let mut enabled = BTreeSet::new();
+
+    for feature in enabled_features {
+        enable_manifest_feature(
+            manifest,
+            feature,
+            &mut enabled,
+            &mut visiting,
+            &mut resolved,
+        )?;
+    }
+
+    Ok(resolved)
+}
+
+fn enable_manifest_feature(
+    manifest: &DalManifest,
+    feature: &str,
+    enabled: &mut BTreeSet<String>,
+    visiting: &mut Vec<String>,
+    resolved: &mut BTreeMap<String, DalDependencySpec>,
+) -> Result<()> {
+    validate_feature_name(feature)?;
+    if enabled.contains(feature) {
+        return Ok(());
+    }
+    if let Some(pos) = visiting.iter().position(|entry| entry == feature) {
+        let mut cycle = visiting[pos..].to_vec();
+        cycle.push(feature.to_string());
+        bail!("package feature cycle detected: {}", cycle.join(" -> "));
+    }
+    let members = manifest
+        .features
+        .get(feature)
+        .ok_or_else(|| anyhow::anyhow!("package does not define feature `{feature}`"))?
+        .clone();
+    visiting.push(feature.to_string());
+    for member in members {
+        if let Some(dep_name) = member.strip_prefix("dep:") {
+            let spec = manifest
+                .optional_dependencies
+                .get(dep_name)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "feature `{feature}` references unknown optional dependency `{dep_name}`"
+                    )
+                })?
+                .normalized();
+            resolved.insert(dep_name.to_string(), spec);
+        } else {
+            enable_manifest_feature(manifest, &member, enabled, visiting, resolved)?;
+        }
+    }
+    visiting.pop();
+    enabled.insert(feature.to_string());
+    Ok(())
+}
+
 fn validate_dependency_roots(roots: &DalDependencyRoots) -> Result<()> {
     for (name, req) in &roots.dependencies {
         validate_package_name(name)?;
-        parse_dependency_req(req)
+        validate_dependency_spec(req)
             .with_context(|| format!("invalid dependency requirement for `{name}`"))?;
     }
     Ok(())
@@ -339,7 +555,7 @@ fn visit_locked_package(
 
     let pkg = by_name
         .get(package)
-        .ok_or_else(|| anyhow::anyhow!("package `{package}` was missing from dal.lock"))?;
+        .ok_or_else(|| anyhow::anyhow!("package `{package}` was missing from `dal.lock`"))?;
     stack.push(package.to_string());
     for dep in pkg.dependencies.keys() {
         visit_locked_package(dep, by_name, reachable, stack)?;
@@ -475,12 +691,14 @@ mod tests {
                     module: String::new(),
                     version: "1.2.3".to_string(),
                     dependencies: BTreeMap::new(),
+                    features: vec![],
                 },
                 DalLockedPackage {
                     name: "my-package".to_string(),
                     module: "stale".to_string(),
                     version: "1.2.3".to_string(),
                     dependencies: BTreeMap::new(),
+                    features: vec![],
                 },
             ],
         };
@@ -501,7 +719,12 @@ mod tests {
                 version: "1.0.0".to_string(),
                 readme: Some("README.md".to_string()),
             },
-            dependencies: BTreeMap::from([("other-package".to_string(), "^2.1".to_string())]),
+            dependencies: BTreeMap::from([(
+                "other-package".to_string(),
+                DalDependencySpec::simple("^2.1"),
+            )]),
+            optional_dependencies: BTreeMap::new(),
+            features: BTreeMap::new(),
             cli: Some(DalCliMeta {
                 entry: "src/main.fdn".to_string(),
                 name: None,
@@ -521,31 +744,64 @@ mod tests {
                     module: "tool".to_string(),
                     version: "1.0.0".to_string(),
                     dependencies: BTreeMap::from([("leaf".to_string(), "=1.0.0".to_string())]),
+                    features: vec![],
                 },
                 DalLockedPackage {
                     name: "leaf".to_string(),
                     module: "leaf".to_string(),
                     version: "1.0.0".to_string(),
                     dependencies: BTreeMap::new(),
+                    features: vec![],
                 },
                 DalLockedPackage {
                     name: "unused".to_string(),
                     module: "unused".to_string(),
                     version: "9.9.9".to_string(),
                     dependencies: BTreeMap::new(),
+                    features: vec![],
                 },
             ],
         };
 
         let pruned = prune_lock_to_dependencies(
             &lock,
-            &BTreeMap::from([("tool".to_string(), "=1.0.0".to_string())]),
+            &BTreeMap::from([("tool".to_string(), DalDependencySpec::simple("=1.0.0"))]),
         )?;
 
         assert_eq!(pruned.packages.len(), 2);
         assert!(pruned.packages.iter().any(|pkg| pkg.name == "tool"));
         assert!(pruned.packages.iter().any(|pkg| pkg.name == "leaf"));
         assert!(!pruned.packages.iter().any(|pkg| pkg.name == "unused"));
+        Ok(())
+    }
+
+    #[test]
+    fn resolve_manifest_dependencies_enables_optional_deps_via_features() -> Result<()> {
+        let manifest = DalManifest {
+            package: DalPackageMeta {
+                name: "torch".to_string(),
+                version: "1.0.0".to_string(),
+                readme: None,
+            },
+            dependencies: BTreeMap::from([("core".to_string(), DalDependencySpec::simple("^1"))]),
+            optional_dependencies: BTreeMap::from([(
+                "python-runtime".to_string(),
+                DalDependencySpec::detailed("^3", vec!["c-api".to_string()]),
+            )]),
+            features: BTreeMap::from([(
+                "pybindings".to_string(),
+                vec!["dep:python-runtime".to_string()],
+            )]),
+            cli: None,
+        };
+
+        let resolved = resolve_manifest_dependencies(&manifest, &["pybindings".to_string()])?;
+        assert!(resolved.contains_key("core"));
+        let python = resolved
+            .get("python-runtime")
+            .expect("feature should activate optional dependency");
+        assert_eq!(python.version_req(), "^3");
+        assert_eq!(python.features(), ["c-api"]);
         Ok(())
     }
 }
