@@ -1196,10 +1196,22 @@ Fix: change the first parameter's type annotation to `action`:
         ),
 
         "E0304" => Some(
-            r#"The number of extra arguments supplied to a decorator does not match the
-number of extra parameters the decorator action expects.  The first parameter
-of a decorator receives the decorated action implicitly; all remaining
-parameters must be provided explicitly inside the `@decorator(...)` call.
+            r#"A decorator was used with an invalid configuration.
+
+For user-defined decorators, this usually means the number of extra arguments
+supplied to `@decorator(...)` does not match the number of extra parameters
+the decorator action expects. The first parameter of a decorator receives the
+decorated action implicitly; all remaining parameters must be provided
+explicitly inside the decorator call.
+
+This code is also used for invalid built-in decorator usage, especially
+`@extern`, for example:
+
+    @extern()                       # missing library string
+    @extern("lib", abi = "weird")  # invalid ABI name
+    @extern("lib")
+    action bad with (text oftype string) returns integer
+    # error: native @extern only supports integer/float/boolean/handle params
 
 Erroneous example:
 
@@ -1224,6 +1236,9 @@ from the decorator's declaration:
 
     @log
     action greet {  }
+
+For `@extern`, fix the decorator metadata or change the action signature to
+match the supported ABI surface.
 "#,
         ),
 

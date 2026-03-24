@@ -368,7 +368,7 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                     .params
                     .iter()
                     .map(|param| self.native_extern_param_type(&param.ty))
-                    .collect::<Vec<_>>();
+                    .collect::<Result<Vec<_>>>()?;
                 let fn_type = match function.return_ty {
                     fidan_mir::MirTy::Nothing | fidan_mir::MirTy::Error => {
                         self.context.void_type().fn_type(&params, false)
@@ -390,13 +390,16 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
         Ok(imported)
     }
 
-    fn native_extern_param_type(&self, ty: &fidan_mir::MirTy) -> BasicMetadataTypeEnum<'ctx> {
-        match ty {
+    fn native_extern_param_type(
+        &self,
+        ty: &fidan_mir::MirTy,
+    ) -> Result<BasicMetadataTypeEnum<'ctx>> {
+        Ok(match ty {
             fidan_mir::MirTy::Integer | fidan_mir::MirTy::Handle => self.i64_type.into(),
             fidan_mir::MirTy::Float => self.f64_type.into(),
             fidan_mir::MirTy::Boolean => self.i8_type.into(),
-            other => panic!("unsupported native @extern parameter type in LLVM backend: {other:?}"),
-        }
+            other => bail!("unsupported native @extern parameter type in LLVM backend: {other:?}"),
+        })
     }
 
     fn native_extern_return_type(

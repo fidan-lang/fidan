@@ -21,6 +21,17 @@ pub extern "C" fn fidan_test_native_add(a: i64, b: i64) -> i64 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn fidan_test_sum3(a: i64, b: i64, c: i64) -> i64 {
+    a + b + c
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fidan_test_mix4(a: i64, b: f64, c: i8, d: usize) -> i64 {
+    let bool_part = if c == 0 { 0 } else { 100 };
+    a + (b as i64) + bool_part + d as i64
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn fidan_test_float_scale(x: f64, scale: f64) -> f64 {
     x * scale
 }
@@ -87,6 +98,14 @@ fn register_extern_test_symbols() {
     register_self_symbol(
         "fidan_test_native_add",
         fidan_test_native_add as *const () as *mut c_void,
+    );
+    register_self_symbol(
+        "fidan_test_sum3",
+        fidan_test_sum3 as *const () as *mut c_void,
+    );
+    register_self_symbol(
+        "fidan_test_mix4",
+        fidan_test_mix4 as *const () as *mut c_void,
     );
     register_self_symbol(
         "fidan_test_float_scale",
@@ -413,6 +432,21 @@ fn extern_mixed_native_signatures_do_not_corrupt_param_types() {
         r#"@extern("self", symbol = "fidan_test_native_add")
         action nativeAdd with (a oftype integer, b oftype integer) returns integer
 
+        @extern("self", symbol = "fidan_test_sum3")
+        action sum3 with (
+            a oftype integer,
+            b oftype integer,
+            c oftype integer
+        ) returns integer
+
+        @extern("self", symbol = "fidan_test_mix4")
+        action mix4 with (
+            a oftype integer,
+            b oftype float,
+            c oftype boolean,
+            d oftype handle
+        ) returns integer
+
         @extern("self", symbol = "fidan_test_float_scale")
         action floatScale with (value oftype float, factor oftype float) returns float
 
@@ -420,12 +454,52 @@ fn extern_mixed_native_signatures_do_not_corrupt_param_types() {
         action negateBool with (value oftype boolean) returns boolean
 
         assert_eq(nativeAdd(20, 22), 42)
+        assert_eq(sum3(10, 20, 12), 42)
+        assert_eq(mix4(7, 8.0, true, 9), 124)
         assert_eq(floatScale(2.5, 4.0), 10.0)
         assert_eq(negateBool(true), false)"#,
     );
     if let Err(err) = result {
         panic!("{}: {}", err.code, err.message);
     }
+}
+
+#[test]
+fn extern_native_more_than_four_params_is_type_error() {
+    let interner = make_interner();
+    let source_map = Arc::new(SourceMap::new());
+    let file = source_map.add_file(
+        "<test>",
+        r#"@extern("self")
+        action tooWide with (
+            a oftype integer,
+            b oftype integer,
+            c oftype integer,
+            d oftype integer,
+            e oftype integer
+        ) returns integer"#,
+    );
+    let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+    let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+    assert!(
+        parse_diags
+            .iter()
+            .all(|diag| diag.severity != fidan_diagnostics::Severity::Error),
+        "unexpected parse errors: {parse_diags:?}"
+    );
+    let typed = fidan_typeck::typecheck_full(&module, interner);
+    assert!(
+        typed
+            .diagnostics
+            .iter()
+            .any(|diag| diag.message.contains("supports at most 4 parameters")),
+        "expected native extern arity error, got {:?}",
+        typed
+            .diagnostics
+            .iter()
+            .map(|diag| diag.message.clone())
+            .collect::<Vec<_>>()
+    );
 }
 
 // ── Runtime error paths (Err with correct code) ───────────────────────────────

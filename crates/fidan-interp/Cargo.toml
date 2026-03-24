@@ -7,6 +7,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+fidan-config = { workspace = true }
 fidan-source = { workspace = true }
 fidan-ast = { workspace = true }
 fidan-diagnostics = { workspace = true }

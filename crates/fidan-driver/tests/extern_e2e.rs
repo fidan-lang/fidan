@@ -124,6 +124,21 @@ action defaultExternAdd with (a oftype integer, b oftype integer) returns intege
 @extern("{lib}", symbol = "fidan_fixture_native_add", link = "{link}")
 action nativeAdd with (a oftype integer, b oftype integer) returns integer
 
+@extern("{lib}", symbol = "fidan_fixture_sum3", link = "{link}")
+action sum3 with (
+    a oftype integer,
+    b oftype integer,
+    c oftype integer
+) returns integer
+
+@extern("{lib}", symbol = "fidan_fixture_mix4", link = "{link}")
+action mix4 with (
+    a oftype integer,
+    b oftype float,
+    c oftype boolean,
+    d oftype handle
+) returns integer
+
 @extern("{lib}", symbol = "fidan_fixture_make_handle", link = "{link}")
 action makeHandle returns handle
 
@@ -147,6 +162,8 @@ action boxedEcho with (text oftype string) returns string
 action main {{
     assert_eq(defaultExternAdd(20, 22), 42)
     assert_eq(nativeAdd(20, 22), 42)
+    assert_eq(sum3(10, 20, 12), 42)
+    assert_eq(mix4(7, 8.0, true, 9), 124)
 
     var h = makeHandle()
     h = incHandle(h)

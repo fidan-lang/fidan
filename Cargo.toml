@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "crates/fidan-config",
   "crates/fidan-source",
   "crates/fidan-lexer",
   "crates/fidan-ast",
@@ -33,6 +34,7 @@ license-file = "LICENSE"
 repository = "https://github.com/fidan-lang/fidan"
 
 [workspace.dependencies]
+fidan-config = { path = "crates/fidan-config" }
 fidan-source = { path = "crates/fidan-source" }
 fidan-lexer = { path = "crates/fidan-lexer" }
 fidan-ast = { path = "crates/fidan-ast" }

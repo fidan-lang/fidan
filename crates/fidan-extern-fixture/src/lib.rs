@@ -11,6 +11,17 @@ pub extern "C" fn fidan_fixture_native_add(a: i64, b: i64) -> i64 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn fidan_fixture_sum3(a: i64, b: i64, c: i64) -> i64 {
+    a + b + c
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fidan_fixture_mix4(a: i64, b: f64, c: i8, d: usize) -> i64 {
+    let bool_part = if c == 0 { 0 } else { 100 };
+    a + (b as i64) + bool_part + d as i64
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn fidan_fixture_float_scale(x: f64, scale: f64) -> f64 {
     x * scale
 }

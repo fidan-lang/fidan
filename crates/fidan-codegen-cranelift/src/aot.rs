@@ -555,6 +555,15 @@ fn is_scalar(ty: &MirTy) -> bool {
     )
 }
 
+fn native_extern_mir_ty_to_cl(ty: &MirTy) -> Result<cranelift_codegen::ir::Type> {
+    match ty {
+        MirTy::Integer | MirTy::Handle => Ok(I64),
+        MirTy::Float => Ok(F64),
+        MirTy::Boolean => Ok(I8),
+        other => bail!("unsupported native @extern type in Cranelift backend: {other:?}"),
+    }
+}
+
 // ── Function declaration ───────────────────────────────────────────────────────
 
 fn declare_all_functions(
@@ -607,10 +616,12 @@ fn declare_all_extern_functions(
         match extern_decl.abi {
             MirExternAbi::Native => {
                 for param in &mf.params {
-                    sig.params.push(AbiParam::new(mir_ty_to_cl(&param.ty)));
+                    sig.params
+                        .push(AbiParam::new(native_extern_mir_ty_to_cl(&param.ty)?));
                 }
                 if !matches!(mf.return_ty, MirTy::Nothing | MirTy::Error) {
-                    sig.returns.push(AbiParam::new(mir_ty_to_cl(&mf.return_ty)));
+                    sig.returns
+                        .push(AbiParam::new(native_extern_mir_ty_to_cl(&mf.return_ty)?));
                 }
             }
             MirExternAbi::Fidan => {
@@ -790,10 +801,18 @@ fn lower_extern_wrapper(
 
     let mut sig = module.make_signature();
     for param in &mf.params {
-        sig.params.push(AbiParam::new(mir_ty_to_cl(&param.ty)));
+        let cl_ty = match extern_decl.abi {
+            MirExternAbi::Native => native_extern_mir_ty_to_cl(&param.ty)?,
+            MirExternAbi::Fidan => mir_ty_to_cl(&param.ty),
+        };
+        sig.params.push(AbiParam::new(cl_ty));
     }
     if !matches!(mf.return_ty, MirTy::Nothing | MirTy::Error) {
-        sig.returns.push(AbiParam::new(mir_ty_to_cl(&mf.return_ty)));
+        let cl_ty = match extern_decl.abi {
+            MirExternAbi::Native => native_extern_mir_ty_to_cl(&mf.return_ty)?,
+            MirExternAbi::Fidan => mir_ty_to_cl(&mf.return_ty),
+        };
+        sig.returns.push(AbiParam::new(cl_ty));
     }
 
     let wrapper_name = mangle_fn("__extern_wrapper", mf.id.0);

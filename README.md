@@ -586,6 +586,64 @@ action fibonacci_old with (certain n oftype integer) returns integer {
 
 ---
 
+### Native interop with `@extern`
+
+Fidan can import native functions from shared libraries through `@extern`.
+
+```fidan
+@extern("./mylib.dll", symbol = "add_i64")
+action addNative with (a oftype integer, b oftype integer) returns integer
+
+assert_eq(addNative(20, 22), 42)
+```
+
+Native ABI `@extern` currently supports:
+
+- up to 4 parameters
+- parameter types: `integer`, `float`, `boolean`, `handle`
+- return types: `integer`, `float`, `boolean`, `nothing`, `handle`
+
+Example with mixed native types:
+
+```fidan
+@extern("./mylib.dll", symbol = "mix_values")
+action mixValues with (
+    a oftype integer,
+    b oftype float,
+    c oftype boolean,
+    d oftype handle
+) returns integer
+
+assert_eq(mixValues(7, 8.0, true, 9), 124)
+```
+
+For richer values such as strings, lists, dicts, tuples, or dynamic objects, use the boxed Fidan ABI:
+
+```fidan
+@unsafe
+@extern("./mylib.dll", symbol = "echo_boxed", abi = "fidan")
+action echoBoxed with (text oftype string) returns string
+```
+
+`@extern` rules:
+
+- `@extern` actions must be top-level and must omit their body
+- native ABI is for scalar types only
+- `abi = "fidan"` requires `@unsafe`
+- `@precompile` cannot be combined with `@extern`
+- `parallel action` cannot be combined with `@extern`
+
+For AOT builds, add `link = "..."` so the native import library is available at link time:
+
+```fidan
+@extern("./mylib.dll", symbol = "add_i64", link = "./mylib.lib")
+action addNative with (a oftype integer, b oftype integer) returns integer
+```
+
+There is a complete local smoke demo in `LOCAL/extern-cpp/`.
+
+---
+
 ### Imports and modules
 
 ```fidan

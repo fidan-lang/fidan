@@ -4,6 +4,7 @@ use crate::types::FidanType;
 use fidan_ast::{
     AstArena, BinOp, Decorator, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp,
 };
+use fidan_config::MAX_NATIVE_EXTERN_PARAMS;
 use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::{FileId, Span};
@@ -3004,6 +3005,19 @@ impl TypeChecker {
                     );
                 }
             }
+        }
+
+        if matches!(spec.abi, ExternAbiKind::Native) && ctx.params.len() > MAX_NATIVE_EXTERN_PARAMS
+        {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0304"),
+                format!(
+                    "native @extern currently supports at most {MAX_NATIVE_EXTERN_PARAMS} parameters; `{}` uses {}",
+                    self.interner.resolve(name),
+                    ctx.params.len()
+                ),
+                ctx.span,
+            );
         }
 
         if matches!(spec.abi, ExternAbiKind::Native)
