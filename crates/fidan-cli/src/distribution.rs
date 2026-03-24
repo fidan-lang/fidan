@@ -121,6 +121,19 @@ fn read_response_bytes(
     Ok(out)
 }
 
+pub fn fetch_cached_bytes(url: &str, cache_path: &Path, expected_sha256: &str) -> Result<Vec<u8>> {
+    if let Ok(bytes) = fs::read(cache_path)
+        && verify_sha256(&bytes, expected_sha256).is_ok()
+    {
+        return Ok(bytes);
+    }
+
+    let bytes = fetch_bytes(url)?;
+    verify_sha256(&bytes, expected_sha256)?;
+    write_bytes(cache_path, &bytes)?;
+    Ok(bytes)
+}
+
 fn download_label(url: &str) -> String {
     url.rsplit('/')
         .find(|segment| !segment.is_empty())
@@ -285,15 +298,6 @@ pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     fs::write(path, bytes).with_context(|| format!("failed to write `{}`", path.display()))
 }
 
-pub fn read_all(path: &Path) -> Result<Vec<u8>> {
-    let mut file =
-        fs::File::open(path).with_context(|| format!("failed to open `{}`", path.display()))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .with_context(|| format!("failed to read `{}`", path.display()))?;
-    Ok(bytes)
-}
-
 pub fn stage_dir(base: &Path, prefix: &str) -> PathBuf {
     base.join(format!(
         "{}.tmp-{}-{}",
@@ -304,4 +308,86 @@ pub fn stage_dir(base: &Path, prefix: &str) -> PathBuf {
             .unwrap_or_default()
             .as_millis()
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fidan-cli-distribution-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).expect("failed to create temp dir");
+        dir
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(bytes);
+        format!("{:x}", hasher.finalize())
+    }
+
+    #[test]
+    fn fetch_cached_bytes_reuses_matching_cache() {
+        let dir = test_temp_dir("reuse");
+        let source = dir.join("source.tar.gz");
+        let cache = dir.join("cache.tar.gz");
+        let expected = b"cached-archive";
+        fs::write(&source, expected).expect("failed to write source archive");
+        let url = format!("file://{}", source.display());
+        let sha = sha256_hex(expected);
+
+        let first = fetch_cached_bytes(&url, &cache, &sha).expect("first fetch should succeed");
+        assert_eq!(first, expected);
+        fs::remove_file(&source).expect("failed to remove source archive");
+
+        let second = fetch_cached_bytes(&url, &cache, &sha).expect("cached fetch should succeed");
+        assert_eq!(second, expected);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fetch_cached_bytes_refreshes_stale_cache() {
+        let dir = test_temp_dir("refresh");
+        let source = dir.join("source.tar.gz");
+        let cache = dir.join("cache.tar.gz");
+        let expected = b"fresh-archive";
+        fs::write(&source, expected).expect("failed to write source archive");
+        fs::write(&cache, b"stale-archive").expect("failed to write stale cache");
+        let url = format!("file://{}", source.display());
+        let sha = sha256_hex(expected);
+
+        let bytes = fetch_cached_bytes(&url, &cache, &sha).expect("fetch should refresh cache");
+        assert_eq!(bytes, expected);
+        assert_eq!(fs::read(&cache).expect("failed to read cache"), expected);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fetch_cached_bytes_does_not_reuse_stale_cache_without_source() {
+        let dir = test_temp_dir("reject-stale");
+        let source = dir.join("missing.tar.gz");
+        let cache = dir.join("cache.tar.gz");
+        fs::write(&cache, b"stale-archive").expect("failed to write stale cache");
+        let url = format!("file://{}", source.display());
+        let sha = sha256_hex(b"expected-archive");
+
+        let err = fetch_cached_bytes(&url, &cache, &sha)
+            .expect_err("stale cache should not be reused when the source is unavailable");
+        let err_text = err.to_string();
+        assert!(
+            err_text.contains("failed to read"),
+            "expected source read failure after stale-cache rejection, got {err_text}"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

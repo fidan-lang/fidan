@@ -1,6 +1,6 @@
 use crate::distribution::{
-    extract_tar_gz, fetch_bytes, fetch_manifest, materialize_release_root, read_all,
-    select_toolchain_release, stage_dir, verify_sha256, write_bytes,
+    extract_tar_gz, fetch_cached_bytes, fetch_manifest, materialize_release_root,
+    select_toolchain_release, stage_dir, write_bytes,
 };
 use crate::prompts::prompt_yes_no;
 use anyhow::{Context, Result, bail};
@@ -138,10 +138,7 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
         "toolchain-{}-{}-{}.tar.gz",
         name, release.toolchain_version, host
     ));
-    let bytes = fetch_bytes(&release.url)?;
-    verify_sha256(&bytes, &release.sha256)?;
-    write_bytes(&cache_path, &bytes)?;
-    let archive = read_all(&cache_path)?;
+    let bytes = fetch_cached_bytes(&release.url, &cache_path, &release.sha256)?;
 
     let staging = stage_dir(&parent, &format!("{}-{}", name, release.toolchain_version));
     let progress = ProgressReporter::spinner(
@@ -151,7 +148,7 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
             release.kind, release.toolchain_version
         ),
     );
-    let extract_result = extract_tar_gz(&archive, &staging);
+    let extract_result = extract_tar_gz(&bytes, &staging);
     progress.finish_and_clear();
     extract_result?;
     materialize_release_root(

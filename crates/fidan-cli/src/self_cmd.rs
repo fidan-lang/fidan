@@ -1,6 +1,6 @@
 use crate::distribution::{
-    binary_relpath, extract_tar_gz, fetch_bytes, fetch_manifest, materialize_release_root,
-    read_all, select_fidan_release, stage_dir, verify_sha256, write_bytes,
+    binary_relpath, extract_tar_gz, fetch_cached_bytes, fetch_manifest, materialize_release_root,
+    select_fidan_release, stage_dir,
 };
 use crate::prompts::prompt_yes_no;
 use anyhow::{Context, Result, bail};
@@ -170,15 +170,12 @@ fn run_install(version: &str) -> Result<()> {
         .join("cache")
         .join("downloads")
         .join(format!("fidan-{}-{}.tar.gz", release.version, host));
-    let bytes = fetch_bytes(&release.url)?;
-    verify_sha256(&bytes, &release.sha256)?;
-    write_bytes(&cache_path, &bytes)?;
-    let archive = read_all(&cache_path)?;
+    let bytes = fetch_cached_bytes(&release.url, &cache_path, &release.sha256)?;
 
     let staging = stage_dir(&versions_dir, &format!("fidan-{}", release.version));
     let progress =
         ProgressReporter::spinner("extract", format!("unpacking Fidan {}", release.version));
-    let extract_result = extract_tar_gz(&archive, &staging);
+    let extract_result = extract_tar_gz(&bytes, &staging);
     progress.finish_and_clear();
     extract_result?;
     let expected = PathBuf::from(

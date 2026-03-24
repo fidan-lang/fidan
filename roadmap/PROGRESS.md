@@ -23,6 +23,12 @@
 | All crate stubs created | ✅ | All 17 crates have `Cargo.toml` + stub `lib.rs`/`main.rs` |
 | `cargo build` clean on all crates | ✅ | 1 inconsequential dead_code warning in `fidan-diagnostics` |
 
+## Post-1.0 Backlog
+
+| Item | Status | Notes |
+|---|---|---|
+| Full native ABI for `@extern` | ⬜ | `Fidan 1.0` intentionally ships the current fast native ABI contract plus `abi = "fidan"` for boxed/dynamic calls. Post-1.0 work should cover unlimited native arity, richer pointer/buffer/struct interop, callback support, explicit ownership rules, platform calling-convention review, and a larger compatibility test matrix. |
+
 ---
 
 ## Phase 1 – Workspace + Lexer

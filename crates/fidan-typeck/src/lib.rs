@@ -308,6 +308,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn builtin_type_name_cannot_be_shadowed_by_var() {
+        let errors = check_errors("const var integer -> integer set 1");
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("reserved builtin name `integer`")),
+            "expected reserved builtin var error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_type_name_cannot_be_used_as_param() {
+        let errors = check_errors(
+            r#"action bad with (integer oftype integer) returns integer {
+                return integer
+            }"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("reserved builtin name `integer`")),
+            "expected reserved builtin param error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_type_name_cannot_be_used_as_loop_binding() {
+        let errors = check_errors(
+            r#"for integer in [1, 2, 3] {
+                print(integer)
+            }"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("reserved builtin name `integer`")),
+            "expected reserved builtin loop-binding error, got {errors:?}"
+        );
+    }
+
     // ── Parallel-safety diagnostics ───────────────────────────────────────────
 
     #[test]

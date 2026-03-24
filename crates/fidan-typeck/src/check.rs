@@ -11,6 +11,24 @@ use fidan_source::{FileId, Span};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
+const RESERVED_BUILTIN_BINDINGS: &[&str] = &[
+    "print",
+    "println",
+    "eprint",
+    "input",
+    "len",
+    "type",
+    "string",
+    "integer",
+    "float",
+    "boolean",
+    "handle",
+    "Shared",
+    "assert",
+    "assert_eq",
+    "assert_ne",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExternAbiKind {
     Native,
@@ -161,30 +179,12 @@ impl TypeChecker {
 
     fn register_builtins(&mut self) {
         let dummy = self.dummy_span();
-        let builtins: &[(&str, SymbolKind)] = &[
-            ("print", SymbolKind::BuiltinAction),
-            ("println", SymbolKind::BuiltinAction),
-            ("eprint", SymbolKind::BuiltinAction),
-            ("input", SymbolKind::BuiltinAction),
-            ("len", SymbolKind::BuiltinAction),
-            ("type", SymbolKind::BuiltinAction),
-            ("string", SymbolKind::BuiltinAction),
-            ("integer", SymbolKind::BuiltinAction),
-            ("float", SymbolKind::BuiltinAction),
-            ("boolean", SymbolKind::BuiltinAction),
-            // Type constructors
-            ("Shared", SymbolKind::BuiltinAction),
-            // Test assertion helpers — valid at any scope, panic on failure.
-            ("assert", SymbolKind::BuiltinAction),
-            ("assert_eq", SymbolKind::BuiltinAction),
-            ("assert_ne", SymbolKind::BuiltinAction),
-        ];
-        for &(name, kind) in builtins {
+        for &name in RESERVED_BUILTIN_BINDINGS {
             let sym = self.interner.intern(name);
             self.table.define(
                 sym,
                 SymbolInfo {
-                    kind,
+                    kind: SymbolKind::BuiltinAction,
                     ty: FidanType::Function,
                     span: dummy,
                     is_mutable: false,
@@ -407,6 +407,9 @@ impl TypeChecker {
                 methods,
                 span,
             } => {
+                if self.reject_reserved_builtin_binding(*name, *span) {
+                    return;
+                }
                 let mut obj = ObjectInfo {
                     fields: FxHashMap::default(),
                     methods: FxHashMap::default(),
@@ -482,6 +485,9 @@ impl TypeChecker {
                 span,
                 ..
             } => {
+                if self.reject_reserved_builtin_binding(*name, *span) {
+                    return;
+                }
                 // Record the action's full signature for HIR lowering.
                 let info = self.build_action_info(params, return_ty, *span);
                 // Duplicate / import-conflict check (E0109).
@@ -534,6 +540,9 @@ impl TypeChecker {
                 span,
                 ..
             } => {
+                if self.reject_reserved_builtin_binding(*name, *span) {
+                    return;
+                }
                 self.table.define(
                     *name,
                     SymbolInfo {
@@ -552,11 +561,13 @@ impl TypeChecker {
                 is_const,
                 span,
             } => {
+                if self.reject_reserved_builtin_binding(*name, *span) {
+                    return;
+                }
                 // Redeclaration check at pass 1 — fires exactly once on the
                 // duplicate `var`, before pass 2 ever runs `check_var_decl`.
                 if !self.is_repl
                     && let Some(prev) = self.table.lookup_current_scope(*name)
-                    && prev.kind != SymbolKind::BuiltinAction
                 {
                     let n = self.interner.resolve(*name).to_string();
                     let prev_span = prev.span;
@@ -1056,6 +1067,9 @@ impl TypeChecker {
                     _ => vec![FidanType::Dynamic; bindings.len()],
                 };
                 for (i, &binding) in bindings.iter().enumerate() {
+                    if self.reject_reserved_builtin_binding(binding, *span) {
+                        continue;
+                    }
                     let bty = elem_types.get(i).cloned().unwrap_or(FidanType::Dynamic);
                     self.table.define(
                         binding,
@@ -1126,6 +1140,9 @@ impl TypeChecker {
         }
 
         for param in params {
+            if self.reject_reserved_builtin_binding(param.name, param.span) {
+                continue;
+            }
             let param_ty = self.resolve_type_expr(&param.ty);
             self.table.define(
                 param.name,
@@ -1177,10 +1194,12 @@ impl TypeChecker {
                 is_const,
                 span,
             } => {
+                if self.reject_reserved_builtin_binding(name, span) {
+                    return;
+                }
                 // Local redeclaration check (action bodies have no pass 1).
                 if !self.is_repl
                     && let Some(prev) = self.table.lookup_current_scope(name)
-                    && prev.kind != SymbolKind::BuiltinAction
                 {
                     let n = self.interner.resolve(name).to_string();
                     let prev_span = prev.span;
@@ -1321,16 +1340,18 @@ impl TypeChecker {
                     _ => FidanType::Dynamic,
                 };
                 self.table.push_scope(ScopeKind::Block);
-                self.table.define(
-                    binding,
-                    SymbolInfo {
-                        kind: SymbolKind::Var,
-                        ty: elem_ty,
-                        span,
-                        is_mutable: false,
-                        initialized: Initialized::Yes,
-                    },
-                );
+                if !self.reject_reserved_builtin_binding(binding, span) {
+                    self.table.define(
+                        binding,
+                        SymbolInfo {
+                            kind: SymbolKind::Var,
+                            ty: elem_ty,
+                            span,
+                            is_mutable: false,
+                            initialized: Initialized::Yes,
+                        },
+                    );
+                }
                 for &s in &body {
                     self.check_stmt(s, module);
                 }
@@ -1354,7 +1375,9 @@ impl TypeChecker {
                 self.check_block(&body, module);
                 for catch in &catches {
                     self.table.push_scope(ScopeKind::Block);
-                    if let Some(binding) = catch.binding {
+                    if let Some(binding) = catch.binding
+                        && !self.reject_reserved_builtin_binding(binding, catch.span)
+                    {
                         let dummy = self.dummy_span();
                         self.table.define(
                             binding,
@@ -1404,16 +1427,18 @@ impl TypeChecker {
                     _ => FidanType::Dynamic,
                 };
                 self.table.push_scope(ScopeKind::Block);
-                self.table.define(
-                    binding,
-                    SymbolInfo {
-                        kind: SymbolKind::Var,
-                        ty: elem_ty,
-                        span,
-                        is_mutable: false,
-                        initialized: Initialized::Yes,
-                    },
-                );
+                if !self.reject_reserved_builtin_binding(binding, span) {
+                    self.table.define(
+                        binding,
+                        SymbolInfo {
+                            kind: SymbolKind::Var,
+                            ty: elem_ty,
+                            span,
+                            is_mutable: false,
+                            initialized: Initialized::Yes,
+                        },
+                    );
+                }
                 for &s in &body {
                     self.check_stmt(s, module);
                 }
@@ -1555,6 +1580,25 @@ impl TypeChecker {
                 },
             },
         );
+    }
+
+    fn is_reserved_builtin_name(&self, name: Symbol) -> bool {
+        let resolved = self.interner.resolve(name);
+        RESERVED_BUILTIN_BINDINGS.contains(&resolved.as_ref())
+    }
+
+    fn reject_reserved_builtin_binding(&mut self, name: Symbol, span: Span) -> bool {
+        if self.is_reserved_builtin_name(name) {
+            let resolved = self.interner.resolve(name).to_string();
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0109"),
+                format!("reserved builtin name `{resolved}` cannot be shadowed"),
+                span,
+            );
+            true
+        } else {
+            false
+        }
     }
 
     // ── Unused import detection ───────────────────────────────────────────────
