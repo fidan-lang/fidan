@@ -22,7 +22,13 @@ use std::sync::{Arc, Mutex};
 use crate::FidanValue;
 
 type PendingJoinHandle = std::thread::JoinHandle<Result<ParallelCapture, String>>;
-type PendingState = Arc<Mutex<Option<PendingJoinHandle>>>;
+
+enum PendingStateEntry {
+    Thread(PendingJoinHandle),
+    Ready(Result<ParallelCapture, String>),
+}
+
+type PendingState = Arc<Mutex<Option<PendingStateEntry>>>;
 
 // ── ParallelCapture ────────────────────────────────────────────────────────────
 
@@ -93,7 +99,7 @@ impl ParallelArgs {
 /// the error; [`Self::join`] is the backwards-compatible convenience that
 /// maps errors to `FidanValue::Nothing`.
 #[derive(Clone)]
-pub struct FidanPending(pub PendingState);
+pub struct FidanPending(PendingState);
 
 impl FidanPending {
     /// Spawn a closure on a new OS thread and wrap the result in a `FidanPending`.
@@ -106,7 +112,9 @@ impl FidanPending {
         F: FnOnce(ParallelArgs) -> FidanValue + Send + 'static,
     {
         let handle = std::thread::spawn(move || Ok::<_, String>(ParallelCapture(f(args))));
-        FidanPending(Arc::new(Mutex::new(Some(handle))))
+        FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Thread(
+            handle,
+        )))))
     }
 
     /// Spawn a fallible closure on a new OS thread.
@@ -120,7 +128,19 @@ impl FidanPending {
         F: FnOnce(ParallelArgs) -> Result<FidanValue, String> + Send + 'static,
     {
         let handle = std::thread::spawn(move || f(args).map(ParallelCapture));
-        FidanPending(Arc::new(Mutex::new(Some(handle))))
+        FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Thread(
+            handle,
+        )))))
+    }
+
+    /// Create a pending handle that is already resolved on the current thread.
+    ///
+    /// This is used for same-thread structured `concurrent` tasks in AOT mode:
+    /// callers still observe a `Pending`, but no OS thread is involved.
+    pub fn ready_result(result: Result<FidanValue, String>) -> Self {
+        FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Ready(
+            result.map(ParallelCapture),
+        )))))
     }
 
     /// Block the calling thread until the spawned computation finishes.
@@ -134,13 +154,14 @@ impl FidanPending {
             guard.take()
         };
         match maybe {
-            Some(h) => match h.join() {
+            Some(PendingStateEntry::Thread(h)) => match h.join() {
                 Ok(Ok(cap)) => Ok(cap.into_inner()),
                 Ok(Err(e)) => Err(e),
                 // The Rust thread itself panicked (shouldn't happen in normal
                 // operation, but handle defensively).
                 Err(_) => Err("task thread panicked unexpectedly".to_string()),
             },
+            Some(PendingStateEntry::Ready(result)) => result.map(ParallelCapture::into_inner),
             None => Ok(FidanValue::Nothing),
         }
     }

@@ -55,8 +55,8 @@ Most languages make a trade-off: either **readable** (Python) or **fast** (C++/R
 |---|---|
 | **Readable code** | English-like syntax (`and`, `or`, `not`, `is`, `certain`, `otherwise when`…) |
 | **Safety without ceremony** | Null-safety analysis, `certain` non-null guarantees, data-race detection at compile time |
-| **Performance** | MIR-level optimization passes + Cranelift JIT (`@precompile`, auto hot-path) + AOT, LLVM on the roadmap |
-| **Real concurrency** | `parallel`, `concurrent`, `spawn`/`await` — backed by real OS threads, not green threads |
+| **Performance** | MIR-level optimization passes + Cranelift JIT (`@precompile`, auto hot-path with safe interpreter fallback) + Cranelift/LLVM AOT |
+| **Real concurrency** | `parallel` + `spawn`/`await` use OS threads; `concurrent` gives structured same-thread concurrency |
 | **Great tooling** | Formatter, linter, fixer, REPL, LSP, VS Code extension — all built-in, not plugins |
 | **Reproducible debugging** | `--replay` captures stdin and replays crashes exactly |
 | **Readable errors** | Ariadne-rendered diagnostics with source context, inline carets, fix-it patches |
@@ -446,7 +446,7 @@ attempt {
 
 ### Concurrency and parallelism
 
-Fidan has three concurrency models, backed by real OS threads:
+Fidan has three concurrency models:
 
 #### `spawn` / `await` — explicit async
 
@@ -483,7 +483,7 @@ parallel for item in largeDataset {
 }
 ```
 
-#### `concurrent` block — cooperative I/O-bound tasks
+#### `concurrent` block — structured same-thread tasks
 
 ```fidan
 concurrent {
@@ -761,12 +761,10 @@ Dal package preflight validation happens locally before archive creation or uplo
 | `--strict` | Treat select warnings as errors |
 | `--trace short\|full\|compact` | Show call stack on panic |
 | `--jit-threshold N` | JIT after N calls (0 = off) |
-| `--sandbox` | Deny all I/O, env, net, spawn access by default |
+| `--sandbox` | Deny file and environment access by default |
 | `--allow-read <paths>` | Whitelist read paths (sandbox mode) |
 | `--allow-write <paths>` | Whitelist write paths (sandbox mode) |
 | `--allow-env` | Allow environment variable access (sandbox) |
-| `--allow-net` | Allow network access (sandbox) |
-| `--allow-spawn` | Allow subprocess spawning (sandbox) |
 | `--time-limit <secs>` | Hard wall-time limit |
 | `--mem-limit <mb>` | Hard memory limit |
 | `--max-errors N` | Stop after N errors |
@@ -995,7 +993,7 @@ The same MIR feeds all three backends — no behavioral divergence between run m
 | `fidan-runtime` | Value model, COW collections, object model, `Shared<T>` |
 | `fidan-interp` | MIR tree-walking interpreter |
 | `fidan-codegen-cranelift` | Cranelift JIT backend |
-| `fidan-codegen-llvm` | LLVM AOT backend *(planned)* |
+| `fidan-codegen-llvm` | LLVM AOT backend |
 | `fidan-stdlib` | Rust-backed standard library |
 | `fidan-fmt` | Canonical source formatter |
 | `fidan-lsp` | Full LSP server |
@@ -1013,14 +1011,14 @@ The same MIR feeds all three backends — no behavioral divergence between run m
 | MIR optimization passes | ✅ Complete |
 | Interpreter (tree-walking + MIR) | ✅ Complete |
 | Real OS thread parallelism (`parallel`, `spawn`/`await`) | ✅ Complete |
-| Cranelift JIT (`@precompile`, auto hot-path) | ✅ Complete |
+| Cranelift JIT (`@precompile`, auto hot-path with interpreter fallback for unsupported MIR) | ✅ Complete |
 | Standard library (`std.io`, `std.math`, `std.string`, `std.collections`, `std.test`, `std.parallel`) | ✅ Complete |
 | Full LSP server | ✅ Complete |
 | VS Code extension | ✅ Complete |
 | Hot reload (`--reload`) | ✅ Complete |
 | Replay-based crash reproduction (`--replay`) | ✅ Complete |
-| LLVM AOT backend (`fidan build --release`) | ⬜ Not started |
-| Package manager | 🔜 Planned |
+| LLVM AOT backend (`fidan build --release`) | ✅ Complete |
+| Package manager (DAL) | ✅ Complete |
 | Debug adapter (VS Code breakpoints) | 🔜 Planned |
 | Playground (browser WASM) | 🔜 Planned |
 

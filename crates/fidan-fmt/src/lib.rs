@@ -130,6 +130,22 @@ mod tests {
         assert_eq!(out, src);
     }
 
+    #[test]
+    fn inline_lambda_expression() {
+        let src = "var greet = action with (certain name oftype string) returns string {\n    return name\n}\n";
+        let out = fmt(src);
+        assert_eq!(out, src);
+        assert_idempotent(src);
+    }
+
+    #[test]
+    fn inline_lambda_without_params() {
+        let src = "var noop = action {\n    return\n}\n";
+        let out = fmt(src);
+        assert_eq!(out, src);
+        assert_idempotent(src);
+    }
+
     // ── Use imports ───────────────────────────────────────────────────────
 
     #[test]

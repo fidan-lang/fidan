@@ -5,7 +5,7 @@
 //! never emitted and necessary ones are never omitted.
 
 use crate::printer::Printer;
-use fidan_ast::{Arg, BinOp, Expr, ExprId, InterpPart, TypeExpr, UnOp};
+use fidan_ast::{Arg, BinOp, Expr, ExprId, InterpPart, Param, StmtId, TypeExpr, UnOp};
 
 // ── Precedence ────────────────────────────────────────────────────────────────
 
@@ -376,9 +376,25 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
         }
 
         // ── Inline lambda ─────────────────────────────────────────────────
-        Expr::Lambda { .. } => {
-            // Lambda formatting is not yet fully implemented; emit a placeholder.
-            p.w("action { … }");
+        Expr::Lambda {
+            params,
+            return_ty,
+            body,
+            ..
+        } => {
+            p.w("action");
+            if !params.is_empty() {
+                p.w(" with (");
+                emit_params(p, &params);
+                p.w(")");
+            }
+            if let Some(rt) = return_ty {
+                p.w(" returns ");
+                emit_type(p, &rt);
+            }
+            p.w(" {");
+            emit_lambda_block(p, &body);
+            p.w("}");
         }
     }
 }
@@ -450,6 +466,40 @@ fn emit_inline_stmts_or_block(p: &mut Printer<'_>, stmts: &[fidan_ast::StmtId]) 
         p.indent_out();
         p.nl();
     }
+}
+
+fn emit_params(p: &mut Printer<'_>, params: &[Param]) {
+    for (i, param) in params.iter().enumerate() {
+        if i > 0 {
+            p.w(", ");
+        }
+        if param.certain {
+            p.w("certain ");
+        } else if param.optional {
+            p.w("optional ");
+        }
+        let pn = p.sym_s(param.name);
+        p.w(&pn);
+        p.w(" oftype ");
+        emit_type(p, &param.ty);
+        if let Some(default) = param.default {
+            p.w(" = ");
+            emit_expr(p, default);
+        }
+    }
+}
+
+fn emit_lambda_block(p: &mut Printer<'_>, stmts: &[StmtId]) {
+    if stmts.is_empty() {
+        return;
+    }
+    p.indent_in();
+    for &sid in stmts {
+        p.nl();
+        crate::emit_stmt::emit_stmt(p, sid);
+    }
+    p.indent_out();
+    p.nl();
 }
 
 /// Escape a raw string value back into a Fidan `"..."` literal.

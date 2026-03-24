@@ -8,10 +8,12 @@
 // These tests guard against regressions across the entire front-to-back path
 // and also verify the static analysis passes (E0401, W1004) through real MIR.
 
+use std::collections::hash_map::DefaultHasher;
 use std::ffi::c_void;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use fidan_interp::{FidanValue, RunError, register_self_symbol, run_mir};
+use fidan_interp::{FidanValue, RunError, register_self_symbol, run_mir, run_mir_with_jit};
 use fidan_lexer::{Lexer, SymbolInterner};
 use fidan_source::SourceMap;
 
@@ -58,6 +60,13 @@ pub extern "C" fn fidan_test_read_handle(h: usize) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fidan_test_free_handle(_: usize) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fidan_test_thread_tag() -> i64 {
+    let mut hasher = DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    hasher.finish() as i64
+}
 
 #[unsafe(no_mangle)]
 /// # Safety
@@ -132,6 +141,10 @@ fn register_extern_test_symbols() {
         fidan_test_free_handle as *const () as *mut c_void,
     );
     register_self_symbol(
+        "fidan_test_thread_tag",
+        fidan_test_thread_tag as *const () as *mut c_void,
+    );
+    register_self_symbol(
         "fidan_test_add_boxed",
         fidan_test_add_boxed as *const () as *mut c_void,
     );
@@ -151,6 +164,10 @@ fn make_interner() -> Arc<SymbolInterner> {
 ///
 /// Asserts there are no parse errors before running.
 fn run_src(src: &str) -> Result<(), RunError> {
+    run_src_with_threshold(src, 500)
+}
+
+fn run_src_with_threshold(src: &str, jit_threshold: u32) -> Result<(), RunError> {
     let source_map = Arc::new(SourceMap::new());
     let interner = make_interner();
     let file = source_map.add_file("<test>", src);
@@ -169,7 +186,11 @@ fn run_src(src: &str) -> Result<(), RunError> {
     let hir = fidan_hir::lower_module(&module, &tm, &interner);
     let mut mir = fidan_mir::lower_program(&hir, &interner, &[]);
     fidan_passes::run_all(&mut mir);
-    run_mir(mir, interner, source_map)
+    if jit_threshold == 500 {
+        run_mir(mir, interner, source_map)
+    } else {
+        run_mir_with_jit(mir, interner, source_map, jit_threshold)
+    }
 }
 
 /// Build MIR without running it — used for static analysis assertions.
@@ -623,6 +644,103 @@ fn parallel_block_ok() {
 }
 
 #[test]
+fn parallel_for_uses_worker_threads() {
+    register_extern_test_symbols();
+    assert!(
+        run_src(
+            r#"@extern("self", symbol = "fidan_test_thread_tag")
+        action threadTag returns integer
+
+        var mainId = threadTag()
+        var sawWorker = Shared(false)
+        parallel for item in [1, 2, 3, 4, 5, 6, 7, 8] {
+            if threadTag() != mainId {
+                sawWorker.set(true)
+            }
+        }
+        assert_eq(sawWorker.get(), true)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn parallel_for_uses_worker_threads_with_jit_enabled() {
+    register_extern_test_symbols();
+    assert!(
+        run_src_with_threshold(
+            r#"@extern("self", symbol = "fidan_test_thread_tag")
+        action threadTag returns integer
+
+        action warm with (n oftype integer) returns integer { return n + 1 }
+
+        var warmup = warm(1)
+        warmup = warm(warmup)
+        var mainId = threadTag()
+        var sawWorker = Shared(false)
+        parallel for item in [1, 2, 3, 4, 5, 6, 7, 8] {
+            if threadTag() != mainId {
+                sawWorker.set(true)
+            }
+        }
+        assert_eq(sawWorker.get(), true)"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn concurrent_block_ok() {
+    assert!(
+        run_src(
+            r#"var counter = 0
+        concurrent {
+            task A { counter = counter + 1 }
+            task B { counter = counter + 2 }
+        }
+        assert_eq(counter, 3)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn concurrent_block_ok_with_jit_enabled() {
+    assert!(
+        run_src_with_threshold(
+            r#"action hot with (n oftype integer) returns integer { return n + 1 }
+        var warm = hot(1)
+        warm = hot(warm)
+        var counter = 0
+        concurrent {
+            task A { counter = counter + hot(1) }
+            task B { counter = counter + hot(1) }
+        }
+        assert_eq(counter, 4)"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn jitted_function_remains_callable_after_compilation() {
+    assert!(
+        run_src_with_threshold(
+            r#"action hot with (n oftype integer) returns integer { return n + 1 }
+        var x = 0
+        while x < 1000 {
+            x = hot(x)
+        }
+        assert_eq(x, 1000)"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn parallel_task_failure_returns_r9001() {
     let err = run_src(
         r#"parallel {
@@ -664,6 +782,23 @@ fn e0401_parallel_data_race_detected() {
         races[0].var_name.contains("counter"),
         "expected race on 'counter', got '{}'",
         races[0].var_name
+    );
+}
+
+#[test]
+fn e0401_no_race_for_concurrent_block() {
+    let (mir, interner) = build_mir(
+        r#"var counter = 0
+        concurrent {
+            task A { counter = counter + 1 }
+            task B { counter = counter + 2 }
+        }"#,
+    );
+    let races = fidan_passes::check_parallel_races(&mir, &interner);
+    assert!(
+        races.is_empty(),
+        "unexpected E0401 for concurrent block: {:?}",
+        races.iter().map(|r| &r.var_name).collect::<Vec<_>>()
     );
 }
 

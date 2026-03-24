@@ -97,4 +97,46 @@ mod tests {
         );
         assert_eq!(mir.functions.len(), 3, "init + add + sub");
     }
+
+    #[test]
+    fn concurrent_block_lowers_to_spawn_concurrent() {
+        let mir = lower("concurrent { task { print(\"a\") } }");
+        let init = &mir.functions[0];
+        assert!(
+            init.blocks
+                .iter()
+                .flat_map(|bb| &bb.instructions)
+                .any(|instr| matches!(instr, Instr::SpawnConcurrent { .. })),
+            "expected SpawnConcurrent in init function"
+        );
+        assert!(
+            !init
+                .blocks
+                .iter()
+                .flat_map(|bb| &bb.instructions)
+                .any(|instr| matches!(instr, Instr::SpawnParallel { .. })),
+            "concurrent block must not lower to SpawnParallel"
+        );
+    }
+
+    #[test]
+    fn parallel_block_lowers_to_spawn_parallel() {
+        let mir = lower("parallel { task { print(\"a\") } }");
+        let init = &mir.functions[0];
+        assert!(
+            init.blocks
+                .iter()
+                .flat_map(|bb| &bb.instructions)
+                .any(|instr| matches!(instr, Instr::SpawnParallel { .. })),
+            "expected SpawnParallel in init function"
+        );
+        assert!(
+            !init
+                .blocks
+                .iter()
+                .flat_map(|bb| &bb.instructions)
+                .any(|instr| matches!(instr, Instr::SpawnConcurrent { .. })),
+            "parallel block must not lower to SpawnConcurrent"
+        );
+    }
 }

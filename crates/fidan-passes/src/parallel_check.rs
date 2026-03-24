@@ -6,7 +6,7 @@
 // ---------
 // For each function F in the MIR program:
 //   1. Build a map: spawn-handle local → task FunctionId for every
-//      SpawnParallel / SpawnConcurrent instruction encountered.
+//      SpawnParallel instruction encountered.
 //   2. For each JoinAll instruction, collect the participating task functions
 //      referenced by the joined handles.
 //   3. For each *pair* of tasks (A, B) in the same JoinAll group:
@@ -16,11 +16,15 @@
 //   4. For each ParallelIter body function: any StoreGlobal in the body is a
 //      race across iterations → E0401.
 //
+// Only true parallel work can race: `parallel { task ... }`, `parallel action`,
+// and `parallel for`. `concurrent { task ... }` runs on the current interpreter
+// thread and is therefore excluded from this pass.
+//
 // Only module-level globals can race: task-private captures are value-copied
-// per invocation and mutations are discarded after the task returns.
-// `Shared` globals are deliberately safe (Arc<Mutex> internals), but since
-// we cannot distinguish them at the GlobalId level yet we report all races
-// and the fix suggestion directs users to `Shared`.
+// per invocation and mutations are discarded after the task returns. `Shared`
+// globals are deliberately safe (Arc<Mutex> internals), but since we cannot
+// distinguish them at the GlobalId level yet we report all races and the fix
+// suggestion directs users to `Shared`.
 
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{FunctionId, GlobalId, Instr, LocalId, MirProgram};
@@ -47,16 +51,11 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<ParallelRaceDi
 
         for block in &func.blocks {
             for instr in &block.instructions {
-                match instr {
-                    Instr::SpawnParallel {
-                        handle, task_fn, ..
-                    }
-                    | Instr::SpawnConcurrent {
-                        handle, task_fn, ..
-                    } => {
-                        handle_map.insert(*handle, *task_fn);
-                    }
-                    _ => {}
+                if let Instr::SpawnParallel {
+                    handle, task_fn, ..
+                } = instr
+                {
+                    handle_map.insert(*handle, *task_fn);
                 }
             }
         }
@@ -153,7 +152,7 @@ fn check_task_group(
                         var_name: var_name.clone(),
                         context: format!(
                             "written by task `{}` and accessed by task `{}`; \
-                             wrap in `Shared oftype T` to allow safe concurrent mutation",
+                             wrap in `Shared oftype T` to allow safe parallel mutation",
                             interner.resolve(prog.functions[tasks[i].0 as usize].name),
                             interner.resolve(prog.functions[tasks[j].0 as usize].name),
                         ),

@@ -125,16 +125,25 @@ fn build_class_table(
 struct CallFrame {
     /// SSA locals — sized to `func.local_count` on entry.
     locals: Vec<FidanValue>,
+    /// Structured same-thread tasks queued by `concurrent { task ... }`.
+    concurrent_tasks: FxHashMap<LocalId, ConcurrentTask>,
     /// Exception-handler stack: `PushCatch` pushes, `PopCatch` pops.
     catch_stack: Vec<BlockId>,
     /// Set by `Terminator::Throw` before jumping to a catch block.
     current_exception: Option<FidanValue>,
 }
 
+struct ConcurrentTask {
+    task_fn: FunctionId,
+    args: Vec<FidanValue>,
+    task_name: String,
+}
+
 impl CallFrame {
     fn new(local_count: u32) -> Self {
         Self {
             locals: vec![FidanValue::Nothing; local_count as usize],
+            concurrent_tasks: FxHashMap::default(),
             catch_stack: vec![],
             current_exception: None,
         }
@@ -151,6 +160,14 @@ impl CallFrame {
         if let Some(slot) = self.locals.get_mut(local.0 as usize) {
             *slot = value;
         }
+    }
+
+    fn queue_concurrent_task(&mut self, local: LocalId, task: ConcurrentTask) {
+        self.concurrent_tasks.insert(local, task);
+    }
+
+    fn take_concurrent_task(&mut self, local: LocalId) -> Option<ConcurrentTask> {
+        self.concurrent_tasks.remove(&local)
     }
 }
 
@@ -196,7 +213,7 @@ pub struct MirMachine {
     /// When set, `LoadGlobal` reads from this lock-free `Arc<[FidanValue]>` slice
     /// instead of acquiring the `RwLock` on every access — a measurable speedup
     /// for read-heavy test suites and programs with many global constants.
-    frozen_globals: Option<Arc<[FidanValue]>>,
+    frozen_globals: Option<Box<[FidanValue]>>,
     /// Snapshot of all interned strings taken once after parsing.
     /// Allows O(1) symbol → &str resolution with a single `Arc::clone` and
     /// NO `RwLock` acquisition — critical for the hot method-dispatch path.
@@ -245,12 +262,30 @@ pub struct TestResult {
     pub message: Option<String>,
 }
 
-// SAFETY: All fields are either `Arc<T>` (Send+Sync when T:Send+Sync) or a
-// `HashMap` of `Arc<FidanClass>` (Send+Sync).  `MirMachine` itself holds no
-// `Rc` — frame-local `Rc` only lives on the call stack of a single thread.
+// SAFETY: `MirMachine` only crosses thread boundaries through `clone_for_thread`.
+// That path rebuilds globals/frozen_globals as thread-local `parallel_capture()`
+// copies before the machine is moved into the worker thread.
 unsafe impl Send for MirMachine {}
 
 impl MirMachine {
+    fn format_task_failure(task_name: &str, sig: MirSignal) -> String {
+        match sig {
+            MirSignal::Panic(m) => format!("task `{}` panicked: {}", task_name, m),
+            MirSignal::Throw(v) => format!(
+                "task `{}` threw an uncaught error: {}",
+                task_name,
+                crate::builtins::display(&v)
+            ),
+            MirSignal::ParallelFail(m) => format!("task `{}` failed: {}", task_name, m),
+            MirSignal::RuntimeError(code, m) => {
+                format!("task `{}` error [{code}]: {}", task_name, m)
+            }
+            MirSignal::SandboxViolation(code, m) => {
+                format!("task `{}` sandbox violation [{code}]: {}", task_name, m)
+            }
+        }
+    }
+
     pub fn new(
         program: Arc<MirProgram>,
         interner: Arc<SymbolInterner>,
@@ -379,6 +414,15 @@ impl MirMachine {
     /// refcount.  The `classes` map clones its `Arc<FidanClass>` pointers —
     /// O(n-classes), but class tables are small.
     fn clone_for_thread(&self) -> MirMachine {
+        let thread_globals: Vec<FidanValue> = if let Some(ref frozen) = self.frozen_globals {
+            frozen.iter().map(FidanValue::parallel_capture).collect()
+        } else {
+            self.globals
+                .read()
+                .iter()
+                .map(FidanValue::parallel_capture)
+                .collect()
+        };
         MirMachine {
             program: Arc::clone(&self.program),
             interner: Arc::clone(&self.interner),
@@ -391,8 +435,8 @@ impl MirMachine {
             stdlib_modules: self.stdlib_modules.clone(),
             reexported_namespaces: self.reexported_namespaces.clone(),
             user_fn_map: self.user_fn_map.clone(),
-            globals: Rc::clone(&self.globals),
-            frozen_globals: self.frozen_globals.as_ref().map(Arc::clone),
+            globals: Rc::new(parking_lot::RwLock::new(thread_globals.clone())),
+            frozen_globals: Some(thread_globals.into_boxed_slice()),
             // One atomic bump on the outer Arc; all Arc<str> entries are shared.
             str_table: Arc::clone(&self.str_table),
             test_results: Vec::new(),
@@ -429,14 +473,14 @@ impl MirMachine {
         self.profile_data = Some(Arc::new(entries));
     }
 
-    /// Freeze the current global values into a lock-free `Arc<[FidanValue]>` snapshot.
+    /// Freeze the current global values into a lock-free boxed slice snapshot.
     ///
     /// Call this immediately after the init function (`run()`) returns so that
     /// all subsequent `LoadGlobal` instructions bypass the `RwLock` entirely.
     /// Child machines spawned via `clone_for_thread` inherit the snapshot
     /// automatically.
     pub fn freeze_globals(&mut self) {
-        let snapshot: Arc<[FidanValue]> = Arc::from(self.globals.read().clone().into_boxed_slice());
+        let snapshot: Box<[FidanValue]> = self.globals.read().clone().into_boxed_slice();
         self.frozen_globals = Some(snapshot);
     }
 
@@ -676,13 +720,14 @@ impl MirMachine {
                 }
             } else {
                 let prev = self.call_counters[idx].fetch_add(1, Ordering::Relaxed);
-                if prev + 1 == self.jit_threshold {
+                if prev == self.jit_threshold.saturating_sub(1) {
                     // Threshold reached — attempt JIT compilation.
                     let mut compiler = JitCompiler::new();
                     if let Some(entry) =
                         compiler.compile_function(func, &self.program, &self.interner)
                     {
                         self.jit_fns.write()[idx] = Some(entry);
+                        let _ = Box::leak(Box::new(compiler));
                         // Publish the compiled flag AFTER the function is stored.
                         self.jit_flags[idx].store(true, Ordering::Release);
                         // Dispatch immediately — including this very (compilation-trigger) call.
@@ -1037,10 +1082,11 @@ impl MirMachine {
             }
             // ── Concurrency / Parallelism ─────────────────────────────────────
             //
-            // SpawnParallel / SpawnConcurrent: launch the task on a real OS
-            // thread.  The caller is expected to `JoinAll` the handles later.
+            // `concurrent { task ... }` uses structured same-thread tasks:
+            // tasks are queued in the current frame and resolved at `JoinAll`
+            // / `await` without crossing thread boundaries.
             //
-            // SpawnExpr: same, but the result is `await`-ed explicitly.
+            // `parallel { task ... }` and `spawn expr` remain OS-thread backed.
             //
             // Each thread gets its own `MirMachine` (clone_for_thread is O(1)
             // for Arc fields).  Captured values go through `parallel_capture()`
@@ -1054,8 +1100,26 @@ impl MirMachine {
                 handle,
                 task_fn,
                 args,
+            } => {
+                let task_fn = *task_fn;
+                let task_name = {
+                    let func = self.program.function(task_fn);
+                    self.sym_str(func.name).to_string()
+                };
+                let task_args: Vec<FidanValue> =
+                    args.iter().map(|a| self.eval_operand(a, frame)).collect();
+                frame.queue_concurrent_task(
+                    *handle,
+                    ConcurrentTask {
+                        task_fn,
+                        args: task_args,
+                        task_name,
+                    },
+                );
+                frame.store(*handle, FidanValue::Nothing);
             }
-            | Instr::SpawnParallel {
+
+            Instr::SpawnParallel {
                 handle,
                 task_fn,
                 args,
@@ -1075,27 +1139,7 @@ impl MirMachine {
                 let pending = FidanPending::spawn_fallible(args_bundle, move |bundle| {
                     child
                         .call_function(task_fn, bundle.into_vec())
-                        .map_err(|sig| match sig {
-                            MirSignal::Panic(m) => {
-                                format!("task `{}` panicked: {}", task_name, m)
-                            }
-                            MirSignal::Throw(v) => {
-                                format!(
-                                    "task `{}` threw an uncaught error: {}",
-                                    task_name,
-                                    crate::builtins::display(&v)
-                                )
-                            }
-                            MirSignal::ParallelFail(m) => {
-                                format!("task `{}` failed: {}", task_name, m)
-                            }
-                            MirSignal::RuntimeError(code, m) => {
-                                format!("task `{}` error [{code}]: {}", task_name, m)
-                            }
-                            MirSignal::SandboxViolation(code, m) => {
-                                format!("task `{}` sandbox violation [{code}]: {}", task_name, m)
-                            }
-                        })
+                        .map_err(|sig| MirMachine::format_task_failure(&task_name, sig))
                 });
                 frame.store(*handle, FidanValue::Pending(pending));
             }
@@ -1171,20 +1215,32 @@ impl MirMachine {
                 // written back into the same local slots (Pending → resolved).
                 // Task failures are collected and reported together as R9001.
                 let mut failures: Vec<String> = Vec::new();
+                let mut block_kind = "parallel";
                 let resolved: Vec<(LocalId, FidanValue)> = handles
                     .iter()
                     .map(|&local| {
-                        let val = frame.load(local);
-                        let result = if let FidanValue::Pending(p) = &val {
-                            match p.try_join() {
+                        let result = if let Some(task) = frame.take_concurrent_task(local) {
+                            block_kind = "concurrent";
+                            match self.call_function(task.task_fn, task.args) {
                                 Ok(v) => v,
-                                Err(e) => {
-                                    failures.push(e);
+                                Err(sig) => {
+                                    failures.push(Self::format_task_failure(&task.task_name, sig));
                                     FidanValue::Nothing
                                 }
                             }
                         } else {
-                            val // already resolved (sequential fallback)
+                            let val = frame.load(local);
+                            if let FidanValue::Pending(p) = &val {
+                                match p.try_join() {
+                                    Ok(v) => v,
+                                    Err(e) => {
+                                        failures.push(e);
+                                        FidanValue::Nothing
+                                    }
+                                }
+                            } else {
+                                val // already resolved (sequential fallback)
+                            }
                         };
                         (local, result)
                     })
@@ -1201,18 +1257,34 @@ impl MirMachine {
                         .collect::<Vec<_>>()
                         .join("\n");
                     return Err(MirSignal::ParallelFail(format!(
-                        "{} task{} failed in `parallel` block:\n{}",
-                        n, pl, details
+                        "{} task{} failed in `{}` block:\n{}",
+                        n, pl, block_kind, details
                     )));
                 }
             }
 
             Instr::AwaitPending { dest, handle } => {
-                let val = self.eval_operand(handle, frame);
-                let resolved = if let FidanValue::Pending(p) = &val {
-                    p.join()
+                let resolved = if let Operand::Local(local) = handle {
+                    if let Some(task) = frame.take_concurrent_task(*local) {
+                        match self.call_function(task.task_fn, task.args) {
+                            Ok(v) => v,
+                            Err(_) => FidanValue::Nothing,
+                        }
+                    } else {
+                        let val = self.eval_operand(handle, frame);
+                        if let FidanValue::Pending(p) = &val {
+                            p.join()
+                        } else {
+                            val
+                        }
+                    }
                 } else {
-                    val
+                    let val = self.eval_operand(handle, frame);
+                    if let FidanValue::Pending(p) = &val {
+                        p.join()
+                    } else {
+                        val
+                    }
                 };
                 frame.store(*dest, resolved);
             }

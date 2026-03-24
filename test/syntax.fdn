@@ -463,8 +463,8 @@ action demonstrateMatch {
 
 action demonstrateConcurrency {
 
-    # ── concurrent { } — cooperative green threads ────────────────────────────
-    # Tasks interleave co-operatively; control returns after ALL finish
+    # ── concurrent { } — structured same-thread tasks ─────────────────────────
+    # Tasks run without crossing thread boundaries; control returns after ALL finish
     concurrent {
         task fetchUsers {
             print("Fetching users...")

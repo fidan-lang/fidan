@@ -1,4 +1,6 @@
 use fidan_runtime::FidanValue;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn defaultExternAdd(a: i64, b: i64) -> i64 {
@@ -48,6 +50,13 @@ pub extern "C" fn fidan_fixture_read_handle(h: usize) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fidan_fixture_free_handle(_: usize) {}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fidan_fixture_thread_tag() -> i64 {
+    let mut hasher = DefaultHasher::new();
+    std::thread::current().id().hash(&mut hasher);
+    hasher.finish() as i64
+}
 
 #[unsafe(no_mangle)]
 /// # Safety

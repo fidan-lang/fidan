@@ -252,13 +252,14 @@ pub enum Instr {
     Drop { local: LocalId },
 
     // ── Concurrency (Phase 5.5) ───────────────────────────────────────────────
-    /// Spawn a cooperative green-thread task (`concurrent` block).
+    /// Spawn a task originating from a `concurrent { task ... }` block.
     SpawnConcurrent {
         handle: LocalId,
         task_fn: FunctionId,
         args: Vec<Operand>,
     },
-    /// Spawn a parallel OS-thread task (`parallel` block / `parallel action`).
+    /// Spawn a task originating from a `parallel { task ... }` block or
+    /// `parallel action`.
     SpawnParallel {
         handle: LocalId,
         task_fn: FunctionId,

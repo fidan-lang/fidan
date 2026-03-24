@@ -81,7 +81,7 @@ enum Command {
         /// Suppress specific diagnostic codes (comma-separated, e.g. `W5003,W1004`)
         #[arg(long, value_delimiter = ',')]
         suppress: Vec<String>,
-        /// Enable zero-config sandbox: deny all file, env, net, and spawn by default
+        /// Enable zero-config sandbox: deny file and environment access by default
         #[arg(long)]
         sandbox: bool,
         /// Allow file-system reads from path prefix (repeatable; `*` = allow all)
@@ -93,12 +93,6 @@ enum Command {
         /// Allow environment variable access (`getEnv`, `setEnv`, `args`, `cwd`)
         #[arg(long)]
         allow_env: bool,
-        /// Allow network access (reserved for a future `std.net` module)
-        #[arg(long)]
-        allow_net: bool,
-        /// Allow subprocess spawn (reserved for a future `std.process` module)
-        #[arg(long)]
-        allow_spawn: bool,
         /// Wall-time limit in seconds when `--sandbox` is active (0 = no limit)
         #[arg(long)]
         time_limit: Option<u64>,
@@ -399,8 +393,6 @@ fn run_cli() -> Result<()> {
             allow_read,
             allow_write,
             allow_env,
-            allow_net,
-            allow_spawn,
             time_limit,
             mem_limit,
         } => {
@@ -440,12 +432,6 @@ fn run_cli() -> Result<()> {
                 }
                 if allow_env {
                     policy = policy.with_allow_env();
-                }
-                if allow_net {
-                    policy = policy.with_allow_net();
-                }
-                if allow_spawn {
-                    policy = policy.with_allow_spawn();
                 }
                 if let Some(t) = time_limit {
                     policy = policy.with_time_limit(t);

@@ -1718,10 +1718,13 @@ impl<'p> FnCtx<'p> {
                     });
             }
 
-            // ── Concurrent block ─────────────────────────────────────────────
-            // Each task body becomes a synthetic function, spawned on a real OS
-            // thread via SpawnConcurrent.  JoinAll waits for all of them.
-            HirStmt::ConcurrentBlock { tasks, .. } => {
+            // ── Concurrent / parallel task block ────────────────────────────
+            // Each task body becomes a synthetic function, then the block kind
+            // decides whether we preserve it as `SpawnConcurrent` or
+            // `SpawnParallel` in MIR.
+            HirStmt::ConcurrentBlock {
+                is_parallel, tasks, ..
+            } => {
                 let mut handles: Vec<LocalId> = Vec::new();
                 for task in tasks {
                     // Collect variables captured from the outer scope.
@@ -1745,11 +1748,19 @@ impl<'p> FnCtx<'p> {
 
                     // Spawn the task and collect its handle.
                     let handle = self.alloc_local();
-                    self.emit(Instr::SpawnConcurrent {
-                        handle,
-                        task_fn: task_fn_id,
-                        args: closure_args,
-                    });
+                    if *is_parallel {
+                        self.emit(Instr::SpawnParallel {
+                            handle,
+                            task_fn: task_fn_id,
+                            args: closure_args,
+                        });
+                    } else {
+                        self.emit(Instr::SpawnConcurrent {
+                            handle,
+                            task_fn: task_fn_id,
+                            args: closure_args,
+                        });
+                    }
                     handles.push(handle);
 
                     // Defer body lowering via the shared pending queue.

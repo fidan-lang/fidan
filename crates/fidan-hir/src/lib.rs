@@ -62,6 +62,21 @@ mod tests {
         assert!(hir.functions[0].is_parallel, "@parallel flag propagated");
     }
 
+    #[test]
+    fn concurrent_and_parallel_blocks_preserve_block_kind() {
+        let (hir, _) =
+            lower("concurrent { task { print(\"a\") } } parallel { task { print(\"b\") } }");
+        assert_eq!(hir.init_stmts.len(), 2);
+        match &hir.init_stmts[0] {
+            HirStmt::ConcurrentBlock { is_parallel, .. } => assert!(!is_parallel),
+            other => panic!("expected concurrent block, got {other:?}"),
+        }
+        match &hir.init_stmts[1] {
+            HirStmt::ConcurrentBlock { is_parallel, .. } => assert!(*is_parallel),
+            other => panic!("expected parallel block, got {other:?}"),
+        }
+    }
+
     // ── 3. Object lowering ────────────────────────────────────────────────────
 
     #[test]

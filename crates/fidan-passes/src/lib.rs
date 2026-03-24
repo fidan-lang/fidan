@@ -29,7 +29,7 @@ pub use precompile_hints::SlowHintDiag;
 pub use unawaited_pending::UnawaitedPendingDiag;
 pub use unreachable_pruning::UnreachablePruning;
 
-/// Check for data races in `parallel` / `concurrent` blocks (E0401).
+/// Check for data races in true parallel constructs (`parallel` / `parallel for`) (E0401).
 pub fn check_parallel_races(
     prog: &MirProgram,
     interner: &fidan_lexer::SymbolInterner,

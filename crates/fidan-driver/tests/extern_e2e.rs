@@ -177,6 +177,27 @@ action main {{
     )
 }
 
+fn build_parallel_for_thread_source(fixture: &FixtureArtifacts) -> String {
+    let lib = as_fidan_string(&fixture.dylib_path);
+    let link = as_fidan_string(&fixture.link_input_path);
+    format!(
+        r#"@extern("{lib}", symbol = "fidan_fixture_thread_tag", link = "{link}")
+action threadTag returns integer
+
+action main {{
+    var mainId = threadTag()
+    var sawWorker = Shared(false)
+    parallel for item in [1, 2, 3, 4, 5, 6, 7, 8] {{
+        if threadTag() != mainId {{
+            sawWorker.set(true)
+        }}
+    }}
+    assert_eq(sawWorker.get(), true)
+}}
+"#
+    )
+}
+
 fn compile_fixture_program(
     source: &str,
     backend: Backend,
@@ -315,6 +336,53 @@ fn extern_fixture_llvm_aot_ok() {
         sandbox.join("extern_smoke.exe")
     } else {
         sandbox.join("extern_smoke")
+    };
+    compile_fixture_program(
+        &source,
+        Backend::Llvm,
+        &output,
+        std::slice::from_ref(&fixture.runtime_dir),
+    );
+    run_compiled_binary(&output, &fixture.runtime_dir);
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn parallel_for_cranelift_aot_uses_worker_threads() {
+    let fixture = build_fixture_artifacts().clone();
+    let source = build_parallel_for_thread_source(&fixture);
+    let sandbox = temp_dir("fidan_parallel_for_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("parallel_for_smoke.exe")
+    } else {
+        sandbox.join("parallel_for_smoke")
+    };
+    compile_fixture_program(
+        &source,
+        Backend::Cranelift,
+        &output,
+        std::slice::from_ref(&fixture.runtime_dir),
+    );
+    run_compiled_binary(&output, &fixture.runtime_dir);
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn parallel_for_llvm_aot_uses_worker_threads() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM parallel-for AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let fixture = build_fixture_artifacts().clone();
+    let source = build_parallel_for_thread_source(&fixture);
+    let sandbox = temp_dir("fidan_parallel_for_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("parallel_for_smoke.exe")
+    } else {
+        sandbox.join("parallel_for_smoke")
     };
     compile_fixture_program(
         &source,

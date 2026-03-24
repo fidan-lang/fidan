@@ -195,13 +195,18 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<SlowHintDiag> 
                             .get(&cid)
                             .map(String::as_str)
                             .unwrap_or("<unknown>");
+                        let (callee_label, self_label) = if callee_name == "new" {
+                            ("constructor", "constructor")
+                        } else {
+                            ("action", "action")
+                        };
                         diags.push(SlowHintDiag {
                             code: "W5003",
                             fn_name: fn_name.clone(),
                             context: format!(
-                                "action `{callee_name}` is called inside a loop in \
+                                "{callee_label} `{callee_name}` is called inside a loop in \
                                      `{fn_name}` but lacks `@precompile`; \
-                                     consider adding `@precompile` to `{callee_name}` \
+                                     consider adding `@precompile` to {self_label} `{callee_name}` \
                                      so the JIT can eagerly compile it"
                             ),
                         });
@@ -396,6 +401,41 @@ mod tests {
         assert!(
             !diags.iter().any(|d| d.code == "W5003"),
             "W5003 must not fire when callee is already @precompile"
+        );
+    }
+
+    #[test]
+    fn constructor_new_uses_constructor_wording() {
+        let interner = make_interner();
+        let caller_name = interner.intern("outer_ctor");
+        let callee_name = interner.intern("new");
+
+        let mut callee_fn = MirFunction::new(FunctionId(1), callee_name, MirTy::Nothing);
+        let _b = callee_fn.alloc_block();
+        callee_fn.blocks[0].terminator = Terminator::Return(None);
+
+        let mut caller_fn = make_loop_func(0, caller_name);
+        caller_fn.blocks[0].instructions.push(Instr::Call {
+            dest: None,
+            result_ty: None,
+            callee: fidan_mir::Callee::Fn(FunctionId(1)),
+            args: vec![],
+            span: fidan_source::Span::new(fidan_source::FileId(0), 0, 0),
+        });
+
+        let mut prog = MirProgram::new();
+        prog.add_function(caller_fn);
+        prog.add_function(callee_fn);
+
+        let diags = check(&prog, &interner);
+        let context = diags
+            .iter()
+            .find(|d| d.code == "W5003")
+            .map(|d| d.context.as_str())
+            .unwrap_or("");
+        assert!(
+            context.contains("constructor `new`"),
+            "expected constructor wording, got `{context}`"
         );
     }
 }

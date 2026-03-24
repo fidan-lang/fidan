@@ -3839,9 +3839,9 @@ fn ms_to_civil(ms: i64) -> (i32, u32, u32, u32, u32, u32) {
     (y as i32, m as u32, d as u32, h as u32, min as u32, s as u32)
 }
 
-// ── parallel iter (sequential AOT fallback) ───────────────────────────────────
+// ── parallel iter ──────────────────────────────────────────────────────────────
 
-/// Sequential implementation of `parallel for`: call `body_fn` (by FN_TABLE index)
+/// Runtime implementation of `parallel for`: call `body_fn` (by FN_TABLE index)
 /// once per element in `collection`, passing `[item, env_args...]` to the trampoline.
 /// Called from AOT-generated code for `Instr::ParallelIter`.
 #[unsafe(no_mangle)]
@@ -3859,16 +3859,44 @@ pub unsafe extern "C" fn fdn_parallel_iter_seq(
     };
     if let FidanValue::List(list_ref) = coll {
         let items: Vec<FidanValue> = list_ref.borrow().iter().cloned().collect();
-        for item in items {
-            let item_ptr = into_raw(item);
-            let mut call_args: Vec<*mut FidanValue> = Vec::with_capacity(1 + env_slice.len());
-            call_args.push(item_ptr);
-            call_args.extend_from_slice(env_slice);
-            let result = call_trampoline_by_idx(fn_idx as usize, &call_args);
-            if !result.is_null() {
-                drop(Box::from_raw(result));
+        let env_caps: Vec<ParallelCapture> = env_slice
+            .iter()
+            .map(|ptr| ParallelCapture(borrow(*ptr).parallel_capture()))
+            .collect();
+        let first_exception: std::sync::Arc<std::sync::Mutex<Option<ParallelCapture>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(None));
+
+        std::thread::scope(|scope| {
+            for item in items {
+                let mut caps = Vec::with_capacity(1 + env_caps.len());
+                caps.push(ParallelCapture(item.parallel_capture()));
+                caps.extend(
+                    env_caps
+                        .iter()
+                        .map(|cap| ParallelCapture(cap.0.parallel_capture())),
+                );
+                let err_slot = std::sync::Arc::clone(&first_exception);
+                scope.spawn(move || {
+                    let result =
+                        call_trampoline_owned(fn_idx as usize, ParallelArgs(caps).into_vec());
+                    if fdn_has_exception() != 0 {
+                        let exn_ptr = fdn_catch_exception();
+                        let exn_cap = ParallelCapture(borrow(exn_ptr).parallel_capture());
+                        drop(Box::from_raw(exn_ptr));
+                        let mut slot = err_slot.lock().unwrap();
+                        if slot.is_none() {
+                            *slot = Some(exn_cap);
+                        }
+                    }
+                    drop(result);
+                });
             }
-            drop(Box::from_raw(item_ptr));
+        });
+
+        if let Some(exn_cap) = first_exception.lock().unwrap().take() {
+            let exn_ptr = into_raw(exn_cap.into_inner());
+            fdn_store_exception(exn_ptr);
+            drop(Box::from_raw(exn_ptr));
         }
     }
 }
@@ -3935,9 +3963,40 @@ pub unsafe extern "C" fn fdn_spawn_task(
 }
 
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_spawn_concurrent(
+    fn_idx: i64,
+    _name_bytes: *const u8,
+    _name_len: i64,
+    args_ptr: *const *mut FidanValue,
+    args_cnt: i64,
+) -> *mut FidanValue {
+    let values: Vec<FidanValue> = (0..args_cnt as usize)
+        .map(|i| borrow(*args_ptr.add(i)).clone())
+        .collect();
+    let result = call_trampoline_owned(fn_idx as usize, values);
+    let pending = if fdn_has_exception() != 0 {
+        let exn_ptr = fdn_catch_exception();
+        let message = display(borrow(exn_ptr));
+        drop(Box::from_raw(exn_ptr));
+        FidanPending::ready_result(Err(message))
+    } else {
+        FidanPending::ready_result(Ok(result))
+    };
+    into_raw(FidanValue::Pending(pending))
+}
+
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_pending_join(handle: *mut FidanValue) -> *mut FidanValue {
     match borrow(handle) {
-        FidanValue::Pending(pending) => into_raw(pending.join()),
+        FidanValue::Pending(pending) => match pending.try_join() {
+            Ok(value) => into_raw(value),
+            Err(message) => {
+                let exception = into_raw(FidanValue::String(FidanString::new(&message)));
+                fdn_store_exception(exception);
+                drop(Box::from_raw(exception));
+                into_raw(FidanValue::Nothing)
+            }
+        },
         other => into_raw(other.clone()),
     }
 }

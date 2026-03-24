@@ -366,6 +366,7 @@ struct RuntimeDecls {
     fn_name_register: cranelift_module::FuncId,
     call_dynamic: cranelift_module::FuncId,
     spawn_expr: cranelift_module::FuncId,
+    spawn_concurrent: cranelift_module::FuncId,
     spawn_task: cranelift_module::FuncId,
     pending_join: cranelift_module::FuncId,
     parallel_iter_seq: cranelift_module::FuncId,
@@ -525,6 +526,10 @@ impl RuntimeDecls {
             fn_name_register: decl!("fdn_fn_name_register", sig!((p, i64t, i64t) -> void)),
             call_dynamic: decl!("fdn_call_dynamic", sig!((p, p, i64t) -> ptr)),
             spawn_expr: decl!("fdn_spawn_expr", sig!((i64t, p, i64t) -> ptr)),
+            spawn_concurrent: decl!(
+                "fdn_spawn_concurrent",
+                sig!((i64t, p, i64t, p, i64t) -> ptr)
+            ),
             spawn_task: decl!("fdn_spawn_task", sig!((i64t, p, i64t, p, i64t) -> ptr)),
             pending_join: decl!("fdn_pending_join", sig!((p) -> ptr)),
             parallel_iter_seq: decl!("fdn_parallel_iter_seq", sig!((p, i64t, p, i64t) -> void)),
@@ -1380,8 +1385,23 @@ fn lower_instr(
             handle: dest,
             task_fn,
             args,
+        } => {
+            let fn_idx = builder.ins().iconst(I64, task_fn.0 as i64);
+            let task_name_sym = interner.resolve(program.function(*task_fn).name);
+            let (name_ptr, name_len) = str_const(module, builder, task_name_sym.as_ref())?;
+            let (arr, cnt) =
+                build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
+            let pending = call_rt(
+                module,
+                builder,
+                rt.spawn_concurrent,
+                &[fn_idx, name_ptr, name_len, arr, cnt],
+            )?
+            .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+            builder.def_var(cl_vars[dest.0 as usize], pending);
         }
-        | Instr::SpawnParallel {
+
+        Instr::SpawnParallel {
             handle: dest,
             task_fn,
             args,
@@ -1414,6 +1434,18 @@ fn lower_instr(
                 let resolved = call_rt(module, builder, rt.pending_join, &[handle_ptr])?
                     .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
                 builder.def_var(cl_vars[handle.0 as usize], resolved);
+                emit_pending_exception_check(
+                    module,
+                    rt,
+                    builder,
+                    cl_blocks,
+                    cl_vars,
+                    local_types,
+                    mf,
+                    bi,
+                    current_catch_stack,
+                    interner,
+                )?;
             }
         }
 
@@ -1423,6 +1455,18 @@ fn lower_instr(
             let resolved = call_rt(module, builder, rt.pending_join, &[handle_ptr])?
                 .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
             builder.def_var(cl_vars[dest.0 as usize], resolved);
+            emit_pending_exception_check(
+                module,
+                rt,
+                builder,
+                cl_blocks,
+                cl_vars,
+                local_types,
+                mf,
+                bi,
+                current_catch_stack,
+                interner,
+            )?;
         }
 
         Instr::SpawnDynamic { dest, method, args } => {
@@ -1479,7 +1523,7 @@ fn lower_instr(
             body_fn,
             closure_args,
         } => {
-            // Sequential iteration: call fdn_parallel_iter_seq(collection, fn_idx, env, n).
+            // Runtime implementation of `parallel for`: call fdn_parallel_iter_seq(collection, fn_idx, env, n).
             let coll = lower_operand_as_ptr(builder, cl_vars, local_types, collection, rt, module)?;
             let fn_idx = builder.ins().iconst(I64, body_fn.0 as i64);
             let (env_arr, env_cnt) = if closure_args.is_empty() {
@@ -1504,6 +1548,18 @@ fn lower_instr(
                 builder,
                 rt.parallel_iter_seq,
                 &[coll, fn_idx, env_arr, env_cnt],
+            )?;
+            emit_pending_exception_check(
+                module,
+                rt,
+                builder,
+                cl_blocks,
+                cl_vars,
+                local_types,
+                mf,
+                bi,
+                current_catch_stack,
+                interner,
             )?;
         }
 

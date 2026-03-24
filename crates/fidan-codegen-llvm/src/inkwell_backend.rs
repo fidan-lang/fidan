@@ -973,6 +973,19 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             ),
         );
         self.declare_runtime_fn(
+            "fdn_spawn_concurrent",
+            self.ptr_type.fn_type(
+                &[
+                    self.i64_type.into(),
+                    self.ptr_type.into(),
+                    self.i64_type.into(),
+                    self.ptr_type.into(),
+                    self.i64_type.into(),
+                ],
+                false,
+            ),
+        );
+        self.declare_runtime_fn(
             "fdn_pending_join",
             self.ptr_type.fn_type(&[self.ptr_type.into()], false),
         );
@@ -1678,8 +1691,39 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 handle,
                 task_fn,
                 args,
+            } => {
+                let values = args
+                    .iter()
+                    .map(|arg| self.lower_operand(arg))
+                    .collect::<Result<Vec<_>>>()?;
+                let (array_ptr, count) = self.build_ptr_array(&values)?;
+                let task_name = self
+                    .module
+                    .backend
+                    .symbol_name(self.module.backend.program().function(*task_fn).name)?
+                    .to_owned();
+                let (name_ptr, name_len) = self.string_bytes(&task_name);
+                let pending = self.call_ptr(
+                    "fdn_spawn_concurrent",
+                    &[
+                        self.module
+                            .i64_type
+                            .const_int(task_fn.0 as u64, false)
+                            .into(),
+                        name_ptr.into(),
+                        name_len.into(),
+                        array_ptr.into(),
+                        count.into(),
+                    ],
+                )?;
+                let slot = self.slot(*handle)?;
+                self.module
+                    .builder
+                    .build_store(slot, pending)
+                    .map_err(|err| anyhow!("{err}"))?;
+                Ok(())
             }
-            | Instr::SpawnParallel {
+            Instr::SpawnParallel {
                 handle,
                 task_fn,
                 args,
@@ -1724,6 +1768,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                         .builder
                         .build_store(slot, resolved)
                         .map_err(|err| anyhow!("{err}"))?;
+                    self.emit_pending_exception_check(current_catch_stack)?;
                 }
                 Ok(())
             }
@@ -1735,6 +1780,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     .builder
                     .build_store(slot, resolved)
                     .map_err(|err| anyhow!("{err}"))?;
+                self.emit_pending_exception_check(current_catch_stack)?;
                 Ok(())
             }
             Instr::SpawnDynamic { dest, method, args } => {
@@ -1798,7 +1844,9 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                         env_ptr.into(),
                         env_count.into(),
                     ],
-                )
+                )?;
+                self.emit_pending_exception_check(current_catch_stack)?;
+                Ok(())
             }
         }
     }

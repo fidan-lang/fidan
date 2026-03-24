@@ -468,7 +468,8 @@ function Invoke-HelperBuild {
   }
 
   try {
-    $helperPath = Join-Path "target/release" (if ($IsWindows) { "fidan-llvm-helper.exe" } else { "fidan-llvm-helper" })
+    $helperBinaryName = if ($IsWindows) { "fidan-llvm-helper.exe" } else { "fidan-llvm-helper" }
+    $helperPath = Join-Path "target/release" $helperBinaryName
     if (Test-Path -LiteralPath $helperPath) {
       Remove-Item -LiteralPath $helperPath -Force
     }
