@@ -24,7 +24,7 @@ pub fn lookup_keyword(s: &str) -> Option<TokenKind> {
         "break" | "stop" => TokenKind::Break,
         "continue" => TokenKind::Continue,
         "attempt" | "try" => TokenKind::Attempt,
-        "catch" => TokenKind::Catch,
+        "catch" | "rescue" => TokenKind::Catch,
         "finally" => TokenKind::Finally,
         "panic" | "throw" => TokenKind::Panic,
         "use" => TokenKind::Use,

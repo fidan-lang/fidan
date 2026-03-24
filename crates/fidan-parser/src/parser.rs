@@ -192,19 +192,36 @@ impl<'t> Parser<'t> {
         }
     }
 
+    fn token_name_symbol(&self, tok: &TokenKind) -> Option<Symbol> {
+        match tok {
+            TokenKind::Ident(sym) => Some(*sym),
+            TokenKind::StarStar => Some(self.interner.intern("pow")),
+            _ => tok.as_keyword_str().map(|kw| self.interner.intern(kw)),
+        }
+    }
+
+    /// Like `expect_ident_sym` but also accepts keyword tokens in import/module paths.
+    /// This keeps reserved words usable as stdlib module segments, e.g. `use std.parallel`.
+    pub(crate) fn expect_import_segment(&mut self, msg: &str) -> Symbol {
+        let span = self.current_span();
+        let tok = self.peek().clone();
+        if let Some(sym) = self.token_name_symbol(&tok) {
+            self.advance();
+            return sym;
+        }
+        self.error(msg, span);
+        self.interner.intern("<error>")
+    }
+
     /// Like `expect_ident_sym` but also accepts keyword tokens as field names.
     /// Keywords are legal identifiers after `.` in Fidan (e.g. `obj.set()`,
     /// `obj.new`) — same rule as Python, Swift, Kotlin, etc.
     pub(crate) fn expect_field_name(&mut self) -> Symbol {
         let span = self.current_span();
         let tok = self.peek().clone();
-        if let TokenKind::Ident(sym) = tok {
+        if let Some(sym) = self.token_name_symbol(&tok) {
             self.advance();
             return sym;
-        }
-        if let Some(kw) = tok.as_keyword_str() {
-            self.advance();
-            return self.interner.intern(kw);
         }
         self.error("expected field name after `.`", span);
         self.interner.intern("<error>")
@@ -1047,7 +1064,7 @@ impl<'t> Parser<'t> {
             });
         }
 
-        let mut path = vec![self.expect_ident_sym("expected module name")];
+        let mut path = vec![self.expect_import_segment("expected module name")];
 
         // Grouped import flag: `use std.io.{print, readFile, writeFile}`
         let mut grouped_names: Option<Vec<Symbol>> = None;
@@ -1065,7 +1082,7 @@ impl<'t> Parser<'t> {
                     if matches!(self.peek(), TokenKind::RBrace | TokenKind::Eof) {
                         break;
                     }
-                    names.push(self.expect_ident_sym("expected import name"));
+                    names.push(self.expect_import_segment("expected import name"));
                     if !self.eat(&TokenKind::Comma) {
                         break;
                     }
@@ -1074,7 +1091,7 @@ impl<'t> Parser<'t> {
                 grouped_names = Some(names);
                 break;
             }
-            path.push(self.expect_ident_sym("expected path segment"));
+            path.push(self.expect_import_segment("expected path segment"));
         }
 
         let end = self.current_span().end;

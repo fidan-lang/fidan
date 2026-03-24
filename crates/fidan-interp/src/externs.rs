@@ -123,11 +123,31 @@ fn call_fidan_abi(decl: &MirExternDecl, args: Vec<FidanValue>) -> Result<FidanVa
     for ptr in raw_args.drain(..) {
         unsafe { drop(Box::from_raw(ptr)) };
     }
+    take_fidan_abi_result(&library, result)
+}
+
+fn take_fidan_abi_result(
+    library: &ExternLibrary,
+    result: *mut FidanValue,
+) -> Result<FidanValue, String> {
     if result.is_null() {
-        Ok(FidanValue::Nothing)
-    } else {
-        Ok(unsafe { *Box::from_raw(result) })
+        return Ok(FidanValue::Nothing);
     }
+
+    if !library.owned {
+        return Ok(unsafe { *Box::from_raw(result) });
+    }
+
+    // External Rust plugins may allocate the returned box with a different allocator
+    // than the host process (e.g. the CLI uses mimalloc). Clone the foreign value into
+    // host-owned memory first, then ask the foreign library to free its own box.
+    let cloned = unsafe { (&*result).clone() };
+    if let Ok(drop_symbol) = library.resolve("fdn_drop") {
+        type RawDrop = unsafe extern "C" fn(*mut FidanValue);
+        let drop_fn: RawDrop = unsafe { std::mem::transmute(drop_symbol) };
+        unsafe { drop_fn(result) };
+    }
+    Ok(cloned)
 }
 
 fn call_native_abi(

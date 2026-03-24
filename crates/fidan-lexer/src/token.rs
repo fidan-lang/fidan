@@ -192,6 +192,8 @@ impl TokenKind {
             TokenKind::Shared => "shared",
             TokenKind::Pending => "pending",
             TokenKind::Weak => "weak",
+            TokenKind::Test => "test",
+            TokenKind::Enum => "enum",
             TokenKind::And => "and",
             TokenKind::Or => "or",
             TokenKind::Not => "not",

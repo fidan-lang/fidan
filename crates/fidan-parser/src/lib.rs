@@ -257,6 +257,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn attempt_rescue_alias() {
+        let (_, diags) = parse_src(
+            r#"attempt {
+                panic("oops")
+            } rescue e {
+                print(e)
+            }"#,
+        );
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
     // ── Expressions ───────────────────────────────────────────────────────────
 
     #[test]
@@ -555,6 +571,56 @@ mod tests {
     #[test]
     fn use_alias() {
         let (_, diags) = parse_src("use std.math as math");
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn use_keyword_named_module() {
+        let (_, diags) = parse_src("use std.parallel");
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn use_grouped_from_keyword_named_module() {
+        let (_, diags) = parse_src("use std.parallel.{parallelMap, parallelReduce}");
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn use_grouped_operator_named_export() {
+        let (_, diags) = parse_src("use std.math.{pow}");
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn field_call_operator_named_export() {
+        let (_, diags) = parse_src("var x = math.pow(2, 3)");
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn field_call_keyword_named_export() {
+        let (_, diags) = parse_src("var x = regex.test(\"a\", \"a\")");
         assert!(
             errors(&diags).is_empty(),
             "unexpected errors: {:?}",

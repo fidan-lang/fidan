@@ -513,12 +513,13 @@ mod tests {
         assert_eq!(tokens[0], TokenKind::Semicolon); // sep = ;
 
         // Operator / call synonyms
-        let tokens = lex("also try throw mod pow");
+        let tokens = lex("also try rescue throw mod pow");
         assert_eq!(tokens[0], TokenKind::Comma); // also = ,
         assert_eq!(tokens[1], TokenKind::Attempt); // try = attempt
-        assert_eq!(tokens[2], TokenKind::Panic); // throw = panic
-        assert_eq!(tokens[3], TokenKind::Percent); // mod = %
-        assert_eq!(tokens[4], TokenKind::StarStar); // pow = **
+        assert_eq!(tokens[2], TokenKind::Catch); // rescue = catch
+        assert_eq!(tokens[3], TokenKind::Panic); // throw = panic
+        assert_eq!(tokens[4], TokenKind::Percent); // mod = %
+        assert_eq!(tokens[5], TokenKind::StarStar); // pow = **
     }
 
     #[test]

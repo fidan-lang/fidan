@@ -3378,72 +3378,78 @@ pub fn lower_program(
         }
     }
 
-    // ── Lower pending parallel-for body functions ─────────────────────────────
-    // New entries can appear during this loop (nested parallel-for), so we
-    // keep processing until the queue is fully drained.
-    loop {
-        let Some(pf) = pending_par_fors.borrow_mut().pop_front() else {
-            break;
+    // ── Lower deferred synthetic bodies ──────────────────────────────────────
+    // Lambdas, `parallel for`, and `concurrent` tasks all enqueue synthetic
+    // functions here. New entries can appear while lowering nested bodies, so
+    // we keep draining until the queue is fully empty each time we call this.
+    let drain_pending_bodies =
+        |prog: &mut MirProgram, fn_param_names: &FxHashMap<FunctionId, Vec<Symbol>>| {
+            loop {
+                let Some(pf) = pending_par_fors.borrow_mut().pop_front() else {
+                    break;
+                };
+                // SAFETY: raw ptrs point into HirStmt slices owned by `hir`, which
+                // lives for the entire duration of lower_program.
+                let body: &[HirStmt] =
+                    unsafe { std::slice::from_raw_parts(pf.body_ptr, pf.body_len) };
+                let entry_bb = prog.function_mut(pf.fn_id).alloc_block();
+                let mut ctx = FnCtx {
+                    prog,
+                    fn_id: pf.fn_id,
+                    cur_bb: entry_bb,
+                    env: VarEnv::default(),
+                    global_map: global_map.clone(),
+                    fn_map: fn_map.clone(),
+                    obj_map: obj_map.clone(),
+                    terminated: false,
+                    this_reg: None,
+                    owner_class: None,
+                    parent_map: parent_map.clone(),
+                    method_ids: method_ids.clone(),
+                    new_sym,
+                    len_sym,
+                    append_sym,
+                    type_sym,
+                    fn_is_extension: fn_is_extension.clone(),
+                    loop_stack: vec![],
+                    continue_sites: FxHashMap::default(),
+                    wildcard_sym,
+                    lambda_sym,
+                    par_for_pending: Rc::clone(&pending_par_fors),
+                    is_init_fn: false,
+                    fn_param_names: fn_param_names.clone(),
+                };
+                // First param (parallel for only): the per-iteration loop binding.
+                if let Some((binding_sym, binding_ty)) = pf.binding {
+                    let binding_local = ctx.alloc_local();
+                    ctx.define_var(binding_sym, binding_local);
+                    ctx.func_mut().params.push(MirParam {
+                        local: binding_local,
+                        name: binding_sym,
+                        ty: binding_ty,
+                        certain: false,
+                        default: None,
+                    });
+                }
+                // Subsequent params: captured env variables (parallel for + concurrent tasks).
+                for (sym, ty) in pf.env_params {
+                    let local = ctx.alloc_local();
+                    ctx.define_var(sym, local);
+                    ctx.func_mut().params.push(MirParam {
+                        local,
+                        name: sym,
+                        ty,
+                        certain: false,
+                        default: None,
+                    });
+                }
+                ctx.lower_stmts(body);
+                if !ctx.terminated {
+                    ctx.set_terminator(Terminator::Return(None));
+                }
+            }
         };
-        // SAFETY: raw ptrs point into HirStmt slices owned by `hir`, which
-        // lives for the entire duration of lower_program.
-        let body: &[HirStmt] = unsafe { std::slice::from_raw_parts(pf.body_ptr, pf.body_len) };
-        let entry_bb = prog.function_mut(pf.fn_id).alloc_block();
-        let mut ctx = FnCtx {
-            prog: &mut prog,
-            fn_id: pf.fn_id,
-            cur_bb: entry_bb,
-            env: VarEnv::default(),
-            global_map: global_map.clone(),
-            fn_map: fn_map.clone(),
-            obj_map: obj_map.clone(),
-            terminated: false,
-            this_reg: None,
-            owner_class: None,
-            parent_map: parent_map.clone(),
-            method_ids: method_ids.clone(),
-            new_sym,
-            len_sym,
-            append_sym,
-            type_sym,
-            fn_is_extension: fn_is_extension.clone(),
-            loop_stack: vec![],
-            continue_sites: FxHashMap::default(),
-            wildcard_sym,
-            lambda_sym,
-            par_for_pending: Rc::clone(&pending_par_fors),
-            is_init_fn: false,
-            fn_param_names: fn_param_names.clone(),
-        };
-        // First param (parallel for only): the per-iteration loop binding.
-        if let Some((binding_sym, binding_ty)) = pf.binding {
-            let binding_local = ctx.alloc_local();
-            ctx.define_var(binding_sym, binding_local);
-            ctx.func_mut().params.push(MirParam {
-                local: binding_local,
-                name: binding_sym,
-                ty: binding_ty,
-                certain: false,
-                default: None,
-            });
-        }
-        // Subsequent params: captured env variables (parallel for + concurrent tasks).
-        for (sym, ty) in pf.env_params {
-            let local = ctx.alloc_local();
-            ctx.define_var(sym, local);
-            ctx.func_mut().params.push(MirParam {
-                local,
-                name: sym,
-                ty,
-                certain: false,
-                default: None,
-            });
-        }
-        ctx.lower_stmts(body);
-        if !ctx.terminated {
-            ctx.set_terminator(Terminator::Return(None));
-        }
-    }
+    drain_pending_bodies(&mut prog, &fn_param_names);
 
     // ── Lower test blocks ─────────────────────────────────────────────────────
     // Each `test "name" { body }` becomes an anonymous parameterless function.
@@ -3494,6 +3500,10 @@ pub fn lower_program(
         prog.test_functions
             .push((test_decl.name.clone(), test_fn_id));
     }
+
+    // Tests can also contain lambdas and parallel/concurrent bodies, so do a
+    // final drain pass after lowering them as well.
+    drain_pending_bodies(&mut prog, &fn_param_names);
 
     // ── Propagate use_decls from HIR ──────────────────────────────────────────
     for decl in &hir.use_decls {

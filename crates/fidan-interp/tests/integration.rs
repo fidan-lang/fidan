@@ -272,6 +272,21 @@ fn attempt_catch_ok() {
 }
 
 #[test]
+fn attempt_rescue_ok() {
+    assert!(
+        run_src(
+            r#"var result = 0
+        attempt {
+            panic("expected")
+        } rescue e {
+            result = 1
+        }"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn recursive_action_ok() {
     assert!(
         run_src(
