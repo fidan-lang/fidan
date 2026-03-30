@@ -4,10 +4,12 @@ use crate::{
     analysis, convert, document::Document, semantic, store::DocumentStore, symbols::SymKind,
     symbols::SymbolEntry,
 };
-use fidan_config::BUILTIN_FUNCTIONS;
+use fidan_config::{BUILTIN_FUNCTIONS, decorator_info};
 use fidan_fmt::{FormatOptions, format_source, load_format_options_for_path};
 use fidan_source::{FileId, SourceFile, Span};
-use fidan_stdlib::{STDLIB_MODULES, module_info as stdlib_module_info};
+use fidan_stdlib::{
+    STDLIB_MODULES, member_doc as stdlib_member_doc, module_info as stdlib_module_info,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result as RpcResult;
@@ -73,6 +75,55 @@ fn stdlib_members(mod_name: &str) -> &'static [&'static str] {
     stdlib_module_info(mod_name)
         .map(|info| (info.exports)())
         .unwrap_or(&[])
+}
+
+fn stdlib_module_hover_markdown(mod_name: &str) -> Option<String> {
+    let info = stdlib_module_info(mod_name)?;
+    Some(format!("```fidan\nuse std.{mod_name}\n```\n\n{}", info.doc))
+}
+
+fn stdlib_member_hover_markdown(mod_name: &str, member_name: &str) -> Option<String> {
+    stdlib_member_doc(mod_name, member_name)
+}
+
+fn decorator_hover_markdown(name: &str) -> Option<String> {
+    let info = decorator_info(name)?;
+    let state = if info.reserved_only {
+        "Reserved for future use."
+    } else {
+        "Built-in language decorator."
+    };
+    Some(format!(
+        "```fidan\n@{}\n```\n\n{}\n\n{}",
+        info.name, info.doc, state
+    ))
+}
+
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
+}
+
+fn decorator_name_at_offset(text: &str, offset: usize) -> Option<&str> {
+    let bytes = text.as_bytes();
+    if offset > bytes.len() {
+        return None;
+    }
+
+    let mut start = offset;
+    while start > 0 && is_ident_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+
+    let mut end = offset;
+    while end < bytes.len() && is_ident_byte(bytes[end]) {
+        end += 1;
+    }
+
+    if start == end || start == 0 || bytes[start - 1] != b'@' {
+        return None;
+    }
+
+    text.get(start..end)
 }
 
 #[cfg(test)]
@@ -549,6 +600,17 @@ impl LanguageServer for FidanLsp {
             };
             let file = SourceFile::new(FileId(0), uri.as_str(), doc.text.as_str());
             let offset = lsp_pos_to_offset(&file, pos);
+            if let Some(name) = decorator_name_at_offset(doc.text.as_str(), offset as usize)
+                && let Some(detail) = decorator_hover_markdown(name)
+            {
+                return Ok(Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: detail,
+                    }),
+                    range: None,
+                }));
+            }
             let spans = &doc.identifier_spans;
             let hit_idx = match spans
                 .iter()
@@ -593,6 +655,12 @@ impl LanguageServer for FidanLsp {
                 });
             if let Some(e) = in_doc {
                 Phase1::Found(e.detail.clone())
+            } else if let Some(pn) = prev_name
+                && let Some(mod_name) = doc.stdlib_imports.get(pn)
+                && let Some(detail) =
+                    stdlib_member_hover_markdown(mod_name.as_str(), cur_name.as_str())
+            {
+                Phase1::Found(detail)
             } else if let Some(pn) = prev_name {
                 // `module.Type` — prev is a namespace alias for an imported file.
                 if let Some(import_url) = doc.imports.get(pn) {
@@ -617,6 +685,11 @@ impl LanguageServer for FidanLsp {
                     "```fidan\nimport \"{}\" as {}\n```",
                     file_name, cur_name
                 ))
+            } else if let Some(mod_name) = doc.stdlib_imports.get(cur_name.as_str()) {
+                match stdlib_module_hover_markdown(mod_name.as_str()) {
+                    Some(detail) => Phase1::Found(detail),
+                    None => Phase1::NotFound,
+                }
             } else {
                 Phase1::NotFound
             }
@@ -1247,6 +1320,14 @@ impl LanguageServer for FidanLsp {
                         .map(|name| CompletionItem {
                             label: name.to_string(),
                             kind: Some(CompletionItemKind::FUNCTION),
+                            documentation: stdlib_member_hover_markdown(&mod_name, name).map(
+                                |value| {
+                                    Documentation::MarkupContent(MarkupContent {
+                                        kind: MarkupKind::Markdown,
+                                        value,
+                                    })
+                                },
+                            ),
                             ..Default::default()
                         })
                         .collect()
@@ -1323,6 +1404,14 @@ impl LanguageServer for FidanLsp {
                         .map(|name| CompletionItem {
                             label: name.to_string(),
                             kind: Some(CompletionItemKind::FUNCTION),
+                            documentation: stdlib_member_hover_markdown(&mod_name, name).map(
+                                |value| {
+                                    Documentation::MarkupContent(MarkupContent {
+                                        kind: MarkupKind::Markdown,
+                                        value,
+                                    })
+                                },
+                            ),
                             ..Default::default()
                         })
                         .collect();
@@ -2396,5 +2485,34 @@ mod tests {
                 info.name
             );
         }
+    }
+
+    #[test]
+    fn decorator_hover_docs_cover_builtins_and_reserved_spellings() {
+        let precompile =
+            decorator_hover_markdown("precompile").expect("missing @precompile hover doc");
+        assert!(precompile.contains("@precompile"));
+
+        let gpu = decorator_hover_markdown("gpu").expect("missing @gpu hover doc");
+        assert!(gpu.contains("Reserved for future use"));
+    }
+
+    #[test]
+    fn decorator_name_lookup_requires_at_prefix() {
+        let text = "@precompile\naction main {}";
+        assert_eq!(decorator_name_at_offset(text, 5), Some("precompile"));
+        assert_eq!(decorator_name_at_offset(text, 0), None);
+        assert_eq!(decorator_name_at_offset(text, 16), None);
+    }
+
+    #[test]
+    fn stdlib_member_hover_docs_cover_recent_exports() {
+        let sleep =
+            stdlib_member_hover_markdown("time", "sleep").expect("missing std.time.sleep doc");
+        assert!(sleep.contains("std.time.sleep"));
+
+        let wait_any = stdlib_member_hover_markdown("async", "waitAny")
+            .expect("missing std.async.waitAny doc");
+        assert!(wait_any.contains("std.async.waitAny"));
     }
 }
