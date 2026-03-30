@@ -7,6 +7,8 @@
 // per-call-frame catch stack, mirroring the `PushCatch`/`PopCatch`
 // instructions emitted by the MIR lowerer.
 
+use std::collections::VecDeque;
+use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -14,21 +16,26 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use fidan_ast::{BinOp, UnOp};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_mir::{
-    BlockId, Callee, FunctionId, Instr, LocalId, MirLit, MirObjectInfo, MirProgram, MirStringPart,
-    Operand, Rvalue, Terminator,
+    BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirFunction, MirLit, MirObjectInfo,
+    MirProgram, MirStringPart, MirTy, Operand, Rvalue, Terminator,
 };
 use fidan_runtime::{
     FidanClass, FidanDict, FidanList, FidanObject, FidanPending, FidanString, FidanValue, FieldDef,
     FunctionId as RuntimeFnId, OwnedRef, ParallelArgs, ParallelCapture, display as fidan_display,
 };
 use fidan_source::{SourceMap, Span};
-use fidan_stdlib::{SandboxPolicy, SandboxViolation, StdlibResult, parallel::ParallelOp};
+use fidan_stdlib::{
+    SandboxPolicy, SandboxViolation, StdlibResult, module_exports, parallel::ParallelOp,
+};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::builtins;
 use crate::externs;
 use crate::profiler::{FnProfileEntry, FnProfileItem, ProfileReport};
-use fidan_codegen_cranelift::{JitCompiler, JitFnEntry, call_jit_fn};
+use fidan_codegen_cranelift::{
+    JitCompiler, JitFnEntry, JitRuntimeHooks, call_jit_fn, register_jit_runtime_hooks,
+    with_jit_runtime_context,
+};
 
 // ── Public error types ────────────────────────────────────────────────────────
 
@@ -125,25 +132,46 @@ fn build_class_table(
 struct CallFrame {
     /// SSA locals — sized to `func.local_count` on entry.
     locals: Vec<FidanValue>,
-    /// Structured same-thread tasks queued by `concurrent { task ... }`.
-    concurrent_tasks: FxHashMap<LocalId, ConcurrentTask>,
     /// Exception-handler stack: `PushCatch` pushes, `PopCatch` pops.
     catch_stack: Vec<BlockId>,
     /// Set by `Terminator::Throw` before jumping to a catch block.
     current_exception: Option<FidanValue>,
 }
 
-struct ConcurrentTask {
-    task_fn: FunctionId,
-    args: Vec<FidanValue>,
-    task_name: String,
+enum DeferredTask {
+    Concurrent {
+        task_fn: FunctionId,
+        args: Vec<FidanValue>,
+        task_name: String,
+    },
+    StaticSpawn {
+        task_fn: FunctionId,
+        args: Vec<FidanValue>,
+    },
+    DynamicSpawn {
+        method: Option<Symbol>,
+        args: Vec<FidanValue>,
+    },
+}
+
+enum DeferredTaskError {
+    Signal(MirSignal),
+    ConcurrentTask {
+        task_name: String,
+        signal: MirSignal,
+    },
+}
+
+enum PendingTaskState {
+    Queued(DeferredTask),
+    Running,
+    Ready(Result<FidanValue, DeferredTaskError>),
 }
 
 impl CallFrame {
     fn new(local_count: u32) -> Self {
         Self {
             locals: vec![FidanValue::Nothing; local_count as usize],
-            concurrent_tasks: FxHashMap::default(),
             catch_stack: vec![],
             current_exception: None,
         }
@@ -160,14 +188,6 @@ impl CallFrame {
         if let Some(slot) = self.locals.get_mut(local.0 as usize) {
             *slot = value;
         }
-    }
-
-    fn queue_concurrent_task(&mut self, local: LocalId, task: ConcurrentTask) {
-        self.concurrent_tasks.insert(local, task);
-    }
-
-    fn take_concurrent_task(&mut self, local: LocalId) -> Option<ConcurrentTask> {
-        self.concurrent_tasks.remove(&local)
     }
 }
 
@@ -232,6 +252,10 @@ pub struct MirMachine {
     jit_flags: Arc<Vec<AtomicBool>>,
     /// Number of calls after which the JIT kicks in (0 = disabled).
     jit_threshold: u32,
+    /// Same-thread deferred tasks created by `spawn` / `concurrent`.
+    pending_tasks: FxHashMap<u64, PendingTaskState>,
+    pending_ready: VecDeque<u64>,
+    next_pending_task_id: u64,
     /// Pre-interned symbol for the string `"drop"`.
     ///
     /// Stored here so `exec_drop_dispatch` can call `class.find_method(drop_sym)`
@@ -267,7 +291,70 @@ pub struct TestResult {
 // copies before the machine is moved into the worker thread.
 unsafe impl Send for MirMachine {}
 
+unsafe fn jit_load_global_raw(ctx: *mut c_void, global_id: u32) -> i64 {
+    let machine = unsafe { &mut *(ctx as *mut MirMachine) };
+    let global = GlobalId(global_id);
+    let ty = machine
+        .program
+        .globals
+        .get(global_id as usize)
+        .map(|g| &g.ty)
+        .unwrap_or(&MirTy::Dynamic);
+    let value = machine.global_value(global);
+    machine.encode_jit_abi_value(&value, ty)
+}
+
+unsafe fn jit_store_global_raw(ctx: *mut c_void, global_id: u32, raw: i64) {
+    let machine = unsafe { &mut *(ctx as *mut MirMachine) };
+    let ty = machine
+        .program
+        .globals
+        .get(global_id as usize)
+        .map(|g| &g.ty)
+        .unwrap_or(&MirTy::Dynamic)
+        .clone();
+    let value = machine.decode_jit_abi_value(raw, &ty);
+    if let Some(slot) = machine.globals.write().get_mut(global_id as usize) {
+        *slot = value;
+    }
+    machine.frozen_globals = None;
+}
+
+unsafe fn jit_call_fn_raw(ctx: *mut c_void, fn_id: u32, args_ptr: *const i64, arg_cnt: i64) -> i64 {
+    let machine = unsafe { &mut *(ctx as *mut MirMachine) };
+    let func_id = FunctionId(fn_id);
+    let param_tys = machine
+        .program
+        .function(func_id)
+        .params
+        .iter()
+        .map(|param| param.ty.clone())
+        .collect::<Vec<_>>();
+    let return_ty = machine.program.function(func_id).return_ty.clone();
+    let raw_args = unsafe { std::slice::from_raw_parts(args_ptr, arg_cnt.max(0) as usize) };
+    let args = raw_args
+        .iter()
+        .enumerate()
+        .map(|(index, raw)| {
+            let ty = param_tys.get(index).unwrap_or(&MirTy::Dynamic);
+            machine.decode_jit_abi_value(*raw, ty)
+        })
+        .collect::<Vec<_>>();
+    let result = machine
+        .call_function(func_id, args)
+        .unwrap_or(FidanValue::Nothing);
+    machine.encode_jit_abi_value(&result, &return_ty)
+}
+
 impl MirMachine {
+    fn register_jit_hooks() {
+        register_jit_runtime_hooks(JitRuntimeHooks {
+            load_global_raw: jit_load_global_raw,
+            store_global_raw: jit_store_global_raw,
+            call_fn_raw: jit_call_fn_raw,
+        });
+    }
+
     fn format_task_failure(task_name: &str, sig: MirSignal) -> String {
         match sig {
             MirSignal::Panic(m) => format!("task `{}` panicked: {}", task_name, m),
@@ -291,6 +378,7 @@ impl MirMachine {
         interner: Arc<SymbolInterner>,
         source_map: Arc<SourceMap>,
     ) -> Self {
+        Self::register_jit_hooks();
         let classes = build_class_table(&program.objects, &interner);
 
         // Build the free-function import map from `use std.module.{fn}` declarations.
@@ -399,6 +487,9 @@ impl MirMachine {
             jit_fns,
             jit_flags,
             jit_threshold: 500,
+            pending_tasks: FxHashMap::default(),
+            pending_ready: VecDeque::new(),
+            next_pending_task_id: 1,
             drop_sym,
             profile_data: None,
             stdin_capture: Vec::new(),
@@ -406,6 +497,76 @@ impl MirMachine {
             replay_pos: 0,
             sandbox: None,
         }
+    }
+
+    fn global_value(&self, global: GlobalId) -> FidanValue {
+        if let Some(ref frozen) = self.frozen_globals {
+            frozen
+                .get(global.0 as usize)
+                .cloned()
+                .unwrap_or(FidanValue::Nothing)
+        } else {
+            self.globals
+                .read()
+                .get(global.0 as usize)
+                .cloned()
+                .unwrap_or(FidanValue::Nothing)
+        }
+    }
+
+    fn encode_jit_abi_value(&self, value: &FidanValue, ty: &MirTy) -> i64 {
+        match (value, ty) {
+            (FidanValue::Integer(n), MirTy::Integer) => *n,
+            (FidanValue::Float(f), MirTy::Float) => f.to_bits() as i64,
+            (FidanValue::Boolean(b), MirTy::Boolean) => i64::from(*b),
+            _ => 0,
+        }
+    }
+
+    fn decode_jit_abi_value(&self, raw: i64, ty: &MirTy) -> FidanValue {
+        match ty {
+            MirTy::Integer => FidanValue::Integer(raw),
+            MirTy::Float => FidanValue::Float(f64::from_bits(raw as u64)),
+            MirTy::Boolean => FidanValue::Boolean(raw != 0),
+            _ => FidanValue::Nothing,
+        }
+    }
+
+    fn prepare_call_args(
+        &self,
+        func: &MirFunction,
+        args: &[FidanValue],
+    ) -> Result<Vec<FidanValue>, MirSignal> {
+        if args.len() > func.params.len() {
+            let fn_name_s = self.sym_str(func.name).to_string();
+            let expected = func.params.len();
+            let got = args.len();
+            return Err(MirSignal::Panic(format!(
+                "too many arguments to `{fn_name_s}`: expected {expected}, got {got}"
+            )));
+        }
+
+        let mut prepared = Vec::with_capacity(func.params.len());
+        for (i, param) in func.params.iter().enumerate() {
+            let val = args.get(i).cloned().unwrap_or(FidanValue::Nothing);
+            let val = if matches!(val, FidanValue::Nothing) {
+                if let Some(ref lit) = param.default {
+                    mir_lit_to_value(lit)
+                } else {
+                    val
+                }
+            } else {
+                val
+            };
+            if param.certain && matches!(val, FidanValue::Nothing) {
+                let pname = self.sym_str(param.name);
+                return Err(MirSignal::Panic(format!(
+                    "certain parameter `{pname}` cannot be nothing"
+                )));
+            }
+            prepared.push(val);
+        }
+        Ok(prepared)
     }
 
     /// Create a lightweight clone of this machine for use on a parallel thread.
@@ -444,6 +605,9 @@ impl MirMachine {
             jit_fns: Arc::clone(&self.jit_fns),
             jit_flags: Arc::clone(&self.jit_flags),
             jit_threshold: self.jit_threshold,
+            pending_tasks: FxHashMap::default(),
+            pending_ready: VecDeque::new(),
+            next_pending_task_id: 1,
             drop_sym: self.drop_sym,
             profile_data: self.profile_data.as_ref().map(Arc::clone),
             // Parallel threads get a fresh capture buffer.
@@ -563,6 +727,105 @@ impl MirMachine {
                 if f.precompile {
                     self.call_counters[i].store(pre_warm, Ordering::Relaxed);
                 }
+            }
+        }
+    }
+
+    fn queue_pending_task(&mut self, task: DeferredTask) -> FidanValue {
+        let id = self.next_pending_task_id;
+        self.next_pending_task_id += 1;
+        self.pending_tasks
+            .insert(id, PendingTaskState::Queued(task));
+        self.pending_ready.push_back(id);
+        FidanValue::PendingTask(id)
+    }
+
+    fn run_deferred_task(&mut self, task: DeferredTask) -> Result<FidanValue, DeferredTaskError> {
+        match task {
+            DeferredTask::Concurrent {
+                task_fn,
+                args,
+                task_name,
+            } => self
+                .call_function(task_fn, args)
+                .map_err(|signal| DeferredTaskError::ConcurrentTask { task_name, signal }),
+            DeferredTask::StaticSpawn { task_fn, args } => self
+                .call_function(task_fn, args)
+                .map_err(DeferredTaskError::Signal),
+            DeferredTask::DynamicSpawn { method, args } => {
+                let mut vals = args;
+                if vals.is_empty() {
+                    return Ok(FidanValue::Nothing);
+                }
+                let first = vals.remove(0);
+                match method {
+                    Some(sym) => self
+                        .dispatch_method_sym(first, sym, vals)
+                        .map_err(DeferredTaskError::Signal),
+                    None => match first {
+                        FidanValue::Function(RuntimeFnId(id)) => self
+                            .call_function(FunctionId(id), vals)
+                            .map_err(DeferredTaskError::Signal),
+                        FidanValue::Closure {
+                            fn_id: RuntimeFnId(id),
+                            captured,
+                        } => {
+                            let mut full_args = captured;
+                            full_args.extend(vals);
+                            self.call_function(FunctionId(id), full_args)
+                                .map_err(DeferredTaskError::Signal)
+                        }
+                        _ => Ok(FidanValue::Nothing),
+                    },
+                }
+            }
+        }
+    }
+
+    fn run_next_same_thread_task(&mut self) -> bool {
+        while let Some(id) = self.pending_ready.pop_front() {
+            let Some(state) = self.pending_tasks.remove(&id) else {
+                continue;
+            };
+            match state {
+                PendingTaskState::Queued(task) => {
+                    self.pending_tasks.insert(id, PendingTaskState::Running);
+                    let result = self.run_deferred_task(task);
+                    self.pending_tasks
+                        .insert(id, PendingTaskState::Ready(result));
+                    return true;
+                }
+                PendingTaskState::Running => {
+                    self.pending_tasks.insert(id, PendingTaskState::Running);
+                }
+                PendingTaskState::Ready(result) => {
+                    self.pending_tasks
+                        .insert(id, PendingTaskState::Ready(result));
+                }
+            }
+        }
+        false
+    }
+
+    fn resolve_same_thread_pending(&mut self, id: u64) -> Result<FidanValue, DeferredTaskError> {
+        loop {
+            match self.pending_tasks.get(&id) {
+                Some(PendingTaskState::Queued(_)) | Some(PendingTaskState::Running) => {
+                    if !self.run_next_same_thread_task() {
+                        return Err(DeferredTaskError::Signal(MirSignal::Panic(
+                            "same-thread task scheduler deadlocked while awaiting a running task"
+                                .to_string(),
+                        )));
+                    }
+                }
+                Some(PendingTaskState::Ready(_)) => {
+                    let Some(PendingTaskState::Ready(result)) = self.pending_tasks.remove(&id)
+                    else {
+                        unreachable!("pending task state changed while resolving");
+                    };
+                    return result;
+                }
+                None => return Ok(FidanValue::Nothing),
             }
         }
     }
@@ -690,6 +953,7 @@ impl MirMachine {
 
     fn call_function(&mut self, fn_id: FunctionId, args: Vec<FidanValue>) -> MirResult {
         let func = self.program.function(fn_id);
+        let args = self.prepare_call_args(func, &args)?;
 
         if func.extern_decl.is_some() {
             if self.sandbox.is_some() {
@@ -714,30 +978,41 @@ impl MirMachine {
             let idx = fn_id.0 as usize;
             // Fast-path: single atomic load — no lock acquired when not compiled.
             if self.jit_flags[idx].load(Ordering::Acquire) {
-                let guard = self.jit_fns.read();
-                if let Some(ref entry) = guard[idx] {
-                    return Ok(call_jit_fn(entry, &args));
+                let entry = {
+                    let guard = self.jit_fns.read();
+                    guard[idx].clone()
+                };
+                if let Some(entry) = entry
+                    && entry.is_native()
+                {
+                    let self_ptr = self as *mut MirMachine as *mut c_void;
+                    return Ok(with_jit_runtime_context(self_ptr, || {
+                        call_jit_fn(&entry, &args)
+                    }));
                 }
             } else {
                 let prev = self.call_counters[idx].fetch_add(1, Ordering::Relaxed);
                 if prev == self.jit_threshold.saturating_sub(1) {
                     // Threshold reached — attempt JIT compilation.
                     let mut compiler = JitCompiler::new();
-                    if let Some(entry) =
-                        compiler.compile_function(func, &self.program, &self.interner)
-                    {
-                        self.jit_fns.write()[idx] = Some(entry);
-                        let _ = Box::leak(Box::new(compiler));
-                        // Publish the compiled flag AFTER the function is stored.
-                        self.jit_flags[idx].store(true, Ordering::Release);
-                        // Dispatch immediately — including this very (compilation-trigger) call.
-                        let guard = self.jit_fns.read();
-                        if let Some(ref e) = guard[idx] {
-                            return Ok(call_jit_fn(e, &args));
+                    let entry = compiler.compile_function(func, &self.program, &self.interner);
+                    let is_native = entry.is_native();
+                    self.jit_fns.write()[idx] = Some(entry);
+                    let _ = Box::leak(Box::new(compiler));
+                    // Publish the compiled flag AFTER the function is stored.
+                    self.jit_flags[idx].store(true, Ordering::Release);
+                    // Dispatch immediately — including this very (compilation-trigger) call.
+                    if is_native {
+                        let entry = {
+                            let guard = self.jit_fns.read();
+                            guard[idx].clone()
+                        };
+                        if let Some(entry) = entry {
+                            let self_ptr = self as *mut MirMachine as *mut c_void;
+                            return Ok(with_jit_runtime_context(self_ptr, || {
+                                call_jit_fn(&entry, &args)
+                            }));
                         }
-                    } else {
-                        // Non-eligible: saturate so we never attempt again.
-                        self.call_counters[idx].store(u32::MAX, Ordering::Relaxed);
                     }
                 }
             }
@@ -766,27 +1041,7 @@ impl MirMachine {
         // (or omitted the arg entirely), substitute the compile-time default.
         for (i, param) in func.params.iter().enumerate() {
             let val = args.get(i).cloned().unwrap_or(FidanValue::Nothing);
-            let val = if matches!(val, FidanValue::Nothing) {
-                if let Some(ref lit) = param.default {
-                    mir_lit_to_value(lit)
-                } else {
-                    val
-                }
-            } else {
-                val
-            };
             frame.store(param.local, val);
-        }
-
-        // Runtime guard: too many arguments are a bug that typeck should have
-        // caught at compile time.  Panic at runtime as a safety net.
-        if args.len() > func.params.len() {
-            let fn_name_s = self.sym_str(func.name).to_string();
-            let expected = func.params.len();
-            let got = args.len();
-            return Err(MirSignal::Panic(format!(
-                "too many arguments to `{fn_name_s}`: expected {expected}, got {got}"
-            )));
         }
 
         // Consume the call-site span set by exec_instr just before calling us.
@@ -1079,6 +1334,7 @@ impl MirMachine {
                 if let Some(slot) = self.globals.write().get_mut(global.0 as usize) {
                     *slot = val;
                 }
+                self.frozen_globals = None;
             }
             // ── Concurrency / Parallelism ─────────────────────────────────────
             //
@@ -1086,7 +1342,10 @@ impl MirMachine {
             // tasks are queued in the current frame and resolved at `JoinAll`
             // / `await` without crossing thread boundaries.
             //
-            // `parallel { task ... }` and `spawn expr` remain OS-thread backed.
+            // `parallel { task ... }` remains OS-thread backed.
+            //
+            // `spawn expr` / `spawn dynamic` are same-thread deferred tasks:
+            // they do not execute eagerly and instead run when first awaited.
             //
             // Each thread gets its own `MirMachine` (clone_for_thread is O(1)
             // for Arc fields).  Captured values go through `parallel_capture()`
@@ -1108,15 +1367,14 @@ impl MirMachine {
                 };
                 let task_args: Vec<FidanValue> =
                     args.iter().map(|a| self.eval_operand(a, frame)).collect();
-                frame.queue_concurrent_task(
+                frame.store(
                     *handle,
-                    ConcurrentTask {
+                    self.queue_pending_task(DeferredTask::Concurrent {
                         task_fn,
                         args: task_args,
                         task_name,
-                    },
+                    }),
                 );
-                frame.store(*handle, FidanValue::Nothing);
             }
 
             Instr::SpawnParallel {
@@ -1149,65 +1407,27 @@ impl MirMachine {
                 task_fn,
                 args,
             } => {
-                let task_fn = *task_fn; // Copy
-                let args_bundle = ParallelArgs::from_captures(
-                    args.iter()
-                        .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture())),
+                let task_args: Vec<FidanValue> =
+                    args.iter().map(|a| self.eval_operand(a, frame)).collect();
+                frame.store(
+                    *dest,
+                    self.queue_pending_task(DeferredTask::StaticSpawn {
+                        task_fn: *task_fn,
+                        args: task_args,
+                    }),
                 );
-                let mut child = self.clone_for_thread();
-                let pending = FidanPending::spawn_with_args(args_bundle, move |bundle| {
-                    child
-                        .call_function(task_fn, bundle.into_vec())
-                        .unwrap_or(FidanValue::Nothing)
-                });
-                frame.store(*dest, FidanValue::Pending(pending));
             }
 
             Instr::SpawnDynamic { dest, method, args } => {
-                // Evaluate all args (args[0] = receiver or fn-value) in the
-                // current frame and capture them for the new thread.
-                let caps: Vec<ParallelCapture> = args
-                    .iter()
-                    .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture()))
-                    .collect();
-                // Look up the method symbol before moving `self` into the closure.
-                let method_sym: Option<Symbol> = *method; // Copy, no allocation
-                let bundle = ParallelArgs::from_captures(caps);
-                let mut child = self.clone_for_thread();
-                let pending = FidanPending::spawn_with_args(bundle, move |bundle| {
-                    let mut vals = bundle.into_vec();
-                    if vals.is_empty() {
-                        return FidanValue::Nothing;
-                    }
-                    let first = vals.remove(0);
-                    match method_sym {
-                        Some(sym) => {
-                            // Method dispatch: first value is the receiver.
-                            child
-                                .dispatch_method_sym(first, sym, vals)
-                                .unwrap_or(FidanValue::Nothing)
-                        }
-                        None => match first {
-                            // Dynamic fn-value dispatch.
-                            FidanValue::Function(RuntimeFnId(id)) => child
-                                .call_function(FunctionId(id), vals)
-                                .unwrap_or(FidanValue::Nothing),
-                            FidanValue::Closure {
-                                fn_id: RuntimeFnId(id),
-                                captured,
-                            } => {
-                                let mut full_args: Vec<FidanValue> =
-                                    captured.iter().map(|v| v.parallel_capture()).collect();
-                                full_args.extend(vals);
-                                child
-                                    .call_function(FunctionId(id), full_args)
-                                    .unwrap_or(FidanValue::Nothing)
-                            }
-                            _ => FidanValue::Nothing,
-                        },
-                    }
-                });
-                frame.store(*dest, FidanValue::Pending(pending));
+                let task_args: Vec<FidanValue> =
+                    args.iter().map(|a| self.eval_operand(a, frame)).collect();
+                frame.store(
+                    *dest,
+                    self.queue_pending_task(DeferredTask::DynamicSpawn {
+                        method: *method,
+                        args: task_args,
+                    }),
+                );
             }
 
             Instr::JoinAll { handles } => {
@@ -1219,28 +1439,30 @@ impl MirMachine {
                 let resolved: Vec<(LocalId, FidanValue)> = handles
                     .iter()
                     .map(|&local| {
-                        let result = if let Some(task) = frame.take_concurrent_task(local) {
-                            block_kind = "concurrent";
-                            match self.call_function(task.task_fn, task.args) {
+                        let val = frame.load(local);
+                        let result = match &val {
+                            FidanValue::PendingTask(id) => match self
+                                .resolve_same_thread_pending(*id)
+                            {
                                 Ok(v) => v,
-                                Err(sig) => {
-                                    failures.push(Self::format_task_failure(&task.task_name, sig));
+                                Err(DeferredTaskError::ConcurrentTask { task_name, signal }) => {
+                                    block_kind = "concurrent";
+                                    failures.push(Self::format_task_failure(&task_name, signal));
                                     FidanValue::Nothing
                                 }
-                            }
-                        } else {
-                            let val = frame.load(local);
-                            if let FidanValue::Pending(p) = &val {
-                                match p.try_join() {
-                                    Ok(v) => v,
-                                    Err(e) => {
-                                        failures.push(e);
-                                        FidanValue::Nothing
-                                    }
+                                Err(DeferredTaskError::Signal(signal)) => {
+                                    failures.push(Self::format_task_failure("<task>", signal));
+                                    FidanValue::Nothing
                                 }
-                            } else {
-                                val // already resolved (sequential fallback)
-                            }
+                            },
+                            FidanValue::Pending(p) => match p.try_join() {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    failures.push(e);
+                                    FidanValue::Nothing
+                                }
+                            },
+                            _ => val, // already resolved (sequential fallback)
                         };
                         (local, result)
                     })
@@ -1264,27 +1486,20 @@ impl MirMachine {
             }
 
             Instr::AwaitPending { dest, handle } => {
-                let resolved = if let Operand::Local(local) = handle {
-                    if let Some(task) = frame.take_concurrent_task(*local) {
-                        match self.call_function(task.task_fn, task.args) {
-                            Ok(v) => v,
-                            Err(_) => FidanValue::Nothing,
+                let val = self.eval_operand(handle, frame);
+                let resolved = match &val {
+                    FidanValue::PendingTask(id) => match self.resolve_same_thread_pending(*id) {
+                        Ok(v) => v,
+                        Err(DeferredTaskError::Signal(signal))
+                        | Err(DeferredTaskError::ConcurrentTask { signal, .. }) => {
+                            return Err(signal);
                         }
-                    } else {
-                        let val = self.eval_operand(handle, frame);
-                        if let FidanValue::Pending(p) = &val {
-                            p.join()
-                        } else {
-                            val
-                        }
-                    }
-                } else {
-                    let val = self.eval_operand(handle, frame);
-                    if let FidanValue::Pending(p) = &val {
-                        p.join()
-                    } else {
-                        val
-                    }
+                    },
+                    FidanValue::Pending(p) => match p.try_join() {
+                        Ok(v) => v,
+                        Err(message) => return Err(MirSignal::Panic(message)),
+                    },
+                    _ => val,
                 };
                 frame.store(*dest, resolved);
             }
@@ -1840,6 +2055,17 @@ impl MirMachine {
         name: &str,
         args: Vec<FidanValue>,
     ) -> Result<FidanValue, MirSignal> {
+        if module == "__builtin__" {
+            if let Some(value) = builtins::call_builtin_constructor(name, args.clone()) {
+                return Ok(value);
+            }
+            if let Some(value) =
+                builtins::call_builtin(name, args).map_err(|err| MirSignal::Panic(err.message))?
+            {
+                return Ok(value);
+            }
+            return Err(MirSignal::Panic(format!("unknown builtin `{name}`")));
+        }
         // Sandbox check: guard all `io` module calls before execution.
         // Check sandbox first (Option branch) so non-sandbox runs skip the
         // module string comparison entirely on every stdlib call.
@@ -1990,6 +2216,14 @@ impl MirMachine {
                     return FidanValue::String(FidanString::new(name.as_ref()));
                 }
                 FidanValue::Nothing
+            }
+            FidanValue::Namespace(module) if self.stdlib_modules.contains(module.as_ref()) => {
+                let field_name = self.sym_str(field);
+                if module_exports(module.as_ref()).contains(&field_name.as_ref()) {
+                    FidanValue::StdlibFn(Arc::clone(module), field_name)
+                } else {
+                    FidanValue::Nothing
+                }
             }
             // User namespace field access: e.g. `test2.math` where `test2` is a
             // user module namespace.  Resolve the field to a stdlib namespace value

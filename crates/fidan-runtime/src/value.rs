@@ -33,8 +33,10 @@ pub enum FidanValue {
     Function(FunctionId),
     /// Tuple: `(v1, v2, ...)`
     Tuple(Vec<FidanValue>),
-    /// A value being computed on a background thread (`spawn` expression).
+    /// A value being computed asynchronously (`spawn` expression).
     Pending(FidanPending),
+    /// Interpreter-only same-thread deferred task handle.
+    PendingTask(u64),
     /// A stdlib module namespace (e.g. `io`, `math`).
     /// Method calls on this value are routed to `fidan_stdlib::dispatch_stdlib`.
     Namespace(Arc<str>),
@@ -85,7 +87,7 @@ impl FidanValue {
             FidanValue::Function(_) => "action",
             FidanValue::Closure { .. } => "action",
             FidanValue::Tuple(_) => "tuple",
-            FidanValue::Pending(_) => "pending",
+            FidanValue::Pending(_) | FidanValue::PendingTask(_) => "pending",
             FidanValue::Namespace(_) => "namespace",
             FidanValue::StdlibFn(_, _) => "action",
             FidanValue::EnumType(_) => "enum-type",
@@ -173,6 +175,7 @@ impl FidanValue {
 
             // Share the Arc<Mutex<JoinHandle>>.
             FidanValue::Pending(p) => FidanValue::Pending(p.clone()),
+            FidanValue::PendingTask(id) => FidanValue::PendingTask(*id),
 
             // Recurse per element.
             FidanValue::Tuple(elems) => {
@@ -263,7 +266,7 @@ pub fn display(val: &FidanValue) -> String {
             let inner = s.0.lock().unwrap();
             format!("Shared({})", display(&inner))
         }
-        FidanValue::Pending(_) => "<pending>".to_string(),
+        FidanValue::Pending(_) | FidanValue::PendingTask(_) => "<pending>".to_string(),
         FidanValue::Function(id) => format!("<action#{}>", id.0),
         FidanValue::Closure { fn_id, .. } => format!("<action#{}>", fn_id.0),
         FidanValue::Namespace(m) => format!("<module:{}>", m),

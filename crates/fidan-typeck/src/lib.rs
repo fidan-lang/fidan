@@ -261,22 +261,20 @@ mod tests {
     }
 
     #[test]
-    fn extern_native_rejects_more_than_four_params() {
-        let errors = check_errors(
-            r#"@extern("self")
-            action tooWide with (
+    fn extern_native_accepts_more_than_four_params() {
+        assert!(
+            check_errors(
+                r#"@extern("self")
+            action wide with (
                 a oftype integer,
                 b oftype integer,
                 c oftype integer,
                 d oftype integer,
-                e oftype integer
-            ) returns integer"#,
-        );
-        assert!(
-            errors
-                .iter()
-                .any(|msg| msg.contains("supports at most 4 parameters")),
-            "expected native arity limit error, got {errors:?}"
+                e oftype integer,
+                f oftype integer
+            ) returns integer"#
+            )
+            .is_empty()
         );
     }
 

@@ -34,14 +34,30 @@ function Invoke-ProgramWithTimeout {
         [string]$StdoutPath,
         [string]$StderrPath,
         [int]$TimeoutMs,
-        [string[]]$StdinLines
+        [string[]]$StdinLines,
+        [string]$Label = "process"
     )
+
+    function Format-ArgumentForProcess {
+        param([string]$Value)
+        if ($null -eq $Value) {
+            return '""'
+        }
+        if ($Value.Length -eq 0) {
+            return '""'
+        }
+        if ($Value -notmatch '[\s"]') {
+            return $Value
+        }
+
+        $escaped = $Value -replace '(\\*)"', '$1$1\"'
+        $escaped = $escaped -replace '(\\+)$', '$1$1'
+        return '"' + $escaped + '"'
+    }
 
     $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
     $startInfo.FileName = $ExePath
-    foreach ($argument in $Arguments) {
-        $null = $startInfo.ArgumentList.Add($argument)
-    }
+    $startInfo.Arguments = (($Arguments | ForEach-Object { Format-ArgumentForProcess $_ }) -join ' ')
     $startInfo.WorkingDirectory = $WorkingDirectory
     $startInfo.UseShellExecute = $false
     $startInfo.RedirectStandardOutput = $true
@@ -51,6 +67,8 @@ function Invoke-ProgramWithTimeout {
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $startInfo
     $null = $process.Start()
+    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+    $stderrTask = $process.StandardError.ReadToEndAsync()
 
     if ($null -ne $StdinLines) {
         foreach ($line in $StdinLines) {
@@ -59,22 +77,35 @@ function Invoke-ProgramWithTimeout {
         $process.StandardInput.Close()
     }
 
-    if (-not $process.WaitForExit($TimeoutMs)) {
-        try {
-            $process.Kill($true)
-        } catch {
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $nextHeartbeatMs = 15000
+    $timedOut = $false
+    while (-not $process.WaitForExit(200)) {
+        if ($stopwatch.ElapsedMilliseconds -ge $nextHeartbeatMs) {
+            $elapsedSeconds = [Math]::Floor($stopwatch.ElapsedMilliseconds / 1000)
+            Write-Host "[running] $Label - ${elapsedSeconds}s elapsed"
+            $nextHeartbeatMs += 15000
         }
-        $stdout = $process.StandardOutput.ReadToEnd()
-        $stderr = $process.StandardError.ReadToEnd()
-        Set-Content -Path $StdoutPath -Value $stdout -NoNewline
-        Set-Content -Path $StderrPath -Value $stderr -NoNewline
-        return 124
+        if ($stopwatch.ElapsedMilliseconds -ge $TimeoutMs) {
+            $timedOut = $true
+            try {
+                $process.Kill($true)
+            } catch {
+            }
+            break
+        }
     }
 
-    $stdout = $process.StandardOutput.ReadToEnd()
-    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
+    $stdoutTask.Wait()
+    $stderrTask.Wait()
+    $stdout = $stdoutTask.Result
+    $stderr = $stderrTask.Result
     Set-Content -Path $StdoutPath -Value $stdout -NoNewline
     Set-Content -Path $StderrPath -Value $stderr -NoNewline
+    if ($timedOut) {
+        return 124
+    }
     return $process.ExitCode
 }
 
@@ -149,7 +180,8 @@ try {
             -StdoutPath $compileOut `
             -StderrPath $compileErr `
             -TimeoutMs 600000 `
-            -StdinLines $null
+            -StdinLines $null `
+            -Label "compile $rel"
 
         if ($compileExit -eq 124) {
             Write-Host "[FAIL] $rel - compile timed out"
@@ -161,6 +193,17 @@ try {
             Write-Host "[FAIL] $rel - compile failed"
             $compileStdout = Read-TextFile $compileOut
             $compileText = Read-TextFile $compileErr
+            if ($Backend -eq "llvm" -and $compileText -match "required LLVM backend feature") {
+                Write-Host "[SKIP] $rel - LLVM helper install lacks the required backend feature set"
+                if ($compileStdout) {
+                    Write-Host $compileStdout
+                }
+                if ($compileText) {
+                    Write-Host $compileText
+                }
+                $skip += 1
+                continue
+            }
             if ($compileStdout) {
                 Write-Host $compileStdout
             }
@@ -174,14 +217,21 @@ try {
         $timeoutMs = $DefaultTimeoutSeconds * 1000
         $stdinLines = $null
         $allowTimeout = $false
+        $expectFailure = $false
 
         switch ($baseName) {
             "parallel_benchmark.fdn" {
                 $timeoutMs = $BenchmarkProbeSeconds * 1000
                 $allowTimeout = $true
             }
+            "release_mega_1_0.fdn" {
+                $timeoutMs = [Math]::Max($timeoutMs, 30000)
+            }
             "replay_demo.fdn" {
                 $stdinLines = @("6", "3")
+            }
+            "trace_demo.fdn" {
+                $expectFailure = $true
             }
         }
 
@@ -192,7 +242,8 @@ try {
             -StdoutPath $stdout `
             -StderrPath $stderr `
             -TimeoutMs $timeoutMs `
-            -StdinLines $stdinLines
+            -StdinLines $stdinLines `
+            -Label "run $rel"
 
         if ($allowTimeout -and $exitCode -eq 124) {
             Write-Host "[PASS] $rel - long-running benchmark reached timeout window"
@@ -208,10 +259,25 @@ try {
 
         if ($exitCode -ne 0) {
             $stderrText = Read-TextFile $stderr
-            Write-Host "[FAIL] $rel - exited with code $exitCode"
-            if ($stderrText) {
-                Write-Host $stderrText
+            if ($expectFailure) {
+                Write-Host "[PASS] $rel - failed as expected"
+                if ($stderrText) {
+                    Write-Host $stderrText
+                }
+                $pass += 1
+                continue
+            } else {
+                Write-Host "[FAIL] $rel - exited with code $exitCode"
+                if ($stderrText) {
+                    Write-Host $stderrText
+                }
+                $fail += 1
+                continue
             }
+        }
+
+        if ($expectFailure) {
+            Write-Host "[FAIL] $rel - was expected to fail"
             $fail += 1
             continue
         }

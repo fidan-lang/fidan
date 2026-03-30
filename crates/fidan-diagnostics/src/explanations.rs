@@ -508,7 +508,7 @@ Fix: either remove the `parent` reference or add an `extends` clause:
 
         // ── Concurrency / safety ──────────────────────────────────────────────
         "E0401" => Some(
-            r#"A module-level variable is written by one parallel task and read or 
+            r#"A module-level variable is written by one parallel task and read or
 written by another task in the same `parallel` or `concurrent` block.
 Because both tasks run on separate OS threads, these accesses are not
 synchronised and constitute a data race.
@@ -544,8 +544,9 @@ Fix: wrap the shared variable in `Shared oftype T`:
 
         "E0402" => Some(
             r#"A `Pending oftype T` value produced by `spawn` was dropped without
-being `await`-ed.  The spawned task may still be running when the
-enclosing scope exits, which leads to undefined behaviour.
+being `await`-ed.  The task may never be driven to completion, so its
+side effects and return value can be silently lost when the enclosing
+scope exits.
 
 Erroneous example:
 
@@ -610,8 +611,9 @@ Fix: either use the parameter or remove it from the signature.
 
         "W1004" => Some(
             r#"A `spawn expr` expression produces a `Pending oftype T` handle but the
-handle is never passed to `await`.  The spawned thread continues to run
-but its return value is silently discarded when the handle goes out of scope.
+handle is never passed to `await`.  The scheduled task may never run to
+completion, and its return value is silently discarded when the handle
+goes out of scope.
 
 This is almost always a bug: either you intended to await the result
 or the spawn is unnecessary.

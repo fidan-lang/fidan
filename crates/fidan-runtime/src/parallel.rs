@@ -17,14 +17,150 @@
 // bodies must therefore consume captured wrappers via **method calls**
 // (`into_inner()`, `into_vec()`) rather than direct field accesses (`.0`).
 
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 
 use crate::FidanValue;
 
 type PendingJoinHandle = std::thread::JoinHandle<Result<ParallelCapture, String>>;
+type DeferredPendingThunk = Box<dyn FnOnce() -> Result<ParallelCapture, String> + Send + 'static>;
+
+struct DeferredScheduler {
+    next_id: u64,
+    queue: VecDeque<u64>,
+    entries: HashMap<u64, DeferredSchedulerEntry>,
+}
+
+enum DeferredSchedulerEntry {
+    Queued(DeferredPendingThunk),
+    Running,
+    Ready(Result<ParallelCapture, String>),
+}
+
+#[derive(Clone, Copy)]
+enum DeferredSchedulerState {
+    Queued,
+    Running,
+    Ready,
+    Missing,
+}
+
+impl Default for DeferredScheduler {
+    fn default() -> Self {
+        Self {
+            next_id: 1,
+            queue: VecDeque::new(),
+            entries: HashMap::new(),
+        }
+    }
+}
+
+impl DeferredScheduler {
+    fn push(&mut self, thunk: DeferredPendingThunk) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.entries
+            .insert(id, DeferredSchedulerEntry::Queued(thunk));
+        self.queue.push_back(id);
+        id
+    }
+}
+
+thread_local! {
+    static DEFERRED_SCHEDULER: RefCell<DeferredScheduler> =
+        RefCell::new(DeferredScheduler::default());
+}
+
+fn deferred_scheduler_state(id: u64) -> DeferredSchedulerState {
+    DEFERRED_SCHEDULER.with(|scheduler| {
+        let scheduler = scheduler.borrow();
+        match scheduler.entries.get(&id) {
+            Some(DeferredSchedulerEntry::Queued(_)) => DeferredSchedulerState::Queued,
+            Some(DeferredSchedulerEntry::Running) => DeferredSchedulerState::Running,
+            Some(DeferredSchedulerEntry::Ready(_)) => DeferredSchedulerState::Ready,
+            None => DeferredSchedulerState::Missing,
+        }
+    })
+}
+
+fn deferred_scheduler_take_ready(id: u64) -> Result<ParallelCapture, String> {
+    DEFERRED_SCHEDULER.with(|scheduler| {
+        let mut scheduler = scheduler.borrow_mut();
+        let Some(DeferredSchedulerEntry::Ready(result)) = scheduler.entries.remove(&id) else {
+            unreachable!("pending task state changed while taking ready result");
+        };
+        result
+    })
+}
+
+fn deferred_scheduler_pop_next_queued() -> Option<(u64, DeferredPendingThunk)> {
+    DEFERRED_SCHEDULER.with(|scheduler| {
+        let mut scheduler = scheduler.borrow_mut();
+        while let Some(id) = scheduler.queue.pop_front() {
+            let Some(entry) = scheduler.entries.remove(&id) else {
+                continue;
+            };
+            match entry {
+                DeferredSchedulerEntry::Queued(thunk) => {
+                    scheduler
+                        .entries
+                        .insert(id, DeferredSchedulerEntry::Running);
+                    return Some((id, thunk));
+                }
+                DeferredSchedulerEntry::Running => {
+                    scheduler
+                        .entries
+                        .insert(id, DeferredSchedulerEntry::Running);
+                }
+                DeferredSchedulerEntry::Ready(result) => {
+                    scheduler
+                        .entries
+                        .insert(id, DeferredSchedulerEntry::Ready(result));
+                }
+            }
+        }
+        None
+    })
+}
+
+fn deferred_scheduler_store_ready(id: u64, result: Result<ParallelCapture, String>) {
+    DEFERRED_SCHEDULER.with(|scheduler| {
+        scheduler
+            .borrow_mut()
+            .entries
+            .insert(id, DeferredSchedulerEntry::Ready(result));
+    });
+}
+
+fn deferred_scheduler_run_next() -> bool {
+    let Some((id, thunk)) = deferred_scheduler_pop_next_queued() else {
+        return false;
+    };
+    deferred_scheduler_store_ready(id, thunk());
+    true
+}
+
+fn deferred_scheduler_resolve(id: u64) -> Result<ParallelCapture, String> {
+    loop {
+        match deferred_scheduler_state(id) {
+            DeferredSchedulerState::Queued | DeferredSchedulerState::Running => {
+                if !deferred_scheduler_run_next() {
+                    return Err(
+                        "same-thread task scheduler deadlocked while awaiting a running task"
+                            .to_string(),
+                    );
+                }
+            }
+            DeferredSchedulerState::Ready => return deferred_scheduler_take_ready(id),
+            DeferredSchedulerState::Missing => return Ok(ParallelCapture(FidanValue::Nothing)),
+        }
+    }
+}
 
 enum PendingStateEntry {
     Thread(PendingJoinHandle),
+    Deferred(u64),
     Ready(Result<ParallelCapture, String>),
 }
 
@@ -87,7 +223,7 @@ impl ParallelArgs {
 
 // ── FidanPending ───────────────────────────────────────────────────────────────
 
-/// A value that is being computed on a background thread (`spawn` expression).
+/// A value that is being computed asynchronously.
 ///
 /// Cheap to clone — all clones share the same `Arc<Mutex<…>>` slot.
 /// The first call to [`FidanPending::join`] consumes the `JoinHandle`; all
@@ -133,6 +269,28 @@ impl FidanPending {
         )))))
     }
 
+    /// Schedule a closure to run lazily on the calling thread the first time the
+    /// handle is awaited or joined.
+    pub fn defer_with_args<F>(args: ParallelArgs, f: F) -> Self
+    where
+        F: FnOnce(ParallelArgs) -> FidanValue + Send + 'static,
+    {
+        let thunk: DeferredPendingThunk = Box::new(move || Ok(ParallelCapture(f(args))));
+        let id = DEFERRED_SCHEDULER.with(|scheduler| scheduler.borrow_mut().push(thunk));
+        FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Deferred(id)))))
+    }
+
+    /// Schedule a fallible closure to run lazily on the calling thread the first
+    /// time the handle is awaited or joined.
+    pub fn defer_fallible<F>(args: ParallelArgs, f: F) -> Self
+    where
+        F: FnOnce(ParallelArgs) -> Result<FidanValue, String> + Send + 'static,
+    {
+        let thunk: DeferredPendingThunk = Box::new(move || f(args).map(ParallelCapture));
+        let id = DEFERRED_SCHEDULER.with(|scheduler| scheduler.borrow_mut().push(thunk));
+        FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Deferred(id)))))
+    }
+
     /// Create a pending handle that is already resolved on the current thread.
     ///
     /// This is used for same-thread structured `concurrent` tasks in AOT mode:
@@ -161,6 +319,9 @@ impl FidanPending {
                 // operation, but handle defensively).
                 Err(_) => Err("task thread panicked unexpectedly".to_string()),
             },
+            Some(PendingStateEntry::Deferred(id)) => {
+                deferred_scheduler_resolve(id).map(ParallelCapture::into_inner)
+            }
             Some(PendingStateEntry::Ready(result)) => result.map(ParallelCapture::into_inner),
             None => Ok(FidanValue::Nothing),
         }

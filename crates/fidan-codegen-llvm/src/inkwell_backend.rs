@@ -7,7 +7,7 @@ use fidan_ast::{BinOp, UnOp};
 use fidan_lexer::Symbol;
 use fidan_mir::{
     BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirExternAbi, MirFunction, MirLit,
-    MirStringPart, Operand, Rvalue, Terminator,
+    MirStringPart, MirTy, Operand, Rvalue, Terminator,
 };
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
@@ -267,6 +267,8 @@ struct FunctionState<'m, 'ctx, 'a> {
     llvm_function: FunctionValue<'ctx>,
     blocks: HashMap<u32, LlvmBlock<'ctx>>,
     locals: HashMap<u32, PointerValue<'ctx>>,
+    global_namespace_map: HashMap<GlobalId, String>,
+    namespace_locals: HashMap<LocalId, String>,
     current_block_id: u32,
     current_block_name: String,
     temp_index: usize,
@@ -484,6 +486,31 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 .build_call(function, &[], "init")
                 .map_err(|err| anyhow!("{err}"))?;
             trace("inkwell:emit_entry_main:called_init");
+
+            let has_exception = self.call_runtime_i8("fdn_has_exception", &[])?;
+            let has_exception = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    has_exception,
+                    self.i8_type.const_zero(),
+                    "init.has_exception",
+                )
+                .map_err(|err| anyhow!("{err}"))?;
+            let throw_block = self.context.append_basic_block(main, "init.throw");
+            let continue_block = self.context.append_basic_block(main, "init.cont");
+            self.builder
+                .build_conditional_branch(has_exception, throw_block, continue_block)
+                .map_err(|err| anyhow!("{err}"))?;
+
+            self.builder.position_at_end(throw_block);
+            let exception = self.call_runtime_ptr("fdn_catch_exception", &[])?;
+            self.call_runtime_void("fdn_throw_unhandled", &[exception.into()])?;
+            self.builder
+                .build_return(Some(&self.i32_type.const_int(1, false)))
+                .map_err(|err| anyhow!("{err}"))?;
+
+            self.builder.position_at_end(continue_block);
         }
 
         trace("inkwell:emit_entry_main:return_zero");
@@ -514,7 +541,14 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
         }
 
         self.builder.position_at_end(entry);
-        let mut state = FunctionState::new(self, function.clone(), function_value, blocks);
+        let global_namespace_map = self.backend.build_global_namespace_map();
+        let mut state = FunctionState::new(
+            self,
+            function.clone(),
+            function_value,
+            blocks,
+            global_namespace_map,
+        );
         state.initialize_entry()?;
         state.lower_blocks()?;
         Ok(())
@@ -946,12 +980,42 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 .void_type()
                 .fn_type(&[self.ptr_type.into()], false),
         );
+        self.declare_runtime_fn(
+            "fdn_throw_unhandled",
+            self.context
+                .void_type()
+                .fn_type(&[self.ptr_type.into()], false),
+        );
         self.declare_runtime_fn("fdn_has_exception", self.i8_type.fn_type(&[], false));
         self.declare_runtime_fn("fdn_catch_exception", self.ptr_type.fn_type(&[], false));
+        self.declare_runtime_fn(
+            "fdn_make_closure",
+            self.ptr_type.fn_type(
+                &[
+                    self.i64_type.into(),
+                    self.ptr_type.into(),
+                    self.i64_type.into(),
+                ],
+                false,
+            ),
+        );
         self.declare_runtime_fn(
             "fdn_spawn_expr",
             self.ptr_type.fn_type(
                 &[
+                    self.i64_type.into(),
+                    self.ptr_type.into(),
+                    self.i64_type.into(),
+                ],
+                false,
+            ),
+        );
+        self.declare_runtime_fn(
+            "fdn_spawn_dynamic",
+            self.ptr_type.fn_type(
+                &[
+                    self.ptr_type.into(),
+                    self.ptr_type.into(),
                     self.i64_type.into(),
                     self.ptr_type.into(),
                     self.i64_type.into(),
@@ -1085,7 +1149,19 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             "fdn_assert",
             self.context
                 .void_type()
-                .fn_type(&[self.i8_type.into(), self.ptr_type.into()], false),
+                .fn_type(&[self.i64_type.into(), self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_assert_eq",
+            self.context
+                .void_type()
+                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_assert_ne",
+            self.context
+                .void_type()
+                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
         );
         self.declare_runtime_fn(
             "fdn_panic",
@@ -1447,6 +1523,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
         mir_function: MirFunction,
         llvm_function: FunctionValue<'ctx>,
         blocks: HashMap<u32, LlvmBlock<'ctx>>,
+        global_namespace_map: HashMap<GlobalId, String>,
     ) -> Self {
         Self {
             module,
@@ -1454,6 +1531,8 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             llvm_function,
             blocks,
             locals: HashMap::new(),
+            global_namespace_map,
+            namespace_locals: HashMap::new(),
             current_block_id: 0,
             current_block_name: "entry".to_owned(),
             temp_index: 0,
@@ -1509,6 +1588,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
         for block in &blocks {
             self.current_block_id = block.id.0;
             self.current_block_name = format!("bb{}", block.id.0);
+            self.namespace_locals.clear();
             let llvm_block = self.block(block.id.0)?;
             self.module.builder.position_at_end(llvm_block);
             let mut current_catch_stack = entry_catch_stacks[block.id.0 as usize].clone();
@@ -1545,6 +1625,18 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     .builder
                     .build_store(slot, value)
                     .map_err(|err| anyhow!("{err}"))?;
+                self.namespace_locals.remove(dest);
+                match rhs {
+                    Rvalue::Literal(MirLit::Namespace(namespace)) => {
+                        self.namespace_locals.insert(*dest, namespace.clone());
+                    }
+                    Rvalue::Use(Operand::Local(source)) => {
+                        if let Some(namespace) = self.namespace_locals.get(source).cloned() {
+                            self.namespace_locals.insert(*dest, namespace);
+                        }
+                    }
+                    _ => {}
+                }
                 if matches!(rhs, Rvalue::Call { .. }) {
                     self.emit_pending_exception_check(current_catch_stack)?;
                 }
@@ -1560,6 +1652,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                         .builder
                         .build_store(slot, value)
                         .map_err(|err| anyhow!("{err}"))?;
+                    self.namespace_locals.remove(dest);
                 }
                 self.emit_pending_exception_check(current_catch_stack)?;
                 Ok(())
@@ -1587,17 +1680,40 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 object,
                 field,
             } => {
-                let object = self.lower_operand(object)?;
-                let (field_ptr, field_len) = self.string_ptr(*field)?;
-                let value = self.call_ptr(
-                    "fdn_obj_get_field",
-                    &[object.into(), field_ptr.into(), field_len.into()],
-                )?;
+                let field_name = self.module.backend.symbol_name(*field)?;
+                let stdlib_namespace = match object {
+                    Operand::Local(local) => self.namespace_locals.get(local).cloned(),
+                    Operand::Const(MirLit::Namespace(namespace)) => Some(namespace.clone()),
+                    _ => None,
+                };
+                let value = if let Some(namespace) = stdlib_namespace
+                    && fidan_stdlib::module_exports(namespace.as_str()).contains(&field_name)
+                {
+                    let (module_ptr, module_len) = self.string_bytes(namespace.as_str());
+                    let (field_ptr, field_len) = self.string_ptr(*field)?;
+                    self.call_ptr(
+                        "fdn_box_stdlib_fn",
+                        &[
+                            module_ptr.into(),
+                            module_len.into(),
+                            field_ptr.into(),
+                            field_len.into(),
+                        ],
+                    )?
+                } else {
+                    let object = self.lower_operand(object)?;
+                    let (field_ptr, field_len) = self.string_ptr(*field)?;
+                    self.call_ptr(
+                        "fdn_obj_get_field",
+                        &[object.into(), field_ptr.into(), field_len.into()],
+                    )?
+                };
                 let slot = self.slot(*dest)?;
                 self.module
                     .builder
                     .build_store(slot, value)
                     .map_err(|err| anyhow!("{err}"))?;
+                self.namespace_locals.remove(dest);
                 Ok(())
             }
             Instr::GetIndex {
@@ -1613,6 +1729,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     .builder
                     .build_store(slot, value)
                     .map_err(|err| anyhow!("{err}"))?;
+                self.namespace_locals.remove(dest);
                 Ok(())
             }
             Instr::SetIndex {
@@ -1635,7 +1752,8 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 )
             }
             Instr::LoadGlobal { dest, global } => {
-                let global = self.global(*global)?;
+                let global_id = *global;
+                let global = self.global(global_id)?;
                 let name = self.temp("gload");
                 let value = self
                     .module
@@ -1648,6 +1766,11 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     .builder
                     .build_store(slot, value)
                     .map_err(|err| anyhow!("{err}"))?;
+                if let Some(namespace) = self.global_namespace_map.get(&global_id).cloned() {
+                    self.namespace_locals.insert(*dest, namespace);
+                } else {
+                    self.namespace_locals.remove(dest);
+                }
                 Ok(())
             }
             Instr::StoreGlobal { global, value } => {
@@ -1784,42 +1907,38 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 Ok(())
             }
             Instr::SpawnDynamic { dest, method, args } => {
-                let result = if let Some(method) = method {
+                let (first, rest, method_ptr, method_len) = if let Some(method) = method {
                     let receiver = self.lower_operand(&args[0])?;
-                    let call_args = args[1..]
-                        .iter()
-                        .map(|arg| self.lower_operand(arg))
-                        .collect::<Result<Vec<_>>>()?;
-                    let (array_ptr, count) = self.build_ptr_array(&call_args)?;
                     let (method_ptr, method_len) = self.string_ptr(*method)?;
-                    self.call_ptr(
-                        "fdn_obj_invoke",
-                        &[
-                            receiver.into(),
-                            method_ptr.into(),
-                            method_len.into(),
-                            array_ptr.into(),
-                            count.into(),
-                        ],
-                    )?
+                    (receiver, &args[1..], method_ptr, method_len)
                 } else {
-                    let function_value = self.lower_operand(&args[0])?;
-                    let call_args = args[1..]
-                        .iter()
-                        .map(|arg| self.lower_operand(arg))
-                        .collect::<Result<Vec<_>>>()?;
-                    let (array_ptr, count) = self.build_ptr_array(&call_args)?;
-                    self.call_ptr(
-                        "fdn_call_dynamic",
-                        &[function_value.into(), array_ptr.into(), count.into()],
-                    )?
+                    (
+                        self.lower_operand(&args[0])?,
+                        &args[1..],
+                        self.module.ptr_type.const_null(),
+                        self.module.i64_type.const_zero(),
+                    )
                 };
+                let call_args = rest
+                    .iter()
+                    .map(|arg| self.lower_operand(arg))
+                    .collect::<Result<Vec<PointerValue<'ctx>>>>()?;
+                let (array_ptr, count) = self.build_ptr_array(&call_args)?;
+                let result = self.call_ptr(
+                    "fdn_spawn_dynamic",
+                    &[
+                        first.into(),
+                        method_ptr.into(),
+                        method_len.into(),
+                        array_ptr.into(),
+                        count.into(),
+                    ],
+                )?;
                 let slot = self.slot(*dest)?;
                 self.module
                     .builder
                     .build_store(slot, result)
                     .map_err(|err| anyhow!("{err}"))?;
-                self.emit_pending_exception_check(current_catch_stack)?;
                 Ok(())
             }
             Instr::ParallelIter {
@@ -2063,6 +2182,22 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             Rvalue::StringInterp(parts) => self.lower_string_interp(parts),
             Rvalue::Literal(literal) => self.lower_literal(literal),
             Rvalue::CatchException => self.call_ptr("fdn_catch_exception", &[]),
+            Rvalue::MakeClosure { fn_id, captures } => {
+                let fn_id = self.module.i64_type.const_int(*fn_id as u64, false);
+                if captures.is_empty() {
+                    self.call_ptr("fdn_box_fn_ref", &[fn_id.into()])
+                } else {
+                    let captures = captures
+                        .iter()
+                        .map(|capture| self.lower_operand(capture))
+                        .collect::<Result<Vec<_>>>()?;
+                    let (array_ptr, count) = self.build_ptr_array(&captures)?;
+                    self.call_ptr(
+                        "fdn_make_closure",
+                        &[fn_id.into(), array_ptr.into(), count.into()],
+                    )
+                }
+            }
             Rvalue::Slice {
                 target,
                 start,
@@ -2082,11 +2217,6 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 expected_tag,
             } => self.lower_enum_tag_check(value, *expected_tag),
             Rvalue::EnumPayload { value, index } => self.lower_enum_payload(value, *index),
-            _ => bail!(
-                "LLVM backend subset does not support rvalue `{}` yet in function `{}`",
-                rvalue_name(rhs),
-                self.module.backend.symbol_name(self.mir_function.name)?
-            ),
         }
     }
 
@@ -2099,11 +2229,19 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     .get(&function_id.0)
                     .copied()
                     .ok_or_else(|| anyhow!("missing declared function {}", function_id.0))?;
-                let args = args
-                    .iter()
-                    .map(|arg| self.lower_operand(arg).map(Into::into))
-                    .collect::<Result<Vec<BasicMetadataValueEnum<'ctx>>>>()?;
-                self.call_decl(function, &args)
+                let mir_function = self.module.backend.program().function(*function_id);
+                let mut call_args =
+                    Vec::<BasicMetadataValueEnum<'ctx>>::with_capacity(mir_function.params.len());
+                for (index, param) in mir_function.params.iter().enumerate() {
+                    let value = if let Some(arg) = args.get(index) {
+                        self.lower_operand(arg)?
+                    } else {
+                        self.module
+                            .trampoline_default_value(param.default.as_ref())?
+                    };
+                    call_args.push(value.into());
+                }
+                self.call_decl(function, &call_args)
             }
             Callee::Method { receiver, method } => {
                 let receiver = self.lower_operand(receiver)?;
@@ -2182,12 +2320,27 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             "assert" => {
                 let cond = self.lower_operand(&args[0])?;
                 let truthy = self.call_i8("fdn_truthy", &[cond.into()])?;
+                let truthy_i64 =
+                    self.builder
+                        .build_int_z_extend(truthy, self.i64_type, "assert_truthy_i64")?;
                 let msg = if let Some(arg) = args.get(1) {
                     self.lower_operand(arg)?
                 } else {
                     self.lower_literal(&MirLit::Str("assertion failed".to_owned()))?
                 };
-                self.call_void("fdn_assert", &[truthy.into(), msg.into()])?;
+                self.call_void("fdn_assert", &[truthy_i64.into(), msg.into()])?;
+                self.call_ptr("fdn_box_nothing", &[])
+            }
+            "assertEq" | "assert_eq" => {
+                let lhs = self.lower_operand(&args[0])?;
+                let rhs = self.lower_operand(&args[1])?;
+                self.call_void("fdn_assert_eq", &[lhs.into(), rhs.into()])?;
+                self.call_ptr("fdn_box_nothing", &[])
+            }
+            "assertNe" | "assert_ne" => {
+                let lhs = self.lower_operand(&args[0])?;
+                let rhs = self.lower_operand(&args[1])?;
+                self.call_void("fdn_assert_ne", &[lhs.into(), rhs.into()])?;
                 self.call_ptr("fdn_box_nothing", &[])
             }
             "panic" => {
@@ -2890,28 +3043,6 @@ fn compute_catch_stacks(function: &MirFunction) -> Vec<Vec<BlockId>> {
         .into_iter()
         .map(|stack| stack.unwrap_or_default())
         .collect()
-}
-
-fn rvalue_name(rvalue: &Rvalue) -> &'static str {
-    match rvalue {
-        Rvalue::Use(..) => "use",
-        Rvalue::Binary { .. } => "binary",
-        Rvalue::Unary { .. } => "unary",
-        Rvalue::NullCoalesce { .. } => "null-coalesce",
-        Rvalue::Call { .. } => "call",
-        Rvalue::Construct { .. } => "construct",
-        Rvalue::List(..) => "list",
-        Rvalue::Dict(..) => "dict",
-        Rvalue::Tuple(..) => "tuple",
-        Rvalue::StringInterp(..) => "string-interp",
-        Rvalue::Literal(..) => "literal",
-        Rvalue::CatchException => "catch-exception",
-        Rvalue::MakeClosure { .. } => "make-closure",
-        Rvalue::Slice { .. } => "slice",
-        Rvalue::ConstructEnum { .. } => "construct-enum",
-        Rvalue::EnumTagCheck { .. } => "enum-tag-check",
-        Rvalue::EnumPayload { .. } => "enum-payload",
-    }
 }
 
 fn literal_name(literal: &MirLit) -> &'static str {

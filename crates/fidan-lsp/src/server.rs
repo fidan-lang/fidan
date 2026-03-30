@@ -4,6 +4,7 @@ use crate::{
     analysis, convert, document::Document, semantic, store::DocumentStore, symbols::SymKind,
     symbols::SymbolEntry,
 };
+use fidan_config::BUILTIN_FUNCTIONS;
 use fidan_fmt::{FormatOptions, format_source};
 use fidan_source::{FileId, SourceFile, Span};
 use std::collections::HashMap;
@@ -64,22 +65,6 @@ const COMPLETION_KEYWORDS: &[&str] = &[
     "this",
     "parent",
     "new",
-];
-
-const BUILTIN_FUNCTIONS: &[&str] = &[
-    "print",
-    "println",
-    "eprint",
-    "input",
-    "len",
-    "type",
-    "string",
-    "integer",
-    "float",
-    "boolean",
-    "assert",
-    "assert_eq",
-    "assert_ne",
 ];
 
 /// All known `std.*` module names for import completion.

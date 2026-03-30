@@ -1,9 +1,9 @@
 use std::ffi::{CString, c_char, c_void};
 use std::sync::{Arc, LazyLock};
 
-use fidan_config::MAX_NATIVE_EXTERN_PARAMS;
 use fidan_mir::{MirExternAbi, MirExternDecl, MirFunction, MirParam, MirTy};
 use fidan_runtime::FidanValue;
+use libffi::middle::{Cif, CodePtr, Type, arg};
 use parking_lot::RwLock;
 use rustc_hash::FxHashMap;
 
@@ -163,19 +163,34 @@ fn call_native_abi(
         .map(|param| native_kind(&param.ty))
         .collect::<Result<_, _>>()?;
     let ret_kind = native_kind(return_ty)?;
-    match param_kinds.as_slice() {
-        [] => dispatch_native0(symbol, ret_kind),
-        [arg0] => dispatch_native1(symbol, *arg0, ret_kind, &args),
-        [arg0, arg1] => dispatch_native2(symbol, *arg0, *arg1, ret_kind, &args),
-        [arg0, arg1, arg2] => dispatch_native3(symbol, *arg0, *arg1, *arg2, ret_kind, &args),
-        [arg0, arg1, arg2, arg3] => {
-            dispatch_native4(symbol, *arg0, *arg1, *arg2, *arg3, ret_kind, &args)
+    let storage = param_kinds
+        .iter()
+        .enumerate()
+        .map(|(index, kind)| NativeArgValue::from_fidan(*kind, &args, index))
+        .collect::<Result<Vec<_>, _>>()?;
+    let ffi_args = storage
+        .iter()
+        .map(NativeArgValue::as_ffi_arg)
+        .collect::<Vec<_>>();
+    let cif = Cif::new(
+        param_kinds.iter().map(|kind| native_kind_ffi_type(*kind)),
+        native_kind_ffi_type(ret_kind),
+    );
+    let code_ptr = CodePtr(symbol);
+
+    unsafe {
+        match ret_kind {
+            NativeKind::Integer => Ok(FidanValue::Integer(cif.call(code_ptr, &ffi_args))),
+            NativeKind::Float => Ok(FidanValue::Float(cif.call(code_ptr, &ffi_args))),
+            NativeKind::Boolean => Ok(FidanValue::Boolean(
+                cif.call::<i8>(code_ptr, &ffi_args) != 0,
+            )),
+            NativeKind::Handle => Ok(FidanValue::Handle(cif.call(code_ptr, &ffi_args))),
+            NativeKind::Nothing => {
+                cif.call::<()>(code_ptr, &ffi_args);
+                Ok(FidanValue::Nothing)
+            }
         }
-        _ => Err(format!(
-            "native @extern currently supports up to {MAX_NATIVE_EXTERN_PARAMS} parameters in the interpreter; `{}` uses {}",
-            decl.symbol,
-            param_kinds.len()
-        )),
     }
 }
 
@@ -214,29 +229,44 @@ fn display_mir_ty(ty: &MirTy) -> String {
     }
 }
 
-unsafe fn call_native0<R>(symbol: *mut c_void) -> R {
-    let func: unsafe extern "C" fn() -> R = unsafe { std::mem::transmute(symbol) };
-    unsafe { func() }
+enum NativeArgValue {
+    Integer(i64),
+    Float(f64),
+    Boolean(i8),
+    Handle(usize),
 }
 
-unsafe fn call_native1<A, R>(symbol: *mut c_void, a: A) -> R {
-    let func: unsafe extern "C" fn(A) -> R = unsafe { std::mem::transmute(symbol) };
-    unsafe { func(a) }
+impl NativeArgValue {
+    fn from_fidan(kind: NativeKind, args: &[FidanValue], index: usize) -> Result<Self, String> {
+        match kind {
+            NativeKind::Integer => Ok(Self::Integer(arg_as_i64(args, index)?)),
+            NativeKind::Float => Ok(Self::Float(arg_as_f64(args, index)?)),
+            NativeKind::Boolean => Ok(Self::Boolean(arg_as_i8(args, index)?)),
+            NativeKind::Handle => Ok(Self::Handle(arg_as_usize(args, index)?)),
+            NativeKind::Nothing => {
+                Err("native @extern parameters cannot use type `nothing`".to_string())
+            }
+        }
+    }
+
+    fn as_ffi_arg(&self) -> libffi::middle::Arg<'_> {
+        match self {
+            Self::Integer(value) => arg(value),
+            Self::Float(value) => arg(value),
+            Self::Boolean(value) => arg(value),
+            Self::Handle(value) => arg(value),
+        }
+    }
 }
 
-unsafe fn call_native2<A, B, R>(symbol: *mut c_void, a: A, b: B) -> R {
-    let func: unsafe extern "C" fn(A, B) -> R = unsafe { std::mem::transmute(symbol) };
-    unsafe { func(a, b) }
-}
-
-unsafe fn call_native3<A, B, C, R>(symbol: *mut c_void, a: A, b: B, c: C) -> R {
-    let func: unsafe extern "C" fn(A, B, C) -> R = unsafe { std::mem::transmute(symbol) };
-    unsafe { func(a, b, c) }
-}
-
-unsafe fn call_native4<A, B, C, D, R>(symbol: *mut c_void, a: A, b: B, c: C, d: D) -> R {
-    let func: unsafe extern "C" fn(A, B, C, D) -> R = unsafe { std::mem::transmute(symbol) };
-    unsafe { func(a, b, c, d) }
+fn native_kind_ffi_type(kind: NativeKind) -> Type {
+    match kind {
+        NativeKind::Integer => Type::i64(),
+        NativeKind::Float => Type::f64(),
+        NativeKind::Boolean => Type::i8(),
+        NativeKind::Handle => Type::usize(),
+        NativeKind::Nothing => Type::void(),
+    }
 }
 
 fn arg_as_i64(args: &[FidanValue], index: usize) -> Result<i64, String> {
@@ -291,636 +321,6 @@ fn arg_as_usize(args: &[FidanValue], index: usize) -> Result<usize, String> {
         )),
         None => Err(format!("missing argument {index}")),
     }
-}
-
-macro_rules! dispatch_ret0 {
-    ($symbol:expr, $ret:expr) => {{
-        match $ret {
-            NativeKind::Integer => Ok(FidanValue::Integer(unsafe { call_native0::<i64>($symbol) })),
-            NativeKind::Float => Ok(FidanValue::Float(unsafe { call_native0::<f64>($symbol) })),
-            NativeKind::Boolean => Ok(FidanValue::Boolean(
-                unsafe { call_native0::<i8>($symbol) } != 0,
-            )),
-            NativeKind::Handle => Ok(FidanValue::Handle(unsafe {
-                call_native0::<usize>($symbol)
-            })),
-            NativeKind::Nothing => {
-                unsafe { call_native0::<()>($symbol) };
-                Ok(FidanValue::Nothing)
-            }
-        }
-    }};
-}
-
-macro_rules! dispatch_ret1 {
-    ($symbol:expr, $ret:expr, $arg_ty:ty, $arg:expr) => {{
-        match $ret {
-            NativeKind::Integer => Ok(FidanValue::Integer(unsafe {
-                call_native1::<$arg_ty, i64>($symbol, $arg)
-            })),
-            NativeKind::Float => Ok(FidanValue::Float(unsafe {
-                call_native1::<$arg_ty, f64>($symbol, $arg)
-            })),
-            NativeKind::Boolean => Ok(FidanValue::Boolean(
-                unsafe { call_native1::<$arg_ty, i8>($symbol, $arg) } != 0,
-            )),
-            NativeKind::Handle => Ok(FidanValue::Handle(unsafe {
-                call_native1::<$arg_ty, usize>($symbol, $arg)
-            })),
-            NativeKind::Nothing => {
-                unsafe { call_native1::<$arg_ty, ()>($symbol, $arg) };
-                Ok(FidanValue::Nothing)
-            }
-        }
-    }};
-}
-
-macro_rules! dispatch_ret2 {
-    ($symbol:expr, $ret:expr, $arg_ty_a:ty, $arg_ty_b:ty, $arg_a:expr, $arg_b:expr) => {{
-        match $ret {
-            NativeKind::Integer => Ok(FidanValue::Integer(unsafe {
-                call_native2::<$arg_ty_a, $arg_ty_b, i64>($symbol, $arg_a, $arg_b)
-            })),
-            NativeKind::Float => Ok(FidanValue::Float(unsafe {
-                call_native2::<$arg_ty_a, $arg_ty_b, f64>($symbol, $arg_a, $arg_b)
-            })),
-            NativeKind::Boolean => Ok(FidanValue::Boolean(
-                unsafe { call_native2::<$arg_ty_a, $arg_ty_b, i8>($symbol, $arg_a, $arg_b) } != 0,
-            )),
-            NativeKind::Handle => Ok(FidanValue::Handle(unsafe {
-                call_native2::<$arg_ty_a, $arg_ty_b, usize>($symbol, $arg_a, $arg_b)
-            })),
-            NativeKind::Nothing => {
-                unsafe { call_native2::<$arg_ty_a, $arg_ty_b, ()>($symbol, $arg_a, $arg_b) };
-                Ok(FidanValue::Nothing)
-            }
-        }
-    }};
-}
-
-macro_rules! dispatch_ret3 {
-    (
-        $symbol:expr,
-        $ret:expr,
-        $arg_ty_a:ty,
-        $arg_ty_b:ty,
-        $arg_ty_c:ty,
-        $arg_a:expr,
-        $arg_b:expr,
-        $arg_c:expr
-    ) => {{
-        match $ret {
-            NativeKind::Integer => Ok(FidanValue::Integer(unsafe {
-                call_native3::<$arg_ty_a, $arg_ty_b, $arg_ty_c, i64>(
-                    $symbol, $arg_a, $arg_b, $arg_c,
-                )
-            })),
-            NativeKind::Float => Ok(FidanValue::Float(unsafe {
-                call_native3::<$arg_ty_a, $arg_ty_b, $arg_ty_c, f64>(
-                    $symbol, $arg_a, $arg_b, $arg_c,
-                )
-            })),
-            NativeKind::Boolean => Ok(FidanValue::Boolean(
-                unsafe {
-                    call_native3::<$arg_ty_a, $arg_ty_b, $arg_ty_c, i8>(
-                        $symbol, $arg_a, $arg_b, $arg_c,
-                    )
-                } != 0,
-            )),
-            NativeKind::Handle => Ok(FidanValue::Handle(unsafe {
-                call_native3::<$arg_ty_a, $arg_ty_b, $arg_ty_c, usize>(
-                    $symbol, $arg_a, $arg_b, $arg_c,
-                )
-            })),
-            NativeKind::Nothing => {
-                unsafe {
-                    call_native3::<$arg_ty_a, $arg_ty_b, $arg_ty_c, ()>(
-                        $symbol, $arg_a, $arg_b, $arg_c,
-                    )
-                };
-                Ok(FidanValue::Nothing)
-            }
-        }
-    }};
-}
-
-macro_rules! dispatch_ret4 {
-    (
-        $symbol:expr,
-        $ret:expr,
-        $arg_ty_a:ty,
-        $arg_ty_b:ty,
-        $arg_ty_c:ty,
-        $arg_ty_d:ty,
-        $arg_a:expr,
-        $arg_b:expr,
-        $arg_c:expr,
-        $arg_d:expr
-    ) => {{
-        match $ret {
-            NativeKind::Integer => Ok(FidanValue::Integer(unsafe {
-                call_native4::<$arg_ty_a, $arg_ty_b, $arg_ty_c, $arg_ty_d, i64>(
-                    $symbol, $arg_a, $arg_b, $arg_c, $arg_d,
-                )
-            })),
-            NativeKind::Float => Ok(FidanValue::Float(unsafe {
-                call_native4::<$arg_ty_a, $arg_ty_b, $arg_ty_c, $arg_ty_d, f64>(
-                    $symbol, $arg_a, $arg_b, $arg_c, $arg_d,
-                )
-            })),
-            NativeKind::Boolean => Ok(FidanValue::Boolean(
-                unsafe {
-                    call_native4::<$arg_ty_a, $arg_ty_b, $arg_ty_c, $arg_ty_d, i8>(
-                        $symbol, $arg_a, $arg_b, $arg_c, $arg_d,
-                    )
-                } != 0,
-            )),
-            NativeKind::Handle => Ok(FidanValue::Handle(unsafe {
-                call_native4::<$arg_ty_a, $arg_ty_b, $arg_ty_c, $arg_ty_d, usize>(
-                    $symbol, $arg_a, $arg_b, $arg_c, $arg_d,
-                )
-            })),
-            NativeKind::Nothing => {
-                unsafe {
-                    call_native4::<$arg_ty_a, $arg_ty_b, $arg_ty_c, $arg_ty_d, ()>(
-                        $symbol, $arg_a, $arg_b, $arg_c, $arg_d,
-                    )
-                };
-                Ok(FidanValue::Nothing)
-            }
-        }
-    }};
-}
-
-macro_rules! native_param_kind_match {
-    ($kind:expr, $on_integer:expr, $on_float:expr, $on_boolean:expr, $on_handle:expr) => {
-        match $kind {
-            NativeKind::Integer => $on_integer,
-            NativeKind::Float => $on_float,
-            NativeKind::Boolean => $on_boolean,
-            NativeKind::Handle => $on_handle,
-            NativeKind::Nothing => {
-                Err("native @extern parameters cannot use type `nothing`".to_string())
-            }
-        }
-    };
-}
-
-macro_rules! dispatch_native3_from_arg1 {
-    (
-        $symbol:expr,
-        $ret:expr,
-        $args:expr,
-        $ty0:ty,
-        $conv0:ident,
-        $arg1:expr,
-        $arg2:expr
-    ) => {
-        native_param_kind_match!(
-            $arg1,
-            dispatch_native3_from_arg2!($symbol, $ret, $args, $ty0, $conv0, i64, arg_as_i64, $arg2),
-            dispatch_native3_from_arg2!($symbol, $ret, $args, $ty0, $conv0, f64, arg_as_f64, $arg2),
-            dispatch_native3_from_arg2!($symbol, $ret, $args, $ty0, $conv0, i8, arg_as_i8, $arg2),
-            dispatch_native3_from_arg2!(
-                $symbol,
-                $ret,
-                $args,
-                $ty0,
-                $conv0,
-                usize,
-                arg_as_usize,
-                $arg2
-            )
-        )
-    };
-}
-
-macro_rules! dispatch_native3_from_arg2 {
-    (
-        $symbol:expr,
-        $ret:expr,
-        $args:expr,
-        $ty0:ty,
-        $conv0:ident,
-        $ty1:ty,
-        $conv1:ident,
-        $arg2:expr
-    ) => {
-        native_param_kind_match!(
-            $arg2,
-            dispatch_ret3!(
-                $symbol,
-                $ret,
-                $ty0,
-                $ty1,
-                i64,
-                $conv0($args, 0)?,
-                $conv1($args, 1)?,
-                arg_as_i64($args, 2)?
-            ),
-            dispatch_ret3!(
-                $symbol,
-                $ret,
-                $ty0,
-                $ty1,
-                f64,
-                $conv0($args, 0)?,
-                $conv1($args, 1)?,
-                arg_as_f64($args, 2)?
-            ),
-            dispatch_ret3!(
-                $symbol,
-                $ret,
-                $ty0,
-                $ty1,
-                i8,
-                $conv0($args, 0)?,
-                $conv1($args, 1)?,
-                arg_as_i8($args, 2)?
-            ),
-            dispatch_ret3!(
-                $symbol,
-                $ret,
-                $ty0,
-                $ty1,
-                usize,
-                $conv0($args, 0)?,
-                $conv1($args, 1)?,
-                arg_as_usize($args, 2)?
-            )
-        )
-    };
-}
-
-macro_rules! dispatch_native4_from_arg1 {
-    (
-        $symbol:expr,
-        $ret:expr,
-        $args:expr,
-        $ty0:ty,
-        $conv0:ident,
-        $arg1:expr,
-        $arg2:expr,
-        $arg3:expr
-    ) => {
-        native_param_kind_match!(
-            $arg1,
-            dispatch_native4_from_arg2!(
-                $symbol, $ret, $args, $ty0, $conv0, i64, arg_as_i64, $arg2, $arg3
-            ),
-            dispatch_native4_from_arg2!(
-                $symbol, $ret, $args, $ty0, $conv0, f64, arg_as_f64, $arg2, $arg3
-            ),
-            dispatch_native4_from_arg2!(
-                $symbol, $ret, $args, $ty0, $conv0, i8, arg_as_i8, $arg2, $arg3
-            ),
-            dispatch_native4_from_arg2!(
-                $symbol,
-                $ret,
-                $args,
-                $ty0,
-                $conv0,
-                usize,
-                arg_as_usize,
-                $arg2,
-                $arg3
-            )
-        )
-    };
-}
-
-macro_rules! dispatch_native4_from_arg2 {
-    (
-        $symbol:expr,
-        $ret:expr,
-        $args:expr,
-        $ty0:ty,
-        $conv0:ident,
-        $ty1:ty,
-        $conv1:ident,
-        $arg2:expr,
-        $arg3:expr
-    ) => {
-        native_param_kind_match!(
-            $arg2,
-            dispatch_native4_from_arg3!(
-                $symbol, $ret, $args, $ty0, $conv0, $ty1, $conv1, i64, arg_as_i64, $arg3
-            ),
-            dispatch_native4_from_arg3!(
-                $symbol, $ret, $args, $ty0, $conv0, $ty1, $conv1, f64, arg_as_f64, $arg3
-            ),
-            dispatch_native4_from_arg3!(
-                $symbol, $ret, $args, $ty0, $conv0, $ty1, $conv1, i8, arg_as_i8, $arg3
-            ),
-            dispatch_native4_from_arg3!(
-                $symbol,
-                $ret,
-                $args,
-                $ty0,
-                $conv0,
-                $ty1,
-                $conv1,
-                usize,
-                arg_as_usize,
-                $arg3
-            )
-        )
-    };
-}
-
-macro_rules! dispatch_native4_from_arg3 {
-    (
-        $symbol:expr,
-        $ret:expr,
-        $args:expr,
-        $ty0:ty,
-        $conv0:ident,
-        $ty1:ty,
-        $conv1:ident,
-        $ty2:ty,
-        $conv2:ident,
-        $arg3:expr
-    ) => {
-        native_param_kind_match!(
-            $arg3,
-            dispatch_ret4!(
-                $symbol,
-                $ret,
-                $ty0,
-                $ty1,
-                $ty2,
-                i64,
-                $conv0($args, 0)?,
-                $conv1($args, 1)?,
-                $conv2($args, 2)?,
-                arg_as_i64($args, 3)?
-            ),
-            dispatch_ret4!(
-                $symbol,
-                $ret,
-                $ty0,
-                $ty1,
-                $ty2,
-                f64,
-                $conv0($args, 0)?,
-                $conv1($args, 1)?,
-                $conv2($args, 2)?,
-                arg_as_f64($args, 3)?
-            ),
-            dispatch_ret4!(
-                $symbol,
-                $ret,
-                $ty0,
-                $ty1,
-                $ty2,
-                i8,
-                $conv0($args, 0)?,
-                $conv1($args, 1)?,
-                $conv2($args, 2)?,
-                arg_as_i8($args, 3)?
-            ),
-            dispatch_ret4!(
-                $symbol,
-                $ret,
-                $ty0,
-                $ty1,
-                $ty2,
-                usize,
-                $conv0($args, 0)?,
-                $conv1($args, 1)?,
-                $conv2($args, 2)?,
-                arg_as_usize($args, 3)?
-            )
-        )
-    };
-}
-
-fn dispatch_native0(symbol: *mut c_void, ret: NativeKind) -> Result<FidanValue, String> {
-    dispatch_ret0!(symbol, ret)
-}
-
-fn dispatch_native1(
-    symbol: *mut c_void,
-    arg0: NativeKind,
-    ret: NativeKind,
-    args: &[FidanValue],
-) -> Result<FidanValue, String> {
-    match arg0 {
-        NativeKind::Integer => dispatch_ret1!(symbol, ret, i64, arg_as_i64(args, 0)?),
-        NativeKind::Float => dispatch_ret1!(symbol, ret, f64, arg_as_f64(args, 0)?),
-        NativeKind::Boolean => dispatch_ret1!(symbol, ret, i8, arg_as_i8(args, 0)?),
-        NativeKind::Handle => dispatch_ret1!(symbol, ret, usize, arg_as_usize(args, 0)?),
-        NativeKind::Nothing => {
-            Err("native @extern parameters cannot use type `nothing`".to_string())
-        }
-    }
-}
-
-fn dispatch_native2(
-    symbol: *mut c_void,
-    arg0: NativeKind,
-    arg1: NativeKind,
-    ret: NativeKind,
-    args: &[FidanValue],
-) -> Result<FidanValue, String> {
-    match (arg0, arg1) {
-        (NativeKind::Integer, NativeKind::Integer) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                i64,
-                i64,
-                arg_as_i64(args, 0)?,
-                arg_as_i64(args, 1)?
-            )
-        }
-        (NativeKind::Integer, NativeKind::Float) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                i64,
-                f64,
-                arg_as_i64(args, 0)?,
-                arg_as_f64(args, 1)?
-            )
-        }
-        (NativeKind::Integer, NativeKind::Boolean) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                i64,
-                i8,
-                arg_as_i64(args, 0)?,
-                arg_as_i8(args, 1)?
-            )
-        }
-        (NativeKind::Integer, NativeKind::Handle) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                i64,
-                usize,
-                arg_as_i64(args, 0)?,
-                arg_as_usize(args, 1)?
-            )
-        }
-        (NativeKind::Float, NativeKind::Integer) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                f64,
-                i64,
-                arg_as_f64(args, 0)?,
-                arg_as_i64(args, 1)?
-            )
-        }
-        (NativeKind::Float, NativeKind::Float) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                f64,
-                f64,
-                arg_as_f64(args, 0)?,
-                arg_as_f64(args, 1)?
-            )
-        }
-        (NativeKind::Float, NativeKind::Boolean) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                f64,
-                i8,
-                arg_as_f64(args, 0)?,
-                arg_as_i8(args, 1)?
-            )
-        }
-        (NativeKind::Float, NativeKind::Handle) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                f64,
-                usize,
-                arg_as_f64(args, 0)?,
-                arg_as_usize(args, 1)?
-            )
-        }
-        (NativeKind::Boolean, NativeKind::Integer) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                i8,
-                i64,
-                arg_as_i8(args, 0)?,
-                arg_as_i64(args, 1)?
-            )
-        }
-        (NativeKind::Boolean, NativeKind::Float) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                i8,
-                f64,
-                arg_as_i8(args, 0)?,
-                arg_as_f64(args, 1)?
-            )
-        }
-        (NativeKind::Boolean, NativeKind::Boolean) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                i8,
-                i8,
-                arg_as_i8(args, 0)?,
-                arg_as_i8(args, 1)?
-            )
-        }
-        (NativeKind::Boolean, NativeKind::Handle) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                i8,
-                usize,
-                arg_as_i8(args, 0)?,
-                arg_as_usize(args, 1)?
-            )
-        }
-        (NativeKind::Handle, NativeKind::Integer) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                usize,
-                i64,
-                arg_as_usize(args, 0)?,
-                arg_as_i64(args, 1)?
-            )
-        }
-        (NativeKind::Handle, NativeKind::Float) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                usize,
-                f64,
-                arg_as_usize(args, 0)?,
-                arg_as_f64(args, 1)?
-            )
-        }
-        (NativeKind::Handle, NativeKind::Boolean) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                usize,
-                i8,
-                arg_as_usize(args, 0)?,
-                arg_as_i8(args, 1)?
-            )
-        }
-        (NativeKind::Handle, NativeKind::Handle) => {
-            dispatch_ret2!(
-                symbol,
-                ret,
-                usize,
-                usize,
-                arg_as_usize(args, 0)?,
-                arg_as_usize(args, 1)?
-            )
-        }
-        _ => Err("native @extern parameters cannot use type `nothing`".to_string()),
-    }
-}
-
-fn dispatch_native3(
-    symbol: *mut c_void,
-    arg0: NativeKind,
-    arg1: NativeKind,
-    arg2: NativeKind,
-    ret: NativeKind,
-    args: &[FidanValue],
-) -> Result<FidanValue, String> {
-    native_param_kind_match!(
-        arg0,
-        dispatch_native3_from_arg1!(symbol, ret, args, i64, arg_as_i64, arg1, arg2),
-        dispatch_native3_from_arg1!(symbol, ret, args, f64, arg_as_f64, arg1, arg2),
-        dispatch_native3_from_arg1!(symbol, ret, args, i8, arg_as_i8, arg1, arg2),
-        dispatch_native3_from_arg1!(symbol, ret, args, usize, arg_as_usize, arg1, arg2)
-    )
-}
-
-fn dispatch_native4(
-    symbol: *mut c_void,
-    arg0: NativeKind,
-    arg1: NativeKind,
-    arg2: NativeKind,
-    arg3: NativeKind,
-    ret: NativeKind,
-    args: &[FidanValue],
-) -> Result<FidanValue, String> {
-    native_param_kind_match!(
-        arg0,
-        dispatch_native4_from_arg1!(symbol, ret, args, i64, arg_as_i64, arg1, arg2, arg3),
-        dispatch_native4_from_arg1!(symbol, ret, args, f64, arg_as_f64, arg1, arg2, arg3),
-        dispatch_native4_from_arg1!(symbol, ret, args, i8, arg_as_i8, arg1, arg2, arg3),
-        dispatch_native4_from_arg1!(symbol, ret, args, usize, arg_as_usize, arg1, arg2, arg3)
-    )
 }
 
 fn library_candidates(lib: &str) -> Vec<String> {

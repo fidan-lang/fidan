@@ -24,6 +24,11 @@ pub extern "C" fn fidan_fixture_mix4(a: i64, b: f64, c: i8, d: usize) -> i64 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn fidan_fixture_sum6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
+    a + b + c + d + e + f
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn fidan_fixture_float_scale(x: f64, scale: f64) -> f64 {
     x * scale
 }

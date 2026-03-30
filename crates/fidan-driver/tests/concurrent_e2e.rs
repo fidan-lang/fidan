@@ -42,6 +42,213 @@ main()
 "#
 }
 
+fn spawn_source() -> &'static str {
+    r#"var counter = Shared(0)
+
+action bump returns integer {
+    counter.set(counter.get() + 1)
+    return counter.get()
+}
+
+action main {
+    var pendingStatic = spawn bump()
+    assert_eq(counter.get(), 0)
+    assert_eq(await pendingStatic, 1)
+    assert_eq(counter.get(), 1)
+
+    var work = action with () returns integer {
+        counter.set(counter.get() + 1)
+        return counter.get()
+    }
+    var pendingDynamic = spawn work()
+    assert_eq(counter.get(), 1)
+    assert_eq(await pendingDynamic, 2)
+    assert_eq(counter.get(), 2)
+    print(counter.get())
+}
+
+main()
+"#
+}
+
+fn scheduler_source() -> &'static str {
+    r#"var trace = Shared(0)
+
+action inner returns integer {
+    trace.set(trace.get() * 10 + 3)
+    return trace.get()
+}
+
+action main {
+    concurrent {
+        task A {
+            trace.set(trace.get() * 10 + 1)
+            var pending = spawn inner()
+            assert_eq(await pending, 123)
+            trace.set(trace.get() * 10 + 4)
+        }
+        task B {
+            trace.set(trace.get() * 10 + 2)
+        }
+    }
+    assert_eq(trace.get(), 1234)
+    print(trace.get())
+}
+
+main()
+"#
+}
+
+fn object_method_source() -> &'static str {
+    r#"use std.math.{sqrt}
+
+object Point {
+    var x oftype float = 0.0
+    var y oftype float = 0.0
+
+    new with (certain x oftype float, certain y oftype float) {
+        this.x = x
+        this.y = y
+    }
+
+    action distance_to with (certain other oftype Point) returns float {
+        var dx = this.x - other.x
+        var dy = this.y - other.y
+        return sqrt(dx * dx + dy * dy)
+    }
+}
+
+action main {
+    var p1 = Point(0.0, 0.0)
+    var p2 = Point(3.0, 4.0)
+    assert_eq(p1.distance_to(p2), 5.0)
+    print(p1.distance_to(p2))
+}
+
+main()
+"#
+}
+
+fn stdlib_function_value_source() -> &'static str {
+    r#"use std.string as strings
+
+action apply_to_string with (value, fn) returns string {
+    return fn(value)
+}
+
+action apply_substr with (value, start, finish, fn) returns string {
+    return fn(value, start, finish)
+}
+
+action main {
+    var to_text = string
+    assert_eq(apply_to_string(42, to_text), "42")
+
+    var substr_fn = strings.substr
+    assert_eq(apply_substr("abcdef", 2, 5, substr_fn), "cde")
+    print("ok")
+}
+
+main()
+"#
+}
+
+fn builtin_assert_source() -> &'static str {
+    r#"assert_eq(20 + 22, 42)
+assert_ne(20 + 21, 42)
+print("ok")
+"#
+}
+
+fn parallel_reduce_source() -> &'static str {
+    r#"use std.parallel.{parallelReduce}
+
+action reduce_sum with (certain acc oftype integer, certain item oftype integer) returns integer {
+    return acc + item
+}
+
+action main {
+    assert_eq(parallelReduce([1, 2, 3, 4], 0, reduce_sum), 10)
+    print("10")
+}
+
+main()
+"#
+}
+
+fn parallel_reduce_top_level_source() -> &'static str {
+    r#"use std.parallel.{parallelReduce}
+
+action reduce_sum with (certain acc oftype integer, certain item oftype integer) returns integer {
+    return acc + item
+}
+
+var reduced_parallel = parallelReduce([1, 2, 3, 4], 0, reduce_sum)
+assert_eq(reduced_parallel, 10)
+print("10")
+"#
+}
+
+fn scalar_conversion_source() -> &'static str {
+    r#"assert(boolean(1) == true)
+assert(string(99) == "99")
+assert(integer("42") == 42)
+assert(float("3.5") == 3.5)
+print("ok")
+"#
+}
+
+fn time_format_source() -> &'static str {
+    r#"use std.time
+
+var fixed = 1700000000000
+assert_eq(time.date(fixed), "2023-11-14")
+assert_eq(time.time(fixed), "22:13:20")
+assert_eq(time.datetime(fixed), "2023-11-14 22:13:20")
+assert_eq(len(time.time(fixed)), 8)
+assert_eq(len(time.datetime(fixed)), 19)
+print("ok")
+"#
+}
+
+fn default_args_source() -> &'static str {
+    r#"action approx_equal with (
+    certain a oftype float,
+    certain b oftype float,
+    optional rel_tol oftype float = 0.0000001,
+    optional abs_tol oftype float = 0.0001
+) returns boolean {
+    var diff = a - b
+    if diff < 0.0 {
+        diff = 0.0 - diff
+    }
+    return diff <= abs_tol or diff <= rel_tol
+}
+
+assert(approx_equal(4.0, 4.0))
+assert_eq(approx_equal(4.0, 4.2), false)
+print("ok")
+"#
+}
+
+fn repeated_assert_source() -> &'static str {
+    r#"use std.io
+use std.time
+
+var root = io.join("LOCAL", "repeat-aot-" + string(time.now()))
+var file = io.join(root, "x.txt")
+var ok1 = io.makeDir(root)
+var ok2 = io.writeFile(file, "a")
+var ok3 = io.appendFile(file, "b")
+
+assert(ok1)
+assert(ok2)
+assert(ok3)
+assert_eq(io.readFile(file), "ab")
+print("ok")
+"#
+}
+
 fn compile_program(source: &str, backend: Backend, output_path: &Path) {
     let src_path = output_path.with_extension("fdn");
     fs::write(&src_path, source).expect("write concurrent smoke source");
@@ -69,7 +276,7 @@ fn compile_program(source: &str, backend: Backend, output_path: &Path) {
     compile(&Session::new(), mir, interner, &opts).expect("compile concurrent smoke program");
 }
 
-fn run_compiled_binary(bin: &Path) {
+fn run_compiled_binary(bin: &Path, expected_stdout_fragment: &str) {
     let output = Command::new(bin)
         .output()
         .expect("run compiled concurrent smoke binary");
@@ -81,10 +288,63 @@ fn run_compiled_binary(bin: &Path) {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("200000"),
-        "expected concurrent smoke output to contain 200000, got:\n{}",
-        stdout
+        stdout.contains(expected_stdout_fragment),
+        "expected compiled program output to contain {expected_stdout_fragment:?}, got:\n{}",
+        stdout,
     );
+}
+
+fn run_compiled_binary_clean(bin: &Path, expected_stdout_fragment: &str) {
+    let output = Command::new(bin)
+        .output()
+        .expect("run compiled concurrent smoke binary");
+    assert!(
+        output.status.success(),
+        "compiled concurrent smoke binary failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(expected_stdout_fragment),
+        "expected compiled program output to contain {expected_stdout_fragment:?}, got:\n{}",
+        stdout,
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.trim().is_empty(),
+        "expected compiled program stderr to stay empty, got:\n{}",
+        stderr,
+    );
+}
+
+fn run_compiled_binary_clean_n_times(bin: &Path, expected_stdout_fragment: &str, runs: usize) {
+    for attempt in 0..runs {
+        let output = Command::new(bin)
+            .output()
+            .expect("run compiled concurrent smoke binary");
+        assert!(
+            output.status.success(),
+            "compiled concurrent smoke binary failed on run {}:\nstdout:\n{}\nstderr:\n{}",
+            attempt + 1,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(expected_stdout_fragment),
+            "expected compiled program output to contain {expected_stdout_fragment:?} on run {}, got:\n{}",
+            attempt + 1,
+            stdout,
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.trim().is_empty(),
+            "expected compiled program stderr to stay empty on run {}, got:\n{}",
+            attempt + 1,
+            stderr,
+        );
+    }
 }
 
 fn llvm_available() -> bool {
@@ -103,7 +363,7 @@ fn concurrent_cranelift_aot_same_thread_ok() {
         sandbox.join("concurrent_smoke")
     };
     compile_program(concurrent_source(), Backend::Cranelift, &output);
-    run_compiled_binary(&output);
+    run_compiled_binary(&output, "200000");
     fs::remove_dir_all(&sandbox).ok();
 }
 
@@ -123,6 +383,260 @@ fn concurrent_llvm_aot_same_thread_ok() {
         sandbox.join("concurrent_smoke")
     };
     compile_program(concurrent_source(), Backend::Llvm, &output);
-    run_compiled_binary(&output);
+    run_compiled_binary(&output, "200000");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn spawn_cranelift_aot_defers_until_await() {
+    let sandbox = temp_dir("fidan_spawn_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("spawn_smoke.exe")
+    } else {
+        sandbox.join("spawn_smoke")
+    };
+    compile_program(spawn_source(), Backend::Cranelift, &output);
+    run_compiled_binary(&output, "2");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn spawn_llvm_aot_defers_until_await() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM spawn AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_spawn_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("spawn_smoke.exe")
+    } else {
+        sandbox.join("spawn_smoke")
+    };
+    compile_program(spawn_source(), Backend::Llvm, &output);
+    run_compiled_binary(&output, "2");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn concurrent_cranelift_aot_scheduler_yields_across_spawn_await() {
+    let sandbox = temp_dir("fidan_scheduler_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("scheduler_smoke.exe")
+    } else {
+        sandbox.join("scheduler_smoke")
+    };
+    compile_program(scheduler_source(), Backend::Cranelift, &output);
+    run_compiled_binary(&output, "1234");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn concurrent_llvm_aot_scheduler_yields_across_spawn_await() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM scheduler AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_scheduler_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("scheduler_smoke.exe")
+    } else {
+        sandbox.join("scheduler_smoke")
+    };
+    compile_program(scheduler_source(), Backend::Llvm, &output);
+    run_compiled_binary(&output, "1234");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn object_method_cranelift_aot_preserves_object_args() {
+    let sandbox = temp_dir("fidan_object_method_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("object_method_smoke.exe")
+    } else {
+        sandbox.join("object_method_smoke")
+    };
+    compile_program(object_method_source(), Backend::Cranelift, &output);
+    run_compiled_binary(&output, "5");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn object_method_llvm_aot_preserves_object_args() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM object-method AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_object_method_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("object_method_smoke.exe")
+    } else {
+        sandbox.join("object_method_smoke")
+    };
+    compile_program(object_method_source(), Backend::Llvm, &output);
+    run_compiled_binary(&output, "5");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn stdlib_function_values_cranelift_aot_are_callable() {
+    let sandbox = temp_dir("fidan_stdlib_fn_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("stdlib_fn_smoke.exe")
+    } else {
+        sandbox.join("stdlib_fn_smoke")
+    };
+    compile_program(stdlib_function_value_source(), Backend::Cranelift, &output);
+    run_compiled_binary(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn stdlib_function_values_llvm_aot_are_callable() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM stdlib function-value AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_stdlib_fn_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("stdlib_fn_smoke.exe")
+    } else {
+        sandbox.join("stdlib_fn_smoke")
+    };
+    compile_program(stdlib_function_value_source(), Backend::Llvm, &output);
+    run_compiled_binary(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn builtin_asserts_cranelift_aot_do_not_fall_through_to_builtin_stderr() {
+    let sandbox = temp_dir("fidan_builtin_asserts_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("builtin_asserts_smoke.exe")
+    } else {
+        sandbox.join("builtin_asserts_smoke")
+    };
+    compile_program(builtin_assert_source(), Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn builtin_asserts_llvm_aot_do_not_crash_or_fall_through() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM builtin assert AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_builtin_asserts_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("builtin_asserts_smoke.exe")
+    } else {
+        sandbox.join("builtin_asserts_smoke")
+    };
+    compile_program(builtin_assert_source(), Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn parallel_reduce_cranelift_aot_uses_initial_then_callback_order() {
+    let sandbox = temp_dir("fidan_parallel_reduce_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("parallel_reduce_smoke.exe")
+    } else {
+        sandbox.join("parallel_reduce_smoke")
+    };
+    compile_program(parallel_reduce_source(), Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "10");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn parallel_reduce_top_level_cranelift_aot_uses_callback_as_third_arg() {
+    let sandbox = temp_dir("fidan_parallel_reduce_top_level_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("parallel_reduce_top_level_smoke.exe")
+    } else {
+        sandbox.join("parallel_reduce_top_level_smoke")
+    };
+    compile_program(
+        parallel_reduce_top_level_source(),
+        Backend::Cranelift,
+        &output,
+    );
+    run_compiled_binary_clean(&output, "10");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn scalar_conversions_cranelift_aot_round_trip_cleanly() {
+    let sandbox = temp_dir("fidan_scalar_conversions_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("scalar_conversions_smoke.exe")
+    } else {
+        sandbox.join("scalar_conversions_smoke")
+    };
+    compile_program(scalar_conversion_source(), Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn time_formatting_cranelift_aot_matches_stdlib_contract() {
+    let sandbox = temp_dir("fidan_time_formatting_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("time_formatting_smoke.exe")
+    } else {
+        sandbox.join("time_formatting_smoke")
+    };
+    compile_program(time_format_source(), Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn default_args_llvm_aot_fill_missing_parameters() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM default-arg AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_default_args_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("default_args_smoke.exe")
+    } else {
+        sandbox.join("default_args_smoke")
+    };
+    compile_program(default_args_source(), Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn repeated_cranelift_aot_runs_keep_dynamic_asserts_stable() {
+    let sandbox = temp_dir("fidan_repeated_asserts_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("repeated_asserts_smoke.exe")
+    } else {
+        sandbox.join("repeated_asserts_smoke")
+    };
+    compile_program(repeated_assert_source(), Backend::Cranelift, &output);
+    run_compiled_binary_clean_n_times(&output, "ok", 12);
     fs::remove_dir_all(&sandbox).ok();
 }

@@ -42,6 +42,7 @@ use fidan_mir::{
 };
 use fidan_stdlib::{
     MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_receiver_method, infer_stdlib_method,
+    module_exports,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -366,6 +367,7 @@ struct RuntimeDecls {
     fn_name_register: cranelift_module::FuncId,
     call_dynamic: cranelift_module::FuncId,
     spawn_expr: cranelift_module::FuncId,
+    spawn_dynamic: cranelift_module::FuncId,
     spawn_concurrent: cranelift_module::FuncId,
     spawn_task: cranelift_module::FuncId,
     pending_join: cranelift_module::FuncId,
@@ -479,7 +481,7 @@ impl RuntimeDecls {
             input_fn: decl!("fdn_input", sig!((p) -> ptr)),
             len_fn: decl!("fdn_len", sig!((p) -> i64)),
             panic_fn: decl!("fdn_panic", sig!((p) -> void)),
-            assert_fn: decl!("fdn_assert", sig!((i8t, p) -> void)),
+            assert_fn: decl!("fdn_assert", sig!((i64t, p) -> void)),
             type_name: decl!("fdn_type_name", sig!((p) -> ptr)),
             to_string: decl!("fdn_to_string", sig!((p) -> ptr)),
             to_integer: decl!("fdn_to_integer", sig!((p) -> ptr)),
@@ -526,6 +528,7 @@ impl RuntimeDecls {
             fn_name_register: decl!("fdn_fn_name_register", sig!((p, i64t, i64t) -> void)),
             call_dynamic: decl!("fdn_call_dynamic", sig!((p, p, i64t) -> ptr)),
             spawn_expr: decl!("fdn_spawn_expr", sig!((i64t, p, i64t) -> ptr)),
+            spawn_dynamic: decl!("fdn_spawn_dynamic", sig!((p, p, i64t, p, i64t) -> ptr)),
             spawn_concurrent: decl!(
                 "fdn_spawn_concurrent",
                 sig!((i64t, p, i64t, p, i64t) -> ptr)
@@ -1266,16 +1269,36 @@ fn lower_instr(
             object,
             field,
         } => {
-            let obj = lower_operand_as_ptr(builder, cl_vars, local_types, object, rt, module)?;
-            let (field_ptr, field_len) =
-                str_const(module, builder, interner.resolve(*field).as_ref())?;
-            let r = call_rt(
-                module,
-                builder,
-                rt.obj_get_field,
-                &[obj, field_ptr, field_len],
-            )?
-            .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+            let field_name = interner.resolve(*field);
+            let stdlib_namespace = match object {
+                Operand::Local(local) => namespace_locals.get(local).map(String::as_str),
+                Operand::Const(MirLit::Namespace(namespace)) => Some(namespace.as_str()),
+                _ => None,
+            };
+
+            let r = if let Some(namespace) = stdlib_namespace
+                && module_exports(namespace).contains(&field_name.as_ref())
+            {
+                let (module_ptr, module_len) = str_const(module, builder, namespace)?;
+                let (field_ptr, field_len) = str_const(module, builder, field_name.as_ref())?;
+                call_rt(
+                    module,
+                    builder,
+                    rt.box_stdlib_fn,
+                    &[module_ptr, module_len, field_ptr, field_len],
+                )?
+                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0))
+            } else {
+                let obj = lower_operand_as_ptr(builder, cl_vars, local_types, object, rt, module)?;
+                let (field_ptr, field_len) = str_const(module, builder, field_name.as_ref())?;
+                call_rt(
+                    module,
+                    builder,
+                    rt.obj_get_field,
+                    &[obj, field_ptr, field_len],
+                )?
+                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0))
+            };
             builder.def_var(cl_vars[dest.0 as usize], r);
         }
 
@@ -1349,7 +1372,9 @@ fn lower_instr(
                 let gv = module.declare_data_in_func(data_id, builder.func);
                 let addr = builder.ins().global_value(PTR_TY, gv);
                 let val = builder.ins().load(PTR_TY, MemFlags::new(), addr, 0);
-                builder.def_var(cl_vars[dest.0 as usize], val);
+                let cloned = call_rt(module, builder, rt.clone_any, &[val])?
+                    .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+                builder.def_var(cl_vars[dest.0 as usize], cloned);
             } else {
                 namespace_locals.remove(dest);
                 let zero = builder.ins().iconst(PTR_TY, 0);
@@ -1363,7 +1388,9 @@ fn lower_instr(
                 let gv = module.declare_data_in_func(data_id, builder.func);
                 let addr = builder.ins().global_value(PTR_TY, gv);
                 let val = lower_operand_boxed(builder, cl_vars, local_types, value, rt, module)?;
-                builder.ins().store(MemFlags::new(), val, addr, 0);
+                let cloned = call_rt(module, builder, rt.clone_any, &[val])?
+                    .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+                builder.ins().store(MemFlags::new(), cloned, addr, 0);
             }
         }
 
@@ -1470,52 +1497,31 @@ fn lower_instr(
         }
 
         Instr::SpawnDynamic { dest, method, args } => {
-            // Synchronous dispatch: same as Callee::Method or Callee::Dynamic.
-            let result = if let Some(sym) = method {
-                // Method call: args[0] = receiver, args[1..] = method arguments.
+            let (first, rest, method_ptr, method_len) = if let Some(sym) = method {
                 let recv =
                     lower_operand_as_ptr(builder, cl_vars, local_types, &args[0], rt, module)?;
                 let (mp, ml) = str_const(module, builder, interner.resolve(*sym).as_ref())?;
-                let (arr, cnt) = build_ptr_array(
-                    module,
-                    rt,
-                    builder,
-                    cl_vars,
-                    local_types,
-                    &args[1..],
-                    interner,
-                )?;
-                call_rt(module, builder, rt.obj_invoke, &[recv, mp, ml, arr, cnt])?.unwrap_or_else(
-                    || {
-                        call_rt(module, builder, rt.box_nothing, &[])
-                            .ok()
-                            .flatten()
-                            .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0))
-                    },
-                )
+                (recv, &args[1..], mp, ml)
             } else {
-                // Dynamic fn-value call: args[0] = fn value, args[1..] = call args.
                 let fn_val =
                     lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?;
-                let (arr, cnt) = build_ptr_array(
-                    module,
-                    rt,
-                    builder,
-                    cl_vars,
-                    local_types,
+                (
+                    fn_val,
                     &args[1..],
-                    interner,
-                )?;
-                call_rt(module, builder, rt.call_dynamic, &[fn_val, arr, cnt])?.unwrap_or_else(
-                    || {
-                        call_rt(module, builder, rt.box_nothing, &[])
-                            .ok()
-                            .flatten()
-                            .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0))
-                    },
+                    builder.ins().iconst(PTR_TY, 0),
+                    builder.ins().iconst(I64, 0),
                 )
             };
-            builder.def_var(cl_vars[dest.0 as usize], result);
+            let (arr, cnt) =
+                build_ptr_array(module, rt, builder, cl_vars, local_types, rest, interner)?;
+            let pending = call_rt(
+                module,
+                builder,
+                rt.spawn_dynamic,
+                &[first, method_ptr, method_len, arr, cnt],
+            )?
+            .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+            builder.def_var(cl_vars[dest.0 as usize], pending);
         }
 
         Instr::ParallelIter {
@@ -2710,15 +2716,27 @@ fn emit_builtin(
 
         "assert" => {
             let cond = lower_operand(builder, cl_vars, &args[0]);
-            let cond_i8 = widen_to_i8(builder, cond, local_types, &args[0]);
+            let cond_i8 = widen_to_i8(builder, module, rt, cond, local_types, &args[0])?;
             let msg = if args.len() > 1 {
                 lower_operand_boxed(builder, cl_vars, local_types, &args[1], rt, module)?
             } else {
                 let (p, l) = str_const(module, builder, "assertion failed")?;
                 call_rt(module, builder, rt.box_str, &[p, l])?.unwrap()
             };
-            call_rt(module, builder, rt.assert_fn, &[cond_i8, msg])?;
+            let cond_i64 = builder.ins().uextend(I64, cond_i8);
+            call_rt(module, builder, rt.assert_fn, &[cond_i64, msg])?;
             Ok(call_rt(module, builder, rt.box_nothing, &[])?.unwrap())
+        }
+
+        "assertEq" | "assert_eq" | "assertNe" | "assert_ne" => {
+            let (mp, ml) = str_const(module, builder, "test")?;
+            let (fp, fl) = str_const(module, builder, name)?;
+            let (arr, cnt) =
+                build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
+            Ok(
+                call_rt(module, builder, rt.stdlib_call, &[mp, ml, fp, fl, arr, cnt])?
+                    .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)),
+            )
         }
 
         "panic" => {
@@ -2754,8 +2772,9 @@ fn emit_builtin(
             } else {
                 lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?
             };
-            Ok(call_rt(module, builder, rt.to_string, &[arg])?
-                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)))
+            let boxed = call_rt(module, builder, rt.to_string, &[arg])?
+                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+            coerce_boxed_call_result(module, rt, builder, boxed, result_ty)
         }
 
         "integer" | "int" => {
@@ -2764,8 +2783,9 @@ fn emit_builtin(
             } else {
                 lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?
             };
-            Ok(call_rt(module, builder, rt.to_integer, &[arg])?
-                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)))
+            let boxed = call_rt(module, builder, rt.to_integer, &[arg])?
+                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+            coerce_boxed_call_result(module, rt, builder, boxed, result_ty)
         }
 
         "float" => {
@@ -2774,8 +2794,9 @@ fn emit_builtin(
             } else {
                 lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?
             };
-            Ok(call_rt(module, builder, rt.to_float, &[arg])?
-                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)))
+            let boxed = call_rt(module, builder, rt.to_float, &[arg])?
+                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+            coerce_boxed_call_result(module, rt, builder, boxed, result_ty)
         }
 
         "boolean" | "bool" => {
@@ -2784,8 +2805,9 @@ fn emit_builtin(
             } else {
                 lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?
             };
-            Ok(call_rt(module, builder, rt.to_boolean, &[arg])?
-                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)))
+            let boxed = call_rt(module, builder, rt.to_boolean, &[arg])?
+                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+            coerce_boxed_call_result(module, rt, builder, boxed, result_ty)
         }
 
         _ => {
@@ -3216,6 +3238,14 @@ fn build_local_type_map(
     program: &MirProgram,
     interner: &SymbolInterner,
 ) -> HashMap<u32, MirTy> {
+    fn mark_pointer_like_local(map: &mut HashMap<u32, MirTy>, op: &Operand) {
+        if let Operand::Local(local) = op
+            && matches!(map.get(&local.0), Some(MirTy::Error))
+        {
+            map.insert(local.0, MirTy::Dynamic);
+        }
+    }
+
     let mut map = HashMap::new();
     let global_ns_map = build_global_namespace_map(program, interner);
     let mut namespace_locals: HashMap<LocalId, String> = HashMap::new();
@@ -3230,11 +3260,32 @@ fn build_local_type_map(
         }
         for instr in &bb.instructions {
             match instr {
+                Instr::GetField { object, .. }
+                | Instr::SetField { object, .. }
+                | Instr::GetIndex { object, .. }
+                | Instr::SetIndex { object, .. } => mark_pointer_like_local(&mut map, object),
+                Instr::Call {
+                    callee: Callee::Method { receiver, .. },
+                    ..
+                } => mark_pointer_like_local(&mut map, receiver),
+                Instr::SpawnDynamic {
+                    method: Some(_),
+                    args,
+                    ..
+                } => {
+                    if let Some(receiver) = args.first() {
+                        mark_pointer_like_local(&mut map, receiver);
+                    }
+                }
+                _ => {}
+            }
+
+            match instr {
                 Instr::Assign { dest, ty, rhs } => {
                     // When the declared type is Dynamic/Error, try to deduce the real type
                     // from the rvalue so hot loops can stay on native scalar paths.
                     let effective_ty = if matches!(ty, MirTy::Dynamic | MirTy::Error) {
-                        infer_rvalue_type(rhs, &map, &namespace_locals, interner)
+                        infer_rvalue_type(rhs, program, &map, &namespace_locals, interner)
                     } else {
                         ty.clone()
                     };
@@ -3263,7 +3314,14 @@ fn build_local_type_map(
                         .clone()
                         .filter(|ty| !matches!(ty, MirTy::Dynamic | MirTy::Error))
                         .or_else(|| {
-                            infer_call_result_ty(callee, args, &map, &namespace_locals, interner)
+                            infer_call_result_ty(
+                                callee,
+                                program,
+                                args,
+                                &map,
+                                &namespace_locals,
+                                interner,
+                            )
                         })
                         .unwrap_or(MirTy::Dynamic);
                     map.insert(d.0, inferred_ty);
@@ -3297,12 +3355,21 @@ fn infer_stdlib_method_return_ty(
 
 fn infer_call_result_ty(
     callee: &Callee,
+    program: &MirProgram,
     args: &[Operand],
     map: &HashMap<u32, MirTy>,
     namespace_locals: &HashMap<LocalId, String>,
     interner: &SymbolInterner,
 ) -> Option<MirTy> {
     match callee {
+        Callee::Fn(fn_id) => {
+            let return_ty = effective_return_ty(&program.functions[fn_id.0 as usize]);
+            if matches!(return_ty, MirTy::Nothing | MirTy::Error) {
+                None
+            } else {
+                Some(return_ty)
+            }
+        }
         Callee::Method {
             receiver: Operand::Local(recv),
             method,
@@ -3347,6 +3414,7 @@ fn infer_receiver_method_return_ty(
 /// Try to infer the type of an rvalue from its operands when the declared type is `Error`.
 fn infer_rvalue_type(
     rhs: &Rvalue,
+    program: &MirProgram,
     map: &HashMap<u32, MirTy>,
     namespace_locals: &HashMap<LocalId, String>,
     interner: &SymbolInterner,
@@ -3396,7 +3464,7 @@ fn infer_rvalue_type(
         Rvalue::Literal(MirLit::Str(_)) => MirTy::String,
         Rvalue::Use(op) => infer_operand_type(op, map),
         Rvalue::Call { callee, args } => {
-            infer_call_result_ty(callee, args, map, namespace_locals, interner)
+            infer_call_result_ty(callee, program, args, map, namespace_locals, interner)
                 .unwrap_or(MirTy::Dynamic)
         }
         _ => MirTy::Dynamic,
@@ -3478,14 +3546,10 @@ fn lower_operand_boxed(
             } => {
                 let (mp, ml) = str_const(module, builder, mod_name)?;
                 let (np, nl) = str_const(module, builder, name)?;
-                let zero = builder.ins().iconst(I64, 0);
-                return Ok(call_rt(
-                    module,
-                    builder,
-                    rt.stdlib_call,
-                    &[mp, ml, np, nl, zero, zero],
-                )?
-                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)));
+                return Ok(
+                    call_rt(module, builder, rt.box_stdlib_fn, &[mp, ml, np, nl])?
+                        .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)),
+                );
             }
             MirLit::Int(_) | MirLit::Float(_) | MirLit::Bool(_) => {} // handled below
         }
@@ -3524,6 +3588,20 @@ fn lower_operand_as_ptr(
     rt: &RuntimeDecls,
     module: &mut ObjectModule,
 ) -> Result<cranelift_codegen::ir::Value> {
+    if let Operand::Local(local) = op
+        && matches!(local_types.get(&local.0), Some(MirTy::Error))
+    {
+        let raw = builder.use_var(cl_vars[local.0 as usize]);
+        let raw_ty = builder.func.dfg.value_type(raw);
+        return if raw_ty == F64 {
+            Ok(call_rt(module, builder, rt.box_float, &[raw])?.unwrap_or(raw))
+        } else if raw_ty == I8 {
+            Ok(call_rt(module, builder, rt.box_bool, &[raw])?.unwrap_or(raw))
+        } else {
+            Ok(raw)
+        };
+    }
+
     lower_operand_boxed(builder, cl_vars, local_types, op, rt, module)
 }
 
@@ -3589,16 +3667,41 @@ fn widen_to_i64(
 
 fn widen_to_i8(
     builder: &mut FunctionBuilder<'_>,
+    module: &mut ObjectModule,
+    rt: &RuntimeDecls,
     val: cranelift_codegen::ir::Value,
-    _local_types: &HashMap<u32, MirTy>,
-    _op: &Operand,
-) -> cranelift_codegen::ir::Value {
+    local_types: &HashMap<u32, MirTy>,
+    op: &Operand,
+) -> Result<cranelift_codegen::ir::Value> {
     let ty = builder.func.dfg.value_type(val);
     if ty == I8 {
-        val
-    } else {
-        // truncate or compare
-        builder.ins().ireduce(I8, val)
+        return Ok(val);
+    }
+
+    if ty == F64 {
+        let zero = builder.ins().f64const(0.0);
+        return Ok(builder.ins().fcmp(FloatCC::NotEqual, val, zero));
+    }
+
+    match operand_mir_ty(local_types, op) {
+        MirTy::Integer | MirTy::Handle => Ok(builder.ins().icmp_imm(IntCC::NotEqual, val, 0)),
+        MirTy::Dynamic
+        | MirTy::String
+        | MirTy::List(_)
+        | MirTy::Dict(_, _)
+        | MirTy::Tuple(_)
+        | MirTy::Object(_)
+        | MirTy::Enum(_)
+        | MirTy::Shared(_)
+        | MirTy::Pending(_)
+        | MirTy::Function
+        | MirTy::Nothing
+        | MirTy::Error => Ok(call_rt(module, builder, rt.truthy, &[val])?.unwrap_or(val)),
+        MirTy::Boolean => Ok(builder.ins().icmp_imm(IntCC::NotEqual, val, 0)),
+        MirTy::Float => {
+            let zero = builder.ins().f64const(0.0);
+            Ok(builder.ins().fcmp(FloatCC::NotEqual, val, zero))
+        }
     }
 }
 
@@ -3781,7 +3884,9 @@ fn link(
         }
         cmd.arg(format!("/LIBPATH:{}", runtime_dir.display()));
         if link_dynamic {
-            cmd.arg("fidan_runtime.dll.lib");
+            let import_lib = find_dynamic_runtime_import_lib(&runtime_dir)
+                .context("cannot find fidan_runtime.dll.lib — build Fidan first")?;
+            cmd.arg(import_lib);
         } else {
             let lib = find_static_runtime_lib(&runtime_dir)
                 .context("cannot find fidan_runtime.lib — build Fidan first")?;
@@ -3853,24 +3958,98 @@ fn link(
 }
 
 fn append_windows_link_input(command: &mut std::process::Command, input: &str) {
+    let resolved = resolve_windows_link_input(input);
     let path_like = input.contains(std::path::MAIN_SEPARATOR)
         || input.contains('/')
         || input.contains('\\')
         || input.contains(':');
     if path_like {
-        command.arg(input);
+        command.arg(&resolved);
         return;
     }
 
-    let has_lib_suffix = std::path::Path::new(input)
+    let has_lib_suffix = std::path::Path::new(&resolved)
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("lib"))
         .unwrap_or(false);
     if has_lib_suffix {
-        command.arg(input);
+        command.arg(&resolved);
     } else {
-        command.arg(format!("{input}.lib"));
+        command.arg(format!("{resolved}.lib"));
+    }
+}
+
+fn resolve_windows_link_input(input: &str) -> String {
+    let path = Path::new(input);
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase());
+
+    if ext.as_deref() != Some("dll") {
+        return input.to_owned();
+    }
+
+    let dll_lib = PathBuf::from(format!("{input}.lib"));
+    if dll_lib.is_file() {
+        return dll_lib.to_string_lossy().into_owned();
+    }
+
+    let import_lib = path.with_extension("lib");
+    if import_lib.is_file() {
+        return import_lib.to_string_lossy().into_owned();
+    }
+
+    dll_lib.to_string_lossy().into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_windows_link_input;
+
+    #[test]
+    fn windows_link_input_prefers_dll_lib_sidecar() {
+        let temp = std::env::temp_dir().join(format!(
+            "fidan_cranelift_link_input_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).expect("create temp dir");
+        let dll = temp.join("ffi_demo.dll");
+        let dll_lib = temp.join("ffi_demo.dll.lib");
+        std::fs::write(&dll, []).expect("write dll placeholder");
+        std::fs::write(&dll_lib, []).expect("write import lib placeholder");
+
+        let resolved = resolve_windows_link_input(&dll.to_string_lossy());
+        assert_eq!(resolved, dll_lib.to_string_lossy());
+
+        std::fs::remove_dir_all(&temp).ok();
+    }
+
+    #[test]
+    fn windows_link_input_falls_back_to_plain_lib_sidecar() {
+        let temp = std::env::temp_dir().join(format!(
+            "fidan_cranelift_link_input_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).expect("create temp dir");
+        let dll = temp.join("ffi_demo.dll");
+        let lib = temp.join("ffi_demo.lib");
+        std::fs::write(&dll, []).expect("write dll placeholder");
+        std::fs::write(&lib, []).expect("write import lib placeholder");
+
+        let resolved = resolve_windows_link_input(&dll.to_string_lossy());
+        assert_eq!(resolved, lib.to_string_lossy());
+
+        std::fs::remove_dir_all(&temp).ok();
     }
 }
 
@@ -4056,21 +4235,32 @@ fn find_static_runtime_lib(dir: &Path) -> Option<PathBuf> {
     } else {
         &["libfidan_runtime.a"]
     };
-    for &name in candidates {
-        let p = dir.join(name);
-        if p.exists() {
-            return Some(p);
+    find_latest_runtime_artifact(dir, candidates)
+}
+
+fn find_dynamic_runtime_import_lib(dir: &Path) -> Option<PathBuf> {
+    if cfg!(windows) {
+        find_latest_runtime_artifact(dir, &["fidan_runtime.dll.lib", "libfidan_runtime.dll.lib"])
+    } else {
+        None
+    }
+}
+
+fn find_latest_runtime_artifact(dir: &Path, names: &[&str]) -> Option<PathBuf> {
+    let mut matches = Vec::new();
+    for candidate_dir in [Some(dir), Some(&dir.join("deps"))].into_iter().flatten() {
+        for &name in names {
+            let path = candidate_dir.join(name);
+            if let Ok(metadata) = std::fs::metadata(&path)
+                && metadata.is_file()
+            {
+                matches.push((metadata.modified().ok(), path));
+            }
         }
     }
-    // Also check deps/
-    let deps = dir.join("deps");
-    for &name in candidates {
-        let p = deps.join(name);
-        if p.exists() {
-            return Some(p);
-        }
-    }
-    None
+
+    matches.sort_by_key(|(modified, path)| (*modified, path.clone()));
+    matches.pop().map(|(_, path)| path)
 }
 
 // ── Windows: locate MSVC + Windows SDK library directories ────────────────────

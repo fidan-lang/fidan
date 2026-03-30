@@ -144,11 +144,15 @@ fn download_label(url: &str) -> String {
 pub fn verify_sha256(bytes: &[u8], expected: &str) -> Result<()> {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = sha256_hex_bytes(hasher.finalize().as_slice());
     if actual != expected.trim().to_lowercase() {
         bail!("SHA-256 mismatch: expected {}, got {}", expected, actual);
     }
     Ok(())
+}
+
+fn sha256_hex_bytes(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 pub fn extract_tar_gz(bytes: &[u8], destination: &Path) -> Result<()> {
@@ -330,7 +334,7 @@ mod tests {
     fn sha256_hex(bytes: &[u8]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
-        format!("{:x}", hasher.finalize())
+        sha256_hex_bytes(hasher.finalize().as_slice())
     }
 
     #[test]

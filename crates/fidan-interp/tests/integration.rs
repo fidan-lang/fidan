@@ -34,6 +34,11 @@ pub extern "C" fn fidan_test_mix4(a: i64, b: f64, c: i8, d: usize) -> i64 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn fidan_test_sum6(a: i64, b: i64, c: i64, d: i64, e: i64, f: i64) -> i64 {
+    a + b + c + d + e + f
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn fidan_test_float_scale(x: f64, scale: f64) -> f64 {
     x * scale
 }
@@ -115,6 +120,10 @@ fn register_extern_test_symbols() {
     register_self_symbol(
         "fidan_test_mix4",
         fidan_test_mix4 as *const () as *mut c_void,
+    );
+    register_self_symbol(
+        "fidan_test_sum6",
+        fidan_test_sum6 as *const () as *mut c_void,
     );
     register_self_symbol(
         "fidan_test_float_scale",
@@ -483,6 +492,16 @@ fn extern_mixed_native_signatures_do_not_corrupt_param_types() {
             d oftype handle
         ) returns integer
 
+        @extern("self", symbol = "fidan_test_sum6")
+        action sum6 with (
+            a oftype integer,
+            b oftype integer,
+            c oftype integer,
+            d oftype integer,
+            e oftype integer,
+            f oftype integer
+        ) returns integer
+
         @extern("self", symbol = "fidan_test_float_scale")
         action floatScale with (value oftype float, factor oftype float) returns float
 
@@ -492,6 +511,7 @@ fn extern_mixed_native_signatures_do_not_corrupt_param_types() {
         assert_eq(nativeAdd(20, 22), 42)
         assert_eq(sum3(10, 20, 12), 42)
         assert_eq(mix4(7, 8.0, true, 9), 124)
+        assert_eq(sum6(2, 4, 6, 8, 10, 12), 42)
         assert_eq(floatScale(2.5, 4.0), 10.0)
         assert_eq(negateBool(true), false)"#,
     );
@@ -501,41 +521,24 @@ fn extern_mixed_native_signatures_do_not_corrupt_param_types() {
 }
 
 #[test]
-fn extern_native_more_than_four_params_is_type_error() {
-    let interner = make_interner();
-    let source_map = Arc::new(SourceMap::new());
-    let file = source_map.add_file(
-        "<test>",
-        r#"@extern("self")
-        action tooWide with (
+fn extern_native_more_than_four_params_ok() {
+    register_extern_test_symbols();
+    let result = run_src(
+        r#"@extern("self", symbol = "fidan_test_sum6")
+        action sum6 with (
             a oftype integer,
             b oftype integer,
             c oftype integer,
             d oftype integer,
-            e oftype integer
-        ) returns integer"#,
+            e oftype integer,
+            f oftype integer
+        ) returns integer
+
+        assert_eq(sum6(2, 4, 6, 8, 10, 12), 42)"#,
     );
-    let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
-    let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
-    assert!(
-        parse_diags
-            .iter()
-            .all(|diag| diag.severity != fidan_diagnostics::Severity::Error),
-        "unexpected parse errors: {parse_diags:?}"
-    );
-    let typed = fidan_typeck::typecheck_full(&module, interner);
-    assert!(
-        typed
-            .diagnostics
-            .iter()
-            .any(|diag| diag.message.contains("supports at most 4 parameters")),
-        "expected native extern arity error, got {:?}",
-        typed
-            .diagnostics
-            .iter()
-            .map(|diag| diag.message.clone())
-            .collect::<Vec<_>>()
-    );
+    if let Err(err) = result {
+        panic!("{}: {}", err.code, err.message);
+    }
 }
 
 // ── Runtime error paths (Err with correct code) ───────────────────────────────
@@ -629,6 +632,44 @@ fn spawn_await_ok() {
 }
 
 #[test]
+fn spawn_defers_static_action_until_await() {
+    assert!(
+        run_src(
+            r#"var counter = Shared(0)
+        action bump returns integer {
+            counter.set(counter.get() + 1)
+            return counter.get()
+        }
+
+        var pending = spawn bump()
+        assert_eq(counter.get(), 0)
+        assert_eq(await pending, 1)
+        assert_eq(counter.get(), 1)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn spawn_dynamic_defers_closure_until_await() {
+    assert!(
+        run_src(
+            r#"var counter = Shared(0)
+        var work = action with () returns integer {
+            counter.set(counter.get() + 1)
+            return counter.get()
+        }
+
+        var pending = spawn work()
+        assert_eq(counter.get(), 0)
+        assert_eq(await pending, 1)
+        assert_eq(counter.get(), 1)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn parallel_block_ok() {
     assert!(
         run_src(
@@ -706,6 +747,81 @@ fn concurrent_block_ok() {
 }
 
 #[test]
+fn stdlib_namespace_field_access_returns_callable_function_values() {
+    let result = run_src(
+        r#"use std.string as strings
+
+action apply_to_string with (value, fn) returns string {
+    return fn(value)
+}
+
+action apply_substr with (value, start, finish, fn) returns string {
+    return fn(value, start, finish)
+}
+
+var to_text = string
+assert_eq(apply_to_string(42, to_text), "42")
+
+var substr_fn = strings.substr
+assert_eq(apply_substr("abcdef", 2, 5, substr_fn), "cde")"#,
+    );
+    assert!(
+        result.is_ok(),
+        "stdlib namespace field function values should stay callable"
+    );
+}
+
+#[test]
+fn concurrent_and_spawn_stay_on_same_thread() {
+    register_extern_test_symbols();
+    assert!(
+        run_src(
+            r#"@extern("self", symbol = "fidan_test_thread_tag")
+        action threadTag returns integer
+
+        var mainId = threadTag()
+        concurrent {
+            task A { assert_eq(threadTag(), mainId) }
+            task B { assert_eq(threadTag(), mainId) }
+        }
+
+        var pending = spawn threadTag()
+        assert_eq(await pending, mainId)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn concurrent_await_yields_to_other_same_thread_tasks() {
+    assert!(
+        run_src(
+            r#"var trace = Shared(0)
+
+        action inner returns integer {
+            trace.set(trace.get() * 10 + 3)
+            return trace.get()
+        }
+
+        concurrent {
+            task A {
+                trace.set(trace.get() * 10 + 1)
+                var pending = spawn inner()
+                assert_eq(await pending, 123)
+                trace.set(trace.get() * 10 + 4)
+            }
+            task B {
+                trace.set(trace.get() * 10 + 2)
+            }
+        }
+
+        assert_eq(trace.get(), 1234)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn concurrent_block_ok_with_jit_enabled() {
     assert!(
         run_src_with_threshold(
@@ -725,6 +841,45 @@ fn concurrent_block_ok_with_jit_enabled() {
 }
 
 #[test]
+fn spawn_dynamic_ok_with_jit_enabled() {
+    assert!(
+        run_src_with_threshold(
+            r#"var counter = Shared(0)
+        var work = action with () returns integer {
+            counter.set(counter.get() + 1)
+            return counter.get()
+        }
+
+        var pending = spawn work()
+        assert_eq(counter.get(), 0)
+        assert_eq(await pending, 1)
+        assert_eq(counter.get(), 1)"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn await_spawned_panic_surfaces_error() {
+    let err = run_src(
+        r#"action boom returns integer {
+            panic("boom")
+        }
+
+        var pending = spawn boom()
+        var result = await pending"#,
+    )
+    .expect_err("expected awaited spawned panic to surface");
+    assert_eq!(err.code.0, "R1002");
+    assert!(
+        err.message.contains("boom"),
+        "unexpected error: {}",
+        err.message
+    );
+}
+
+#[test]
 fn jitted_function_remains_callable_after_compilation() {
     assert!(
         run_src_with_threshold(
@@ -734,6 +889,108 @@ fn jitted_function_remains_callable_after_compilation() {
             x = hot(x)
         }
         assert_eq(x, 1000)"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn jitted_function_with_many_args_ok() {
+    assert!(
+        run_src_with_threshold(
+            r#"action hot with (
+            a oftype integer,
+            b oftype integer,
+            c oftype integer,
+            d oftype integer,
+            e oftype integer,
+            f oftype integer,
+            g oftype integer,
+            h oftype integer,
+            i oftype integer,
+            j oftype integer
+        ) returns integer {
+            return a + b + c + d + e + f + g + h + i + j
+        }
+
+        assert_eq(hot(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), 55)"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn global_reader_remains_correct_with_jit_enabled() {
+    assert!(
+        run_src_with_threshold(
+            r#"var base = 41
+
+        action hot returns integer {
+            return base + 1
+        }
+
+        assert_eq(hot(), 42)
+        assert_eq(hot(), 42)"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn global_store_remains_correct_with_jit_enabled() {
+    assert!(
+        run_src_with_threshold(
+            r#"var counter = 0
+
+        action bump returns integer {
+            counter = counter + 1
+            return counter
+        }
+
+        assert_eq(bump(), 1)
+        assert_eq(bump(), 2)"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn direct_call_chain_remains_correct_with_jit_enabled() {
+    assert!(
+        run_src_with_threshold(
+            r#"action inc with (n oftype integer) returns integer {
+            return n + 1
+        }
+
+        action outer returns integer {
+            return inc(41)
+        }
+
+        assert_eq(outer(), 42)
+        assert_eq(outer(), 42)"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn optional_defaults_remain_correct_with_jit_enabled() {
+    assert!(
+        run_src_with_threshold(
+            r#"action add with (
+            certain a oftype integer,
+            optional b oftype integer = 1
+        ) returns integer {
+            return a + b
+        }
+
+        assert_eq(add(41), 42)
+        assert_eq(add(41, 2), 43)"#,
             1,
         )
         .is_ok()

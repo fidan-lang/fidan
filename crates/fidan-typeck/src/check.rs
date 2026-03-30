@@ -4,29 +4,12 @@ use crate::types::FidanType;
 use fidan_ast::{
     AstArena, BinOp, Decorator, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp,
 };
-use fidan_config::MAX_NATIVE_EXTERN_PARAMS;
+use fidan_config::BUILTIN_BINDINGS;
 use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::{FileId, Span};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
-
-const RESERVED_BUILTIN_BINDINGS: &[&str] = &[
-    "print",
-    "println",
-    "eprint",
-    "input",
-    "len",
-    "type",
-    "string",
-    "integer",
-    "float",
-    "boolean",
-    "Shared",
-    "assert",
-    "assert_eq",
-    "assert_ne",
-];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ExternAbiKind {
@@ -178,7 +161,7 @@ impl TypeChecker {
 
     fn register_builtins(&mut self) {
         let dummy = self.dummy_span();
-        for &name in RESERVED_BUILTIN_BINDINGS {
+        for &name in BUILTIN_BINDINGS {
             let sym = self.interner.intern(name);
             self.table.define(
                 sym,
@@ -1583,7 +1566,7 @@ impl TypeChecker {
 
     fn is_reserved_builtin_name(&self, name: Symbol) -> bool {
         let resolved = self.interner.resolve(name);
-        RESERVED_BUILTIN_BINDINGS.contains(&resolved.as_ref())
+        BUILTIN_BINDINGS.contains(&resolved.as_ref())
     }
 
     fn reject_reserved_builtin_binding(&mut self, name: Symbol, span: Span) -> bool {
@@ -3048,19 +3031,6 @@ impl TypeChecker {
                     );
                 }
             }
-        }
-
-        if matches!(spec.abi, ExternAbiKind::Native) && ctx.params.len() > MAX_NATIVE_EXTERN_PARAMS
-        {
-            self.emit_error(
-                fidan_diagnostics::diag_code!("E0304"),
-                format!(
-                    "native @extern currently supports at most {MAX_NATIVE_EXTERN_PARAMS} parameters; `{}` uses {}",
-                    self.interner.resolve(name),
-                    ctx.params.len()
-                ),
-                ctx.span,
-            );
         }
 
         if matches!(spec.abi, ExternAbiKind::Native)

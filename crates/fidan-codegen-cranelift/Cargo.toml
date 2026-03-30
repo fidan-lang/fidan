@@ -20,3 +20,10 @@ cranelift-native = { workspace = true }
 cranelift-module = { workspace = true }
 cranelift-object = { workspace = true }
 anyhow = { workspace = true }
+libffi = { workspace = true }
+
+[dev-dependencies]
+fidan-parser = { workspace = true }
+fidan-typeck = { workspace = true }
+fidan-hir = { workspace = true }
+fidan-passes = { workspace = true }

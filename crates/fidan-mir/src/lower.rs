@@ -15,6 +15,7 @@ use std::rc::Rc;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use fidan_ast::BinOp;
+use fidan_config::{BUILTIN_BINDINGS, BUILTIN_VALUE_MODULE};
 use fidan_hir::{
     DecoratorArg, HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr,
     HirExprKind, HirExternAbi, HirExternDecl, HirFunction, HirInterpPart, HirModule, HirStmt,
@@ -399,6 +400,8 @@ struct FnCtx<'p> {
     wildcard_sym: Symbol,
     /// Symbol for `"__lambda__"` — used as the debug name for synthetic lambda functions.
     lambda_sym: Symbol,
+    /// Reserved builtins that can be referenced as first-class values.
+    builtin_value_names: FxHashMap<Symbol, String>,
     /// True only for the top-level init function (FunctionId(0)).  Used to
     /// decide whether a `VarDecl` should also write to the global table.
     is_init_fn: bool,
@@ -578,6 +581,11 @@ impl<'p> FnCtx<'p> {
                     let dest = self.alloc_local();
                     self.emit(Instr::LoadGlobal { dest, global: gid });
                     Operand::Local(dest)
+                } else if let Some(builtin_name) = self.builtin_value_names.get(name) {
+                    Operand::Const(MirLit::StdlibFn {
+                        module: BUILTIN_VALUE_MODULE.to_string(),
+                        name: builtin_name.clone(),
+                    })
                 } else {
                     // Unknown/builtin — represent as Nothing for now.
                     Operand::Const(MirLit::Nothing)
@@ -2854,6 +2862,10 @@ pub fn lower_program(
     let type_sym = interner.intern("type");
     let wildcard_sym = interner.intern("_");
     let lambda_sym = interner.intern("__lambda__");
+    let builtin_value_names: FxHashMap<Symbol, String> = BUILTIN_BINDINGS
+        .iter()
+        .map(|name| (interner.intern(name), (*name).to_string()))
+        .collect();
     let this_name = interner.intern("this");
 
     // ── Pre-pass ①: sentinel top-level init fn ───────────────────────────────
@@ -3145,6 +3157,7 @@ pub fn lower_program(
             continue_sites: FxHashMap::default(),
             wildcard_sym,
             lambda_sym,
+            builtin_value_names: builtin_value_names.clone(),
             par_for_pending: pending,
             is_init_fn: false,
             fn_param_names: fn_param_names.clone(),
@@ -3266,6 +3279,7 @@ pub fn lower_program(
             continue_sites: FxHashMap::default(),
             wildcard_sym,
             lambda_sym,
+            builtin_value_names: builtin_value_names.clone(),
             par_for_pending: Rc::clone(&pending_par_fors),
             is_init_fn: true,
             fn_param_names: fn_param_names.clone(),
@@ -3426,6 +3440,7 @@ pub fn lower_program(
                     continue_sites: FxHashMap::default(),
                     wildcard_sym,
                     lambda_sym,
+                    builtin_value_names: builtin_value_names.clone(),
                     par_for_pending: Rc::clone(&pending_par_fors),
                     is_init_fn: false,
                     fn_param_names: fn_param_names.clone(),
@@ -3499,6 +3514,7 @@ pub fn lower_program(
             continue_sites: FxHashMap::default(),
             wildcard_sym,
             lambda_sym,
+            builtin_value_names: builtin_value_names.clone(),
             par_for_pending: Rc::clone(&pending_par_fors),
             is_init_fn: false,
             fn_param_names: fn_param_names.clone(),

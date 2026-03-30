@@ -139,6 +139,16 @@ action mix4 with (
     d oftype handle
 ) returns integer
 
+@extern("{lib}", symbol = "fidan_fixture_sum6", link = "{link}")
+action sum6 with (
+    a oftype integer,
+    b oftype integer,
+    c oftype integer,
+    d oftype integer,
+    e oftype integer,
+    f oftype integer
+) returns integer
+
 @extern("{lib}", symbol = "fidan_fixture_make_handle", link = "{link}")
 action makeHandle returns handle
 
@@ -164,6 +174,7 @@ action main {{
     assert_eq(nativeAdd(20, 22), 42)
     assert_eq(sum3(10, 20, 12), 42)
     assert_eq(mix4(7, 8.0, true, 9), 124)
+    assert_eq(sum6(2, 4, 6, 8, 10, 12), 42)
 
     var h = makeHandle()
     h = incHandle(h)
@@ -194,6 +205,19 @@ action main {{
     }}
     assert_eq(sawWorker.get(), true)
 }}
+"#
+    )
+}
+
+fn build_top_level_native_source(fixture: &FixtureArtifacts) -> String {
+    let lib = as_fidan_string(&fixture.dylib_path);
+    let link = as_fidan_string(&fixture.link_input_path);
+    format!(
+        r#"@extern("{lib}", symbol = "fidan_fixture_native_add", link = "{link}")
+action nativeAdd with (a oftype integer, b oftype integer) returns integer
+
+assert_eq(nativeAdd(20, 22), 42)
+print("ok")
 "#
     )
 }
@@ -274,6 +298,18 @@ fn run_compiled_binary(bin: &Path, runtime_dir: &Path) {
     );
 }
 
+fn run_compiled_binary_without_runtime_env(bin: &Path) {
+    let output = Command::new(bin)
+        .output()
+        .expect("run compiled extern smoke binary without runtime env");
+    assert!(
+        output.status.success(),
+        "compiled extern smoke binary without runtime env failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn run_interpreter_source(source: &str) {
     let sandbox = temp_dir("fidan_extern_interp");
     let src = sandbox.join("extern_smoke.fdn");
@@ -321,6 +357,46 @@ fn extern_fixture_cranelift_aot_ok() {
 }
 
 #[test]
+fn extern_fixture_cranelift_aot_runs_without_runtime_env() {
+    if !cfg!(windows) {
+        return;
+    }
+
+    let fixture = build_fixture_artifacts().clone();
+    let source = build_test_source(&fixture);
+    let sandbox = temp_dir("fidan_extern_cranelift_staged");
+    let output = sandbox.join("extern_staged.exe");
+    compile_fixture_program(
+        &source,
+        Backend::Cranelift,
+        &output,
+        std::slice::from_ref(&fixture.runtime_dir),
+    );
+    run_compiled_binary_without_runtime_env(&output);
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn extern_fixture_cranelift_aot_top_level_native_return_is_not_mistyped() {
+    let fixture = build_fixture_artifacts().clone();
+    let source = build_top_level_native_source(&fixture);
+    let sandbox = temp_dir("fidan_extern_cranelift_top_level_native");
+    let output = if cfg!(windows) {
+        sandbox.join("extern_top_level_native.exe")
+    } else {
+        sandbox.join("extern_top_level_native")
+    };
+    compile_fixture_program(
+        &source,
+        Backend::Cranelift,
+        &output,
+        std::slice::from_ref(&fixture.runtime_dir),
+    );
+    run_compiled_binary(&output, &fixture.runtime_dir);
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
 fn extern_fixture_llvm_aot_ok() {
     if !llvm_available() {
         eprintln!(
@@ -344,6 +420,32 @@ fn extern_fixture_llvm_aot_ok() {
         std::slice::from_ref(&fixture.runtime_dir),
     );
     run_compiled_binary(&output, &fixture.runtime_dir);
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn extern_fixture_llvm_aot_runs_without_runtime_env() {
+    if !cfg!(windows) {
+        return;
+    }
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM staged extern AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let fixture = build_fixture_artifacts().clone();
+    let source = build_test_source(&fixture);
+    let sandbox = temp_dir("fidan_extern_llvm_staged");
+    let output = sandbox.join("extern_staged.exe");
+    compile_fixture_program(
+        &source,
+        Backend::Llvm,
+        &output,
+        std::slice::from_ref(&fixture.runtime_dir),
+    );
+    run_compiled_binary_without_runtime_env(&output);
     fs::remove_dir_all(&sandbox).ok();
 }
 

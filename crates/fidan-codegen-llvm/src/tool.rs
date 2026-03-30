@@ -44,11 +44,14 @@ fn link_windows(
     }
     cmd.arg(format!("/LIBPATH:{}", request.runtime_dir.display()));
     if request.link_dynamic {
-        cmd.arg("fidan_runtime.dll.lib");
+        cmd.arg(
+            find_dynamic_runtime_import_lib(&request.runtime_dir)
+                .context("cannot find `fidan_runtime.dll.lib` — install/rebuild Fidan first")?,
+        );
     } else {
         cmd.arg(
             find_static_runtime_lib(&request.runtime_dir)
-                .context("cannot find fidan_runtime.lib — install/rebuild Fidan first")?,
+                .context("cannot find `fidan_runtime.lib` — install/rebuild Fidan first")?,
         );
     }
     for input in extern_link_inputs {
@@ -178,25 +181,50 @@ fn collect_extern_link_inputs(request: &CompileRequest) -> Vec<String> {
 }
 
 fn append_windows_link_input(command: &mut Command, input: &str) {
+    let resolved = resolve_windows_link_input(input);
     let path_like = input.contains(std::path::MAIN_SEPARATOR)
         || input.contains('/')
         || input.contains('\\')
         || input.contains(':');
     if path_like {
-        command.arg(input);
+        command.arg(&resolved);
         return;
     }
 
-    let has_lib_suffix = Path::new(input)
+    let has_lib_suffix = Path::new(&resolved)
         .extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.eq_ignore_ascii_case("lib"))
         .unwrap_or(false);
     if has_lib_suffix {
-        command.arg(input);
+        command.arg(&resolved);
     } else {
-        command.arg(format!("{input}.lib"));
+        command.arg(format!("{resolved}.lib"));
     }
+}
+
+fn resolve_windows_link_input(input: &str) -> String {
+    let path = Path::new(input);
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase());
+
+    if ext.as_deref() != Some("dll") {
+        return input.to_owned();
+    }
+
+    let dll_lib = PathBuf::from(format!("{input}.lib"));
+    if dll_lib.is_file() {
+        return dll_lib.to_string_lossy().into_owned();
+    }
+
+    let import_lib = path.with_extension("lib");
+    if import_lib.is_file() {
+        return import_lib.to_string_lossy().into_owned();
+    }
+
+    dll_lib.to_string_lossy().into_owned()
 }
 
 fn append_unix_link_input(command: &mut Command, input: &str) {
@@ -209,6 +237,55 @@ fn append_unix_link_input(command: &mut Command, input: &str) {
         command.arg(input);
     } else {
         command.arg(format!("-l{input}"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_windows_link_input;
+
+    #[test]
+    fn windows_link_input_prefers_dll_lib_sidecar() {
+        let temp = std::env::temp_dir().join(format!(
+            "fidan_llvm_link_input_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).expect("create temp dir");
+        let dll = temp.join("ffi_demo.dll");
+        let dll_lib = temp.join("ffi_demo.dll.lib");
+        std::fs::write(&dll, []).expect("write dll placeholder");
+        std::fs::write(&dll_lib, []).expect("write import lib placeholder");
+
+        let resolved = resolve_windows_link_input(&dll.to_string_lossy());
+        assert_eq!(resolved, dll_lib.to_string_lossy());
+
+        std::fs::remove_dir_all(&temp).ok();
+    }
+
+    #[test]
+    fn windows_link_input_falls_back_to_plain_lib_sidecar() {
+        let temp = std::env::temp_dir().join(format!(
+            "fidan_llvm_link_input_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).expect("create temp dir");
+        let dll = temp.join("ffi_demo.dll");
+        let lib = temp.join("ffi_demo.lib");
+        std::fs::write(&dll, []).expect("write dll placeholder");
+        std::fs::write(&lib, []).expect("write import lib placeholder");
+
+        let resolved = resolve_windows_link_input(&dll.to_string_lossy());
+        assert_eq!(resolved, lib.to_string_lossy());
+
+        std::fs::remove_dir_all(&temp).ok();
     }
 }
 
@@ -354,22 +431,26 @@ fn find_static_runtime_lib(dir: &Path) -> Option<PathBuf> {
     } else {
         &["libfidan_runtime.a"]
     };
+    find_latest_runtime_artifact(dir, candidates)
+}
+
+fn find_dynamic_runtime_import_lib(dir: &Path) -> Option<PathBuf> {
+    if cfg!(target_os = "windows") {
+        find_latest_runtime_artifact(dir, &["fidan_runtime.dll.lib", "libfidan_runtime.dll.lib"])
+    } else {
+        None
+    }
+}
+
+fn find_latest_runtime_artifact(dir: &Path, names: &[&str]) -> Option<PathBuf> {
     let mut matches = Vec::new();
 
-    for &name in candidates {
-        let path = dir.join(name);
-        if let Ok(metadata) = std::fs::metadata(&path) {
-            if metadata.is_file() {
-                matches.push((metadata.modified().ok(), path));
-            }
-        }
-    }
-
-    let deps = dir.join("deps");
-    for &name in candidates {
-        let path = deps.join(name);
-        if let Ok(metadata) = std::fs::metadata(&path) {
-            if metadata.is_file() {
+    for candidate_dir in [Some(dir), Some(&dir.join("deps"))].into_iter().flatten() {
+        for &name in names {
+            let path = candidate_dir.join(name);
+            if let Ok(metadata) = std::fs::metadata(&path)
+                && metadata.is_file()
+            {
                 matches.push((metadata.modified().ok(), path));
             }
         }

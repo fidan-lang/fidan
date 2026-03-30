@@ -623,10 +623,32 @@ pub unsafe extern "C" fn fdn_panic(ptr: *mut FidanValue) -> ! {
 
 /// Assert `cond != 0`; panic with `msg` on failure.  Borrows `msg`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fdn_assert(cond: i8, msg: *mut FidanValue) {
+pub unsafe extern "C" fn fdn_assert(cond: i64, msg: *mut FidanValue) {
     if cond == 0 {
         eprintln!("assertion failed: {}", display(borrow(msg)));
         std::process::exit(1);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_assert_eq(lhs: *mut FidanValue, rhs: *mut FidanValue) {
+    let left = borrow(lhs).clone();
+    let right = borrow(rhs).clone();
+    if !values_equal(&left, &right) {
+        let msg = format!("assertEq failed: {} != {}", display(&left), display(&right));
+        let msg_val = into_raw(FidanValue::String(FidanString::new(&msg)));
+        fdn_throw_unhandled(msg_val);
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_assert_ne(lhs: *mut FidanValue, rhs: *mut FidanValue) {
+    let left = borrow(lhs).clone();
+    let right = borrow(rhs).clone();
+    if values_equal(&left, &right) {
+        let msg = format!("assertNe failed: both are {}", display(&left));
+        let msg_val = into_raw(FidanValue::String(FidanString::new(&msg)));
+        fdn_throw_unhandled(msg_val);
     }
 }
 
@@ -1360,7 +1382,7 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
                 None => into_raw(FidanValue::String(FidanString::new(""))),
             }
         }
-        "substring" | "slice" => {
+        "substring" | "substr" | "slice" => {
             let start = args
                 .first()
                 .and_then(|v| {
@@ -2106,7 +2128,7 @@ pub unsafe extern "C" fn fdn_stdlib_call(
 /// To add a new stdlib module, add one arm here — nothing else needs changing.
 fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut FidanValue> {
     match func {
-        "print" => {
+        "print" | "println" => {
             let parts: Vec<String> = args.iter().map(display).collect();
             println!("{}", parts.join(" "));
             Some(into_raw(FidanValue::Nothing))
@@ -2205,6 +2227,7 @@ fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut Fid
             let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Some(into_raw(FidanValue::Shared(SharedRef::new(inner))))
         }
+        "assertEq" | "assert_eq" | "assertNe" | "assert_ne" => Some(dispatch_test(func, args)),
         _ => None,
     }
 }
@@ -3384,7 +3407,7 @@ fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
                 Some(FidanValue::List(l)) => l.borrow().iter().cloned().collect::<Vec<_>>(),
                 _ => return into_raw(FidanValue::Nothing),
             };
-            let fn_val = args.into_iter().nth(1).unwrap_or(FidanValue::Nothing);
+            let fn_val = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
             let fn_ptr = into_raw(fn_val);
             let mut result = FidanList::new();
             for item in list {
@@ -3408,7 +3431,7 @@ fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
                 Some(FidanValue::List(l)) => l.borrow().iter().cloned().collect::<Vec<_>>(),
                 _ => return into_raw(FidanValue::Nothing),
             };
-            let fn_val = args.into_iter().nth(1).unwrap_or(FidanValue::Nothing);
+            let fn_val = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
             let fn_ptr = into_raw(fn_val);
             let mut result = FidanList::new();
             for item in list {
@@ -3436,7 +3459,7 @@ fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
                 Some(FidanValue::List(l)) => l.borrow().iter().cloned().collect::<Vec<_>>(),
                 _ => return into_raw(FidanValue::Nothing),
             };
-            let fn_val = args.into_iter().nth(1).unwrap_or(FidanValue::Nothing);
+            let fn_val = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
             let fn_ptr = into_raw(fn_val);
             for item in list {
                 let item_ptr = into_raw(item);
@@ -3450,13 +3473,13 @@ fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
             into_raw(FidanValue::Nothing)
         }
         "parallelReduce" | "parallel_reduce" => {
-            // parallelReduce(list, fn, initial) -> value
+            // parallelReduce(list, initial, fn) -> value
             let list = match args.first() {
                 Some(FidanValue::List(l)) => l.borrow().iter().cloned().collect::<Vec<_>>(),
                 _ => return into_raw(FidanValue::Nothing),
             };
-            let fn_val = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
-            let initial = args.into_iter().nth(2).unwrap_or(FidanValue::Nothing);
+            let initial = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
+            let fn_val = args.get(2).cloned().unwrap_or(FidanValue::Nothing);
             let fn_ptr = into_raw(fn_val);
             let mut acc = initial;
             for item in list {
@@ -3705,8 +3728,7 @@ fn dispatch_time(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
                     .unwrap_or(0),
             };
             let (_, _, _, h, min, s) = ms_to_civil(ms);
-            let ms_part = (ms.abs() % 1000) as u32;
-            let result = format!("{:02}:{:02}:{:02}.{:03}", h, min, s, ms_part);
+            let result = format!("{:02}:{:02}:{:02}", h, min, s);
             into_raw(FidanValue::String(FidanString::new(&result)))
         }
         "datetime" => {
@@ -3721,7 +3743,7 @@ fn dispatch_time(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
                     .unwrap_or(0),
             };
             let (y, mo, d, h, min, s) = ms_to_civil(ms);
-            let result = format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}", y, mo, d, h, min, s);
+            let result = format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, mo, d, h, min, s);
             into_raw(FidanValue::String(FidanString::new(&result)))
         }
         "format" | "formatDate" | "format_date" => {
@@ -3932,6 +3954,49 @@ unsafe fn call_trampoline_owned(fn_idx: usize, values: Vec<FidanValue>) -> Fidan
     }
 }
 
+unsafe fn call_dynamic_owned(function_value: FidanValue, args: Vec<FidanValue>) -> FidanValue {
+    let function_ptr = into_raw(function_value);
+    let mut arg_ptrs: Vec<*mut FidanValue> = args.into_iter().map(into_raw).collect();
+    let result_ptr = fdn_call_dynamic(function_ptr, arg_ptrs.as_ptr(), arg_ptrs.len() as i64);
+    drop(Box::from_raw(function_ptr));
+    for ptr in arg_ptrs.drain(..) {
+        drop(Box::from_raw(ptr));
+    }
+
+    if result_ptr.is_null() {
+        FidanValue::Nothing
+    } else {
+        *Box::from_raw(result_ptr)
+    }
+}
+
+unsafe fn call_method_owned(
+    receiver: FidanValue,
+    method_name: &str,
+    args: Vec<FidanValue>,
+) -> FidanValue {
+    let receiver_ptr = into_raw(receiver);
+    let method_bytes = method_name.as_bytes();
+    let mut arg_ptrs: Vec<*mut FidanValue> = args.into_iter().map(into_raw).collect();
+    let result_ptr = fdn_obj_invoke(
+        receiver_ptr,
+        method_bytes.as_ptr(),
+        method_bytes.len() as i64,
+        arg_ptrs.as_ptr(),
+        arg_ptrs.len() as i64,
+    );
+    drop(Box::from_raw(receiver_ptr));
+    for ptr in arg_ptrs.drain(..) {
+        drop(Box::from_raw(ptr));
+    }
+
+    if result_ptr.is_null() {
+        FidanValue::Nothing
+    } else {
+        *Box::from_raw(result_ptr)
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_spawn_expr(
     fn_idx: i64,
@@ -3939,8 +4004,16 @@ pub unsafe extern "C" fn fdn_spawn_expr(
     args_cnt: i64,
 ) -> *mut FidanValue {
     let args = build_parallel_args_from_ptrs(args_ptr, args_cnt);
-    let pending = FidanPending::spawn_with_args(args, move |bundle: ParallelArgs| {
-        call_trampoline_owned(fn_idx as usize, bundle.into_vec())
+    let pending = FidanPending::defer_fallible(args, move |bundle: ParallelArgs| {
+        let result = call_trampoline_owned(fn_idx as usize, bundle.into_vec());
+        if fdn_has_exception() != 0 {
+            let exn_ptr = fdn_catch_exception();
+            let message = display(borrow(exn_ptr));
+            drop(Box::from_raw(exn_ptr));
+            Err(message)
+        } else {
+            Ok(result)
+        }
     });
     into_raw(FidanValue::Pending(pending))
 }
@@ -3955,9 +4028,16 @@ pub unsafe extern "C" fn fdn_spawn_task(
 ) -> *mut FidanValue {
     let task_name = str_from_raw(name_bytes, name_len);
     let args = build_parallel_args_from_ptrs(args_ptr, args_cnt);
-    let pending = FidanPending::spawn_with_args(args, move |bundle: ParallelArgs| {
-        let _ = &task_name;
-        call_trampoline_owned(fn_idx as usize, bundle.into_vec())
+    let pending = FidanPending::spawn_fallible(args, move |bundle: ParallelArgs| {
+        let result = call_trampoline_owned(fn_idx as usize, bundle.into_vec());
+        if fdn_has_exception() != 0 {
+            let exn_ptr = fdn_catch_exception();
+            let message = display(borrow(exn_ptr));
+            drop(Box::from_raw(exn_ptr));
+            Err(format!("task `{task_name}` failed: {message}"))
+        } else {
+            Ok(result)
+        }
     });
     into_raw(FidanValue::Pending(pending))
 }
@@ -3970,18 +4050,56 @@ pub unsafe extern "C" fn fdn_spawn_concurrent(
     args_ptr: *const *mut FidanValue,
     args_cnt: i64,
 ) -> *mut FidanValue {
-    let values: Vec<FidanValue> = (0..args_cnt as usize)
-        .map(|i| borrow(*args_ptr.add(i)).clone())
-        .collect();
-    let result = call_trampoline_owned(fn_idx as usize, values);
-    let pending = if fdn_has_exception() != 0 {
-        let exn_ptr = fdn_catch_exception();
-        let message = display(borrow(exn_ptr));
-        drop(Box::from_raw(exn_ptr));
-        FidanPending::ready_result(Err(message))
-    } else {
-        FidanPending::ready_result(Ok(result))
-    };
+    let args = build_parallel_args_from_ptrs(args_ptr, args_cnt);
+    let pending = FidanPending::defer_fallible(args, move |bundle: ParallelArgs| {
+        let result = call_trampoline_owned(fn_idx as usize, bundle.into_vec());
+        if fdn_has_exception() != 0 {
+            let exn_ptr = fdn_catch_exception();
+            let message = display(borrow(exn_ptr));
+            drop(Box::from_raw(exn_ptr));
+            Err(message)
+        } else {
+            Ok(result)
+        }
+    });
+    into_raw(FidanValue::Pending(pending))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_spawn_dynamic(
+    function_or_receiver: *mut FidanValue,
+    method_bytes: *const u8,
+    method_len: i64,
+    args_ptr: *const *mut FidanValue,
+    args_cnt: i64,
+) -> *mut FidanValue {
+    let mut captures = vec![ParallelCapture(
+        borrow(function_or_receiver).parallel_capture(),
+    )];
+    captures.extend(
+        (0..args_cnt as usize)
+            .map(|i| ParallelCapture(borrow(*args_ptr.add(i)).parallel_capture())),
+    );
+    let args = ParallelArgs::from_captures(captures);
+    let method_name =
+        (!method_bytes.is_null() && method_len > 0).then(|| str_from_raw(method_bytes, method_len));
+    let pending = FidanPending::defer_fallible(args, move |bundle: ParallelArgs| {
+        let mut values = bundle.into_vec();
+        let first = values.remove(0);
+        let result = if let Some(ref method_name) = method_name {
+            call_method_owned(first, method_name, values)
+        } else {
+            call_dynamic_owned(first, values)
+        };
+        if fdn_has_exception() != 0 {
+            let exn_ptr = fdn_catch_exception();
+            let message = display(borrow(exn_ptr));
+            drop(Box::from_raw(exn_ptr));
+            Err(message)
+        } else {
+            Ok(result)
+        }
+    });
     into_raw(FidanValue::Pending(pending))
 }
 

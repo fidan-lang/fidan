@@ -171,7 +171,7 @@ impl<'a> BackendContext<'a> {
         map
     }
 
-    fn build_global_namespace_map(&self) -> HashMap<GlobalId, String> {
+    pub(crate) fn build_global_namespace_map(&self) -> HashMap<GlobalId, String> {
         let mut global_ns_map = HashMap::new();
         for (index, global) in self.payload.program.globals.iter().enumerate() {
             let Ok(global_name) = self.symbol_name(global.name) else {

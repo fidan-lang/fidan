@@ -27,16 +27,82 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::{Context, settings, settings::Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{Linkage, Module as CraneliftModule};
+use cranelift_module::{FuncId, Linkage, Module as CraneliftModule};
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{
-    BlockId, Callee, GlobalId, Instr, LocalId, MirFunction, MirLit, MirProgram, MirTy, Operand,
-    Rvalue, Terminator,
+    BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirFunction, MirLit, MirProgram, MirTy,
+    Operand, Rvalue, Terminator,
 };
 use fidan_stdlib::{
     MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_receiver_method, infer_stdlib_method,
 };
+use libffi::middle::{Cif, CodePtr, Type, arg};
+use std::cell::Cell;
 use std::collections::HashMap;
+use std::ffi::c_void;
+use std::sync::OnceLock;
+
+type JitLoadGlobalRawFn = unsafe fn(ctx: *mut c_void, global_id: u32) -> i64;
+type JitStoreGlobalRawFn = unsafe fn(ctx: *mut c_void, global_id: u32, raw: i64);
+type JitCallFnRawFn =
+    unsafe fn(ctx: *mut c_void, fn_id: u32, args_ptr: *const i64, arg_cnt: i64) -> i64;
+
+#[derive(Clone, Copy)]
+pub struct JitRuntimeHooks {
+    pub load_global_raw: JitLoadGlobalRawFn,
+    pub store_global_raw: JitStoreGlobalRawFn,
+    pub call_fn_raw: JitCallFnRawFn,
+}
+
+static JIT_RUNTIME_HOOKS: OnceLock<JitRuntimeHooks> = OnceLock::new();
+
+thread_local! {
+    static ACTIVE_JIT_CONTEXT: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) };
+}
+
+pub fn register_jit_runtime_hooks(hooks: JitRuntimeHooks) {
+    let _ = JIT_RUNTIME_HOOKS.set(hooks);
+}
+
+pub fn with_jit_runtime_context<T>(ctx: *mut c_void, f: impl FnOnce() -> T) -> T {
+    ACTIVE_JIT_CONTEXT.with(|cell| {
+        let previous = cell.replace(ctx);
+        let result = f();
+        cell.set(previous);
+        result
+    })
+}
+
+fn active_jit_runtime_hooks() -> &'static JitRuntimeHooks {
+    JIT_RUNTIME_HOOKS
+        .get()
+        .expect("JIT runtime hooks must be registered before executing JIT code")
+}
+
+fn active_jit_context() -> *mut c_void {
+    ACTIVE_JIT_CONTEXT.with(Cell::get)
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_load_global_raw(global_id: i64) -> i64 {
+    let hooks = active_jit_runtime_hooks();
+    let ctx = active_jit_context();
+    unsafe { (hooks.load_global_raw)(ctx, global_id as u32) }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_store_global_raw(global_id: i64, raw: i64) {
+    let hooks = active_jit_runtime_hooks();
+    let ctx = active_jit_context();
+    unsafe { (hooks.store_global_raw)(ctx, global_id as u32, raw) }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_call_fn_raw(fn_id: i64, args_ptr: *const i64, arg_cnt: i64) -> i64 {
+    let hooks = active_jit_runtime_hooks();
+    let ctx = active_jit_context();
+    unsafe { (hooks.call_fn_raw)(ctx, fn_id as u32, args_ptr, arg_cnt) }
+}
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -122,11 +188,17 @@ fn build_local_type_map(
                     }
                 }
                 Instr::LoadGlobal { dest, global } => {
-                    // Treat namespace slots as Integer (placeholder value)
-                    map.insert(*dest, MirTy::Integer);
                     if let Some(ns) = global_ns_map.get(global) {
+                        // Namespace sentinels are only used for stdlib method dispatch.
+                        map.insert(*dest, MirTy::Integer);
                         namespace_locals.insert(*dest, ns.clone());
                     } else {
+                        let global_ty = program
+                            .globals
+                            .get(global.0 as usize)
+                            .map(|g| g.ty.clone())
+                            .unwrap_or(MirTy::Dynamic);
+                        map.insert(*dest, global_ty);
                         namespace_locals.remove(dest);
                     }
                 }
@@ -254,11 +326,25 @@ fn infer_receiver_method_return_ty(
 #[derive(Clone)]
 pub struct JitFnEntry {
     /// Raw function pointer (unsafe to call — use `call_jit_fn` below).
-    pub fn_ptr: *const u8,
+    pub fn_ptr: Option<*const u8>,
     /// Logical parameter types (in same order as `MirFunction::params`).
     pub param_tys: Vec<MirTy>,
     /// Logical return type.
     pub return_ty: MirTy,
+}
+
+impl JitFnEntry {
+    fn fallback(func: &MirFunction) -> Self {
+        Self {
+            fn_ptr: None,
+            param_tys: func.params.iter().map(|p| p.ty.clone()).collect(),
+            return_ty: func.return_ty.clone(),
+        }
+    }
+
+    pub fn is_native(&self) -> bool {
+        self.fn_ptr.is_some()
+    }
 }
 
 // SAFETY: `fn_ptr` is a pointer into mmap-backed JIT memory that lives as long
@@ -277,6 +363,9 @@ pub struct JitCompiler {
     module: JITModule,
     ctx: Context,
     builder_ctx: FunctionBuilderContext,
+    load_global_raw_id: FuncId,
+    store_global_raw_id: FuncId,
+    call_fn_raw_id: FuncId,
     /// Counter used to generate unique function names.
     fn_counter: u32,
 }
@@ -300,24 +389,73 @@ impl JitCompiler {
             .expect("cranelift-native: unsupported host")
             .finish(flags)
             .expect("cranelift-native: failed to build ISA");
-        let builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
-        let module = JITModule::new(builder);
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        builder.symbol(
+            "fdn_jit_load_global_raw",
+            fdn_jit_load_global_raw as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_store_global_raw",
+            fdn_jit_store_global_raw as *const u8,
+        );
+        builder.symbol("fdn_jit_call_fn_raw", fdn_jit_call_fn_raw as *const u8);
+        let mut module = JITModule::new(builder);
+        let load_global_raw_id = {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(I64));
+            sig.returns.push(AbiParam::new(I64));
+            module
+                .declare_function("fdn_jit_load_global_raw", Linkage::Import, &sig)
+                .expect("declare fdn_jit_load_global_raw")
+        };
+        let store_global_raw_id = {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(I64));
+            sig.params.push(AbiParam::new(I64));
+            module
+                .declare_function("fdn_jit_store_global_raw", Linkage::Import, &sig)
+                .expect("declare fdn_jit_store_global_raw")
+        };
+        let call_fn_raw_id = {
+            let mut sig = module.make_signature();
+            sig.params.push(AbiParam::new(I64));
+            sig.params.push(AbiParam::new(I64));
+            sig.params.push(AbiParam::new(I64));
+            sig.returns.push(AbiParam::new(I64));
+            module
+                .declare_function("fdn_jit_call_fn_raw", Linkage::Import, &sig)
+                .expect("declare fdn_jit_call_fn_raw")
+        };
         let ctx = module.make_context();
         let builder_ctx = FunctionBuilderContext::new();
         Self {
             module,
             ctx,
             builder_ctx,
+            load_global_raw_id,
+            store_global_raw_id,
+            call_fn_raw_id,
             fn_counter: 0,
         }
     }
 
-    /// Attempt to JIT-compile `func`.
-    ///
-    /// Returns `Some(entry)` if compilation succeeded, `None` if the function
-    /// contains constructs the JIT cannot handle (non-primitive types, dynamic
-    /// calls, exception handling, etc.).
     pub fn compile_function(
+        &mut self,
+        func: &MirFunction,
+        program: &MirProgram,
+        interner: &SymbolInterner,
+    ) -> JitFnEntry {
+        self.try_compile_native(func, program, interner)
+            .unwrap_or_else(|| JitFnEntry::fallback(func))
+    }
+
+    /// Attempt to JIT-compile `func` to native code.
+    ///
+    /// Returns `None` when the function uses constructs that the native
+    /// Cranelift lowering does not yet support. The public `compile_function`
+    /// API wraps that case in a fallback entry so the hot-path manager still
+    /// handles the function cleanly.
+    fn try_compile_native(
         &mut self,
         func: &MirFunction,
         program: &MirProgram,
@@ -395,6 +533,15 @@ impl JitCompiler {
 
             // Per-function namespace tracking: LocalId → stdlib module name
             let mut namespace_locals: HashMap<LocalId, String> = HashMap::new();
+            let load_global_raw_ref = self
+                .module
+                .declare_func_in_func(self.load_global_raw_id, builder.func);
+            let store_global_raw_ref = self
+                .module
+                .declare_func_in_func(self.store_global_raw_id, builder.func);
+            let call_fn_raw_ref = self
+                .module
+                .declare_func_in_func(self.call_fn_raw_id, builder.func);
 
             // Declare Cranelift Variables for every MIR local.
             let num_locals = func.local_count as usize;
@@ -436,53 +583,88 @@ impl JitCompiler {
                     match instr {
                         Instr::Assign { dest, ty, rhs } => {
                             let effective_ty = local_types.get(dest).unwrap_or(ty);
-                            let val = emit_rvalue(
-                                &mut builder,
-                                &cl_vars,
-                                &local_types,
-                                rhs,
-                                &namespace_locals,
+                            let emit_ctx = RvalueEmitCtx {
+                                vars: &cl_vars,
+                                local_types: &local_types,
+                                ns_locals: &namespace_locals,
                                 interner,
-                                effective_ty,
-                            )?;
+                                call_fn_raw_ref,
+                            };
+                            let val = emit_rvalue(&mut builder, rhs, effective_ty, &emit_ctx)?;
                             builder.def_var(cl_vars[dest.0 as usize], val);
                         }
 
                         Instr::LoadGlobal { dest, global } => {
                             if let Some(ns) = global_ns_map.get(global) {
                                 namespace_locals.insert(*dest, ns.clone());
+                                let dummy = builder.ins().iconst(I64, 0);
+                                builder.def_var(cl_vars[dest.0 as usize], dummy);
+                            } else {
+                                namespace_locals.remove(dest);
+                                let raw = emit_load_global_raw(
+                                    &mut builder,
+                                    load_global_raw_ref,
+                                    *global,
+                                );
+                                let dest_ty = local_types.get(dest).unwrap_or(&MirTy::Dynamic);
+                                let actual = abi_i64_to_native(&mut builder, raw, dest_ty);
+                                builder.def_var(cl_vars[dest.0 as usize], actual);
                             }
-                            let dummy = builder.ins().iconst(I64, 0);
-                            builder.def_var(cl_vars[dest.0 as usize], dummy);
                         }
 
                         Instr::Call {
                             dest, callee, args, ..
                         } => {
-                            if let Callee::Method {
-                                receiver: Operand::Local(recv),
-                                method,
-                            } = callee
-                            {
-                                let ns = namespace_locals.get(recv)?;
-                                let mname = interner.resolve(*method);
-                                let val = emit_stdlib_method_call(
-                                    &mut builder,
-                                    &cl_vars,
-                                    &local_types,
-                                    ns.as_ref(),
-                                    mname.as_ref(),
-                                    args,
-                                )?;
-                                if let Some(d) = dest {
-                                    builder.def_var(cl_vars[d.0 as usize], val);
+                            let val = match callee {
+                                Callee::Method {
+                                    receiver: Operand::Local(recv),
+                                    method,
+                                } => {
+                                    let ns = namespace_locals.get(recv)?;
+                                    let mname = interner.resolve(*method);
+                                    emit_stdlib_method_call(
+                                        &mut builder,
+                                        &cl_vars,
+                                        &local_types,
+                                        ns.as_ref(),
+                                        mname.as_ref(),
+                                        args,
+                                    )?
                                 }
-                            } else {
-                                return None;
+                                Callee::Fn(fid) => {
+                                    let result_ty = dest
+                                        .and_then(|d| local_types.get(&d))
+                                        .unwrap_or(&MirTy::Nothing);
+                                    emit_call_fn_raw(
+                                        &mut builder,
+                                        &cl_vars,
+                                        &local_types,
+                                        call_fn_raw_ref,
+                                        *fid,
+                                        args,
+                                        result_ty,
+                                    )?
+                                }
+                                _ => return None,
+                            };
+                            if let Some(d) = dest {
+                                builder.def_var(cl_vars[d.0 as usize], val);
                             }
                         }
+                        Instr::StoreGlobal { global, value } => {
+                            let native_value = load_operand(&mut builder, &cl_vars, value);
+                            let global_ty = program
+                                .globals
+                                .get(global.0 as usize)
+                                .map(|g| &g.ty)
+                                .unwrap_or(&MirTy::Dynamic);
+                            let raw = native_to_abi_i64(&mut builder, native_value, global_ty);
+                            emit_store_global_raw(&mut builder, store_global_raw_ref, *global, raw);
+                        }
 
-                        // Abort JIT on any unsupported instruction
+                        // Abort native lowering on any unsupported instruction.
+                        // The public JIT entry will transparently fall back to
+                        // interpreter execution for this function.
                         Instr::PushCatch(_)
                         | Instr::PopCatch
                         | Instr::SpawnConcurrent { .. }
@@ -492,13 +674,12 @@ impl JitCompiler {
                         | Instr::AwaitPending { .. }
                         | Instr::JoinAll { .. }
                         | Instr::ParallelIter { .. }
-                        | Instr::CertainCheck { .. }
                         | Instr::SetField { .. }
                         | Instr::GetField { .. }
                         | Instr::SetIndex { .. }
-                        | Instr::GetIndex { .. }
-                        | Instr::StoreGlobal { .. } => return None,
+                        | Instr::GetIndex { .. } => return None,
 
+                        Instr::CertainCheck { .. } => {}
                         Instr::Drop { .. } | Instr::Nop => {}
                     }
                 }
@@ -597,7 +778,7 @@ impl JitCompiler {
         let fn_ptr = self.module.get_finalized_function(func_id);
 
         Some(JitFnEntry {
-            fn_ptr,
+            fn_ptr: Some(fn_ptr),
             param_tys: func.params.iter().map(|p| p.ty.clone()).collect(),
             return_ty: func.return_ty.clone(),
         })
@@ -606,30 +787,48 @@ impl JitCompiler {
 
 // ── Rvalue emission ────────────────────────────────────────────────────────────
 
+struct RvalueEmitCtx<'a> {
+    vars: &'a [Variable],
+    local_types: &'a HashMap<LocalId, MirTy>,
+    ns_locals: &'a HashMap<LocalId, String>,
+    interner: &'a SymbolInterner,
+    call_fn_raw_ref: cranelift_codegen::ir::FuncRef,
+}
+
 fn emit_rvalue(
     builder: &mut FunctionBuilder,
-    vars: &[Variable],
-    local_types: &HashMap<LocalId, MirTy>,
     rhs: &Rvalue,
-    ns_locals: &HashMap<LocalId, String>,
-    interner: &SymbolInterner,
     dest_ty: &MirTy,
+    ctx: &RvalueEmitCtx<'_>,
 ) -> Option<Value> {
     match rhs {
         Rvalue::Literal(lit) => Some(emit_literal(builder, lit)),
 
-        Rvalue::Use(op) => Some(load_operand(builder, vars, op)),
+        Rvalue::Use(op) => Some(load_operand(builder, ctx.vars, op)),
 
         Rvalue::Binary { op, lhs, rhs } => {
-            let lv = load_operand(builder, vars, lhs);
-            let rv = load_operand(builder, vars, rhs);
+            let lv = load_operand(builder, ctx.vars, lhs);
+            let rv = load_operand(builder, ctx.vars, rhs);
             emit_binop(builder, *op, lv, rv, dest_ty)
         }
 
         Rvalue::Unary { op, operand } => {
-            let v = load_operand(builder, vars, operand);
+            let v = load_operand(builder, ctx.vars, operand);
             emit_unop(builder, *op, v, dest_ty)
         }
+
+        Rvalue::Call {
+            callee: Callee::Fn(fid),
+            args,
+        } => emit_call_fn_raw(
+            builder,
+            ctx.vars,
+            ctx.local_types,
+            ctx.call_fn_raw_ref,
+            *fid,
+            args,
+            dest_ty,
+        ),
 
         Rvalue::Call {
             callee:
@@ -639,12 +838,12 @@ fn emit_rvalue(
                 },
             args,
         } => {
-            let ns = ns_locals.get(recv)?;
-            let mname = interner.resolve(*method);
+            let ns = ctx.ns_locals.get(recv)?;
+            let mname = ctx.interner.resolve(*method);
             emit_stdlib_method_call(
                 builder,
-                vars,
-                local_types,
+                ctx.vars,
+                ctx.local_types,
                 ns.as_ref(),
                 mname.as_ref(),
                 args,
@@ -653,6 +852,58 @@ fn emit_rvalue(
 
         _ => None,
     }
+}
+
+fn emit_load_global_raw(
+    builder: &mut FunctionBuilder,
+    load_global_raw_ref: cranelift_codegen::ir::FuncRef,
+    global: GlobalId,
+) -> Value {
+    let raw = builder.ins().iconst(I64, global.0 as i64);
+    let call = builder.ins().call(load_global_raw_ref, &[raw]);
+    builder
+        .inst_results(call)
+        .first()
+        .copied()
+        .expect("fdn_jit_load_global_raw result")
+}
+
+fn emit_store_global_raw(
+    builder: &mut FunctionBuilder,
+    store_global_raw_ref: cranelift_codegen::ir::FuncRef,
+    global: GlobalId,
+    raw_value: Value,
+) {
+    let raw_global = builder.ins().iconst(I64, global.0 as i64);
+    builder
+        .ins()
+        .call(store_global_raw_ref, &[raw_global, raw_value]);
+}
+
+fn emit_call_fn_raw(
+    builder: &mut FunctionBuilder,
+    vars: &[Variable],
+    local_types: &HashMap<LocalId, MirTy>,
+    call_fn_raw_ref: cranelift_codegen::ir::FuncRef,
+    fn_id: FunctionId,
+    args: &[Operand],
+    dest_ty: &MirTy,
+) -> Option<Value> {
+    let arg_values = args
+        .iter()
+        .map(|arg| operand_to_abi_i64(builder, vars, local_types, arg))
+        .collect::<Vec<_>>();
+    let (args_ptr, args_cnt) = stack_i64_array(builder, &arg_values);
+    let fn_raw = builder.ins().iconst(I64, fn_id.0 as i64);
+    let call = builder
+        .ins()
+        .call(call_fn_raw_ref, &[fn_raw, args_ptr, args_cnt]);
+    let raw = builder
+        .inst_results(call)
+        .first()
+        .copied()
+        .expect("fdn_jit_call_fn_raw result");
+    Some(abi_i64_to_native(builder, raw, dest_ty))
 }
 
 fn emit_literal(builder: &mut FunctionBuilder, lit: &MirLit) -> Value {
@@ -853,6 +1104,41 @@ fn load_operand(builder: &mut FunctionBuilder, vars: &[Variable], op: &Operand) 
     }
 }
 
+fn operand_to_abi_i64(
+    builder: &mut FunctionBuilder,
+    vars: &[Variable],
+    local_types: &HashMap<LocalId, MirTy>,
+    op: &Operand,
+) -> Value {
+    let val = load_operand(builder, vars, op);
+    let ty = match op {
+        Operand::Local(local) => local_types.get(local).unwrap_or(&MirTy::Dynamic),
+        Operand::Const(MirLit::Float(_)) => &MirTy::Float,
+        Operand::Const(MirLit::Bool(_)) => &MirTy::Boolean,
+        Operand::Const(MirLit::Int(_)) => &MirTy::Integer,
+        _ => &MirTy::Dynamic,
+    };
+    native_to_abi_i64(builder, val, ty)
+}
+
+fn stack_i64_array(builder: &mut FunctionBuilder, values: &[Value]) -> (Value, Value) {
+    if values.is_empty() {
+        return (builder.ins().iconst(I64, 0), builder.ins().iconst(I64, 0));
+    }
+
+    let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+        (values.len() * 8) as u32,
+        3u8,
+    ));
+    for (index, value) in values.iter().enumerate() {
+        builder.ins().stack_store(*value, slot, (index as i32) * 8);
+    }
+    let ptr = builder.ins().stack_addr(I64, slot, 0);
+    let cnt = builder.ins().iconst(I64, values.len() as i64);
+    (ptr, cnt)
+}
+
 // ── Phi argument collection ────────────────────────────────────────────────────
 
 fn collect_phi_args(
@@ -970,92 +1256,63 @@ pub fn call_jit_fn(
     entry: &JitFnEntry,
     args: &[fidan_runtime::FidanValue],
 ) -> fidan_runtime::FidanValue {
-    let mut raw_args = [0i64; 16];
-    let n = args.len().min(16);
-    for (i, (v, ty)) in args.iter().zip(entry.param_tys.iter()).enumerate().take(n) {
-        raw_args[i] = fidan_value_to_abi(v, ty);
+    let fn_ptr = entry
+        .fn_ptr
+        .expect("call_jit_fn requires a native JIT entry");
+    let raw_args = args
+        .iter()
+        .zip(entry.param_tys.iter())
+        .map(|(value, ty)| JitArgValue::from_fidan(value, ty))
+        .collect::<Vec<_>>();
+    let ffi_args = raw_args
+        .iter()
+        .map(JitArgValue::as_ffi_arg)
+        .collect::<Vec<_>>();
+    let cif = Cif::new(
+        entry.param_tys.iter().map(jit_abi_ffi_type),
+        jit_abi_ffi_type(&entry.return_ty),
+    );
+    let code_ptr = CodePtr(fn_ptr as *mut _);
+
+    unsafe {
+        match entry.return_ty {
+            MirTy::Integer => fidan_runtime::FidanValue::Integer(cif.call(code_ptr, &ffi_args)),
+            MirTy::Float => fidan_runtime::FidanValue::Float(f64::from_bits(
+                cif.call::<i64>(code_ptr, &ffi_args) as u64,
+            )),
+            MirTy::Boolean => {
+                fidan_runtime::FidanValue::Boolean(cif.call::<i64>(code_ptr, &ffi_args) != 0)
+            }
+            _ => fidan_runtime::FidanValue::Nothing,
+        }
     }
-    let result_i64: i64 = unsafe { dispatch_native(entry.fn_ptr, n, &raw_args) };
-    abi_to_fidan_value(result_i64, &entry.return_ty)
 }
 
-fn fidan_value_to_abi(v: &fidan_runtime::FidanValue, _ty: &MirTy) -> i64 {
-    match v {
-        fidan_runtime::FidanValue::Integer(n) => *n,
-        fidan_runtime::FidanValue::Float(f) => f.to_bits() as i64,
-        fidan_runtime::FidanValue::Boolean(b) => *b as i64,
-        _ => 0,
+enum JitArgValue {
+    Integer(i64),
+}
+
+impl JitArgValue {
+    fn from_fidan(value: &fidan_runtime::FidanValue, ty: &MirTy) -> Self {
+        match (value, ty) {
+            (fidan_runtime::FidanValue::Integer(n), MirTy::Integer) => Self::Integer(*n),
+            (fidan_runtime::FidanValue::Float(f), MirTy::Float) => {
+                Self::Integer(f.to_bits() as i64)
+            }
+            (fidan_runtime::FidanValue::Boolean(b), MirTy::Boolean) => Self::Integer(i64::from(*b)),
+            _ => Self::Integer(0),
+        }
+    }
+
+    fn as_ffi_arg(&self) -> libffi::middle::Arg<'_> {
+        match self {
+            Self::Integer(value) => arg(value),
+        }
     }
 }
 
-fn abi_to_fidan_value(raw: i64, ty: &MirTy) -> fidan_runtime::FidanValue {
-    match ty {
-        MirTy::Integer => fidan_runtime::FidanValue::Integer(raw),
-        MirTy::Float => fidan_runtime::FidanValue::Float(f64::from_bits(raw as u64)),
-        MirTy::Boolean => fidan_runtime::FidanValue::Boolean(raw != 0),
-        _ => fidan_runtime::FidanValue::Nothing,
-    }
-}
-
-/// Dispatch to a native JIT function with 0–8 I64 arguments.
-///
-/// # Safety
-/// `fn_ptr` must point to valid JIT-compiled code that follows the ABI
-/// convention (all I64 params, I64 return, C calling convention).
-unsafe fn dispatch_native(fn_ptr: *const u8, n: usize, args: &[i64; 16]) -> i64 {
-    type F0 = unsafe extern "C" fn() -> i64;
-    type F1 = unsafe extern "C" fn(i64) -> i64;
-    type F2 = unsafe extern "C" fn(i64, i64) -> i64;
-    type F3 = unsafe extern "C" fn(i64, i64, i64) -> i64;
-    type F4 = unsafe extern "C" fn(i64, i64, i64, i64) -> i64;
-    type F5 = unsafe extern "C" fn(i64, i64, i64, i64, i64) -> i64;
-    type F6 = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64;
-    type F7 = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64) -> i64;
-    type F8 = unsafe extern "C" fn(i64, i64, i64, i64, i64, i64, i64, i64) -> i64;
-    let p = fn_ptr as usize;
-    // Rust 2024: explicit unsafe blocks required even inside unsafe fn.
-    match n {
-        0 => unsafe {
-            let f: F0 = std::mem::transmute(p);
-            f()
-        },
-        1 => unsafe {
-            let f: F1 = std::mem::transmute(p);
-            f(args[0])
-        },
-        2 => unsafe {
-            let f: F2 = std::mem::transmute(p);
-            f(args[0], args[1])
-        },
-        3 => unsafe {
-            let f: F3 = std::mem::transmute(p);
-            f(args[0], args[1], args[2])
-        },
-        4 => unsafe {
-            let f: F4 = std::mem::transmute(p);
-            f(args[0], args[1], args[2], args[3])
-        },
-        5 => unsafe {
-            let f: F5 = std::mem::transmute(p);
-            f(args[0], args[1], args[2], args[3], args[4])
-        },
-        6 => unsafe {
-            let f: F6 = std::mem::transmute(p);
-            f(args[0], args[1], args[2], args[3], args[4], args[5])
-        },
-        7 => unsafe {
-            let f: F7 = std::mem::transmute(p);
-            f(
-                args[0], args[1], args[2], args[3], args[4], args[5], args[6],
-            )
-        },
-        _ => unsafe {
-            let f: F8 = std::mem::transmute(p);
-            f(
-                args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7],
-            )
-        },
-    }
+fn jit_abi_ffi_type(_ty: &MirTy) -> Type {
+    Type::i64()
 }
 
 fn stdlib_kind_to_mir_ty(kind: StdlibValueKind) -> MirTy {
@@ -1109,5 +1366,96 @@ fn mir_ty_to_stdlib_kind(ty: MirTy) -> StdlibValueKind {
         MirTy::Dict(_, _) => StdlibValueKind::Dict,
         MirTy::Nothing => StdlibValueKind::Nothing,
         _ => StdlibValueKind::Dynamic,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fidan_lexer::Lexer;
+    use fidan_source::{FileId, SourceFile};
+    use std::sync::Arc;
+
+    fn lower(src: &str) -> (MirProgram, Arc<SymbolInterner>) {
+        let interner = Arc::new(SymbolInterner::new());
+        let file = SourceFile::new(FileId(0), "<test>", src);
+        let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        let (module, _) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+        let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+        let hir = fidan_hir::lower_module(&module, &typed, &interner);
+        let mut mir = fidan_mir::lower_program(&hir, &interner, &[]);
+        fidan_passes::run_all(&mut mir);
+        (mir, interner)
+    }
+
+    #[test]
+    fn unsupported_native_lowering_produces_fallback_entry() {
+        let (mir, interner) = lower(
+            r#"object Counter {
+                var value oftype integer
+
+                action bump returns integer {
+                    this.value = this.value + 1
+                    return this.value
+                }
+            }"#,
+        );
+        let func = mir
+            .functions
+            .iter()
+            .find(|func| interner.resolve(func.name).as_ref() == "bump")
+            .expect("missing bump method");
+        let mut jit = JitCompiler::new();
+        let entry = jit.compile_function(func, &mir, &interner);
+        assert!(
+            !entry.is_native(),
+            "expected object-field method to use fallback JIT entry"
+        );
+    }
+
+    #[test]
+    fn primitive_global_function_compiles_natively() {
+        let (mir, interner) = lower(
+            r#"var base = 41
+
+            action read returns integer {
+                return base + 1
+            }"#,
+        );
+        let func = mir
+            .functions
+            .iter()
+            .find(|func| interner.resolve(func.name).as_ref() == "read")
+            .expect("missing read action");
+        let mut jit = JitCompiler::new();
+        let entry = jit.compile_function(func, &mir, &interner);
+        assert!(
+            entry.is_native(),
+            "expected primitive global reader to compile natively"
+        );
+    }
+
+    #[test]
+    fn primitive_direct_call_compiles_natively() {
+        let (mir, interner) = lower(
+            r#"action inc with (n oftype integer) returns integer {
+                return n + 1
+            }
+
+            action read returns integer {
+                return inc(41)
+            }"#,
+        );
+        let func = mir
+            .functions
+            .iter()
+            .find(|func| interner.resolve(func.name).as_ref() == "read")
+            .expect("missing read action");
+        let mut jit = JitCompiler::new();
+        let entry = jit.compile_function(func, &mir, &interner);
+        assert!(
+            entry.is_native(),
+            "expected primitive direct-call action to compile natively"
+        );
     }
 }

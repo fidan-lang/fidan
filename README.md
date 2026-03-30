@@ -56,7 +56,7 @@ Most languages make a trade-off: either **readable** (Python) or **fast** (C++/R
 | **Readable code** | English-like syntax (`and`, `or`, `not`, `is`, `certain`, `otherwise when`…) |
 | **Safety without ceremony** | Null-safety analysis, `certain` non-null guarantees, data-race detection at compile time |
 | **Performance** | MIR-level optimization passes + Cranelift JIT (`@precompile`, auto hot-path with safe interpreter fallback) + Cranelift/LLVM AOT |
-| **Real concurrency** | `parallel` + `spawn`/`await` use OS threads; `concurrent` gives structured same-thread concurrency |
+| **Real concurrency** | `parallel` uses OS threads; `spawn`/`await` and `concurrent` provide structured same-thread async-style scheduling |
 | **Great tooling** | Formatter, linter, fixer, REPL, LSP, VS Code extension — all built-in, not plugins |
 | **Reproducible debugging** | `--replay` captures stdin and replays crashes exactly |
 | **Readable errors** | Ariadne-rendered diagnostics with source context, inline carets, fix-it patches |
@@ -448,7 +448,7 @@ attempt {
 
 Fidan has three concurrency models:
 
-#### `spawn` / `await` — explicit async
+#### `spawn` / `await` — explicit same-thread async
 
 ```fidan
 action fetch_data with (certain url oftype string) returns string {
@@ -463,6 +463,11 @@ var users = await handle1
 var posts = await handle2
 print("Got {users} and {posts}")
 ```
+
+`spawn` is lazy: the task is scheduled on the current thread and runs at
+`await`/join checkpoints. Same-thread tasks are driven by a cooperative FIFO
+scheduler, so `concurrent` blocks and nested `spawn`/`await` yield to other
+ready same-thread tasks instead of starting OS threads.
 
 #### `parallel` block — run tasks simultaneously
 
@@ -491,6 +496,10 @@ concurrent {
     task { callExternalAPI() }
 }
 ```
+
+`concurrent` is cooperative and same-thread: it shares the caller thread,
+preserves normal mutable-state semantics, and lets `await` yield to sibling
+ready tasks in the block.
 
 #### `Shared` — thread-safe shared state
 
@@ -599,7 +608,7 @@ assert_eq(addNative(20, 22), 42)
 
 Native ABI `@extern` currently supports:
 
-- up to 4 parameters
+- arbitrary numbers of parameters
 - parameter types: `integer`, `float`, `boolean`, `handle`
 - return types: `integer`, `float`, `boolean`, `nothing`, `handle`
 
