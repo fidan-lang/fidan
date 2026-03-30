@@ -6,7 +6,7 @@
 # Three execution modes:
 #   1. Sequential          — a single while-loop.
 #   2. parallel { task }   — 4 named OS-thread tasks, each owns one Shared slot.
-#   3. spawn / await       — 4 spawned background threads, results via await.
+#   3. spawn / await       — 4 same-thread deferred tasks, resolved via await.
 #
 # Usage:
 #   fidan run test/examples/parallel_benchmark.fdn
@@ -95,9 +95,9 @@ print("result : {ptask_res}")
 print("time   : {ptask_ms} ms")
 print("")
 
-# ── spawn / await — 4 independent background threads ─────────────────────────
-# All four spawns happen BEFORE any await, so all 4 tasks run concurrently.
-# Total wall-clock time ≈ max(task_time) rather than sum(task_time).
+# ── spawn / await — 4 deferred same-thread tasks ─────────────────────────────
+# This demonstrates structured async-style scheduling, not multicore speedup.
+# For real CPU parallelism, prefer the `parallel` block above.
 print("--- spawn / await (4 tasks) ---")
 var t2 = time.now()
 var h1 = spawn compute_range(0,         CHUNK)
@@ -128,4 +128,4 @@ print("")
 
 print_speedup("parallel task speedup", seq_ms, ptask_ms)
 print_speedup("spawn/await speedup  ", seq_ms, spawn_ms)
-print("(expected: ~2-4x on a 4-core machine)")
+print("(expected: `parallel` benefits from cores; `spawn/await` shows deferred task composition)")
