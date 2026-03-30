@@ -675,6 +675,35 @@ Note: `fidan fix` can remove all unused imports automatically:
 "#,
         ),
 
+        "W1006" => Some(
+            r#"A statement appears after control flow has already unconditionally left
+the current block.  That later statement can never execute, so it is
+dead code.
+
+This warning is emitted after terminators such as:
+
+    return ...
+    panic ...
+
+and also after compound constructs where **all** branches terminate, such
+as a fully-returning `if/otherwise`, `check`, or `attempt`.
+
+Erroneous example:
+
+    action sum returns integer {
+        return 1
+        print("never runs")   # warning: unreachable statement
+    }
+
+Fix: remove the dead statement or move it before the terminator:
+
+    action sum returns integer {
+        print("runs")
+        return 1
+    }
+"#,
+        ),
+
         // ── Warnings: style ───────────────────────────────────────────────────
         "W2001" => Some(
             r#"The file passed to `fidan run` or `fidan build` does not end in `.fdn`.

@@ -559,7 +559,11 @@ fn fidan_to_lsp(d: &FidanDiag, file: &SourceFile) -> lsp::Diagnostic {
         source: Some("fidan".to_string()),
         message: d.message.clone(),
         related_information: None,
-        tags: None,
+        tags: if d.code == "W1006" {
+            Some(vec![lsp::DiagnosticTag::UNNECESSARY])
+        } else {
+            None
+        },
         code_description: None,
         data,
     }
@@ -763,6 +767,22 @@ var argv = env.args()
                 .identifier_spans
                 .iter()
                 .any(|(_, name)| name == "Pending")
+        );
+    }
+
+    #[test]
+    fn unreachable_warning_is_tagged_unnecessary_for_editor_dimming() {
+        let file = SourceFile::new(FileId(0), "<test>", "return 1\nprint(2)\n");
+        let diag = FidanDiag::warning(
+            fidan_diagnostics::diag_code!("W1006"),
+            "unreachable statement; this code can never execute",
+            Span::new(FileId(0), 9, 17),
+        );
+        let lsp = fidan_to_lsp(&diag, &file);
+        assert_eq!(
+            lsp.tags,
+            Some(vec![lsp::DiagnosticTag::UNNECESSARY]),
+            "expected unreachable diagnostics to be dimmed"
         );
     }
 

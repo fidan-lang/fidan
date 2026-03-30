@@ -111,6 +111,19 @@ mod tests {
             .collect()
     }
 
+    fn check_warning_codes(src: &str) -> Vec<String> {
+        let interner = Arc::new(SymbolInterner::new());
+        let file = SourceFile::new(FileId(0), "<test>", src);
+        let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        let (module, _) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+        let diags = typecheck(&module, interner);
+        diags
+            .into_iter()
+            .filter(|d| d.severity == Severity::Warning)
+            .map(|d| d.code.to_string())
+            .collect()
+    }
+
     // ── Well-typed programs produce no errors ─────────────────────────────────
 
     #[test]
@@ -364,6 +377,146 @@ mod tests {
             }"#
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn warns_on_statement_after_return() {
+        let warnings = check_warning_codes(
+            r#"action sum returns integer {
+                return 1
+                print("dead")
+            }"#,
+        );
+        assert!(
+            warnings.iter().any(|code| code == "W1006"),
+            "expected W1006, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warns_on_statement_after_panic() {
+        let warnings = check_warning_codes(
+            r#"action blow_up {
+                panic("boom")
+                print("dead")
+            }"#,
+        );
+        assert!(
+            warnings.iter().any(|code| code == "W1006"),
+            "expected W1006, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warns_after_fully_terminating_if_chain() {
+        let warnings = check_warning_codes(
+            r#"action choose with (certain flag oftype boolean) returns integer {
+                if flag {
+                    return 1
+                } otherwise {
+                    return 2
+                }
+                print("dead")
+            }"#,
+        );
+        assert!(
+            warnings.iter().any(|code| code == "W1006"),
+            "expected W1006, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warns_on_if_false_branch_body() {
+        let warnings = check_warning_codes(
+            r#"action main {
+                if false {
+                    print("dead")
+                }
+            }"#,
+        );
+        assert!(
+            warnings.iter().any(|code| code == "W1006"),
+            "expected W1006, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warns_on_else_after_if_true() {
+        let warnings = check_warning_codes(
+            r#"action main {
+                if true {
+                    print("live")
+                } otherwise {
+                    print("dead")
+                }
+            }"#,
+        );
+        assert!(
+            warnings.iter().any(|code| code == "W1006"),
+            "expected W1006, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warns_on_while_false_body() {
+        let warnings = check_warning_codes(
+            r#"action main {
+                while false {
+                    print("dead")
+                }
+            }"#,
+        );
+        assert!(
+            warnings.iter().any(|code| code == "W1006"),
+            "expected W1006, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warns_on_const_false_identifier_condition() {
+        let warnings = check_warning_codes(
+            r#"action main {
+                const var x = false
+                if x {
+                    print("dead")
+                }
+            }"#,
+        );
+        assert!(
+            warnings.iter().any(|code| code == "W1006"),
+            "expected W1006, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warns_on_constant_comparison_condition() {
+        let warnings = check_warning_codes(
+            r#"action main {
+                if 1 > 2 {
+                    print("dead")
+                }
+            }"#,
+        );
+        assert!(
+            warnings.iter().any(|code| code == "W1006"),
+            "expected W1006, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warns_on_const_numeric_comparison_condition() {
+        let warnings = check_warning_codes(
+            r#"action main {
+                const var limit = 1
+                if limit > 2 {
+                    print("dead")
+                }
+            }"#,
+        );
+        assert!(
+            warnings.iter().any(|code| code == "W1006"),
+            "expected W1006, got {warnings:?}"
         );
     }
 }

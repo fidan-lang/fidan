@@ -4,6 +4,15 @@ use fidan_lexer::Symbol;
 use fidan_source::Span;
 use rustc_hash::FxHashMap;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConstValue {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    String(String),
+    Nothing,
+}
+
 /// The kind of scope currently active.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeKind {
@@ -43,6 +52,7 @@ pub struct SymbolInfo {
     pub span: Span,
     pub is_mutable: bool,
     pub initialized: Initialized,
+    pub const_value: Option<ConstValue>,
 }
 
 /// One lexical scope level.

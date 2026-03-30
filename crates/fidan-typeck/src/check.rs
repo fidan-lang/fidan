@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use crate::scope::{Initialized, ScopeKind, SymbolInfo, SymbolKind, SymbolTable};
+use crate::scope::{ConstValue, Initialized, ScopeKind, SymbolInfo, SymbolKind, SymbolTable};
 use crate::types::FidanType;
 use fidan_ast::{
     AstArena, BinOp, Decorator, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp,
@@ -171,6 +171,7 @@ impl TypeChecker {
                     span: dummy,
                     is_mutable: false,
                     initialized: Initialized::Yes,
+                    const_value: None,
                 },
             );
         }
@@ -193,6 +194,7 @@ impl TypeChecker {
                 span,
                 is_mutable: false,
                 initialized: Initialized::Yes,
+                const_value: None,
             },
         );
     }
@@ -209,6 +211,7 @@ impl TypeChecker {
                 span,
                 is_mutable: false,
                 initialized: Initialized::Yes,
+                const_value: None,
             },
         );
     }
@@ -242,6 +245,7 @@ impl TypeChecker {
                 span,
                 is_mutable: !is_const,
                 initialized: Initialized::Yes,
+                const_value: None,
             },
         );
     }
@@ -263,6 +267,7 @@ impl TypeChecker {
                 span: dummy,
                 is_mutable: false,
                 initialized: Initialized::Yes,
+                const_value: None,
             },
         );
     }
@@ -457,6 +462,7 @@ impl TypeChecker {
                         span: *span,
                         is_mutable: false,
                         initialized: Initialized::Yes,
+                        const_value: None,
                     },
                 );
             }
@@ -512,6 +518,7 @@ impl TypeChecker {
                         span: *span,
                         is_mutable: false,
                         initialized: Initialized::Yes,
+                        const_value: None,
                     },
                 );
             }
@@ -533,6 +540,7 @@ impl TypeChecker {
                         span: *span,
                         is_mutable: false,
                         initialized: Initialized::Yes,
+                        const_value: None,
                     },
                 );
             }
@@ -584,6 +592,7 @@ impl TypeChecker {
                         span: *span,
                         is_mutable: !is_const,
                         initialized: Initialized::No,
+                        const_value: None,
                     },
                 );
             }
@@ -663,6 +672,7 @@ impl TypeChecker {
                                 span: *span,
                                 is_mutable: false,
                                 initialized: Initialized::Yes,
+                                const_value: None,
                             },
                         );
                         if !re_export && !self.is_repl {
@@ -720,6 +730,7 @@ impl TypeChecker {
                                     span: *span,
                                     is_mutable: false,
                                     initialized: Initialized::Yes,
+                                    const_value: None,
                                 },
                             );
                             if !re_export && !self.is_repl {
@@ -756,6 +767,7 @@ impl TypeChecker {
                                 span: *span,
                                 is_mutable: false,
                                 initialized: Initialized::Yes,
+                                const_value: None,
                             },
                         );
                         if !re_export && !self.is_repl {
@@ -815,6 +827,7 @@ impl TypeChecker {
                         span: *span,
                         is_mutable: false,
                         initialized: Initialized::Yes,
+                        const_value: None,
                     },
                 );
             }
@@ -1061,6 +1074,7 @@ impl TypeChecker {
                             span: *span,
                             is_mutable: true,
                             initialized: Initialized::Yes,
+                            const_value: None,
                         },
                     );
                 }
@@ -1117,6 +1131,7 @@ impl TypeChecker {
                     span: dummy,
                     is_mutable: false,
                     initialized: Initialized::Yes,
+                    const_value: None,
                 },
             );
         }
@@ -1138,13 +1153,12 @@ impl TypeChecker {
                     } else {
                         Initialized::Maybe
                     },
+                    const_value: None,
                 },
             );
         }
 
-        for &sid in body {
-            self.check_stmt(sid, module);
-        }
+        self.check_statements_in_current_scope(body, module, false);
 
         // Emit E0202 if a non-Nothing return type was declared but the action body
         // has no `return` statement at all.
@@ -1256,6 +1270,7 @@ impl TypeChecker {
                             span,
                             is_mutable: true,
                             initialized: Initialized::Yes,
+                            const_value: None,
                         },
                     );
                 }
@@ -1292,12 +1307,38 @@ impl TypeChecker {
                 ..
             } => {
                 self.infer_expr(condition, module);
+                let mut unreachable_else_chain = false;
+                match self.eval_const_bool(condition, module) {
+                    Some(true) => {
+                        unreachable_else_chain = true;
+                    }
+                    Some(false) => {
+                        self.warn_unreachable_stmt_ids(&then_body, module);
+                    }
+                    None => {}
+                }
                 self.check_block(&then_body, module);
                 for ei in &else_ifs {
                     self.infer_expr(ei.condition, module);
+                    if unreachable_else_chain {
+                        self.warn_unreachable_stmt_ids(&ei.body, module);
+                    } else {
+                        match self.eval_const_bool(ei.condition, module) {
+                            Some(true) => {
+                                unreachable_else_chain = true;
+                            }
+                            Some(false) => {
+                                self.warn_unreachable_stmt_ids(&ei.body, module);
+                            }
+                            None => {}
+                        }
+                    }
                     self.check_block(&ei.body, module);
                 }
                 if let Some(body) = &else_body {
+                    if unreachable_else_chain {
+                        self.warn_unreachable_stmt_ids(body, module);
+                    }
                     self.check_block(body, module);
                 }
             }
@@ -1331,6 +1372,7 @@ impl TypeChecker {
                             span,
                             is_mutable: false,
                             initialized: Initialized::Yes,
+                            const_value: None,
                         },
                     );
                 }
@@ -1344,6 +1386,9 @@ impl TypeChecker {
                 condition, body, ..
             } => {
                 self.infer_expr(condition, module);
+                if matches!(self.eval_const_bool(condition, module), Some(false)) {
+                    self.warn_unreachable_stmt_ids(&body, module);
+                }
                 self.check_block(&body, module);
             }
 
@@ -1369,6 +1414,7 @@ impl TypeChecker {
                                 span: dummy,
                                 is_mutable: false,
                                 initialized: Initialized::Yes,
+                                const_value: None,
                             },
                         );
                     }
@@ -1418,6 +1464,7 @@ impl TypeChecker {
                             span,
                             is_mutable: false,
                             initialized: Initialized::Yes,
+                            const_value: None,
                         },
                     );
                 }
@@ -1449,9 +1496,7 @@ impl TypeChecker {
 
     fn check_block(&mut self, stmts: &[StmtId], module: &Module) {
         self.table.push_scope(ScopeKind::Block);
-        for &s in stmts {
-            self.check_stmt(s, module);
-        }
+        self.check_statements_in_current_scope(stmts, module, false);
         self.table.pop_scope();
     }
 
@@ -1460,27 +1505,40 @@ impl TypeChecker {
     /// check arm, not a discarded side-effect.
     fn check_arm_body(&mut self, stmts: &[StmtId], module: &Module) {
         self.table.push_scope(ScopeKind::Block);
-        let (last, rest) = match stmts.split_last() {
-            Some(pair) => pair,
-            None => {
-                self.table.pop_scope();
-                return;
-            }
-        };
-        for &s in rest {
-            self.check_stmt(s, module);
-        }
-        // For the final statement: if it's a bare expression, infer its type
-        // directly — skipping the bare-literal warning — because it is the
-        // arm's result value, not a discarded statement.
-        let final_stmt = module.arena.get_stmt(*last).clone();
-        match final_stmt {
-            Stmt::Expr { expr, .. } => {
-                self.infer_expr(expr, module);
-            }
-            _ => self.check_stmt(*last, module),
-        }
+        self.check_statements_in_current_scope(stmts, module, true);
         self.table.pop_scope();
+    }
+
+    fn check_statements_in_current_scope(
+        &mut self,
+        stmts: &[StmtId],
+        module: &Module,
+        final_expr_is_value: bool,
+    ) {
+        let last_index = stmts.len().saturating_sub(1);
+        let mut dead_code = false;
+        for (idx, &sid) in stmts.iter().enumerate() {
+            let stmt = module.arena.get_stmt(sid).clone();
+            if dead_code {
+                self.warn_unreachable_stmt(&stmt);
+            }
+
+            let final_expr_result = final_expr_is_value && idx == last_index && !dead_code;
+            if final_expr_result {
+                match &stmt {
+                    Stmt::Expr { expr, .. } => {
+                        self.infer_expr(*expr, module);
+                    }
+                    _ => self.check_stmt(sid, module),
+                }
+            } else {
+                self.check_stmt(sid, module);
+            }
+
+            if !dead_code && self.stmt_terminates_all_paths(&stmt, module) {
+                dead_code = true;
+            }
+        }
     }
 
     fn check_var_decl(
@@ -1524,6 +1582,12 @@ impl TypeChecker {
             let _ = self.table.remove_from_current_scope(name);
         }
 
+        let const_value = if is_const {
+            init.and_then(|init_id| self.eval_const_value(init_id, module))
+        } else {
+            None
+        };
+
         let inferred = if let Some(init_id) = init {
             let actual = self.infer_expr(init_id, module);
             if let Some(ref dt) = declared
@@ -1560,6 +1624,7 @@ impl TypeChecker {
                 } else {
                     Initialized::No
                 },
+                const_value,
             },
         );
     }
@@ -1981,6 +2046,7 @@ impl TypeChecker {
                         span,
                         is_mutable: false,
                         initialized: Initialized::Yes,
+                        const_value: None,
                     },
                 );
                 self.infer_expr(element, module);
@@ -2013,6 +2079,7 @@ impl TypeChecker {
                         span,
                         is_mutable: false,
                         initialized: Initialized::Yes,
+                        const_value: None,
                     },
                 );
                 self.infer_expr(key, module);
@@ -2371,6 +2438,143 @@ impl TypeChecker {
             // Loops and other compound statements don't guarantee a return
             // because their bodies might never execute (zero iterations, etc.).
             _ => false,
+        }
+    }
+
+    fn warn_unreachable_stmt(&mut self, stmt: &Stmt) {
+        self.emit_warning(
+            fidan_diagnostics::diag_code!("W1006"),
+            "unreachable statement; this code can never execute",
+            self.stmt_span(stmt),
+        );
+    }
+
+    fn warn_unreachable_stmt_ids(&mut self, stmts: &[StmtId], module: &Module) {
+        for &sid in stmts {
+            self.warn_unreachable_stmt(module.arena.get_stmt(sid));
+        }
+    }
+
+    fn stmt_span(&self, stmt: &Stmt) -> Span {
+        match stmt {
+            Stmt::VarDecl { span, .. }
+            | Stmt::Destructure { span, .. }
+            | Stmt::Assign { span, .. }
+            | Stmt::Expr { span, .. }
+            | Stmt::Return { span, .. }
+            | Stmt::Break { span }
+            | Stmt::Continue { span }
+            | Stmt::If { span, .. }
+            | Stmt::Check { span, .. }
+            | Stmt::For { span, .. }
+            | Stmt::While { span, .. }
+            | Stmt::Attempt { span, .. }
+            | Stmt::ParallelFor { span, .. }
+            | Stmt::ConcurrentBlock { span, .. }
+            | Stmt::Panic { span, .. }
+            | Stmt::Error { span } => *span,
+        }
+    }
+
+    fn eval_const_bool(&self, expr_id: ExprId, module: &Module) -> Option<bool> {
+        match self.eval_const_value(expr_id, module)? {
+            ConstValue::Bool(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn eval_const_value(&self, expr_id: ExprId, module: &Module) -> Option<ConstValue> {
+        match module.arena.get_expr(expr_id) {
+            Expr::BoolLit { value, .. } => Some(ConstValue::Bool(*value)),
+            Expr::IntLit { value, .. } => Some(ConstValue::Int(*value)),
+            Expr::FloatLit { value, .. } => Some(ConstValue::Float(*value)),
+            Expr::StrLit { value, .. } => Some(ConstValue::String(value.clone())),
+            Expr::Nothing { .. } => Some(ConstValue::Nothing),
+            Expr::Ident { name, .. } => self.table.lookup(*name)?.const_value.clone(),
+            Expr::Unary { op, operand, .. } => {
+                let value = self.eval_const_value(*operand, module)?;
+                match (op, value) {
+                    (UnOp::Not, ConstValue::Bool(value)) => Some(ConstValue::Bool(!value)),
+                    (UnOp::Pos, ConstValue::Int(value)) => Some(ConstValue::Int(value)),
+                    (UnOp::Pos, ConstValue::Float(value)) => Some(ConstValue::Float(value)),
+                    (UnOp::Neg, ConstValue::Int(value)) => Some(ConstValue::Int(-value)),
+                    (UnOp::Neg, ConstValue::Float(value)) => Some(ConstValue::Float(-value)),
+                    _ => None,
+                }
+            }
+            Expr::Binary { op, lhs, rhs, .. } => {
+                let lhs = self.eval_const_value(*lhs, module)?;
+                let rhs = self.eval_const_value(*rhs, module)?;
+                self.eval_const_binary(*op, lhs, rhs)
+            }
+            _ => None,
+        }
+    }
+
+    fn eval_const_binary(&self, op: BinOp, lhs: ConstValue, rhs: ConstValue) -> Option<ConstValue> {
+        use ConstValue as C;
+
+        match op {
+            BinOp::And => match (lhs, rhs) {
+                (C::Bool(lhs), C::Bool(rhs)) => Some(C::Bool(lhs && rhs)),
+                _ => None,
+            },
+            BinOp::Or => match (lhs, rhs) {
+                (C::Bool(lhs), C::Bool(rhs)) => Some(C::Bool(lhs || rhs)),
+                _ => None,
+            },
+            BinOp::Eq => Some(C::Bool(lhs == rhs)),
+            BinOp::NotEq => Some(C::Bool(lhs != rhs)),
+            BinOp::Lt => self.eval_order_compare(lhs, rhs, |lhs, rhs| lhs < rhs),
+            BinOp::LtEq => self.eval_order_compare(lhs, rhs, |lhs, rhs| lhs <= rhs),
+            BinOp::Gt => self.eval_order_compare(lhs, rhs, |lhs, rhs| lhs > rhs),
+            BinOp::GtEq => self.eval_order_compare(lhs, rhs, |lhs, rhs| lhs >= rhs),
+            BinOp::Add => match (lhs, rhs) {
+                (C::Int(lhs), C::Int(rhs)) => Some(C::Int(lhs + rhs)),
+                (C::Float(lhs), C::Float(rhs)) => Some(C::Float(lhs + rhs)),
+                (C::String(lhs), C::String(rhs)) => Some(C::String(lhs + &rhs)),
+                _ => None,
+            },
+            BinOp::Sub => match (lhs, rhs) {
+                (C::Int(lhs), C::Int(rhs)) => Some(C::Int(lhs - rhs)),
+                (C::Float(lhs), C::Float(rhs)) => Some(C::Float(lhs - rhs)),
+                _ => None,
+            },
+            BinOp::Mul => match (lhs, rhs) {
+                (C::Int(lhs), C::Int(rhs)) => Some(C::Int(lhs * rhs)),
+                (C::Float(lhs), C::Float(rhs)) => Some(C::Float(lhs * rhs)),
+                _ => None,
+            },
+            BinOp::Div => match (lhs, rhs) {
+                (C::Int(_), C::Int(0)) => None,
+                (C::Int(lhs), C::Int(rhs)) => Some(C::Int(lhs / rhs)),
+                (C::Float(_), C::Float(0.0)) => None,
+                (C::Float(lhs), C::Float(rhs)) => Some(C::Float(lhs / rhs)),
+                _ => None,
+            },
+            BinOp::Rem => match (lhs, rhs) {
+                (C::Int(_), C::Int(0)) => None,
+                (C::Int(lhs), C::Int(rhs)) => Some(C::Int(lhs % rhs)),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn eval_order_compare(
+        &self,
+        lhs: ConstValue,
+        rhs: ConstValue,
+        cmp: impl FnOnce(f64, f64) -> bool,
+    ) -> Option<ConstValue> {
+        use ConstValue as C;
+
+        match (lhs, rhs) {
+            (C::Int(lhs), C::Int(rhs)) => Some(C::Bool(cmp(lhs as f64, rhs as f64))),
+            (C::Float(lhs), C::Float(rhs)) => Some(C::Bool(cmp(lhs, rhs))),
+            (C::Int(lhs), C::Float(rhs)) => Some(C::Bool(cmp(lhs as f64, rhs))),
+            (C::Float(lhs), C::Int(rhs)) => Some(C::Bool(cmp(lhs, rhs as f64))),
+            _ => None,
         }
     }
 
@@ -2774,6 +2978,7 @@ impl TypeChecker {
                     span: dummy,
                     is_mutable: false,
                     initialized: Initialized::Yes,
+                    const_value: None,
                 },
             );
         }
@@ -2790,6 +2995,7 @@ impl TypeChecker {
                 span: dummy,
                 is_mutable: false,
                 initialized: Initialized::Yes,
+                const_value: None,
             },
         );
     }
