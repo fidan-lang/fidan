@@ -99,6 +99,10 @@ enum Command {
         /// Memory limit in MB when `--sandbox` is active (0 = no limit)
         #[arg(long)]
         mem_limit: Option<u64>,
+        /// Arguments passed through to the Fidan program itself. Use `--` before
+        /// them when they could be mistaken for CLI flags.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Compile a Fidan source file to a native binary
     Build {
@@ -395,6 +399,7 @@ fn run_cli() -> Result<()> {
             allow_env,
             time_limit,
             mem_limit,
+            args,
         } => {
             let emit_kinds = parse_emit(&emit)?;
             let trace_mode = parse_trace(&trace)?;
@@ -457,6 +462,7 @@ fn run_cli() -> Result<()> {
                 jit_threshold,
                 strict_mode: strict,
                 replay_inputs,
+                program_args: args,
                 suppress,
                 sandbox: sandbox_policy,
                 opt_level: Default::default(),

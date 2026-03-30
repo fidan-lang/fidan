@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -29,6 +30,17 @@ fn run_trace(mode: &str) -> (bool, String, String) {
         String::from_utf8_lossy(&output.stdout).into_owned(),
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+fn make_temp_program(name: &str, source: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_nanos();
+    let path =
+        std::env::temp_dir().join(format!("fidan_{name}_{}_{}.fdn", std::process::id(), nonce));
+    std::fs::write(&path, source).expect("write temp fidan program");
+    path
 }
 
 #[test]
@@ -80,5 +92,79 @@ fn cli_trace_modes_have_distinct_output_shapes() {
         stderr_full.contains("test\\examples\\trace_demo.fdn")
             || stderr_full.contains("test/examples/trace_demo.fdn"),
         "full mode should include source locations:\n{stderr_full}"
+    );
+}
+
+#[test]
+fn interpreted_env_args_exclude_host_cli_args() {
+    let file = make_temp_program(
+        "env_args_empty",
+        r#"use std.env
+
+action main {
+    var args = env.args()
+    if len(args) == 0 {
+        print("ARGS EMPTY")
+    } else {
+        print("ARGS {args[0]}")
+    }
+}
+
+main()
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("run")
+        .arg(&file)
+        .args(["--trace", "full"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan env-args demo");
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        output.status.success(),
+        "expected env.args() demo to succeed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ARGS EMPTY"),
+        "interpreted run should not leak host CLI args into env.args():\n{stdout}"
+    );
+}
+
+#[test]
+fn interpreted_env_args_forward_program_args_after_double_dash() {
+    let file = make_temp_program(
+        "env_args_forwarded",
+        r#"use std.env
+
+action main {
+    var args = env.args()
+    print("ARGS {args[0]} {args[1]}")
+}
+
+main()
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("run")
+        .arg(&file)
+        .args(["--trace", "full", "--", "alpha", "beta"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan forwarded-args demo");
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        output.status.success(),
+        "expected forwarded env.args() demo to succeed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ARGS alpha beta"),
+        "interpreted run should forward args after `--` into env.args():\n{stdout}"
     );
 }

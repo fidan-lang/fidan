@@ -24,6 +24,7 @@ fidan-hir = { workspace = true }
 fidan-mir = { workspace = true }
 fidan-passes = { workspace = true }
 fidan-interp = { workspace = true }
+fidan-runtime = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 rustyline = { workspace = true }

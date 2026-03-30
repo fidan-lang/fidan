@@ -6,12 +6,10 @@
 
 int main(void)
 {
-  static const char *source =
-      "var result = \"Hello from libfidan\"\n";
+  static const char *source = "var result = \"Hello from libfidan\"\n";
 
   FidanVm *vm = fidan_vm_new();
-  FidanValue *value =
-      fidan_eval(vm, (const uint8_t *)source, strlen(source));
+  FidanValue *value = fidan_eval(vm, (const uint8_t *)source, strlen(source));
 
   if (value == NULL)
   {

@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use fidan_diagnostics::{Severity, render_message_to_stderr};
 use fidan_driver::dal::validate_package_name;
 use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, TraceMode};
+use fidan_runtime::push_program_args;
 use std::path::PathBuf;
 
 // ── Hot Reload ────────────────────────────────────────────────────────────────
@@ -915,6 +916,9 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                     } else {
                         fidan_passes::run_all(&mut mir);
                     }
+                    let mut program_argv = vec![opts.input.display().to_string()];
+                    program_argv.extend(opts.program_args.iter().cloned());
+                    let _program_args_guard = push_program_args(program_argv);
                     let replay_inputs = std::mem::take(&mut opts.replay_inputs);
                     let sandbox = opts.sandbox.take();
                     let (result, captured) = fidan_interp::run_mir_with_replay(
@@ -1004,6 +1008,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                     .and_then(|n| n.to_str())
                     .unwrap_or("?")
                     .to_string();
+                let _program_args_guard = push_program_args(vec![opts.input.display().to_string()]);
                 let (result, report) = fidan_interp::run_mir_with_profile(
                     mir,
                     Arc::clone(&interner),
@@ -1052,6 +1057,8 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                     if test_count == 0 {
                         render_message_to_stderr(Severity::Note, "", "no test blocks found");
                     } else {
+                        let _program_args_guard =
+                            push_program_args(vec![opts.input.display().to_string()]);
                         match fidan_interp::run_tests(
                             mir,
                             Arc::clone(&interner),

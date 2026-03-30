@@ -1,4 +1,4 @@
-use crate::{FidanList, FidanValue, OwnedRef, display as format_val};
+use crate::{FidanList, FidanValue, OwnedRef, current_program_args, display as format_val};
 
 use super::common::{coerce_string, display_string, string_value};
 
@@ -175,7 +175,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "args" | "argv" => {
             let mut list = FidanList::new();
-            for arg in std::env::args() {
+            for arg in current_program_args() {
                 list.append(string_value(&arg));
             }
             Some(FidanValue::List(OwnedRef::new(list)))

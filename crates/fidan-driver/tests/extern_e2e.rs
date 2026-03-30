@@ -242,6 +242,7 @@ fn compile_fixture_program(
         jit_threshold: 0,
         strict_mode: false,
         replay_inputs: vec![],
+        program_args: vec![],
         suppress: vec![],
         sandbox: None,
         opt_level: OptLevel::O2,

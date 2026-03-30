@@ -33,6 +33,9 @@ pub struct CompileOptions {
     /// Pre-loaded stdin lines for a replay run.  Empty = normal execution;
     /// non-empty = replay every `input()` call from this list in order.
     pub replay_inputs: Vec<String>,
+    /// Script-facing argv for interpreted execution. When empty, interpreted
+    /// programs see just the script path as argv[0].
+    pub program_args: Vec<String>,
     /// Diagnostic codes to silence (e.g. `["W5003", "W1004"]`).
     /// The diagnostic is still compiled and counted for errors — only its
     /// rendered output is suppressed.
@@ -68,6 +71,7 @@ impl Default for CompileOptions {
             jit_threshold: 500,
             strict_mode: false,
             replay_inputs: vec![],
+            program_args: vec![],
             suppress: vec![],
             sandbox: None,
             opt_level: OptLevel::O2,

@@ -24,33 +24,33 @@ static const unsigned TASKS = 4u;
 
 static double sequential_sum(long long n)
 {
-    double acc = 0.0;
-    for (long long i = 0; i < n; ++i)
-        acc += std::sqrt(static_cast<double>(i) + 1.0);
-    return acc;
+  double acc = 0.0;
+  for (long long i = 0; i < n; ++i)
+    acc += std::sqrt(static_cast<double>(i) + 1.0);
+  return acc;
 }
 
 static double parallel_sum(long long n)
 {
-    const long long chunk = n / static_cast<long long>(TASKS);
-    std::vector<std::future<double>> futs;
-    futs.reserve(TASKS);
-    for (unsigned t = 0; t < TASKS; ++t)
-    {
-        const long long lo = static_cast<long long>(t) * chunk;
-        const long long hi = (t + 1 == TASKS) ? n : lo + chunk;
-        futs.push_back(std::async(std::launch::async, [lo, hi]()
-                                  {
-            double acc = 0.0;
-            for (long long i = lo; i < hi; ++i)
-                acc += std::sqrt(static_cast<double>(i) + 1.0);
-            return acc; }));
-    }
+  const long long chunk = n / static_cast<long long>(TASKS);
+  std::vector<std::future<double>> futs;
+  futs.reserve(TASKS);
+  for (unsigned t = 0; t < TASKS; ++t)
+  {
+    const long long lo = static_cast<long long>(t) * chunk;
+    const long long hi = (t + 1 == TASKS) ? n : lo + chunk;
+    futs.push_back(std::async(std::launch::async, [lo, hi]() {
+      double acc = 0.0;
+      for (long long i = lo; i < hi; ++i)
+        acc += std::sqrt(static_cast<double>(i) + 1.0);
+      return acc;
+    }));
+  }
 
-    double total = 0.0;
-    for (auto &f : futs)
-        total += f.get();
-    return total;
+  double total = 0.0;
+  for (auto &f : futs)
+    total += f.get();
+  return total;
 }
 
 using Clock = std::chrono::high_resolution_clock;
@@ -58,25 +58,24 @@ using Ms = std::chrono::milliseconds;
 
 int main()
 {
-    std::printf("C++ Benchmark (N = %lld)\n", N);
-    std::printf("─────────────────────────────────────────\n");
+  std::printf("C++ Benchmark (N = %lld)\n", N);
+  std::printf("─────────────────────────────────────────\n");
 
-    {
-        auto t0 = Clock::now();
-        double result = sequential_sum(N);
-        auto t1 = Clock::now();
-        long long ms = std::chrono::duration_cast<Ms>(t1 - t0).count();
-        std::printf("sequential  result=%.12f  time=%lldms\n", result, ms);
-    }
+  {
+    auto t0 = Clock::now();
+    double result = sequential_sum(N);
+    auto t1 = Clock::now();
+    long long ms = std::chrono::duration_cast<Ms>(t1 - t0).count();
+    std::printf("sequential  result=%.12f  time=%lldms\n", result, ms);
+  }
 
-    {
-        auto t0 = Clock::now();
-        double result = parallel_sum(N);
-        auto t1 = Clock::now();
-        long long ms = std::chrono::duration_cast<Ms>(t1 - t0).count();
-        std::printf("parallel    result=%.12f  time=%lldms  threads=%u\n",
-                    result, ms, TASKS);
-    }
+  {
+    auto t0 = Clock::now();
+    double result = parallel_sum(N);
+    auto t1 = Clock::now();
+    long long ms = std::chrono::duration_cast<Ms>(t1 - t0).count();
+    std::printf("parallel    result=%.12f  time=%lldms  threads=%u\n", result, ms, TASKS);
+  }
 
-    return 0;
+  return 0;
 }

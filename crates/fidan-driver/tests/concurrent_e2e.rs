@@ -330,6 +330,7 @@ fn compile_program(source: &str, backend: Backend, output_path: &Path) {
         jit_threshold: 0,
         strict_mode: false,
         replay_inputs: vec![],
+        program_args: vec![],
         suppress: vec![],
         sandbox: None,
         opt_level: OptLevel::O2,
