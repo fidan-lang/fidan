@@ -1,0 +1,152 @@
+# performance_suite.fdn
+#
+# A small cross-language benchmark suite for comparing Fidan AOT against C++.
+# The workloads are intentionally simple and deterministic so the numbers are
+# easier to reason about:
+#
+#   1. Integer loop      — arithmetic-heavy scalar loop.
+#   2. Call chain        — tiny hot function invoked in a tight loop.
+#   3. Sqrt sequential   — floating-point numeric loop.
+#   4. Sqrt parallel     — same workload split across 4 OS-thread tasks.
+#
+# Usage after AOT compile:
+#   perf_suite.exe [int_n] [call_n] [float_n]
+#
+# Defaults are chosen to finish in a reasonable time on developer machines
+# while still producing stable timings.
+
+use std.env
+use std.math
+use std.time
+
+var argv = env.args()
+var INT_N = 120_000_000
+var CALL_N = 60_000_000
+var FLOAT_N = 80_000_000
+var TASKS = 4
+
+if len(argv) > 0 {
+    INT_N = integer(argv[0])
+}
+if len(argv) > 1 {
+    CALL_N = integer(argv[1])
+}
+if len(argv) > 2 {
+    FLOAT_N = integer(argv[2])
+}
+
+action print_case with (
+    certain label oftype string,
+    certain result oftype dynamic,
+    certain elapsed_ms oftype integer
+) returns nothing {
+    print("BENCH {label} result={result} ms={elapsed_ms}")
+}
+
+action print_speedup with (
+    certain label oftype string,
+    certain baseline_ms oftype integer,
+    certain candidate_ms oftype integer
+) returns nothing {
+    if baseline_ms > 0 and candidate_ms > 0 {
+        var speedup = float(baseline_ms) / float(candidate_ms)
+        print("SPEEDUP {label} ratio={speedup}")
+    } else {
+        print("SPEEDUP {label} ratio=n/a")
+    }
+}
+
+action approx_equal with (
+    certain a oftype float,
+    certain b oftype float,
+    optional rel_tol oftype float = 0.000000000001,
+    optional abs_tol oftype float = 0.001
+) returns boolean {
+    var diff = math.abs(a - b)
+    var scale = math.max(math.abs(a), math.abs(b))
+    return diff <= abs_tol or diff <= scale * rel_tol
+}
+
+@precompile
+action integer_kernel with (certain n oftype integer) returns integer {
+    var acc = 0
+    var i = 0
+    while i < n {
+        acc = acc + ((i * 31 + 7) % 97)
+        i = i + 1
+    }
+    return acc
+}
+
+@precompile
+action mix_step with (certain x oftype integer, certain i oftype integer) returns integer {
+    return ((x * 1664525) + i + 1013904223) % 1_000_000_007
+}
+
+@precompile
+action call_kernel with (certain n oftype integer) returns integer {
+    var acc = 0
+    var i = 0
+    while i < n {
+        acc = mix_step(acc, i)
+        i = i + 1
+    }
+    return acc
+}
+
+@precompile
+action sqrt_range with (certain from oftype integer, certain to oftype integer) returns float {
+    var acc = 0.0
+    var i = from
+    while i < to {
+        acc = acc + math.sqrt(i + 1)
+        i = i + 1
+    }
+    return acc
+}
+
+action sqrt_parallel with (certain n oftype integer) returns float {
+    var chunk = n / TASKS
+    var r1 = Shared(0.0)
+    var r2 = Shared(0.0)
+    var r3 = Shared(0.0)
+    var r4 = Shared(0.0)
+
+    parallel {
+        task A { r1.set(sqrt_range(0, chunk)) }
+        task B { r2.set(sqrt_range(chunk, chunk * 2)) }
+        task C { r3.set(sqrt_range(chunk * 2, chunk * 3)) }
+        task D { r4.set(sqrt_range(chunk * 3, n)) }
+    }
+
+    return r1.get() + r2.get() + r3.get() + r4.get()
+}
+
+var _warm_int = integer_kernel(32)
+var _warm_call = call_kernel(32)
+var _warm_float = sqrt_range(0, 32)
+
+print("CONFIG int_n={INT_N} call_n={CALL_N} float_n={FLOAT_N} tasks={TASKS}")
+
+var t0 = time.now()
+var int_result = integer_kernel(INT_N)
+var int_ms = time.elapsed(t0)
+print_case("integer_loop", int_result, int_ms)
+
+var t1 = time.now()
+var call_result = call_kernel(CALL_N)
+var call_ms = time.elapsed(t1)
+print_case("call_chain", call_result, call_ms)
+
+var t2 = time.now()
+var sqrt_seq_result = sqrt_range(0, FLOAT_N)
+var sqrt_seq_ms = time.elapsed(t2)
+print_case("sqrt_seq", sqrt_seq_result, sqrt_seq_ms)
+
+var t3 = time.now()
+var sqrt_par_result = sqrt_parallel(FLOAT_N)
+var sqrt_par_ms = time.elapsed(t3)
+print_case("sqrt_parallel", sqrt_par_result, sqrt_par_ms)
+
+print("CHECK sqrt_parallel_matches={approx_equal(sqrt_seq_result, sqrt_par_result)}")
+print_speedup("sqrt_parallel_vs_seq", sqrt_seq_ms, sqrt_par_ms)
