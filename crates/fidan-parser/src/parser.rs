@@ -153,6 +153,19 @@ impl<'t> Parser<'t> {
         }
     }
 
+    pub(crate) fn require_statement_boundary(&mut self) {
+        if !matches!(
+            self.peek(),
+            TokenKind::Newline | TokenKind::Semicolon | TokenKind::RBrace | TokenKind::Eof
+        ) {
+            let span = self.current_span();
+            self.error(
+                "expected statement separator (`;` / `sep` / newline) or operator between expressions",
+                span,
+            );
+        }
+    }
+
     /// Returns `true` if the current token is `Ident(sym)`.
     pub(crate) fn at_ident(&self, sym: Symbol) -> bool {
         matches!(self.peek(), TokenKind::Ident(s) if *s == sym)
@@ -1277,6 +1290,7 @@ impl<'t> Parser<'t> {
             None
         };
         let end = self.current_span().end;
+        self.require_statement_boundary();
         self.skip_one_terminator();
         self.module.arena.alloc_stmt(Stmt::VarDecl {
             name,
@@ -1299,6 +1313,7 @@ impl<'t> Parser<'t> {
             None
         };
         let end = self.current_span().end;
+        self.require_statement_boundary();
         self.skip_one_terminator();
         self.module.arena.alloc_stmt(Stmt::Return {
             value,
@@ -1313,6 +1328,7 @@ impl<'t> Parser<'t> {
         let value = self.parse_expr();
         let end = self.current_span().end;
         self.expect_tok(&TokenKind::RParen);
+        self.require_statement_boundary();
         self.skip_one_terminator();
         self.module.arena.alloc_stmt(Stmt::Panic {
             value,
@@ -1361,6 +1377,7 @@ impl<'t> Parser<'t> {
             } else {
                 let expr = self.parse_expr();
                 let expr_span = self.module.arena.get_expr(expr).span();
+                self.require_statement_boundary();
                 self.skip_one_terminator();
                 vec![self.module.arena.alloc_stmt(Stmt::Expr {
                     expr,
@@ -1608,12 +1625,14 @@ impl<'t> Parser<'t> {
                 self.advance(); // eat `=` / `set`
                 self.parse_expr(); // consume RHS so parsing can continue
                 let end = self.current_span().end;
+                self.require_statement_boundary();
                 self.skip_one_terminator();
                 return self.error_stmt(Span::new(self.module.file, start, end));
             }
             self.advance();
             let value = self.parse_expr();
             let end = self.current_span().end;
+            self.require_statement_boundary();
             self.skip_one_terminator();
             return self.module.arena.alloc_stmt(Stmt::Assign {
                 target: expr_id,
@@ -1642,6 +1661,7 @@ impl<'t> Parser<'t> {
                 rhs,
                 span,
             });
+            self.require_statement_boundary();
             self.skip_one_terminator();
             return self.module.arena.alloc_stmt(Stmt::Assign {
                 target: expr_id,
@@ -1651,6 +1671,7 @@ impl<'t> Parser<'t> {
         }
         // Expression statement
         let end = self.module.arena.get_expr(expr_id).span().end;
+        self.require_statement_boundary();
         self.skip_one_terminator();
         self.module.arena.alloc_stmt(Stmt::Expr {
             expr: expr_id,

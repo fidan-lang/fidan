@@ -258,6 +258,22 @@ mod tests {
     }
 
     #[test]
+    fn missing_separator_between_same_line_expressions_is_an_error() {
+        let (_, diags) = parse_src(
+            r#"action bad {
+                return r1.get()r2.get() + r3.get()
+            }"#,
+        );
+        assert!(
+            errors(&diags)
+                .iter()
+                .any(|msg| msg.contains("expected statement separator")),
+            "expected missing-separator parse error, got {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
     fn attempt_rescue_alias() {
         let (_, diags) = parse_src(
             r#"attempt {

@@ -483,6 +483,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_registered_code_has_an_explanation() {
+        for entry in CODES {
+            let code = DiagCode(entry.code);
+            assert!(
+                explain(code).is_some(),
+                "explain({}) returned None — add an explanation in explanations.rs",
+                entry.code
+            );
+        }
+    }
+
+    #[test]
+    fn every_registered_code_explanation_is_nonempty() {
+        for entry in CODES {
+            let code = DiagCode(entry.code);
+            let text =
+                explain(code).unwrap_or_else(|| panic!("missing explanation for {}", entry.code));
+            assert!(
+                !text.trim().is_empty(),
+                "explain({}) returned empty text",
+                entry.code
+            );
+        }
+    }
+
     // ── DiagCode Display ─────────────────────────────────────────────────────
 
     #[test]

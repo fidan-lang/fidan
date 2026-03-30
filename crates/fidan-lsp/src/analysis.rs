@@ -73,12 +73,12 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     // ── Identifier-span index (for hover / go-to-def positional lookup) ────────
     let identifier_spans: Vec<(Span, String)> = tokens
         .iter()
-        .filter_map(|tok| {
-            if let TokenKind::Ident(sym) = &tok.kind {
-                Some((tok.span, interner.resolve(*sym).to_string()))
-            } else {
-                None
-            }
+        .filter_map(|tok| match &tok.kind {
+            TokenKind::Ident(sym) => Some((tok.span, interner.resolve(*sym).to_string())),
+            TokenKind::Shared => Some((tok.span, "Shared".to_string())),
+            TokenKind::Pending => Some((tok.span, "Pending".to_string())),
+            TokenKind::Weak => Some((tok.span, "WeakShared".to_string())),
+            _ => None,
         })
         .collect();
 
@@ -739,6 +739,30 @@ var argv = env.args()
                 .iter()
                 .any(|(var, module, member)| var == "argv" && module == "env" && member == "args"),
             "expected env.args() to be recorded for stdlib type patching"
+        );
+    }
+
+    #[test]
+    fn analyze_indexes_builtin_wrapper_tokens_for_hover() {
+        let src = "var counter oftype Shared oftype integer = Shared(0)\nvar weak oftype WeakShared\nvar pending oftype Pending oftype string\n";
+        let result = analyze(src, "file:///builtin_wrappers.fdn");
+        assert!(
+            result
+                .identifier_spans
+                .iter()
+                .any(|(_, name)| name == "Shared")
+        );
+        assert!(
+            result
+                .identifier_spans
+                .iter()
+                .any(|(_, name)| name == "WeakShared")
+        );
+        assert!(
+            result
+                .identifier_spans
+                .iter()
+                .any(|(_, name)| name == "Pending")
         );
     }
 
