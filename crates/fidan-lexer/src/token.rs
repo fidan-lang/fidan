@@ -13,6 +13,9 @@ pub enum TokenKind {
     /// The string body *excluding* the surrounding quotes.
     /// Interpolation markers (`{...}`) are preserved as-is; the parser splits them.
     LitString(String),
+    /// Raw string body excluding the leading `r"` and trailing `"`.
+    /// No escape processing or interpolation is performed.
+    LitRawString(String),
     LitBool(bool),
     /// `nothing`
     Nothing,
@@ -136,6 +139,7 @@ impl TokenKind {
             TokenKind::LitInteger(_)
                 | TokenKind::LitFloat(_)
                 | TokenKind::LitString(_)
+                | TokenKind::LitRawString(_)
                 | TokenKind::LitBool(_)
                 | TokenKind::Nothing
                 | TokenKind::Ident(_)

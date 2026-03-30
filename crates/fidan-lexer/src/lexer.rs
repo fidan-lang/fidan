@@ -179,6 +179,7 @@ impl<'src> Lexer<'src> {
 
                 // ── String literals ───────────────────────────────────────
                 Some('"') => return self.lex_string(start),
+                Some('r') if self.peek2() == Some('"') => return self.lex_raw_string(start),
 
                 // ── Numbers ───────────────────────────────────────────────
                 Some(c) if c.is_ascii_digit() => return self.lex_number(start),
@@ -241,6 +242,34 @@ impl<'src> Lexer<'src> {
             TokenKind::LitString(s)
         };
         self.emit(kind, start)
+    }
+
+    fn lex_raw_string(&mut self, start: u32) -> Token {
+        self.advance(); // leading `r`
+        self.advance(); // opening `"`
+        let mut s = String::new();
+        loop {
+            match self.advance() {
+                None => {
+                    let span = self.span_from(start);
+                    self.diags.push(
+                        Diagnostic::error(
+                            diag_code!("E0001"),
+                            "unterminated raw string literal",
+                            span,
+                        )
+                        .with_label(Label::primary(
+                            span,
+                            "raw string opened here, but never closed with `\"`",
+                        )),
+                    );
+                    break;
+                }
+                Some('"') => break,
+                Some(c) => s.push(c),
+            }
+        }
+        self.emit(TokenKind::LitRawString(s), start)
     }
 
     fn lex_number(&mut self, start: u32) -> Token {
@@ -495,6 +524,15 @@ mod tests {
     fn test_string() {
         let tokens = lex("\"hello world\"");
         assert_eq!(tokens[0], TokenKind::LitString("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_raw_string() {
+        let tokens = lex("r\"literal \\\\n {name} kept raw\"");
+        assert_eq!(
+            tokens[0],
+            TokenKind::LitRawString("literal \\\\n {name} kept raw".to_string())
+        );
     }
 
     #[test]

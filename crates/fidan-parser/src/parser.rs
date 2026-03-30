@@ -1013,7 +1013,7 @@ impl<'t> Parser<'t> {
         self.advance(); // eat `test`
 
         // Expect a string literal name.
-        let name = if let TokenKind::LitString(s) = self.peek() {
+        let name = if let TokenKind::LitString(s) | TokenKind::LitRawString(s) = self.peek() {
             let s = s.clone();
             self.advance();
             s
@@ -1040,7 +1040,7 @@ impl<'t> Parser<'t> {
         self.advance(); // eat `use` / `export use`
 
         // File-path import: `use "some/path"` or `export use "some/path"`
-        let file_path = if let TokenKind::LitString(s) = self.peek() {
+        let file_path = if let TokenKind::LitString(s) | TokenKind::LitRawString(s) = self.peek() {
             Some(s.clone())
         } else {
             None

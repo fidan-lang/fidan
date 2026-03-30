@@ -393,6 +393,12 @@ impl<'t> Parser<'t> {
                 self.advance();
                 self.parse_string_interp(s, span)
             }
+            TokenKind::LitRawString(s) => {
+                self.advance();
+                self.module
+                    .arena
+                    .alloc_expr(Expr::StrLit { value: s, span })
+            }
             TokenKind::Ident(sym) => {
                 // Don't consume contextual keywords that belong to outer syntax
                 if sym == self.sym_else {

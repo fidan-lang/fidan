@@ -335,6 +335,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn raw_string_literal_stays_literal() {
+        let (_, diags) = parse_src(r#"var msg = r"literal \n {name}""#);
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
     // ── Concurrency syntax ────────────────────────────────────────────────────
 
     #[test]

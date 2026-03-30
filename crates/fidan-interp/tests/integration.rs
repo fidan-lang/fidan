@@ -276,6 +276,17 @@ assert_eq("literal \{name\} and {value}", "literal \{name\} and Ada")
 }
 
 #[test]
+fn raw_string_literal_preserves_backslashes_and_braces() {
+    let result = run_src(
+        r#"
+var value = "Ada"
+assert_eq(r"literal \n {value}", "literal \\n \{value\}")
+"#,
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
 fn action_call_ok() {
     assert!(
         run_src(

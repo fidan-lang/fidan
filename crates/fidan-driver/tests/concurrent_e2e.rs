@@ -291,6 +291,12 @@ print("ok")
 "#
 }
 
+fn raw_string_source() -> &'static str {
+    r#"assert_eq(r"literal \n {value}", "literal \\n \{value\}")
+print("ok")
+"#
+}
+
 fn repeated_assert_source() -> &'static str {
     r#"use std.io
 use std.time
@@ -763,6 +769,39 @@ fn async_std_llvm_aot_supports_pending_combinators() {
         sandbox.join("async_std_smoke")
     };
     compile_program(async_std_source(), Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn raw_string_cranelift_aot_stays_literal() {
+    let sandbox = temp_dir("fidan_raw_string_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("raw_string_smoke.exe")
+    } else {
+        sandbox.join("raw_string_smoke")
+    };
+    compile_program(raw_string_source(), Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn raw_string_llvm_aot_stays_literal() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM raw-string AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_raw_string_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("raw_string_smoke.exe")
+    } else {
+        sandbox.join("raw_string_smoke")
+    };
+    compile_program(raw_string_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
     fs::remove_dir_all(&sandbox).ok();
 }
