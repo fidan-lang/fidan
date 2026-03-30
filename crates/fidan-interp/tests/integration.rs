@@ -176,6 +176,28 @@ fn run_src(src: &str) -> Result<(), RunError> {
     run_src_with_threshold(src, 500)
 }
 
+fn run_src_preserving_call_frames(src: &str) -> Result<(), RunError> {
+    let source_map = Arc::new(SourceMap::new());
+    let interner = make_interner();
+    let file = source_map.add_file("<test>", src);
+    let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+    let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+    let parse_errors: Vec<_> = parse_diags
+        .iter()
+        .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
+        .collect();
+    assert!(
+        parse_errors.is_empty(),
+        "unexpected parse errors in test source:\n{:?}",
+        parse_errors
+    );
+    let tm = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+    let hir = fidan_hir::lower_module(&module, &tm, &interner);
+    let mut mir = fidan_mir::lower_program(&hir, &interner, &[]);
+    fidan_passes::run_preserving_call_frames(&mut mir);
+    run_mir(mir, interner, source_map)
+}
+
 fn run_src_with_threshold(src: &str, jit_threshold: u32) -> Result<(), RunError> {
     let source_map = Arc::new(SourceMap::new());
     let interner = make_interner();
@@ -955,6 +977,42 @@ fn await_spawned_panic_surfaces_error() {
         err.message.contains("boom"),
         "unexpected error: {}",
         err.message
+    );
+}
+
+#[test]
+fn panic_trace_full_chain_includes_nested_callers() {
+    let err = run_src_preserving_call_frames(
+        r#"action inner with (certain msg -> string) {
+            panic("something went wrong: {msg}")
+        }
+
+        action middle with (certain count -> integer) {
+            inner("iteration {count}")
+        }
+
+        action outer {
+            middle(42)
+        }
+
+        outer()"#,
+    )
+    .expect_err("expected nested panic to surface");
+    assert_eq!(err.trace.len(), 3, "trace was: {:?}", err.trace);
+    assert!(
+        err.trace[0].label.starts_with("inner("),
+        "trace was: {:?}",
+        err.trace
+    );
+    assert!(
+        err.trace[1].label.starts_with("middle("),
+        "trace was: {:?}",
+        err.trace
+    );
+    assert!(
+        err.trace[2].label.starts_with("outer("),
+        "trace was: {:?}",
+        err.trace
     );
 }
 

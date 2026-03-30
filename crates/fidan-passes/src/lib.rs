@@ -91,3 +91,15 @@ pub fn run_all(program: &mut MirProgram) {
     DeadCodeElimination.run(program);
     UnreachablePruning.run(program);
 }
+
+/// Run an optimisation pipeline that preserves user call boundaries for rich traces.
+///
+/// This intentionally skips inlining so `--trace full` can show the real source-level
+/// call chain instead of a flattened optimized stack. We still keep the cheap cleanup
+/// passes so debug runs stay reasonably tidy and fast.
+pub fn run_preserving_call_frames(program: &mut MirProgram) {
+    ConstantFolding.run(program);
+    CopyPropagation.run(program);
+    DeadCodeElimination.run(program);
+    UnreachablePruning.run(program);
+}

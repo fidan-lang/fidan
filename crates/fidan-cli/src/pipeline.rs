@@ -910,7 +910,11 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                     emit_mir_safety_diags(&mir, &interner, opts.strict_mode, &opts.suppress);
                 if error_count == 0 {
                     // ── Optimisation passes (Phase 6) ─────────────────────
-                    fidan_passes::run_all(&mut mir);
+                    if opts.trace == TraceMode::Full {
+                        fidan_passes::run_preserving_call_frames(&mut mir);
+                    } else {
+                        fidan_passes::run_all(&mut mir);
+                    }
                     let replay_inputs = std::mem::take(&mut opts.replay_inputs);
                     let sandbox = opts.sandbox.take();
                     let (result, captured) = fidan_interp::run_mir_with_replay(
