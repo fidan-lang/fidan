@@ -45,30 +45,12 @@
 use crate::{
     FidanDict, FidanList, FidanString, OwnedRef, SharedRef,
     parallel::{FidanPending, ParallelArgs, ParallelCapture},
+    stdlib,
     value::{FidanValue, FunctionId, display},
 };
 use std::io::BufRead;
-use std::sync::{Arc, LazyLock};
-
-use dashmap::DashMap;
-use regex::Regex;
-
-/// Process-wide cache: pattern string → compiled `Regex`.
-static REGEX_CACHE: LazyLock<DashMap<String, Arc<Regex>>> = LazyLock::new(DashMap::new);
-
-fn compile_regex(pattern: &str) -> Option<Arc<Regex>> {
-    if let Some(cached) = REGEX_CACHE.get(pattern) {
-        return Some(Arc::clone(&*cached));
-    }
-    match Regex::new(pattern) {
-        Ok(re) => {
-            let arc = Arc::new(re);
-            REGEX_CACHE.insert(pattern.to_string(), Arc::clone(&arc));
-            Some(arc)
-        }
-        Err(_) => None,
-    }
-}
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 // ── Internal helpers ───────────────────────────────────────────────────────────
 
@@ -1222,6 +1204,28 @@ fn as_str_val(v: &FidanValue) -> String {
     }
 }
 
+fn async_wait_any_result(index: i64, value: FidanValue) -> FidanValue {
+    stdlib::async_std::wait_any_result(index, value)
+}
+
+fn async_timeout_result(completed: bool, value: FidanValue) -> FidanValue {
+    stdlib::async_std::timeout_result(completed, value)
+}
+
+fn resolve_async_value_owned(value: FidanValue) -> Result<FidanValue, String> {
+    match value {
+        FidanValue::Pending(pending) => pending.try_join(),
+        other => Ok(other),
+    }
+}
+
+fn try_take_async_value_ready(value: &FidanValue) -> Option<Result<FidanValue, String>> {
+    match value {
+        FidanValue::Pending(pending) => pending.try_take_ready(),
+        other => Some(Ok(other.clone())),
+    }
+}
+
 fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -> *mut FidanValue {
     let str_val = s.as_str().to_owned();
     match method {
@@ -2243,6 +2247,7 @@ fn dispatch_stdlib_inline(
         "string" => Some(dispatch_string_fn(func, args)),
         "io" => Some(dispatch_io(func, args)),
         "collections" => Some(dispatch_collections(func, args)),
+        "async" => Some(dispatch_async(func, args)),
         "env" => Some(dispatch_env(func, args)),
         "regex" => Some(dispatch_regex(func, args)),
         "time" => Some(dispatch_time(func, args)),
@@ -2255,1147 +2260,48 @@ fn dispatch_stdlib_inline(
 // ── math module ───────────────────────────────────────────────────────────────
 
 fn dispatch_math(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    fn num(v: &FidanValue) -> f64 {
-        match v {
-            FidanValue::Float(f) => *f,
-            FidanValue::Integer(n) => *n as f64,
-            _ => 0.0,
-        }
-    }
-    fn int_or_float(f: f64) -> FidanValue {
-        if f.fract() == 0.0 && f.abs() < i64::MAX as f64 {
-            FidanValue::Integer(f as i64)
-        } else {
-            FidanValue::Float(f)
-        }
-    }
-    match func {
-        "PI" | "pi" => into_raw(FidanValue::Float(std::f64::consts::PI)),
-        "E" | "e" => into_raw(FidanValue::Float(std::f64::consts::E)),
-        "TAU" | "tau" => into_raw(FidanValue::Float(std::f64::consts::TAU)),
-        "sqrt" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).sqrt(),
-        )),
-        "cbrt" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).cbrt(),
-        )),
-        "abs" => match args.first().unwrap_or(&FidanValue::Nothing) {
-            FidanValue::Integer(n) => into_raw(FidanValue::Integer(n.abs())),
-            FidanValue::Float(f) => into_raw(FidanValue::Float(f.abs())),
-            _ => into_raw(FidanValue::Nothing),
-        },
-        "floor" => into_raw(int_or_float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).floor(),
-        )),
-        "ceil" => into_raw(int_or_float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).ceil(),
-        )),
-        "round" => into_raw(int_or_float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).round(),
-        )),
-        "trunc" => into_raw(int_or_float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).trunc(),
-        )),
-        "exp" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).exp(),
-        )),
-        "exp2" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).exp2(),
-        )),
-        "ln" | "log_e" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).ln(),
-        )),
-        "log2" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).log2(),
-        )),
-        "log10" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).log10(),
-        )),
-        "log" => {
-            let base = args.get(1).map(num).unwrap_or(std::f64::consts::E);
-            into_raw(FidanValue::Float(
-                num(args.first().unwrap_or(&FidanValue::Nothing)).log(base),
-            ))
-        }
-        "sin" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).sin(),
-        )),
-        "cos" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).cos(),
-        )),
-        "tan" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).tan(),
-        )),
-        "asin" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).asin(),
-        )),
-        "acos" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).acos(),
-        )),
-        "atan" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).atan(),
-        )),
-        "atan2" => {
-            let y = num(args.first().unwrap_or(&FidanValue::Nothing));
-            let x = num(args.get(1).unwrap_or(&FidanValue::Nothing));
-            into_raw(FidanValue::Float(y.atan2(x)))
-        }
-        "pow" => {
-            let base = num(args.first().unwrap_or(&FidanValue::Nothing));
-            let exp = num(args.get(1).unwrap_or(&FidanValue::Nothing));
-            into_raw(FidanValue::Float(base.powf(exp)))
-        }
-        "min" => {
-            let a = num(args.first().unwrap_or(&FidanValue::Nothing));
-            let b = num(args.get(1).unwrap_or(&FidanValue::Nothing));
-            into_raw(if a <= b {
-                args.first().cloned().unwrap_or(FidanValue::Nothing)
-            } else {
-                args.get(1).cloned().unwrap_or(FidanValue::Nothing)
-            })
-        }
-        "max" => {
-            let a = num(args.first().unwrap_or(&FidanValue::Nothing));
-            let b = num(args.get(1).unwrap_or(&FidanValue::Nothing));
-            into_raw(if a >= b {
-                args.first().cloned().unwrap_or(FidanValue::Nothing)
-            } else {
-                args.get(1).cloned().unwrap_or(FidanValue::Nothing)
-            })
-        }
-        "clamp" => {
-            let v = num(args.first().unwrap_or(&FidanValue::Nothing));
-            let lo = num(args.get(1).unwrap_or(&FidanValue::Nothing));
-            let hi = num(args.get(2).unwrap_or(&FidanValue::Nothing));
-            into_raw(FidanValue::Float(v.clamp(lo, hi)))
-        }
-        "sign" | "signum" => match args.first().unwrap_or(&FidanValue::Nothing) {
-            FidanValue::Integer(n) => into_raw(FidanValue::Integer(n.signum())),
-            FidanValue::Float(f) => into_raw(FidanValue::Float(f.signum())),
-            _ => into_raw(FidanValue::Nothing),
-        },
-        "isNaN" | "is_nan" => into_raw(FidanValue::Boolean(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).is_nan(),
-        )),
-        "isInfinite" | "is_infinite" => into_raw(FidanValue::Boolean(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).is_infinite(),
-        )),
-        "isFinite" | "is_finite" => into_raw(FidanValue::Boolean(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).is_finite(),
-        )),
-        // ── Hyperbolic ────────────────────────────────────────────────────
-        "sinh" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).sinh(),
-        )),
-        "cosh" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).cosh(),
-        )),
-        "tanh" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).tanh(),
-        )),
-        "hypot" => {
-            let a = num(args.first().unwrap_or(&FidanValue::Nothing));
-            let b = num(args.get(1).unwrap_or(&FidanValue::Nothing));
-            into_raw(FidanValue::Float(a.hypot(b)))
-        }
-        "fract" => into_raw(FidanValue::Float(
-            num(args.first().unwrap_or(&FidanValue::Nothing)).fract(),
-        )),
-        // ── More log ──────────────────────────────────────────────────────
-        "logN" | "log_n" => {
-            let base = num(args.get(1).unwrap_or(&FidanValue::Nothing));
-            into_raw(FidanValue::Float(
-                num(args.first().unwrap_or(&FidanValue::Nothing)).log(base),
-            ))
-        }
-        // ── Constants ─────────────────────────────────────────────────────
-        "inf" | "infinity" => into_raw(FidanValue::Float(f64::INFINITY)),
-        "nan" | "NaN" => into_raw(FidanValue::Float(f64::NAN)),
-        // ── Random ────────────────────────────────────────────────────────
-        "random" => {
-            let seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(12345);
-            let lcg = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-            into_raw(FidanValue::Float((lcg as f64) / (u32::MAX as f64)))
-        }
-        "randomInt" | "random_int" => {
-            let lo = match args.first() {
-                Some(FidanValue::Integer(n)) => *n,
-                _ => 0,
-            };
-            let hi = match args.get(1) {
-                Some(FidanValue::Integer(n)) => *n,
-                _ => 100,
-            };
-            if hi <= lo {
-                return into_raw(FidanValue::Integer(lo));
-            }
-            let seed = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(42);
-            let lcg = seed.wrapping_mul(1664525).wrapping_add(1013904223);
-            into_raw(FidanValue::Integer(lo + (lcg as i64).abs() % (hi - lo)))
-        }
-        _ => {
-            eprintln!("AOT stdlib math: unknown function '{}'", func);
-            into_raw(FidanValue::Nothing)
-        }
-    }
+    stdlib::math::dispatch(func, args)
+        .map(into_raw)
+        .unwrap_or_else(|| into_raw(FidanValue::Nothing))
 }
 
 // ── string module (free-function API) ─────────────────────────────────────────
 
 fn dispatch_string_fn(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    // Handle functions whose first arg is NOT a string.
-    match func {
-        "fromChars" | "from_chars" => {
-            let list_val = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            if let FidanValue::List(l) = list_val {
-                let s: String = l
-                    .borrow()
-                    .iter()
-                    .filter_map(|v| {
-                        if let FidanValue::String(cs) = v {
-                            cs.as_str().chars().next()
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                return into_raw(FidanValue::String(FidanString::new(&s)));
-            }
-            return into_raw(FidanValue::String(FidanString::new("")));
-        }
-        "fromCharCode" | "from_char_code" => {
-            let code = match args.first() {
-                Some(FidanValue::Integer(n)) => *n as u32,
-                _ => 0,
-            };
-            let ch = char::from_u32(code).unwrap_or('\0');
-            return into_raw(FidanValue::String(FidanString::new(&ch.to_string())));
-        }
-        _ => {}
-    }
-    // Delegate to method dispatch by treating the first arg as the string receiver.
-    if let Some(recv) = args.first().cloned()
-        && let FidanValue::String(s) = recv
-    {
-        let rest = args.into_iter().skip(1).collect();
-        return dispatch_string_method(s, func, rest);
-    }
-    into_raw(FidanValue::Nothing)
+    stdlib::string::dispatch(func, args)
+        .map(into_raw)
+        .unwrap_or_else(|| into_raw(FidanValue::Nothing))
 }
 
 // ── io module ─────────────────────────────────────────────────────────────────
-
 fn dispatch_io(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    match func {
-        "readFile" | "read_file" => {
-            if let Some(FidanValue::String(path)) = args.first() {
-                match std::fs::read_to_string(path.as_str()) {
-                    Ok(s) => into_raw(FidanValue::String(FidanString::new(&s))),
-                    Err(e) => {
-                        eprintln!("io.readFile error: {}", e);
-                        into_raw(FidanValue::Nothing)
-                    }
-                }
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "writeFile" | "write_file" => {
-            if let (Some(FidanValue::String(path)), Some(content)) = (args.first(), args.get(1)) {
-                let text = as_str_val(content);
-                match std::fs::write(path.as_str(), text) {
-                    Ok(_) => into_raw(FidanValue::Boolean(true)),
-                    Err(e) => {
-                        eprintln!("io.writeFile error: {}", e);
-                        into_raw(FidanValue::Boolean(false))
-                    }
-                }
-            } else {
-                into_raw(FidanValue::Boolean(false))
-            }
-        }
-        "appendFile" | "append_file" => {
-            if let (Some(FidanValue::String(path)), Some(content)) = (args.first(), args.get(1)) {
-                use std::io::Write;
-                let text = as_str_val(content);
-                match std::fs::OpenOptions::new()
-                    .append(true)
-                    .create(true)
-                    .open(path.as_str())
-                {
-                    Ok(mut f) => {
-                        let ok = f.write_all(text.as_bytes()).is_ok();
-                        into_raw(FidanValue::Boolean(ok))
-                    }
-                    Err(e) => {
-                        eprintln!("io.appendFile error: {}", e);
-                        into_raw(FidanValue::Boolean(false))
-                    }
-                }
-            } else {
-                into_raw(FidanValue::Boolean(false))
-            }
-        }
-        "readLines" | "read_lines" => {
-            if let Some(FidanValue::String(path)) = args.first() {
-                match std::fs::read_to_string(path.as_str()) {
-                    Ok(s) => {
-                        let mut list = FidanList::new();
-                        for line in s.lines() {
-                            list.append(FidanValue::String(FidanString::new(line)));
-                        }
-                        into_raw(FidanValue::List(OwnedRef::new(list)))
-                    }
-                    Err(e) => {
-                        eprintln!("io.readLines error: {}", e);
-                        into_raw(FidanValue::Nothing)
-                    }
-                }
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "fileExists" | "file_exists" | "exists" => {
-            if let Some(FidanValue::String(path)) = args.first() {
-                into_raw(FidanValue::Boolean(
-                    std::path::Path::new(path.as_str()).exists(),
-                ))
-            } else {
-                into_raw(FidanValue::Boolean(false))
-            }
-        }
-        "deleteFile" | "delete_file" => {
-            if let Some(FidanValue::String(path)) = args.first() {
-                into_raw(FidanValue::Boolean(
-                    std::fs::remove_file(path.as_str()).is_ok(),
-                ))
-            } else {
-                into_raw(FidanValue::Boolean(false))
-            }
-        }
-        "print" => {
-            let text = args.iter().map(as_str_val).collect::<Vec<_>>().join(" ");
-            println!("{}", text);
-            into_raw(FidanValue::Nothing)
-        }
-        "println" => {
-            let text = args.iter().map(as_str_val).collect::<Vec<_>>().join(" ");
-            println!("{}", text);
-            into_raw(FidanValue::Nothing)
-        }
-        "eprint" | "eprintln" => {
-            let text = args.iter().map(as_str_val).collect::<Vec<_>>().join(" ");
-            eprintln!("{}", text);
-            into_raw(FidanValue::Nothing)
-        }
-        "readLine" | "read_line" | "readline" => {
-            let mut input = String::new();
-            let _ = std::io::stdin().read_line(&mut input);
-            let trimmed = input.trim_end_matches('\n').trim_end_matches('\r');
-            into_raw(FidanValue::String(FidanString::new(trimmed)))
-        }
-        // ── File predicates ───────────────────────────────────────────────
-        "isFile" | "is_file" => {
-            if let Some(FidanValue::String(path)) = args.first() {
-                into_raw(FidanValue::Boolean(
-                    std::path::Path::new(path.as_str()).is_file(),
-                ))
-            } else {
-                into_raw(FidanValue::Boolean(false))
-            }
-        }
-        "isDir" | "is_dir" | "isDirectory" | "is_directory" => {
-            if let Some(FidanValue::String(path)) = args.first() {
-                into_raw(FidanValue::Boolean(
-                    std::path::Path::new(path.as_str()).is_dir(),
-                ))
-            } else {
-                into_raw(FidanValue::Boolean(false))
-            }
-        }
-        // ── Directory ops ─────────────────────────────────────────────────
-        "makeDir" | "make_dir" | "mkdir" | "createDir" | "create_dir" => {
-            if let Some(FidanValue::String(path)) = args.first() {
-                into_raw(FidanValue::Boolean(
-                    std::fs::create_dir_all(path.as_str()).is_ok(),
-                ))
-            } else {
-                into_raw(FidanValue::Boolean(false))
-            }
-        }
-        "listDir" | "list_dir" | "readDir" | "read_dir" => {
-            if let Some(FidanValue::String(path)) = args.first() {
-                let mut list = FidanList::new();
-                if let Ok(entries) = std::fs::read_dir(path.as_str()) {
-                    for entry in entries.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        list.append(FidanValue::String(FidanString::new(&name)));
-                    }
-                }
-                into_raw(FidanValue::List(OwnedRef::new(list)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        // ── File copy/rename ──────────────────────────────────────────────
-        "copyFile" | "copy_file" => {
-            if let (Some(FidanValue::String(from)), Some(FidanValue::String(to))) =
-                (args.first(), args.get(1))
-            {
-                into_raw(FidanValue::Boolean(
-                    std::fs::copy(from.as_str(), to.as_str()).is_ok(),
-                ))
-            } else {
-                into_raw(FidanValue::Boolean(false))
-            }
-        }
-        "renameFile" | "rename_file" | "moveFile" | "move_file" => {
-            if let (Some(FidanValue::String(from)), Some(FidanValue::String(to))) =
-                (args.first(), args.get(1))
-            {
-                into_raw(FidanValue::Boolean(
-                    std::fs::rename(from.as_str(), to.as_str()).is_ok(),
-                ))
-            } else {
-                into_raw(FidanValue::Boolean(false))
-            }
-        }
-        // ── Path utilities ────────────────────────────────────────────────
-        "join" | "joinPath" | "join_path" => {
-            let mut path = std::path::PathBuf::new();
-            for arg in &args {
-                path.push(as_str_val(arg));
-            }
-            into_raw(FidanValue::String(FidanString::new(
-                &path.to_string_lossy(),
-            )))
-        }
-        "dirname" | "dir_name" | "parent" => {
-            if let Some(FidanValue::String(p)) = args.first() {
-                let dir = std::path::Path::new(p.as_str())
-                    .parent()
-                    .map(|d| d.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                into_raw(FidanValue::String(FidanString::new(&dir)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "basename" | "base_name" | "fileName" | "file_name" => {
-            if let Some(FidanValue::String(p)) = args.first() {
-                let name = std::path::Path::new(p.as_str())
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                into_raw(FidanValue::String(FidanString::new(&name)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "extension" | "ext" => {
-            if let Some(FidanValue::String(p)) = args.first() {
-                let ext = std::path::Path::new(p.as_str())
-                    .extension()
-                    .map(|e| e.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                into_raw(FidanValue::String(FidanString::new(&ext)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "cwd" | "currentDir" | "current_dir" | "pwd" => {
-            let dir = std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default();
-            into_raw(FidanValue::String(FidanString::new(&dir)))
-        }
-        "absolutePath" | "absolute_path" | "realPath" | "real_path" => {
-            if let Some(FidanValue::String(p)) = args.first() {
-                let abs = std::fs::canonicalize(p.as_str())
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| p.as_str().to_string());
-                into_raw(FidanValue::String(FidanString::new(&abs)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        // ── Env (accessible from io namespace) ───────────────────────────
-        "getEnv" | "get_env" | "env" => {
-            if let Some(FidanValue::String(key)) = args.first() {
-                match std::env::var(key.as_str()) {
-                    Ok(v) => into_raw(FidanValue::String(FidanString::new(&v))),
-                    Err(_) => into_raw(FidanValue::Nothing),
-                }
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "setEnv" | "set_env" => {
-            if let (Some(FidanValue::String(k)), Some(v)) = (args.first(), args.get(1)) {
-                unsafe { std::env::set_var(k.as_str(), as_str_val(v)) };
-                into_raw(FidanValue::Nothing)
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "args" | "argv" => {
-            let mut list = FidanList::new();
-            for a in std::env::args() {
-                list.append(FidanValue::String(FidanString::new(&a)));
-            }
-            into_raw(FidanValue::List(OwnedRef::new(list)))
-        }
-        // ── Misc ──────────────────────────────────────────────────────────
-        "flush" => {
-            use std::io::Write;
-            let _ = std::io::stdout().flush();
-            into_raw(FidanValue::Nothing)
-        }
-        _ => {
-            eprintln!("AOT stdlib io: unknown function '{}'", func);
-            into_raw(FidanValue::Nothing)
-        }
-    }
+    stdlib::io::dispatch(func, args)
+        .map(into_raw)
+        .unwrap_or_else(|| into_raw(FidanValue::Nothing))
 }
 
 // ── collections module ────────────────────────────────────────────────────────
-
 fn dispatch_collections(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    match func {
-        "range" => {
-            let start = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-            let end = args
-                .get(1)
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-            let inclusive = args
-                .get(2)
-                .map(|v| matches!(v, FidanValue::Boolean(true)))
-                .unwrap_or(false);
-            let mut list = FidanList::new();
-            let real_end = if inclusive { end + 1 } else { end };
-            for i in start..real_end {
-                list.append(FidanValue::Integer(i));
-            }
-            into_raw(FidanValue::List(OwnedRef::new(list)))
-        }
-        "sort" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let b = l.borrow();
-                let mut items: Vec<FidanValue> = b.iter().cloned().collect();
-                items.sort_by(compare_values);
-                let mut new_list = FidanList::new();
-                for v in items {
-                    new_list.append(v);
-                }
-                into_raw(FidanValue::List(OwnedRef::new(new_list)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "reverse" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let b = l.borrow();
-                let mut new_list = FidanList::new();
-                for v in b.iter().rev() {
-                    new_list.append(v.clone());
-                }
-                into_raw(FidanValue::List(OwnedRef::new(new_list)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "flatten" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let b = l.borrow();
-                let mut new_list = FidanList::new();
-                for v in b.iter() {
-                    match v {
-                        FidanValue::List(inner) => {
-                            for item in inner.borrow().iter() {
-                                new_list.append(item.clone());
-                            }
-                        }
-                        other => new_list.append(other.clone()),
-                    }
-                }
-                into_raw(FidanValue::List(OwnedRef::new(new_list)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "zip" => {
-            if let (Some(FidanValue::List(la)), Some(FidanValue::List(lb))) =
-                (args.first(), args.get(1))
-            {
-                let ba = la.borrow();
-                let bb = lb.borrow();
-                let len = ba.len().min(bb.len());
-                let mut pairs = FidanList::new();
-                for i in 0..len {
-                    let mut pair = FidanList::new();
-                    pair.append(ba.get(i).cloned().unwrap_or(FidanValue::Nothing));
-                    pair.append(bb.get(i).cloned().unwrap_or(FidanValue::Nothing));
-                    pairs.append(FidanValue::List(OwnedRef::new(pair)));
-                }
-                into_raw(FidanValue::List(OwnedRef::new(pairs)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "sum" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let b = l.borrow();
-                let mut total_i: i64 = 0;
-                let mut has_float = false;
-                let mut total_f: f64 = 0.0;
-                for v in b.iter() {
-                    match v {
-                        FidanValue::Integer(n) => {
-                            total_i = total_i.wrapping_add(*n);
-                            total_f += *n as f64;
-                        }
-                        FidanValue::Float(f) => {
-                            has_float = true;
-                            total_f += f;
-                        }
-                        _ => {}
-                    }
-                }
-                if has_float {
-                    into_raw(FidanValue::Float(total_f))
-                } else {
-                    into_raw(FidanValue::Integer(total_i))
-                }
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "min" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let b = l.borrow();
-                let min = b.iter().min_by(|a, b| compare_values(a, b)).cloned();
-                into_raw(min.unwrap_or(FidanValue::Nothing))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "max" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let b = l.borrow();
-                let max = b.iter().max_by(|a, b| compare_values(a, b)).cloned();
-                into_raw(max.unwrap_or(FidanValue::Nothing))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "unique" | "deduplicate" | "dedup" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let b = l.borrow();
-                let mut seen: Vec<FidanValue> = Vec::new();
-                let mut new_list = FidanList::new();
-                for v in b.iter() {
-                    if !seen.iter().any(|s| values_equal(s, v)) {
-                        seen.push(v.clone());
-                        new_list.append(v.clone());
-                    }
-                }
-                into_raw(FidanValue::List(OwnedRef::new(new_list)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        // ── Higher-order (no callback) ────────────────────────────────────
-        "count" | "length" | "len" => match args.first() {
-            Some(FidanValue::List(l)) => into_raw(FidanValue::Integer(l.borrow().len() as i64)),
-            Some(FidanValue::Dict(d)) => into_raw(FidanValue::Integer(d.borrow().len() as i64)),
-            _ => into_raw(FidanValue::Integer(0)),
-        },
-        "isEmpty" | "is_empty" => match args.first() {
-            Some(FidanValue::List(l)) => into_raw(FidanValue::Boolean(l.borrow().is_empty())),
-            Some(FidanValue::Dict(d)) => into_raw(FidanValue::Boolean(d.borrow().is_empty())),
-            _ => into_raw(FidanValue::Boolean(true)),
-        },
-        "concat" => {
-            let mut result = FidanList::new();
-            for arg in &args {
-                if let FidanValue::List(l) = arg {
-                    for v in l.borrow().iter() {
-                        result.append(v.clone());
-                    }
-                }
-            }
-            into_raw(FidanValue::List(OwnedRef::new(result)))
-        }
-        "slice" | "sliceList" | "slice_list" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let items: Vec<FidanValue> = l.borrow().iter().cloned().collect();
-                let len = items.len();
-                let start = match args.get(1) {
-                    Some(FidanValue::Integer(n)) => (*n).max(0) as usize,
-                    _ => 0,
-                };
-                let end = match args.get(2) {
-                    Some(FidanValue::Integer(n)) => (*n as usize).min(len),
-                    _ => len,
-                };
-                let mut result = FidanList::new();
-                for v in items[start.min(len)..end.min(len)].iter() {
-                    result.append(v.clone());
-                }
-                into_raw(FidanValue::List(OwnedRef::new(result)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "first" | "head" => match args.first() {
-            Some(FidanValue::List(l)) => {
-                into_raw(l.borrow().get(0).cloned().unwrap_or(FidanValue::Nothing))
-            }
-            _ => into_raw(FidanValue::Nothing),
-        },
-        "last" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let borrow = l.borrow();
-                let len = borrow.len();
-                into_raw(
-                    borrow
-                        .get(len.saturating_sub(1))
-                        .cloned()
-                        .unwrap_or(FidanValue::Nothing),
-                )
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "join" => {
-            let list_val = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let sep = args.get(1).map(as_str_val).unwrap_or_default();
-            if let FidanValue::List(l) = list_val {
-                let parts: Vec<String> = l.borrow().iter().map(as_str_val).collect();
-                into_raw(FidanValue::String(FidanString::new(&parts.join(&sep))))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "product" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let prod: f64 = l
-                    .borrow()
-                    .iter()
-                    .map(|v| match v {
-                        FidanValue::Integer(n) => *n as f64,
-                        FidanValue::Float(f) => *f,
-                        _ => 1.0,
-                    })
-                    .product();
-                if prod.fract() == 0.0 && prod.abs() < i64::MAX as f64 {
-                    into_raw(FidanValue::Integer(prod as i64))
-                } else {
-                    into_raw(FidanValue::Float(prod))
-                }
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        // ── Set operations (Set = Dict with Boolean true values) ──────────
-        "Set" => {
-            let mut dict = FidanDict::new();
-            if let Some(FidanValue::List(l)) = args.first() {
-                for v in l.borrow().iter() {
-                    let key = FidanString::new(&as_str_val(v));
-                    dict.insert(key, FidanValue::Boolean(true));
-                }
-            }
-            into_raw(FidanValue::Dict(OwnedRef::new(dict)))
-        }
-        "setAdd" | "set_add" => {
-            if let (Some(FidanValue::Dict(d)), Some(val)) = (args.first(), args.get(1)) {
-                let key = FidanString::new(&as_str_val(val));
-                d.borrow_mut().insert(key, FidanValue::Boolean(true));
-                into_raw(FidanValue::Nothing)
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "setRemove" | "set_remove" => {
-            if let (Some(FidanValue::Dict(d)), Some(val)) = (args.first(), args.get(1)) {
-                let key = FidanString::new(&as_str_val(val));
-                d.borrow_mut().remove(&key);
-                into_raw(FidanValue::Nothing)
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "setContains" | "set_contains" | "setHas" | "set_has" => {
-            if let (Some(FidanValue::Dict(d)), Some(val)) = (args.first(), args.get(1)) {
-                let key = FidanString::new(&as_str_val(val));
-                into_raw(FidanValue::Boolean(d.borrow().get(&key).is_some()))
-            } else {
-                into_raw(FidanValue::Boolean(false))
-            }
-        }
-        "setToList" | "set_to_list" | "setValues" | "set_values" => {
-            if let Some(FidanValue::Dict(d)) = args.first() {
-                let mut list = FidanList::new();
-                for (k, _) in d.borrow().iter() {
-                    list.append(FidanValue::String(k.clone()));
-                }
-                into_raw(FidanValue::List(OwnedRef::new(list)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "setLen" | "set_len" | "setSize" | "set_size" => {
-            if let Some(FidanValue::Dict(d)) = args.first() {
-                into_raw(FidanValue::Integer(d.borrow().len() as i64))
-            } else {
-                into_raw(FidanValue::Integer(0))
-            }
-        }
-        "setUnion" | "set_union" => {
-            if let (Some(FidanValue::Dict(a)), Some(FidanValue::Dict(b))) =
-                (args.first(), args.get(1))
-            {
-                let mut result = FidanDict::new();
-                for (k, v) in a.borrow().iter() {
-                    result.insert(k.clone(), v.clone());
-                }
-                for (k, v) in b.borrow().iter() {
-                    result.insert(k.clone(), v.clone());
-                }
-                into_raw(FidanValue::Dict(OwnedRef::new(result)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "setIntersect" | "set_intersect" => {
-            if let (Some(FidanValue::Dict(a)), Some(FidanValue::Dict(b))) =
-                (args.first(), args.get(1))
-            {
-                let mut result = FidanDict::new();
-                let b_ref = b.borrow();
-                for (k, v) in a.borrow().iter() {
-                    if b_ref.get(k).is_some() {
-                        result.insert(k.clone(), v.clone());
-                    }
-                }
-                into_raw(FidanValue::Dict(OwnedRef::new(result)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "setDiff" | "set_diff" | "setDifference" | "set_difference" => {
-            if let (Some(FidanValue::Dict(a)), Some(FidanValue::Dict(b))) =
-                (args.first(), args.get(1))
-            {
-                let mut result = FidanDict::new();
-                let b_ref = b.borrow();
-                for (k, v) in a.borrow().iter() {
-                    if b_ref.get(k).is_none() {
-                        result.insert(k.clone(), v.clone());
-                    }
-                }
-                into_raw(FidanValue::Dict(OwnedRef::new(result)))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        // ── Queue (FIFO) ──────────────────────────────────────────────────
-        "Queue" => {
-            let mut list = FidanList::new();
-            if let Some(FidanValue::List(l)) = args.first() {
-                for v in l.borrow().iter() {
-                    list.append(v.clone());
-                }
-            }
-            into_raw(FidanValue::List(OwnedRef::new(list)))
-        }
-        "enqueue" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let l = l.clone();
-                let val = args.into_iter().nth(1).unwrap_or(FidanValue::Nothing);
-                l.borrow_mut().append(val);
-                into_raw(FidanValue::Nothing)
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "dequeue" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let mut borrow = l.borrow_mut();
-                let items: Vec<FidanValue> = borrow.iter().cloned().collect();
-                if items.is_empty() {
-                    return into_raw(FidanValue::Nothing);
-                }
-                let first_item = items[0].clone();
-                let mut new_list = FidanList::new();
-                for item in items.into_iter().skip(1) {
-                    new_list.append(item);
-                }
-                *borrow = new_list;
-                into_raw(first_item)
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "peek" | "front" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                into_raw(l.borrow().get(0).cloned().unwrap_or(FidanValue::Nothing))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        // ── Stack (LIFO) ──────────────────────────────────────────────────
-        "Stack" => {
-            let mut list = FidanList::new();
-            if let Some(FidanValue::List(l)) = args.first() {
-                for v in l.borrow().iter() {
-                    list.append(v.clone());
-                }
-            }
-            into_raw(FidanValue::List(OwnedRef::new(list)))
-        }
-        "push" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let l = l.clone();
-                let val = args.into_iter().nth(1).unwrap_or(FidanValue::Nothing);
-                l.borrow_mut().append(val);
-                into_raw(FidanValue::Nothing)
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "pop" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let mut borrow = l.borrow_mut();
-                let items: Vec<FidanValue> = borrow.iter().cloned().collect();
-                let len = items.len();
-                if len == 0 {
-                    return into_raw(FidanValue::Nothing);
-                }
-                let top = items[len - 1].clone();
-                let mut new_list = FidanList::new();
-                for item in items.into_iter().take(len - 1) {
-                    new_list.append(item);
-                }
-                *borrow = new_list;
-                into_raw(top)
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "stackPeek" | "top" | "stack_peek" => {
-            if let Some(FidanValue::List(l)) = args.first() {
-                let borrow = l.borrow();
-                let len = borrow.len();
-                into_raw(
-                    borrow
-                        .get(len.saturating_sub(1))
-                        .cloned()
-                        .unwrap_or(FidanValue::Nothing),
-                )
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        _ => {
-            eprintln!("AOT stdlib collections: unknown function '{}'", func);
-            into_raw(FidanValue::Nothing)
-        }
-    }
+    stdlib::collections::dispatch(func, args)
+        .map(into_raw)
+        .unwrap_or_else(|| into_raw(FidanValue::Nothing))
 }
 
 // ── env module ────────────────────────────────────────────────────────────────
-
 fn dispatch_env(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    match func {
-        "get" | "getVar" | "get_var" => {
-            if let Some(FidanValue::String(key)) = args.first() {
-                match std::env::var(key.as_str()) {
-                    Ok(v) => into_raw(FidanValue::String(FidanString::new(&v))),
-                    Err(_) => into_raw(FidanValue::Nothing),
-                }
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "set" | "setVar" | "set_var" => {
-            if let (Some(FidanValue::String(k)), Some(v)) = (args.first(), args.get(1)) {
-                unsafe { std::env::set_var(k.as_str(), as_str_val(v)) };
-                into_raw(FidanValue::Nothing)
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-        "args" => {
-            let mut list = FidanList::new();
-            for arg in std::env::args().skip(1) {
-                list.append(FidanValue::String(FidanString::new(&arg)));
-            }
-            into_raw(FidanValue::List(OwnedRef::new(list)))
-        }
-        _ => {
-            eprintln!("AOT stdlib env: unknown function '{}'", func);
-            into_raw(FidanValue::Nothing)
-        }
-    }
+    stdlib::env::dispatch(func, args)
+        .map(into_raw)
+        .unwrap_or_else(|| into_raw(FidanValue::Nothing))
 }
 
 // ── regex module ──────────────────────────────────────────────────────────────
-
 fn dispatch_regex(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    fn as_s(v: &FidanValue) -> String {
-        match v {
-            FidanValue::String(s) => s.as_str().to_string(),
-            FidanValue::Integer(n) => n.to_string(),
-            FidanValue::Float(f) => f.to_string(),
-            FidanValue::Boolean(b) => b.to_string(),
-            _ => String::new(),
-        }
-    }
-    match func {
-        "test" | "isMatch" | "is_match" => {
-            let pattern = as_s(args.first().unwrap_or(&FidanValue::Nothing));
-            let subject = as_s(args.get(1).unwrap_or(&FidanValue::Nothing));
-            let result = compile_regex(&pattern)
-                .map(|re| re.is_match(&subject))
-                .unwrap_or(false);
-            into_raw(FidanValue::Boolean(result))
-        }
-        "match" | "find" | "find_first" => {
-            let pattern = as_s(args.first().unwrap_or(&FidanValue::Nothing));
-            let subject = as_s(args.get(1).unwrap_or(&FidanValue::Nothing));
-            match compile_regex(&pattern)
-                .and_then(|re| re.find(&subject).map(|m| m.as_str().to_string()))
-            {
-                Some(s) => into_raw(FidanValue::String(FidanString::new(&s))),
-                None => into_raw(FidanValue::Nothing),
-            }
-        }
-        "findAll" | "find_all" | "matches" => {
-            let pattern = as_s(args.first().unwrap_or(&FidanValue::Nothing));
-            let subject = as_s(args.get(1).unwrap_or(&FidanValue::Nothing));
-            let mut list = FidanList::new();
-            if let Some(re) = compile_regex(&pattern) {
-                for m in re.find_iter(&subject) {
-                    list.append(FidanValue::String(FidanString::new(m.as_str())));
-                }
-            }
-            into_raw(FidanValue::List(OwnedRef::new(list)))
-        }
-        "replace" | "sub" => {
-            let pattern = as_s(args.first().unwrap_or(&FidanValue::Nothing));
-            let subject = as_s(args.get(1).unwrap_or(&FidanValue::Nothing));
-            let replacement = as_s(args.get(2).unwrap_or(&FidanValue::Nothing));
-            let result = if let Some(re) = compile_regex(&pattern) {
-                re.replace(&subject, replacement.as_str()).to_string()
-            } else {
-                subject
-            };
-            into_raw(FidanValue::String(FidanString::new(&result)))
-        }
-        "replaceAll" | "replace_all" | "gsub" => {
-            let pattern = as_s(args.first().unwrap_or(&FidanValue::Nothing));
-            let subject = as_s(args.get(1).unwrap_or(&FidanValue::Nothing));
-            let replacement = as_s(args.get(2).unwrap_or(&FidanValue::Nothing));
-            let result = if let Some(re) = compile_regex(&pattern) {
-                re.replace_all(&subject, replacement.as_str()).to_string()
-            } else {
-                subject
-            };
-            into_raw(FidanValue::String(FidanString::new(&result)))
-        }
-        "split" => {
-            let pattern = as_s(args.first().unwrap_or(&FidanValue::Nothing));
-            let subject = as_s(args.get(1).unwrap_or(&FidanValue::Nothing));
-            let mut list = FidanList::new();
-            if let Some(re) = compile_regex(&pattern) {
-                for part in re.split(&subject) {
-                    list.append(FidanValue::String(FidanString::new(part)));
-                }
-            } else {
-                list.append(FidanValue::String(FidanString::new(&subject)));
-            }
-            into_raw(FidanValue::List(OwnedRef::new(list)))
-        }
-        "capture" | "exec" => {
-            let pattern = as_s(args.first().unwrap_or(&FidanValue::Nothing));
-            let subject = as_s(args.get(1).unwrap_or(&FidanValue::Nothing));
-            match compile_regex(&pattern) {
-                Some(re) => match re.captures(&subject) {
-                    Some(caps) => {
-                        let mut list = FidanList::new();
-                        for g in caps.iter() {
-                            match g {
-                                Some(m) => {
-                                    list.append(FidanValue::String(FidanString::new(m.as_str())))
-                                }
-                                None => list.append(FidanValue::Nothing),
-                            }
-                        }
-                        into_raw(FidanValue::List(OwnedRef::new(list)))
-                    }
-                    None => into_raw(FidanValue::Nothing),
-                },
-                None => into_raw(FidanValue::Nothing),
-            }
-        }
-        "isValid" | "is_valid" => {
-            let pattern = as_s(args.first().unwrap_or(&FidanValue::Nothing));
-            into_raw(FidanValue::Boolean(Regex::new(&pattern).is_ok()))
-        }
-        "captureAll" | "capture_all" | "execAll" | "exec_all" => {
-            // Returns a list of lists; each inner list is one match's capture groups.
-            let pattern = as_s(args.first().unwrap_or(&FidanValue::Nothing));
-            let subject = as_s(args.get(1).unwrap_or(&FidanValue::Nothing));
-            let mut outer = FidanList::new();
-            if let Some(re) = compile_regex(&pattern) {
-                for caps in re.captures_iter(&subject) {
-                    let mut inner = FidanList::new();
-                    for g in caps.iter() {
-                        match g {
-                            Some(m) => {
-                                inner.append(FidanValue::String(FidanString::new(m.as_str())))
-                            }
-                            None => inner.append(FidanValue::Nothing),
-                        }
-                    }
-                    outer.append(FidanValue::List(OwnedRef::new(inner)));
-                }
-            }
-            into_raw(FidanValue::List(OwnedRef::new(outer)))
-        }
-        _ => {
-            eprintln!("AOT stdlib regex: unknown function '{}'", func);
-            into_raw(FidanValue::Nothing)
-        }
-    }
+    stdlib::regex::dispatch(func, args)
+        .map(into_raw)
+        .unwrap_or_else(|| into_raw(FidanValue::Nothing))
 }
 
-// ── parallel module ───────────────────────────────────────────────────────────
-//
+// ── parallel module ───────────────────────────────────────────────────────────//
 // These run sequentially in AOT (true parallelism would require extra runtime
 // infrastructure). Behaviour is identical to the interpreter's parallel module.
 
@@ -3510,355 +2416,102 @@ fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
 // ── test module ───────────────────────────────────────────────────────────────
 
 fn dispatch_test(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    fn val_display(v: &FidanValue) -> String {
-        match v {
-            FidanValue::String(s) => format!("\"{}\"", s.as_str()),
-            FidanValue::Integer(n) => n.to_string(),
-            FidanValue::Float(f) => f.to_string(),
-            FidanValue::Boolean(b) => b.to_string(),
-            FidanValue::Nothing => "nothing".to_string(),
-            _ => "<value>".to_string(),
+    match stdlib::test_runner::dispatch(func, args) {
+        Some(Ok(value)) => into_raw(value),
+        Some(Err(msg)) => {
+            eprintln!("Test failed: {}", msg);
+            let msg_val = into_raw(FidanValue::String(FidanString::new(&msg)));
+            unsafe { fdn_throw_unhandled(msg_val) }
         }
-    }
-    fn fail_test(msg: String) -> *mut FidanValue {
-        eprintln!("Test failed: {}", msg);
-        let msg_val = into_raw(FidanValue::String(FidanString::new(&msg)));
-        unsafe { fdn_throw_unhandled(msg_val) }
-    }
-    match func {
-        "assert" => {
-            let cond = matches!(args.first(), Some(FidanValue::Boolean(true)));
-            let msg = args
-                .get(1)
-                .map(|v| match v {
-                    FidanValue::String(s) => s.as_str().to_string(),
-                    _ => "assertion failed".to_string(),
-                })
-                .unwrap_or_else(|| "assertion failed".to_string());
-            if !cond {
-                return fail_test(msg);
-            }
-            into_raw(FidanValue::Nothing)
-        }
-        "assertEq" | "assert_eq" => {
-            let a = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let b = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
-            if !values_equal(&a, &b) {
-                return fail_test(format!(
-                    "assertEq failed: {} != {}",
-                    val_display(&a),
-                    val_display(&b)
-                ));
-            }
-            into_raw(FidanValue::Nothing)
-        }
-        "assertNe" | "assert_ne" => {
-            let a = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let b = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
-            if values_equal(&a, &b) {
-                return fail_test(format!("assertNe failed: both are {}", val_display(&a)));
-            }
-            into_raw(FidanValue::Nothing)
-        }
-        "assertGt" | "assert_gt" => {
-            let a = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let b = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
-            if compare_values(&a, &b) != std::cmp::Ordering::Greater {
-                return fail_test(format!(
-                    "assertGt failed: {} is not > {}",
-                    val_display(&a),
-                    val_display(&b)
-                ));
-            }
-            into_raw(FidanValue::Nothing)
-        }
-        "assertLt" | "assert_lt" => {
-            let a = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let b = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
-            if compare_values(&a, &b) != std::cmp::Ordering::Less {
-                return fail_test(format!(
-                    "assertLt failed: {} is not < {}",
-                    val_display(&a),
-                    val_display(&b)
-                ));
-            }
-            into_raw(FidanValue::Nothing)
-        }
-        "assertGe" | "assert_ge" => {
-            let a = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let b = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
-            if compare_values(&a, &b) == std::cmp::Ordering::Less {
-                return fail_test(format!(
-                    "assertGe failed: {} is not >= {}",
-                    val_display(&a),
-                    val_display(&b)
-                ));
-            }
-            into_raw(FidanValue::Nothing)
-        }
-        "assertLe" | "assert_le" => {
-            let a = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let b = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
-            if compare_values(&a, &b) == std::cmp::Ordering::Greater {
-                return fail_test(format!(
-                    "assertLe failed: {} is not <= {}",
-                    val_display(&a),
-                    val_display(&b)
-                ));
-            }
-            into_raw(FidanValue::Nothing)
-        }
-        "assertSome" | "assert_some" | "assertNotNothing" | "assert_not_nothing" => {
-            let v = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            if matches!(v, FidanValue::Nothing) {
-                return fail_test("assertSome failed: value is nothing".to_string());
-            }
-            into_raw(FidanValue::Nothing)
-        }
-        "assertNothing" | "assert_nothing" | "assertIsNothing" => {
-            let v = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            if !matches!(v, FidanValue::Nothing) {
-                return fail_test(format!("assertNothing failed: got {}", val_display(&v)));
-            }
-            into_raw(FidanValue::Nothing)
-        }
-        "assertTrue" | "assert_true" => {
-            let v = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            if !matches!(v, FidanValue::Boolean(true)) {
-                return fail_test(format!("assertTrue failed: got {}", val_display(&v)));
-            }
-            into_raw(FidanValue::Nothing)
-        }
-        "assertFalse" | "assert_false" => {
-            let v = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            if !matches!(v, FidanValue::Boolean(false)) {
-                return fail_test(format!("assertFalse failed: got {}", val_display(&v)));
-            }
-            into_raw(FidanValue::Nothing)
-        }
-        "fail" => {
-            let msg = args
-                .first()
-                .map(|v| match v {
-                    FidanValue::String(s) => s.as_str().to_string(),
-                    _ => "test.fail() called".to_string(),
-                })
-                .unwrap_or_else(|| "test.fail() called".to_string());
-            fail_test(msg)
-        }
-        "pass" | "ok" => into_raw(FidanValue::Nothing),
-        _ => {
-            eprintln!("AOT stdlib test: unknown function '{}'", func);
-            into_raw(FidanValue::Nothing)
-        }
+        None => into_raw(FidanValue::Nothing),
     }
 }
 
 // ── time module ───────────────────────────────────────────────────────────────
-
 fn dispatch_time(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    fn to_ms_val(v: &FidanValue) -> u64 {
-        match v {
-            FidanValue::Integer(n) => (*n).max(0) as u64,
-            FidanValue::Float(f) => f.max(0.0) as u64,
-            _ => 0,
-        }
-    }
-    match func {
-        "now" => {
-            let ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            into_raw(FidanValue::Integer(ms))
-        }
-        "timestamp" => {
-            let s = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            into_raw(FidanValue::Integer(s))
-        }
-        "sleep" => {
-            let ms = to_ms_val(args.first().unwrap_or(&FidanValue::Nothing));
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            into_raw(FidanValue::Nothing)
-        }
-        "elapsed" => {
-            let start = match args.first().unwrap_or(&FidanValue::Nothing) {
-                FidanValue::Integer(n) => *n,
-                _ => 0,
-            };
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as i64)
-                .unwrap_or(0);
-            into_raw(FidanValue::Integer(now - start))
-        }
-        "wait" => {
-            // Alias for sleep
-            let ms = to_ms_val(args.first().unwrap_or(&FidanValue::Nothing));
-            std::thread::sleep(std::time::Duration::from_millis(ms));
-            into_raw(FidanValue::Nothing)
-        }
-        "date" | "today" => {
-            let ms = match args.first() {
-                Some(v) => match v {
-                    FidanValue::Integer(n) => *n,
-                    _ => 0,
-                },
-                None => std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
-            };
-            let (y, mo, d, _, _, _) = ms_to_civil(ms);
-            let s = format!("{:04}-{:02}-{:02}", y, mo, d);
-            into_raw(FidanValue::String(FidanString::new(&s)))
-        }
-        "time" | "timeStr" | "time_str" => {
-            let ms = match args.first() {
-                Some(v) => match v {
-                    FidanValue::Integer(n) => *n,
-                    _ => 0,
-                },
-                None => std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
-            };
-            let (_, _, _, h, min, s) = ms_to_civil(ms);
-            let result = format!("{:02}:{:02}:{:02}", h, min, s);
-            into_raw(FidanValue::String(FidanString::new(&result)))
-        }
-        "datetime" => {
-            let ms = match args.first() {
-                Some(v) => match v {
-                    FidanValue::Integer(n) => *n,
-                    _ => 0,
-                },
-                None => std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
-            };
-            let (y, mo, d, h, min, s) = ms_to_civil(ms);
-            let result = format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, mo, d, h, min, s);
-            into_raw(FidanValue::String(FidanString::new(&result)))
-        }
-        "format" | "formatDate" | "format_date" => {
-            // format(ms, pattern) — supports %Y %m %d %H %M %S %L placeholders
-            let ms = match args.first() {
-                Some(FidanValue::Integer(n)) => *n,
-                _ => std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis() as i64)
-                    .unwrap_or(0),
-            };
-            let pattern = match args.get(1) {
-                Some(FidanValue::String(s)) => s.as_str().to_string(),
-                _ => "%Y-%m-%dT%H:%M:%S".to_string(),
-            };
-            let (y, mo, d, h, min, s) = ms_to_civil(ms);
-            let ms_part = (ms.abs() % 1000) as u32;
-            let result = pattern
-                .replace("%Y", &format!("{:04}", y))
-                .replace("%m", &format!("{:02}", mo))
-                .replace("%d", &format!("{:02}", d))
-                .replace("%H", &format!("{:02}", h))
-                .replace("%M", &format!("{:02}", min))
-                .replace("%S", &format!("{:02}", s))
-                .replace("%L", &format!("{:03}", ms_part));
-            into_raw(FidanValue::String(FidanString::new(&result)))
-        }
-        "year" => {
-            let ms = match args.first() {
-                Some(FidanValue::Integer(n)) => *n,
-                _ => 0,
-            };
-            let (y, _, _, _, _, _) = ms_to_civil(ms);
-            into_raw(FidanValue::Integer(y as i64))
-        }
-        "month" => {
-            let ms = match args.first() {
-                Some(FidanValue::Integer(n)) => *n,
-                _ => 0,
-            };
-            let (_, mo, _, _, _, _) = ms_to_civil(ms);
-            into_raw(FidanValue::Integer(mo as i64))
-        }
-        "day" => {
-            let ms = match args.first() {
-                Some(FidanValue::Integer(n)) => *n,
-                _ => 0,
-            };
-            let (_, _, d, _, _, _) = ms_to_civil(ms);
-            into_raw(FidanValue::Integer(d as i64))
-        }
-        "hour" => {
-            let ms = match args.first() {
-                Some(FidanValue::Integer(n)) => *n,
-                _ => 0,
-            };
-            let (_, _, _, h, _, _) = ms_to_civil(ms);
-            into_raw(FidanValue::Integer(h as i64))
-        }
-        "minute" => {
-            let ms = match args.first() {
-                Some(FidanValue::Integer(n)) => *n,
-                _ => 0,
-            };
-            let (_, _, _, _, min, _) = ms_to_civil(ms);
-            into_raw(FidanValue::Integer(min as i64))
-        }
-        "second" => {
-            let ms = match args.first() {
-                Some(FidanValue::Integer(n)) => *n,
-                _ => 0,
-            };
-            let (_, _, _, _, _, s) = ms_to_civil(ms);
-            into_raw(FidanValue::Integer(s as i64))
-        }
-        "weekday" => {
-            // Returns 0=Sunday .. 6=Saturday, using Tomohiko Sakamoto's algorithm
-            let ms = match args.first() {
-                Some(FidanValue::Integer(n)) => *n,
-                _ => 0,
-            };
-            let (y, mo, d, _, _, _) = ms_to_civil(ms);
-            let t = [0i32, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
-            let yr = if mo < 3 { y - 1 } else { y };
-            let wd = (yr + yr / 4 - yr / 100 + yr / 400 + t[(mo as usize) - 1] + d as i32) % 7;
-            into_raw(FidanValue::Integer(wd as i64))
-        }
-        _ => {
-            eprintln!("AOT stdlib time: unknown function '{}'", func);
-            into_raw(FidanValue::Nothing)
-        }
-    }
+    stdlib::time::dispatch(func, args)
+        .map(into_raw)
+        .unwrap_or_else(|| into_raw(FidanValue::Nothing))
 }
 
-/// Convert milliseconds since Unix epoch to (year, month, day, hour, minute, second).
-/// Uses the civil-date algorithm (Euclidean affine functions).
-fn ms_to_civil(ms: i64) -> (i32, u32, u32, u32, u32, u32) {
-    let total_secs = ms.div_euclid(1000);
-    let time_of_day = total_secs.rem_euclid(86400);
-    let days = total_secs.div_euclid(86400);
-    // Chrono-free civil date from epoch days (Henry S. Warren Jr.)
-    let z = days + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    let h = time_of_day / 3600;
-    let min = (time_of_day % 3600) / 60;
-    let s = time_of_day % 60;
-    (y as i32, m as u32, d as u32, h as u32, min as u32, s as u32)
+fn dispatch_async(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
+    match stdlib::async_std::dispatch(func, args) {
+        Some(stdlib::async_std::AsyncDispatch::Value(value)) => into_raw(value),
+        Some(stdlib::async_std::AsyncDispatch::Op(op)) => match op {
+            stdlib::async_std::AsyncOp::Sleep { ms } => {
+                into_raw(FidanValue::Pending(FidanPending::sleep(ms)))
+            }
+            stdlib::async_std::AsyncOp::Ready { value } => {
+                into_raw(FidanValue::Pending(FidanPending::ready_result(Ok(value))))
+            }
+            stdlib::async_std::AsyncOp::Gather { values } => {
+                let captures = values
+                    .into_iter()
+                    .map(|value| ParallelCapture(value.parallel_capture()))
+                    .collect::<Vec<_>>();
+                let pending =
+                    FidanPending::defer_fallible(ParallelArgs::from_captures(captures), |bundle| {
+                        let mut out = FidanList::new();
+                        for value in bundle.into_vec() {
+                            out.append(resolve_async_value_owned(value)?);
+                        }
+                        Ok(FidanValue::List(OwnedRef::new(out)))
+                    });
+                into_raw(FidanValue::Pending(pending))
+            }
+            stdlib::async_std::AsyncOp::WaitAny { values } => {
+                let captures = values
+                    .into_iter()
+                    .map(|value| ParallelCapture(value.parallel_capture()))
+                    .collect::<Vec<_>>();
+                let pending =
+                    FidanPending::defer_fallible(ParallelArgs::from_captures(captures), |bundle| {
+                        let values = bundle.into_vec();
+                        if values.is_empty() {
+                            return Ok(async_wait_any_result(-1, FidanValue::Nothing));
+                        }
+                        loop {
+                            for (index, value) in values.iter().enumerate() {
+                                if let Some(result) = try_take_async_value_ready(value) {
+                                    return result.map(|resolved| {
+                                        async_wait_any_result(index as i64, resolved)
+                                    });
+                                }
+                            }
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                    });
+                into_raw(FidanValue::Pending(pending))
+            }
+            stdlib::async_std::AsyncOp::Timeout { handle, ms } => {
+                let pending = FidanPending::defer_fallible(
+                    ParallelArgs::from_captures([ParallelCapture(handle.parallel_capture())]),
+                    move |bundle| {
+                        let handle = bundle
+                            .into_vec()
+                            .into_iter()
+                            .next()
+                            .unwrap_or(FidanValue::Nothing);
+                        let deadline = Instant::now()
+                            .checked_add(Duration::from_millis(ms))
+                            .unwrap_or_else(Instant::now);
+                        loop {
+                            if let Some(result) = try_take_async_value_ready(&handle) {
+                                return result.map(|resolved| async_timeout_result(true, resolved));
+                            }
+                            if Instant::now() >= deadline {
+                                return Ok(async_timeout_result(false, FidanValue::Nothing));
+                            }
+                            let remaining = deadline.saturating_duration_since(Instant::now());
+                            std::thread::sleep(remaining.min(Duration::from_millis(1)));
+                        }
+                    },
+                );
+                into_raw(FidanValue::Pending(pending))
+            }
+        },
+        None => into_raw(FidanValue::Nothing),
+    }
 }
 
 // ── parallel iter ──────────────────────────────────────────────────────────────

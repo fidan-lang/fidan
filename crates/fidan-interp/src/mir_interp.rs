@@ -12,6 +12,7 @@ use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use fidan_ast::{BinOp, UnOp};
 use fidan_lexer::{Symbol, SymbolInterner};
@@ -25,7 +26,8 @@ use fidan_runtime::{
 };
 use fidan_source::{SourceMap, Span};
 use fidan_stdlib::{
-    SandboxPolicy, SandboxViolation, StdlibResult, module_exports, parallel::ParallelOp,
+    SandboxPolicy, SandboxViolation, StdlibResult, async_std, async_std::AsyncOp, module_exports,
+    parallel::ParallelOp,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -151,6 +153,19 @@ enum DeferredTask {
     DynamicSpawn {
         method: Option<Symbol>,
         args: Vec<FidanValue>,
+    },
+    Ready {
+        value: FidanValue,
+    },
+    Gather {
+        values: Vec<FidanValue>,
+    },
+    WaitAny {
+        values: Vec<FidanValue>,
+    },
+    Timeout {
+        handle: FidanValue,
+        ms: u64,
     },
 }
 
@@ -740,6 +755,84 @@ impl MirMachine {
         FidanValue::PendingTask(id)
     }
 
+    fn try_take_same_thread_pending_now(
+        &mut self,
+        id: u64,
+    ) -> Option<Result<FidanValue, DeferredTaskError>> {
+        match self.pending_tasks.remove(&id) {
+            Some(PendingTaskState::Ready(result)) => Some(result),
+            Some(state) => {
+                self.pending_tasks.insert(id, state);
+                None
+            }
+            None => Some(Ok(FidanValue::Nothing)),
+        }
+    }
+
+    fn resolve_async_value(&mut self, value: FidanValue) -> Result<FidanValue, DeferredTaskError> {
+        match value {
+            FidanValue::PendingTask(id) => self.resolve_same_thread_pending(id),
+            FidanValue::Pending(pending) => pending
+                .try_join()
+                .map_err(|message| DeferredTaskError::Signal(MirSignal::Panic(message))),
+            other => Ok(other),
+        }
+    }
+
+    fn try_take_async_value_now(
+        &mut self,
+        value: &FidanValue,
+    ) -> Option<Result<FidanValue, DeferredTaskError>> {
+        match value {
+            FidanValue::PendingTask(id) => self.try_take_same_thread_pending_now(*id),
+            FidanValue::Pending(pending) => pending.try_take_ready().map(|result| {
+                result.map_err(|message| DeferredTaskError::Signal(MirSignal::Panic(message)))
+            }),
+            other => Some(Ok(other.clone())),
+        }
+    }
+
+    fn wait_any_async(&mut self, values: Vec<FidanValue>) -> Result<FidanValue, DeferredTaskError> {
+        if values.is_empty() {
+            return Ok(async_std::wait_any_result(-1, FidanValue::Nothing));
+        }
+        loop {
+            for (index, value) in values.iter().enumerate() {
+                if let Some(result) = self.try_take_async_value_now(value) {
+                    return result
+                        .map(|resolved| async_std::wait_any_result(index as i64, resolved));
+                }
+            }
+            if self.run_next_same_thread_task() {
+                continue;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn timeout_async(
+        &mut self,
+        handle: FidanValue,
+        ms: u64,
+    ) -> Result<FidanValue, DeferredTaskError> {
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(ms))
+            .unwrap_or_else(Instant::now);
+        loop {
+            if let Some(result) = self.try_take_async_value_now(&handle) {
+                return result.map(|resolved| async_std::timeout_result(true, resolved));
+            }
+            if Instant::now() >= deadline {
+                return Ok(async_std::timeout_result(false, FidanValue::Nothing));
+            }
+            if self.run_next_same_thread_task() {
+                continue;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            std::thread::sleep(remaining.min(Duration::from_millis(1)));
+        }
+    }
+
     fn run_deferred_task(&mut self, task: DeferredTask) -> Result<FidanValue, DeferredTaskError> {
         match task {
             DeferredTask::Concurrent {
@@ -779,6 +872,16 @@ impl MirMachine {
                     },
                 }
             }
+            DeferredTask::Ready { value } => Ok(value),
+            DeferredTask::Gather { values } => {
+                let mut out = FidanList::new();
+                for value in values {
+                    out.append(self.resolve_async_value(value)?);
+                }
+                Ok(FidanValue::List(OwnedRef::new(out)))
+            }
+            DeferredTask::WaitAny { values } => self.wait_any_async(values),
+            DeferredTask::Timeout { handle, ms } => self.timeout_async(handle, ms),
         }
     }
 
@@ -2108,6 +2211,7 @@ impl MirMachine {
                 }
                 Ok(v)
             }
+            Some(StdlibResult::NeedsAsyncDispatch(op)) => self.exec_async_op(op),
             Some(StdlibResult::NeedsCallbackDispatch(op)) => self.exec_parallel_op(op),
             None => Err(MirSignal::Panic(format!(
                 "no function `{}` in stdlib module `{}`",
@@ -2151,6 +2255,22 @@ impl MirMachine {
                     acc = self.call_function(FunctionId(fn_id.0), vec![acc, elem])?;
                 }
                 Ok(acc)
+            }
+        }
+    }
+
+    fn exec_async_op(&mut self, op: AsyncOp) -> Result<FidanValue, MirSignal> {
+        match op {
+            AsyncOp::Sleep { ms } => Ok(FidanValue::Pending(FidanPending::sleep(ms))),
+            AsyncOp::Ready { value } => Ok(self.queue_pending_task(DeferredTask::Ready { value })),
+            AsyncOp::Gather { values } => {
+                Ok(self.queue_pending_task(DeferredTask::Gather { values }))
+            }
+            AsyncOp::WaitAny { values } => {
+                Ok(self.queue_pending_task(DeferredTask::WaitAny { values }))
+            }
+            AsyncOp::Timeout { handle, ms } => {
+                Ok(self.queue_pending_task(DeferredTask::Timeout { handle, ms }))
             }
         }
     }

@@ -822,6 +822,74 @@ fn concurrent_await_yields_to_other_same_thread_tasks() {
 }
 
 #[test]
+fn collections_helpers_cover_enumerate_chunk_window_partition_and_group_by() {
+    assert!(
+        run_src(
+            r#"use std.collections
+
+        var enumerated = collections.enumerate(["a", "b", "c"])
+        assert_eq(enumerated[0][0], 0)
+        assert_eq(enumerated[0][1], "a")
+        assert_eq(enumerated[2][0], 2)
+
+        var chunked = collections.chunk([1, 2, 3, 4, 5], 2)
+        assert_eq(len(chunked), 3)
+        assert_eq(chunked[1][0], 3)
+        assert_eq(chunked[2][0], 5)
+
+        var windows = collections.window([1, 2, 3, 4], 3)
+        assert_eq(len(windows), 2)
+        assert_eq(windows[1][2], 4)
+
+        var partitioned = collections.partition([0, 1, nothing, "ok", false])
+        assert_eq(len(partitioned[0]), 2)
+        assert_eq(len(partitioned[1]), 3)
+
+        var grouped = collections.groupBy(["red", "blue", "red"])
+        assert_eq(len(grouped["red"]), 2)
+        assert_eq(len(grouped["blue"]), 1)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn async_std_sleep_gather_wait_any_and_timeout_work() {
+    assert!(
+        run_src(
+            r#"use std.async
+
+        action compute returns integer {
+            return 41
+        }
+
+        var pending = spawn compute()
+        var gathered = async.gather([async.ready(1), pending, async.ready(3)])
+        var results = await gathered
+        assert_eq(results[0], 1)
+        assert_eq(results[1], 41)
+        assert_eq(results[2], 3)
+
+        var raced = await async.waitAny([async.sleep(25), async.ready(99)])
+        assert_eq(raced[0], 1)
+        assert_eq(raced[1], 99)
+
+        var timeoutFast = await async.timeout(async.ready(7), 10)
+        assert_eq(timeoutFast[0], true)
+        assert_eq(timeoutFast[1], 7)
+
+        var timeoutSlow = await async.timeout(async.sleep(20), 1)
+        assert_eq(timeoutSlow[0], false)
+        assert_eq(timeoutSlow[1], nothing)
+
+        var sleeper = async.sleep(1)
+        assert_eq(await sleeper, nothing)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn concurrent_block_ok_with_jit_enabled() {
     assert!(
         run_src_with_threshold(

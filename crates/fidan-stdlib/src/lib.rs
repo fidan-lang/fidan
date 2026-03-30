@@ -14,6 +14,7 @@
 //! `StdlibModule` descriptors. The MIR interpreter queries the registry when
 //! it resolves `Callee::StdlibFn { module, name }` calls.
 
+pub mod async_std;
 pub mod collections;
 pub mod io;
 pub mod math;
@@ -32,6 +33,8 @@ pub use sandbox::{SandboxPolicy, SandboxViolation};
 pub enum StdlibResult {
     /// Synchronous result value.
     Value(fidan_runtime::FidanValue),
+    /// The call requires async/pending orchestration in the host runtime.
+    NeedsAsyncDispatch(async_std::AsyncOp),
     /// The call requires callback dispatch (e.g. parallelMap needs MIR fn dispatch).
     /// Contains an opaque bytes payload — the parallel module's `ParallelOp`.
     NeedsCallbackDispatch(parallel::ParallelOp),
@@ -52,10 +55,10 @@ pub fn dispatch_stdlib(
     args: Vec<fidan_runtime::FidanValue>,
 ) -> Option<StdlibResult> {
     match module {
-        "io" => io::dispatch(name, args).map(StdlibResult::Value),
-        "math" => math::dispatch(name, args).map(StdlibResult::Value),
-        "string" => string::dispatch(name, args).map(StdlibResult::Value),
-        "collections" => collections::dispatch(name, args).map(StdlibResult::Value),
+        "async" => async_std::dispatch(name, args).map(|result| match result {
+            async_std::AsyncDispatch::Value(v) => StdlibResult::Value(v),
+            async_std::AsyncDispatch::Op(op) => StdlibResult::NeedsAsyncDispatch(op),
+        }),
         "test" => {
             test_runner::dispatch(name, args).map(|res| {
                 match res {
@@ -76,32 +79,23 @@ pub fn dispatch_stdlib(
                 fidan_runtime::FidanString::new(&format!("__error__: {msg}")),
             )),
         }),
-        "time" => time::dispatch(name, args).map(StdlibResult::Value),
-        "regex" => regex::dispatch(name, args).map(StdlibResult::Value),
-        _ => None,
+        _ => fidan_runtime::stdlib::dispatch_value_module(module, name, args)
+            .map(StdlibResult::Value),
     }
 }
 
 /// Returns true when `module` is a known stdlib module name.
 pub fn is_stdlib_module(module: &str) -> bool {
-    matches!(
-        module,
-        "io" | "math" | "string" | "collections" | "test" | "parallel" | "time"
-    )
+    module == "parallel" || fidan_runtime::stdlib::is_stdlib_module(module)
 }
 
 /// Returns all exported function names for a given stdlib module.
 /// Used by `use std.module.{name}` to validate name lists at import resolution time.
 pub fn module_exports(module: &str) -> &'static [&'static str] {
     match module {
-        "io" => io::exported_names(),
-        "math" => math::exported_names(),
-        "string" => string::exported_names(),
-        "collections" => collections::exported_names(),
         "test" => test_runner::exported_names(),
         "parallel" => parallel::exported_names(),
-        "time" => time::exported_names(),
-        _ => &[],
+        _ => fidan_runtime::stdlib::module_exports(module),
     }
 }
 

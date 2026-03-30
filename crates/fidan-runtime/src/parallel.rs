@@ -20,6 +20,7 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::FidanValue;
 
@@ -34,6 +35,7 @@ struct DeferredScheduler {
 
 enum DeferredSchedulerEntry {
     Queued(DeferredPendingThunk),
+    Sleeping(Instant),
     Running,
     Ready(Result<ParallelCapture, String>),
 }
@@ -41,6 +43,7 @@ enum DeferredSchedulerEntry {
 #[derive(Clone, Copy)]
 enum DeferredSchedulerState {
     Queued,
+    Sleeping(Instant),
     Running,
     Ready,
     Missing,
@@ -65,6 +68,14 @@ impl DeferredScheduler {
         self.queue.push_back(id);
         id
     }
+
+    fn push_sleep(&mut self, deadline: Instant) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.entries
+            .insert(id, DeferredSchedulerEntry::Sleeping(deadline));
+        id
+    }
 }
 
 thread_local! {
@@ -72,11 +83,50 @@ thread_local! {
         RefCell::new(DeferredScheduler::default());
 }
 
+fn sleep_until(deadline: Instant) {
+    let now = Instant::now();
+    if deadline > now {
+        std::thread::sleep(deadline.duration_since(now));
+    }
+}
+
+fn deferred_scheduler_wake_sleepers() {
+    DEFERRED_SCHEDULER.with(|scheduler| {
+        let mut scheduler = scheduler.borrow_mut();
+        let now = Instant::now();
+        for entry in scheduler.entries.values_mut() {
+            if let DeferredSchedulerEntry::Sleeping(deadline) = entry
+                && *deadline <= now
+            {
+                *entry = DeferredSchedulerEntry::Ready(Ok(ParallelCapture(FidanValue::Nothing)));
+            }
+        }
+    });
+}
+
+fn deferred_scheduler_next_deadline() -> Option<Instant> {
+    DEFERRED_SCHEDULER.with(|scheduler| {
+        scheduler
+            .borrow()
+            .entries
+            .values()
+            .filter_map(|entry| match entry {
+                DeferredSchedulerEntry::Sleeping(deadline) => Some(*deadline),
+                _ => None,
+            })
+            .min()
+    })
+}
+
 fn deferred_scheduler_state(id: u64) -> DeferredSchedulerState {
+    deferred_scheduler_wake_sleepers();
     DEFERRED_SCHEDULER.with(|scheduler| {
         let scheduler = scheduler.borrow();
         match scheduler.entries.get(&id) {
             Some(DeferredSchedulerEntry::Queued(_)) => DeferredSchedulerState::Queued,
+            Some(DeferredSchedulerEntry::Sleeping(deadline)) => {
+                DeferredSchedulerState::Sleeping(*deadline)
+            }
             Some(DeferredSchedulerEntry::Running) => DeferredSchedulerState::Running,
             Some(DeferredSchedulerEntry::Ready(_)) => DeferredSchedulerState::Ready,
             None => DeferredSchedulerState::Missing,
@@ -85,12 +135,28 @@ fn deferred_scheduler_state(id: u64) -> DeferredSchedulerState {
 }
 
 fn deferred_scheduler_take_ready(id: u64) -> Result<ParallelCapture, String> {
+    deferred_scheduler_wake_sleepers();
     DEFERRED_SCHEDULER.with(|scheduler| {
         let mut scheduler = scheduler.borrow_mut();
         let Some(DeferredSchedulerEntry::Ready(result)) = scheduler.entries.remove(&id) else {
             unreachable!("pending task state changed while taking ready result");
         };
         result
+    })
+}
+
+fn deferred_scheduler_try_take_ready(id: u64) -> Option<Result<ParallelCapture, String>> {
+    deferred_scheduler_wake_sleepers();
+    DEFERRED_SCHEDULER.with(|scheduler| {
+        let mut scheduler = scheduler.borrow_mut();
+        match scheduler.entries.remove(&id) {
+            Some(DeferredSchedulerEntry::Ready(result)) => Some(result),
+            Some(entry) => {
+                scheduler.entries.insert(id, entry);
+                None
+            }
+            None => Some(Ok(ParallelCapture(FidanValue::Nothing))),
+        }
     })
 }
 
@@ -107,6 +173,11 @@ fn deferred_scheduler_pop_next_queued() -> Option<(u64, DeferredPendingThunk)> {
                         .entries
                         .insert(id, DeferredSchedulerEntry::Running);
                     return Some((id, thunk));
+                }
+                DeferredSchedulerEntry::Sleeping(deadline) => {
+                    scheduler
+                        .entries
+                        .insert(id, DeferredSchedulerEntry::Sleeping(deadline));
                 }
                 DeferredSchedulerEntry::Running => {
                     scheduler
@@ -134,6 +205,7 @@ fn deferred_scheduler_store_ready(id: u64, result: Result<ParallelCapture, Strin
 }
 
 fn deferred_scheduler_run_next() -> bool {
+    deferred_scheduler_wake_sleepers();
     let Some((id, thunk)) = deferred_scheduler_pop_next_queued() else {
         return false;
     };
@@ -146,11 +218,21 @@ fn deferred_scheduler_resolve(id: u64) -> Result<ParallelCapture, String> {
         match deferred_scheduler_state(id) {
             DeferredSchedulerState::Queued | DeferredSchedulerState::Running => {
                 if !deferred_scheduler_run_next() {
+                    if let Some(deadline) = deferred_scheduler_next_deadline() {
+                        sleep_until(deadline);
+                        continue;
+                    }
                     return Err(
                         "same-thread task scheduler deadlocked while awaiting a running task"
                             .to_string(),
                     );
                 }
+            }
+            DeferredSchedulerState::Sleeping(deadline) => {
+                if deferred_scheduler_run_next() {
+                    continue;
+                }
+                sleep_until(deadline);
             }
             DeferredSchedulerState::Ready => return deferred_scheduler_take_ready(id),
             DeferredSchedulerState::Missing => return Ok(ParallelCapture(FidanValue::Nothing)),
@@ -291,6 +373,16 @@ impl FidanPending {
         FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Deferred(id)))))
     }
 
+    /// Create a same-thread timer pending handle that resolves to `nothing`
+    /// after the requested duration.
+    pub fn sleep(duration_ms: u64) -> Self {
+        let deadline = Instant::now()
+            .checked_add(Duration::from_millis(duration_ms))
+            .unwrap_or_else(Instant::now);
+        let id = DEFERRED_SCHEDULER.with(|scheduler| scheduler.borrow_mut().push_sleep(deadline));
+        FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Deferred(id)))))
+    }
+
     /// Create a pending handle that is already resolved on the current thread.
     ///
     /// This is used for same-thread structured `concurrent` tasks in AOT mode:
@@ -324,6 +416,48 @@ impl FidanPending {
             }
             Some(PendingStateEntry::Ready(result)) => result.map(ParallelCapture::into_inner),
             None => Ok(FidanValue::Nothing),
+        }
+    }
+
+    /// Try to consume the handle only if it is already ready.
+    ///
+    /// Returns `None` when the handle is still pending.
+    pub fn try_take_ready(&self) -> Option<Result<FidanValue, String>> {
+        let mut guard = self.0.lock().unwrap();
+        match guard.as_ref() {
+            Some(PendingStateEntry::Thread(handle)) if handle.is_finished() => {
+                let entry = guard.take();
+                drop(guard);
+                match entry {
+                    Some(PendingStateEntry::Thread(handle)) => Some(match handle.join() {
+                        Ok(Ok(cap)) => Ok(cap.into_inner()),
+                        Ok(Err(err)) => Err(err),
+                        Err(_) => Err("task thread panicked unexpectedly".to_string()),
+                    }),
+                    _ => unreachable!("pending state changed while taking ready thread result"),
+                }
+            }
+            Some(PendingStateEntry::Deferred(id)) => {
+                let id = *id;
+                match deferred_scheduler_try_take_ready(id) {
+                    Some(result) => {
+                        guard.take();
+                        Some(result.map(ParallelCapture::into_inner))
+                    }
+                    None => None,
+                }
+            }
+            Some(PendingStateEntry::Ready(_)) => {
+                let entry = guard.take();
+                drop(guard);
+                match entry {
+                    Some(PendingStateEntry::Ready(result)) => {
+                        Some(result.map(ParallelCapture::into_inner))
+                    }
+                    _ => unreachable!("pending state changed while taking ready result"),
+                }
+            }
+            Some(PendingStateEntry::Thread(_)) | None => None,
         }
     }
 

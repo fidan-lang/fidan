@@ -7,6 +7,7 @@ mod object;
 mod owned_ref;
 pub mod parallel;
 mod shared_ref;
+pub mod stdlib;
 mod string;
 mod value;
 
