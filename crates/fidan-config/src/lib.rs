@@ -49,11 +49,86 @@ pub const BUILTIN_FUNCTIONS: &[&str] = &[
 pub const BUILTIN_DECORATORS: &[&str] = &["precompile", "deprecated", "extern", "unsafe"];
 
 #[derive(Clone, Copy)]
+pub struct BuiltinInfo {
+    pub name: &'static str,
+    pub signature: &'static str,
+    pub doc: &'static str,
+}
+
+#[derive(Clone, Copy)]
 pub struct DecoratorInfo {
     pub name: &'static str,
     pub doc: &'static str,
     pub reserved_only: bool,
 }
+
+pub const LANGUAGE_BUILTINS: &[BuiltinInfo] = &[
+    BuiltinInfo {
+        name: "print",
+        signature: "print(value...) -> nothing",
+        doc: "Print values to stdout followed by a newline.",
+    },
+    BuiltinInfo {
+        name: "eprint",
+        signature: "eprint(value...) -> nothing",
+        doc: "Print values to stderr followed by a newline.",
+    },
+    BuiltinInfo {
+        name: "input",
+        signature: "input(prompt?) -> string",
+        doc: "Read one line of input, optionally after showing a prompt.",
+    },
+    BuiltinInfo {
+        name: "len",
+        signature: "len(value) -> integer",
+        doc: "Return the length of a string, list, or other countable value.",
+    },
+    BuiltinInfo {
+        name: "type",
+        signature: "type(value) -> string",
+        doc: "Return the runtime type name of a value as a string.",
+    },
+    BuiltinInfo {
+        name: "string",
+        signature: "string(value) -> string",
+        doc: "Convert a value to its string representation.",
+    },
+    BuiltinInfo {
+        name: "integer",
+        signature: "integer(value) -> integer",
+        doc: "Convert a value to an integer when possible.",
+    },
+    BuiltinInfo {
+        name: "float",
+        signature: "float(value) -> float",
+        doc: "Convert a value to a floating-point number when possible.",
+    },
+    BuiltinInfo {
+        name: "boolean",
+        signature: "boolean(value) -> boolean",
+        doc: "Convert a value to a boolean truth value.",
+    },
+    BuiltinInfo {
+        name: "Shared",
+        signature: "Shared(value) -> Shared",
+        doc: "Create a shared, thread-safe wrapper so values can be mutated safely across parallel work.",
+    },
+    BuiltinInfo {
+        name: "assert",
+        signature: "assert(condition, message?) -> nothing",
+        doc: "Fail immediately when the condition is not truthy.",
+    },
+    BuiltinInfo {
+        name: "assert_eq",
+        signature: "assert_eq(left, right, message?) -> nothing",
+        doc: "Fail immediately when two values are not equal.",
+    },
+    BuiltinInfo {
+        name: "assert_ne",
+        signature: "assert_ne(left, right, message?) -> nothing",
+        doc: "Fail immediately when two values are equal.",
+    },
+];
 
 /// Canonical decorator metadata used by editor/tooling surfaces.
 ///
@@ -91,11 +166,15 @@ pub fn decorator_info(name: &str) -> Option<&'static DecoratorInfo> {
     LANGUAGE_DECORATORS.iter().find(|info| info.name == name)
 }
 
+pub fn builtin_info(name: &str) -> Option<&'static BuiltinInfo> {
+    LANGUAGE_BUILTINS.iter().find(|info| info.name == name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BUILTIN_BINDINGS, BUILTIN_DECORATORS, BUILTIN_FUNCTIONS, BUILTIN_VALUE_MODULE,
-        LANGUAGE_DECORATORS, decorator_info,
+        LANGUAGE_BUILTINS, LANGUAGE_DECORATORS, builtin_info, decorator_info,
     };
 
     #[test]
@@ -108,6 +187,17 @@ mod tests {
         for builtin in BUILTIN_FUNCTIONS {
             assert!(BUILTIN_BINDINGS.contains(builtin));
         }
+    }
+
+    #[test]
+    fn builtin_bindings_are_documented() {
+        for builtin in BUILTIN_BINDINGS {
+            assert!(
+                builtin_info(builtin).is_some(),
+                "missing builtin metadata for `{builtin}`"
+            );
+        }
+        assert_eq!(LANGUAGE_BUILTINS.len(), BUILTIN_BINDINGS.len());
     }
 
     #[test]

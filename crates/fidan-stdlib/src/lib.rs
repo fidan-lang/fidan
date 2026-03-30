@@ -124,7 +124,221 @@ pub fn member_info(module: &str, name: &str) -> Option<&'static StdlibMemberInfo
 
 pub fn member_doc(module: &str, name: &str) -> Option<String> {
     let info = member_info(module, name)?;
-    Some(format!("```fidan\n{}\n```\n\n{}", info.signature, info.doc))
+    let signature = match member_return_type(module, name) {
+        Some(ret_type) => format!("{} -> {}", info.signature, ret_type),
+        None => info.signature.to_string(),
+    };
+    Some(format!("```fidan\n{}\n```\n\n{}", signature, info.doc))
+}
+
+pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
+    let info = member_info(module, name)?;
+    Some(match info.signature {
+        // async
+        "std.async.sleep(ms)" => "Pending",
+        "std.async.ready(value)" => "Pending",
+        "std.async.gather(handles)" => "Pending",
+        "std.async.waitAny(handles)" => "Pending",
+        "std.async.timeout(handle, ms)" => "Pending",
+
+        // collections
+        "std.collections.range(start, end?)" => "list",
+        "std.collections.Set(items?)" => "dynamic",
+        "std.collections.setAdd(set, value)" => "nothing",
+        "std.collections.setRemove(set, value)" => "nothing",
+        "std.collections.setContains(set, value)" => "boolean",
+        "std.collections.setToList(set)" => "list",
+        "std.collections.setLen(set)" => "integer",
+        "std.collections.setUnion(left, right)" => "dynamic",
+        "std.collections.setIntersect(left, right)" => "dynamic",
+        "std.collections.setDiff(left, right)" => "dynamic",
+        "std.collections.Queue(items?)" => "dynamic",
+        "std.collections.enqueue(queue, value)" => "nothing",
+        "std.collections.dequeue(queue)" => "dynamic",
+        "std.collections.peek(queue)" => "dynamic",
+        "std.collections.Stack(items?)" => "dynamic",
+        "std.collections.push(stack, value)" => "nothing",
+        "std.collections.pop(stack)" => "dynamic",
+        "std.collections.top(stack)" => "dynamic",
+        "std.collections.flatten(list)" => "list",
+        "std.collections.zip(left, right)" => "list",
+        "std.collections.enumerate(list)" => "list",
+        "std.collections.chunk(list, size)" => "list",
+        "std.collections.window(list, size)" => "list",
+        "std.collections.partition(list)" => "list",
+        "std.collections.groupBy(list)" => "dict",
+        "std.collections.unique(list)" => "list",
+        "std.collections.reverse(list)" => "list",
+        "std.collections.sort(list)" => "list",
+        "std.collections.len(list)" => "integer",
+        "std.collections.isEmpty(list)" => "boolean",
+        "std.collections.concat(left, right)" => "list",
+        "std.collections.slice(list, start, end?)" => "list",
+        "std.collections.first(list)" => "dynamic",
+        "std.collections.last(list)" => "dynamic",
+        "std.collections.join(list, separator)" => "string",
+        "std.collections.sum(list)" => "dynamic",
+        "std.collections.product(list)" => "dynamic",
+        "std.collections.min(list)" => "dynamic",
+        "std.collections.max(list)" => "dynamic",
+
+        // env
+        "std.env.get(key)" => "dynamic",
+        "std.env.set(key, value)" => "nothing",
+        "std.env.args()" => "list",
+
+        // io
+        "std.io.print(value...)" => "nothing",
+        "std.io.eprint(value...)" => "nothing",
+        "std.io.readLine(prompt?)" => "string",
+        "std.io.readFile(path)" => "string",
+        "std.io.readLines(path)" => "list",
+        "std.io.writeFile(path, content)" => "nothing",
+        "std.io.appendFile(path, content)" => "nothing",
+        "std.io.deleteFile(path)" => "nothing",
+        "std.io.fileExists(path)" => "boolean",
+        "std.io.isFile(path)" => "boolean",
+        "std.io.isDir(path)" => "boolean",
+        "std.io.makeDir(path)" => "nothing",
+        "std.io.listDir(path)" => "list",
+        "std.io.copyFile(from, to)" => "nothing",
+        "std.io.renameFile(from, to)" => "nothing",
+        "std.io.joinPath(part...)" => "string",
+        "std.io.dirname(path)" => "string",
+        "std.io.basename(path)" => "string",
+        "std.io.extension(path)" => "string",
+        "std.io.cwd()" => "string",
+        "std.io.absolutePath(path)" => "string",
+        "std.io.getEnv(key)" => "dynamic",
+        "std.io.setEnv(key, value)" => "nothing",
+        "std.io.args()" => "list",
+        "std.io.flush()" => "nothing",
+        "std.io.isatty(stream?)" => "boolean",
+
+        // math
+        "std.math.sin(x)" => "float",
+        "std.math.cos(x)" => "float",
+        "std.math.tan(x)" => "float",
+        "std.math.asin(x)" => "float",
+        "std.math.acos(x)" => "float",
+        "std.math.atan(x)" => "float",
+        "std.math.atan2(y, x)" => "float",
+        "std.math.sinh(x)" => "float",
+        "std.math.cosh(x)" => "float",
+        "std.math.tanh(x)" => "float",
+        "std.math.sqrt(x)" => "float",
+        "std.math.cbrt(x)" => "float",
+        "std.math.pow(x, y)" => "float",
+        "std.math.exp(x)" => "float",
+        "std.math.exp2(x)" => "float",
+        "std.math.log(x)" => "float",
+        "std.math.log2(x)" => "float",
+        "std.math.log10(x)" => "float",
+        "std.math.logN(x, base)" => "float",
+        "std.math.floor(x)" => "integer",
+        "std.math.ceil(x)" => "integer",
+        "std.math.round(x)" => "integer",
+        "std.math.trunc(x)" => "integer",
+        "std.math.fract(x)" => "float",
+        "std.math.abs(x)" => "dynamic",
+        "std.math.sign(x)" => "integer",
+        "std.math.min(a, b)" => "dynamic",
+        "std.math.max(a, b)" => "dynamic",
+        "std.math.clamp(x, lo, hi)" => "dynamic",
+        "std.math.hypot(x, y)" => "float",
+        "std.math.pi()" => "float",
+        "std.math.e()" => "float",
+        "std.math.tau()" => "float",
+        "std.math.inf()" => "float",
+        "std.math.nan()" => "float",
+        "std.math.isNan(x)" => "boolean",
+        "std.math.isInfinite(x)" => "boolean",
+        "std.math.isFinite(x)" => "boolean",
+        "std.math.random()" => "float",
+        "std.math.randomInt(lo, hi)" => "integer",
+        "std.math.toDeg(x)" => "float",
+        "std.math.toRad(x)" => "float",
+
+        // parallel
+        "std.parallel.parallelMap(list, fn)" => "list",
+        "std.parallel.parallelFilter(list, fn)" => "list",
+        "std.parallel.parallelForEach(list, fn)" => "nothing",
+        "std.parallel.parallelReduce(list, init, fn)" => "dynamic",
+
+        // regex
+        "std.regex.test(pattern, subject)" => "boolean",
+        "std.regex.match(pattern, subject)" => "dynamic",
+        "std.regex.findAll(pattern, subject)" => "list",
+        "std.regex.capture(pattern, subject)" => "list",
+        "std.regex.captureAll(pattern, subject)" => "list",
+        "std.regex.replace(pattern, subject, replacement)" => "string",
+        "std.regex.replaceAll(pattern, subject, replacement)" => "string",
+        "std.regex.split(pattern, subject)" => "list",
+        "std.regex.isValid(pattern)" => "boolean",
+
+        // string
+        "std.string.toUpper(text)" => "string",
+        "std.string.toLower(text)" => "string",
+        "std.string.capitalize(text)" => "string",
+        "std.string.trim(text)" => "string",
+        "std.string.trimStart(text)" => "string",
+        "std.string.trimEnd(text)" => "string",
+        "std.string.split(text, separator)" => "list",
+        "std.string.join(separator, list)" => "string",
+        "std.string.lines(text)" => "list",
+        "std.string.contains(text, pattern)" => "boolean",
+        "std.string.startsWith(text, prefix)" => "boolean",
+        "std.string.endsWith(text, suffix)" => "boolean",
+        "std.string.indexOf(text, pattern)" => "integer",
+        "std.string.lastIndexOf(text, pattern)" => "integer",
+        "std.string.replace(text, from, to)" => "string",
+        "std.string.replaceFirst(text, from, to)" => "string",
+        "std.string.slice(text, start, end?)" => "string",
+        "std.string.padStart(text, width, pad?)" => "string",
+        "std.string.padEnd(text, width, pad?)" => "string",
+        "std.string.repeat(text, n)" => "string",
+        "std.string.reverse(text)" => "string",
+        "std.string.len(text)" => "integer",
+        "std.string.isEmpty(text)" => "boolean",
+        "std.string.format(template, value...)" => "string",
+        "std.string.parseInt(text)" => "dynamic",
+        "std.string.parseFloat(text)" => "dynamic",
+        "std.string.chars(text)" => "list",
+        "std.string.bytes(text)" => "list",
+        "std.string.fromChars(chars)" => "string",
+        "std.string.charCode(text)" => "integer",
+        "std.string.fromCharCode(code)" => "string",
+
+        // test
+        "std.test.assert(condition, message?)" => "nothing",
+        "std.test.assertEq(left, right, message?)" => "nothing",
+        "std.test.assertNe(left, right, message?)" => "nothing",
+        "std.test.assertGt(left, right, message?)" => "nothing",
+        "std.test.assertLt(left, right, message?)" => "nothing",
+        "std.test.assertSome(value, message?)" => "nothing",
+        "std.test.assertNothing(value, message?)" => "nothing",
+        "std.test.assertType(value, typeName, message?)" => "nothing",
+        "std.test.fail(message?)" => "nothing",
+        "std.test.skip(message?)" => "nothing",
+
+        // time
+        "std.time.now()" => "integer",
+        "std.time.timestamp()" => "integer",
+        "std.time.sleep(ms)" => "nothing",
+        "std.time.elapsed(startMs)" => "integer",
+        "std.time.date(ms?)" => "string",
+        "std.time.time(ms?)" => "string",
+        "std.time.datetime(ms?)" => "string",
+        "std.time.format(ms?, pattern)" => "string",
+        "std.time.year(ms?)" => "integer",
+        "std.time.month(ms?)" => "integer",
+        "std.time.day(ms?)" => "integer",
+        "std.time.hour(ms?)" => "integer",
+        "std.time.minute(ms?)" => "integer",
+        "std.time.second(ms?)" => "integer",
+        "std.time.weekday(ms?)" => "integer",
+        _ => return None,
+    })
 }
 
 /// A dispatched stdlib call result.
@@ -1160,7 +1374,9 @@ const TIME_MEMBER_INFOS: &[StdlibMemberInfo] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{STDLIB_MODULES, member_doc, module_exports, module_info, module_members};
+    use super::{
+        STDLIB_MODULES, member_doc, member_return_type, module_exports, module_info, module_members,
+    };
 
     #[test]
     fn module_infos_are_unique() {
@@ -1211,6 +1427,20 @@ mod tests {
                         .iter()
                         .any(|member| member.names.contains(export)),
                     "missing stdlib member metadata for std.{}.{}",
+                    info.name,
+                    export
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn return_type_metadata_covers_all_exported_names() {
+        for info in STDLIB_MODULES {
+            for export in module_exports(info.name) {
+                assert!(
+                    member_return_type(info.name, export).is_some(),
+                    "missing stdlib return type metadata for std.{}.{}",
                     info.name,
                     export
                 );

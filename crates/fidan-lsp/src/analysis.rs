@@ -47,6 +47,10 @@ pub struct AnalysisResult {
     /// Stored as `(var_name, receiver_type_name, method_name)` so the server can patch
     /// the symbol-table entry after loading cross-module docs.
     pub dynamic_var_call_sites: Vec<(String, String, String)>,
+    /// Top-level `var x = std_alias.member()` calls where the alias resolves to `std.<module>`.
+    /// Stored as `(var_name, module_name, member_name)` so the server can patch the
+    /// symbol-table entry using shared stdlib metadata.
+    pub stdlib_var_call_sites: Vec<(String, String, String)>,
     /// Positions where the editor should display synthetic type labels.
     pub inlay_hint_sites: Vec<InlayHintSite>,
 }
@@ -90,6 +94,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
 
     // ── Dynamic var call sites (cross-module method return type patching) ──
     let dynamic_var_call_sites = extract_dynamic_var_calls(&module, &typed, &interner);
+    let stdlib_var_call_sites = extract_stdlib_var_call_sites(&module, &interner, &stdlib_imports);
 
     // ── Inlay hints (untyped var declarations) ────────────────────────────────
     let inlay_hint_sites =
@@ -121,6 +126,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
         cross_module_field_accesses,
         cross_module_call_sites,
         dynamic_var_call_sites,
+        stdlib_var_call_sites,
         inlay_hint_sites,
     }
 }
@@ -210,33 +216,309 @@ fn extract_dynamic_var_calls(
     interner: &SymbolInterner,
 ) -> Vec<(String, String, String)> {
     let mut out = Vec::new();
+
     for &iid in &module.items {
-        if let Item::VarDecl {
-            name,
-            init: Some(init_eid),
-            ..
-        } = module.arena.get_item(iid)
-        {
-            // Only interested in vars whose init expression resolved to Dynamic.
-            if !matches!(
-                typed.expr_types.get(init_eid),
-                Some(fidan_typeck::FidanType::Dynamic) | None
-            ) {
-                continue;
+        match module.arena.get_item(iid) {
+            Item::VarDecl {
+                name,
+                init: Some(init_eid),
+                ..
+            } => maybe_push_dynamic_var_call(module, typed, interner, *name, *init_eid, &mut out),
+            Item::ActionDecl { body, .. }
+            | Item::ExtensionAction { body, .. }
+            | Item::TestDecl { body, .. } => {
+                collect_stmt_dynamic_var_calls(module, body, typed, interner, &mut out)
             }
-            // Check if the init is a Call whose callee is a Field expression.
-            if let Expr::Call { callee, .. } = module.arena.get_expr(*init_eid)
-                && let Expr::Field { object, field, .. } = module.arena.get_expr(*callee)
-                && let Some(fidan_typeck::FidanType::Object(obj_sym)) = typed.expr_types.get(object)
-            {
-                let var_name = interner.resolve(*name).to_string();
-                let recv_ty = interner.resolve(*obj_sym).to_string();
-                let method_name = interner.resolve(*field).to_string();
-                out.push((var_name, recv_ty, method_name));
+            Item::Stmt(stmt_id) => {
+                collect_stmt_dynamic_var_calls(module, &[*stmt_id], typed, interner, &mut out)
             }
+            Item::ObjectDecl { methods, .. } => {
+                for &mid in methods {
+                    if let Item::ActionDecl { body, .. } = module.arena.get_item(mid) {
+                        collect_stmt_dynamic_var_calls(module, body, typed, interner, &mut out);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     out
+}
+
+fn maybe_push_dynamic_var_call(
+    module: &Module,
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+    var_name_sym: fidan_lexer::Symbol,
+    init_eid: fidan_ast::ExprId,
+    out: &mut Vec<(String, String, String)>,
+) {
+    if !matches!(
+        typed.expr_types.get(&init_eid),
+        Some(fidan_typeck::FidanType::Dynamic) | None
+    ) {
+        return;
+    }
+    if let Expr::Call { callee, .. } = module.arena.get_expr(init_eid)
+        && let Expr::Field { object, field, .. } = module.arena.get_expr(*callee)
+        && let Some(fidan_typeck::FidanType::Object(obj_sym)) = typed.expr_types.get(object)
+    {
+        out.push((
+            interner.resolve(var_name_sym).to_string(),
+            interner.resolve(*obj_sym).to_string(),
+            interner.resolve(*field).to_string(),
+        ));
+    }
+}
+
+fn extract_stdlib_var_call_sites(
+    module: &Module,
+    interner: &SymbolInterner,
+    stdlib_imports: &[(String, String)],
+) -> Vec<(String, String, String)> {
+    let stdlib_aliases: std::collections::HashMap<&str, &str> = stdlib_imports
+        .iter()
+        .map(|(alias, module_name)| (alias.as_str(), module_name.as_str()))
+        .collect();
+    let mut out = Vec::new();
+
+    for &iid in &module.items {
+        match module.arena.get_item(iid) {
+            Item::VarDecl {
+                name,
+                init: Some(init_eid),
+                ..
+            } => maybe_push_stdlib_var_call(
+                module,
+                interner,
+                &stdlib_aliases,
+                *name,
+                *init_eid,
+                &mut out,
+            ),
+            Item::ActionDecl { body, .. }
+            | Item::ExtensionAction { body, .. }
+            | Item::TestDecl { body, .. } => {
+                collect_stmt_stdlib_var_calls(module, body, interner, &stdlib_aliases, &mut out)
+            }
+            Item::Stmt(stmt_id) => collect_stmt_stdlib_var_calls(
+                module,
+                &[*stmt_id],
+                interner,
+                &stdlib_aliases,
+                &mut out,
+            ),
+            Item::ObjectDecl { methods, .. } => {
+                for &mid in methods {
+                    if let Item::ActionDecl { body, .. } = module.arena.get_item(mid) {
+                        collect_stmt_stdlib_var_calls(
+                            module,
+                            body,
+                            interner,
+                            &stdlib_aliases,
+                            &mut out,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
+fn collect_stmt_dynamic_var_calls(
+    module: &Module,
+    stmts: &[fidan_ast::StmtId],
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+    out: &mut Vec<(String, String, String)>,
+) {
+    for &sid in stmts {
+        match module.arena.get_stmt(sid) {
+            fidan_ast::Stmt::VarDecl {
+                name,
+                init: Some(init_eid),
+                ..
+            } => {
+                if !matches!(
+                    typed.expr_types.get(init_eid),
+                    Some(fidan_typeck::FidanType::Dynamic) | None
+                ) {
+                    continue;
+                }
+                if let Expr::Call { callee, .. } = module.arena.get_expr(*init_eid)
+                    && let Expr::Field { object, field, .. } = module.arena.get_expr(*callee)
+                    && let Some(fidan_typeck::FidanType::Object(obj_sym)) =
+                        typed.expr_types.get(object)
+                {
+                    out.push((
+                        interner.resolve(*name).to_string(),
+                        interner.resolve(*obj_sym).to_string(),
+                        interner.resolve(*field).to_string(),
+                    ));
+                }
+            }
+            fidan_ast::Stmt::If {
+                then_body,
+                else_ifs,
+                else_body,
+                ..
+            } => {
+                collect_stmt_dynamic_var_calls(module, then_body, typed, interner, out);
+                for else_if in else_ifs {
+                    collect_stmt_dynamic_var_calls(module, &else_if.body, typed, interner, out);
+                }
+                if let Some(else_body) = else_body {
+                    collect_stmt_dynamic_var_calls(module, else_body, typed, interner, out);
+                }
+            }
+            fidan_ast::Stmt::Check { arms, .. } => {
+                for arm in arms {
+                    collect_stmt_dynamic_var_calls(module, &arm.body, typed, interner, out);
+                }
+            }
+            fidan_ast::Stmt::For { body, .. }
+            | fidan_ast::Stmt::While { body, .. }
+            | fidan_ast::Stmt::ParallelFor { body, .. } => {
+                collect_stmt_dynamic_var_calls(module, body, typed, interner, out);
+            }
+            fidan_ast::Stmt::Attempt {
+                body,
+                catches,
+                otherwise,
+                finally,
+                ..
+            } => {
+                collect_stmt_dynamic_var_calls(module, body, typed, interner, out);
+                for catch in catches {
+                    collect_stmt_dynamic_var_calls(module, &catch.body, typed, interner, out);
+                }
+                if let Some(otherwise) = otherwise {
+                    collect_stmt_dynamic_var_calls(module, otherwise, typed, interner, out);
+                }
+                if let Some(finally) = finally {
+                    collect_stmt_dynamic_var_calls(module, finally, typed, interner, out);
+                }
+            }
+            fidan_ast::Stmt::ConcurrentBlock { tasks, .. } => {
+                for task in tasks {
+                    collect_stmt_dynamic_var_calls(module, &task.body, typed, interner, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_stmt_stdlib_var_calls(
+    module: &Module,
+    stmts: &[fidan_ast::StmtId],
+    interner: &SymbolInterner,
+    stdlib_aliases: &std::collections::HashMap<&str, &str>,
+    out: &mut Vec<(String, String, String)>,
+) {
+    for &sid in stmts {
+        match module.arena.get_stmt(sid) {
+            fidan_ast::Stmt::VarDecl {
+                name,
+                init: Some(init_eid),
+                ..
+            } => {
+                maybe_push_stdlib_var_call(module, interner, stdlib_aliases, *name, *init_eid, out)
+            }
+            fidan_ast::Stmt::If {
+                then_body,
+                else_ifs,
+                else_body,
+                ..
+            } => {
+                collect_stmt_stdlib_var_calls(module, then_body, interner, stdlib_aliases, out);
+                for else_if in else_ifs {
+                    collect_stmt_stdlib_var_calls(
+                        module,
+                        &else_if.body,
+                        interner,
+                        stdlib_aliases,
+                        out,
+                    );
+                }
+                if let Some(else_body) = else_body {
+                    collect_stmt_stdlib_var_calls(module, else_body, interner, stdlib_aliases, out);
+                }
+            }
+            fidan_ast::Stmt::Check { arms, .. } => {
+                for arm in arms {
+                    collect_stmt_stdlib_var_calls(module, &arm.body, interner, stdlib_aliases, out);
+                }
+            }
+            fidan_ast::Stmt::For { body, .. }
+            | fidan_ast::Stmt::While { body, .. }
+            | fidan_ast::Stmt::ParallelFor { body, .. } => {
+                collect_stmt_stdlib_var_calls(module, body, interner, stdlib_aliases, out);
+            }
+            fidan_ast::Stmt::Attempt {
+                body,
+                catches,
+                otherwise,
+                finally,
+                ..
+            } => {
+                collect_stmt_stdlib_var_calls(module, body, interner, stdlib_aliases, out);
+                for catch in catches {
+                    collect_stmt_stdlib_var_calls(
+                        module,
+                        &catch.body,
+                        interner,
+                        stdlib_aliases,
+                        out,
+                    );
+                }
+                if let Some(otherwise) = otherwise {
+                    collect_stmt_stdlib_var_calls(module, otherwise, interner, stdlib_aliases, out);
+                }
+                if let Some(finally) = finally {
+                    collect_stmt_stdlib_var_calls(module, finally, interner, stdlib_aliases, out);
+                }
+            }
+            fidan_ast::Stmt::ConcurrentBlock { tasks, .. } => {
+                for task in tasks {
+                    collect_stmt_stdlib_var_calls(
+                        module,
+                        &task.body,
+                        interner,
+                        stdlib_aliases,
+                        out,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn maybe_push_stdlib_var_call(
+    module: &Module,
+    interner: &SymbolInterner,
+    stdlib_aliases: &std::collections::HashMap<&str, &str>,
+    var_name_sym: fidan_lexer::Symbol,
+    init_eid: fidan_ast::ExprId,
+    out: &mut Vec<(String, String, String)>,
+) {
+    if let Expr::Call { callee, .. } = module.arena.get_expr(init_eid)
+        && let Expr::Field { object, field, .. } = module.arena.get_expr(*callee)
+        && let Expr::Ident {
+            name: recv_name, ..
+        } = module.arena.get_expr(*object)
+        && let Some(module_name) = stdlib_aliases.get(interner.resolve(*recv_name).as_ref())
+    {
+        out.push((
+            interner.resolve(var_name_sym).to_string(),
+            (*module_name).to_string(),
+            interner.resolve(*field).to_string(),
+        ));
+    }
 }
 
 fn fidan_to_lsp(d: &FidanDiag, file: &SourceFile) -> lsp::Diagnostic {
@@ -432,6 +714,31 @@ action main {
                 .stdlib_imports
                 .iter()
                 .any(|(alias, module)| alias == "regex" && module == "regex")
+        );
+        assert!(
+            result
+                .stdlib_var_call_sites
+                .iter()
+                .any(|(var, module, member)| var == "rows"
+                    && module == "collections"
+                    && member == "enumerate")
+        );
+    }
+
+    #[test]
+    fn analyze_records_stdlib_namespace_call_sites_for_lsp_type_patching() {
+        let src = r#"use std.env
+
+var argv = env.args()
+"#;
+
+        let result = analyze(src, "file:///stdlib_type_patch.fdn");
+        assert!(
+            result
+                .stdlib_var_call_sites
+                .iter()
+                .any(|(var, module, member)| var == "argv" && module == "env" && member == "args"),
+            "expected env.args() to be recorded for stdlib type patching"
         );
     }
 

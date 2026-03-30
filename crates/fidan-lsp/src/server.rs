@@ -4,11 +4,12 @@ use crate::{
     analysis, convert, document::Document, semantic, store::DocumentStore, symbols::SymKind,
     symbols::SymbolEntry,
 };
-use fidan_config::{BUILTIN_FUNCTIONS, decorator_info};
+use fidan_config::{BUILTIN_FUNCTIONS, builtin_info, decorator_info};
 use fidan_fmt::{FormatOptions, format_source, load_format_options_for_path};
 use fidan_source::{FileId, SourceFile, Span};
 use fidan_stdlib::{
-    STDLIB_MODULES, member_doc as stdlib_member_doc, module_info as stdlib_module_info,
+    STDLIB_MODULES, member_doc as stdlib_member_doc,
+    member_return_type as stdlib_member_return_type, module_info as stdlib_module_info,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -99,6 +100,11 @@ fn decorator_hover_markdown(name: &str) -> Option<String> {
     ))
 }
 
+fn builtin_hover_markdown(name: &str) -> Option<String> {
+    let info = builtin_info(name)?;
+    Some(format!("```fidan\n{}\n```\n\n{}", info.signature, info.doc))
+}
+
 fn is_ident_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
@@ -124,6 +130,39 @@ fn decorator_name_at_offset(text: &str, offset: usize) -> Option<&str> {
     }
 
     text.get(start..end)
+}
+
+fn patch_var_inferred_type(
+    doc: &mut Document,
+    var_name: &str,
+    ret_type: &str,
+    preserve_member_resolution: bool,
+) {
+    if let Some(sym_entry) = doc.symbol_table.entries.get_mut(var_name) {
+        let kw = if matches!(
+            sym_entry.kind,
+            crate::symbols::SymKind::Variable { is_const: true }
+        ) {
+            "const var"
+        } else {
+            "var"
+        };
+        sym_entry.detail = format!("```fidan\n{} {} -> {}\n```", kw, var_name, ret_type);
+        if preserve_member_resolution {
+            sym_entry.ty_name = Some(ret_type.to_string());
+        }
+    }
+
+    if let Some((span, _)) = doc.identifier_spans.iter().find(|(_, n)| n == var_name) {
+        let end = span.end;
+        if let Some(hint) = doc
+            .inlay_hint_sites
+            .iter_mut()
+            .find(|h| h.byte_offset == end && h.is_type_hint)
+        {
+            hint.label = format!(" -> {}", ret_type);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -247,34 +286,16 @@ impl FidanLsp {
                 && let Some(ref ret_type) = entry.return_type
                 && let Some(mut doc) = self.store.get_mut(uri)
             {
-                if let Some(sym_entry) = doc.symbol_table.entries.get_mut(var_name) {
-                    // Update the hover detail to show the real return type.
-                    let kw = if matches!(
-                        sym_entry.kind,
-                        crate::symbols::SymKind::Variable { is_const: true }
-                    ) {
-                        "const var"
-                    } else {
-                        "var"
-                    };
-                    sym_entry.detail =
-                        format!("```fidan\n{} {} -> {}\n```", kw, var_name, ret_type);
-                    // Also set ty_name so member accesses on `x` can be resolved
-                    // if the return type is an object type.
-                    sym_entry.ty_name = Some(ret_type.clone());
-                }
-                // Also update the inlay hint label: it was set to `-> dynamic`
-                // during analysis but the real return type is now known.
-                if let Some((span, _)) = doc.identifier_spans.iter().find(|(_, n)| n == var_name) {
-                    let end = span.end;
-                    if let Some(hint) = doc
-                        .inlay_hint_sites
-                        .iter_mut()
-                        .find(|h| h.byte_offset == end && h.is_type_hint)
-                    {
-                        hint.label = format!(" -> {}", ret_type);
-                    }
-                }
+                patch_var_inferred_type(&mut doc, var_name, ret_type, true);
+            }
+        }
+
+        for (var_name, mod_name, member_name) in &result.stdlib_var_call_sites {
+            if let Some(ret_type) = stdlib_member_return_type(mod_name, member_name)
+                && ret_type != "dynamic"
+                && let Some(mut doc) = self.store.get_mut(uri)
+            {
+                patch_var_inferred_type(&mut doc, var_name, ret_type, false);
             }
         }
 
@@ -586,14 +607,14 @@ impl LanguageServer for FidanLsp {
         // Phase 1: in-document lookup while holding the DashMap read lock.
         // We drop the lock before any cross-document iteration to avoid
         // re-entrant shard locking with DashMap.
-        enum Phase1 {
+        enum HoverLookup {
             Found(String),            // detail string, ready to return
             CrossDoc(String, String), // (type_name, member_name) to search across docs
             ImportDoc(Url, String),   // (import_file_url, symbol_name) — for `module.Type`
             NotFound,
         }
 
-        let phase1 = {
+        let hover_lookup = {
             let doc = match self.store.get(uri) {
                 Some(d) => d,
                 None => return Ok(None),
@@ -654,23 +675,30 @@ impl LanguageServer for FidanLsp {
                     None
                 });
             if let Some(e) = in_doc {
-                Phase1::Found(e.detail.clone())
+                HoverLookup::Found(e.detail.clone())
+            } else if let Some(detail) = builtin_hover_markdown(cur_name.as_str()) {
+                HoverLookup::Found(detail)
             } else if let Some(pn) = prev_name
                 && let Some(mod_name) = doc.stdlib_imports.get(pn)
                 && let Some(detail) =
                     stdlib_member_hover_markdown(mod_name.as_str(), cur_name.as_str())
             {
-                Phase1::Found(detail)
+                HoverLookup::Found(detail)
+            } else if prev_name == Some("std") {
+                match stdlib_module_hover_markdown(cur_name.as_str()) {
+                    Some(detail) => HoverLookup::Found(detail),
+                    None => HoverLookup::NotFound,
+                }
             } else if let Some(pn) = prev_name {
                 // `module.Type` — prev is a namespace alias for an imported file.
                 if let Some(import_url) = doc.imports.get(pn) {
-                    Phase1::ImportDoc(import_url.clone(), cur_name.clone())
+                    HoverLookup::ImportDoc(import_url.clone(), cur_name.clone())
                 } else {
                     // Type-resolved: prev is a variable with known type.
                     let ty = doc.symbol_table.get(pn).and_then(|e| e.ty_name.clone());
                     match ty {
-                        Some(t) => Phase1::CrossDoc(t, cur_name.clone()),
-                        None => Phase1::NotFound,
+                        Some(t) => HoverLookup::CrossDoc(t, cur_name.clone()),
+                        None => HoverLookup::NotFound,
                     }
                 }
             } else if let Some(url) = doc.imports.get(cur_name.as_str()) {
@@ -681,29 +709,31 @@ impl LanguageServer for FidanLsp {
                     .and_then(|mut s| s.next_back())
                     .unwrap_or("?")
                     .to_owned();
-                Phase1::Found(format!(
+                HoverLookup::Found(format!(
                     "```fidan\nimport \"{}\" as {}\n```",
                     file_name, cur_name
                 ))
             } else if let Some(mod_name) = doc.stdlib_imports.get(cur_name.as_str()) {
                 match stdlib_module_hover_markdown(mod_name.as_str()) {
-                    Some(detail) => Phase1::Found(detail),
-                    None => Phase1::NotFound,
+                    Some(detail) => HoverLookup::Found(detail),
+                    None => HoverLookup::NotFound,
                 }
             } else {
-                Phase1::NotFound
+                HoverLookup::NotFound
             }
             // `doc` (DashMap Ref) is dropped here, releasing the shard lock.
         };
 
         // Phase 2: resolve or do cross-document parent-chain lookup.
-        let detail = match phase1 {
-            Phase1::Found(d) => d,
-            Phase1::CrossDoc(ty, member) => match self.resolve_member_cross_doc(&ty, &member) {
-                Some((_, e)) => e.detail,
-                None => return Ok(None),
-            },
-            Phase1::ImportDoc(url, name) => {
+        let detail = match hover_lookup {
+            HoverLookup::Found(d) => d,
+            HoverLookup::CrossDoc(ty, member) => {
+                match self.resolve_member_cross_doc(&ty, &member) {
+                    Some((_, e)) => e.detail,
+                    None => return Ok(None),
+                }
+            }
+            HoverLookup::ImportDoc(url, name) => {
                 // Look up the symbol directly in the imported document.
                 match self.store.get(&url) {
                     Some(d) => match d.symbol_table.get(&name) {
@@ -713,7 +743,7 @@ impl LanguageServer for FidanLsp {
                     None => return Ok(None),
                 }
             }
-            Phase1::NotFound => return Ok(None),
+            HoverLookup::NotFound => return Ok(None),
         };
 
         Ok(Some(Hover {
@@ -737,7 +767,7 @@ impl LanguageServer for FidanLsp {
         // Phase 1: in-document lookup (shard lock held).
         // `SourceFile` owns its text as `Arc<str>`, so it remains valid after
         // the `doc` lock is released.
-        enum Phase1 {
+        enum DefinitionLookup {
             Found(Span),                              // declaration span in the current document
             CrossDoc(String, String),                 // (type_name, member_name)
             CrossDocNamedArg(String, String, String), // (recv_ty, method_name, param_name)
@@ -746,7 +776,7 @@ impl LanguageServer for FidanLsp {
             NotFound,
         }
 
-        let (phase1, current_file) = {
+        let (definition_lookup, current_file) = {
             let doc = match self.store.get(uri) {
                 Some(d) => d,
                 None => return Ok(None),
@@ -787,46 +817,52 @@ impl LanguageServer for FidanLsp {
             // Fallback: resolve named call-arguments (e.g. `times` in `foo(times = 10)`).
             let named_arg =
                 find_named_arg_param(&doc.symbol_table, spans, hit_idx, cur_span, &doc.text);
-            let named_to_phase1 = |l: NamedArgLookup| -> Phase1 {
+            let named_to_lookup = |l: NamedArgLookup| -> DefinitionLookup {
                 match l {
-                    NamedArgLookup::InDoc(span) => Phase1::Found(span),
+                    NamedArgLookup::InDoc(span) => DefinitionLookup::Found(span),
                     NamedArgLookup::CrossModule {
                         recv_ty,
                         method_name,
                         param_name,
-                    } => Phase1::CrossDocNamedArg(recv_ty, method_name, param_name),
+                    } => DefinitionLookup::CrossDocNamedArg(recv_ty, method_name, param_name),
                 }
             };
             let p1 = if let Some(e) = in_doc {
-                Phase1::Found(e.span)
+                DefinitionLookup::Found(e.span)
             } else if let Some(pn) = prev_name {
                 // `module.Type` — prev is a namespace alias for an imported file.
                 if let Some(import_url) = doc.imports.get(pn) {
-                    Phase1::ImportDoc(import_url.clone(), cur_name.clone())
+                    DefinitionLookup::ImportDoc(import_url.clone(), cur_name.clone())
                 } else {
                     let ty = doc.symbol_table.get(pn).and_then(|e| e.ty_name.clone());
                     match ty {
-                        Some(t) => Phase1::CrossDoc(t, cur_name.clone()),
-                        None => named_arg.map(named_to_phase1).unwrap_or(Phase1::NotFound),
+                        Some(t) => DefinitionLookup::CrossDoc(t, cur_name.clone()),
+                        None => named_arg
+                            .map(named_to_lookup)
+                            .unwrap_or(DefinitionLookup::NotFound),
                     }
                 }
             } else if let Some(import_url) = doc.imports.get(cur_name.as_str()) {
                 // Cursor is on a module alias itself — open the imported file.
-                Phase1::OpenFile(import_url.clone())
+                DefinitionLookup::OpenFile(import_url.clone())
             } else {
-                named_arg.map(named_to_phase1).unwrap_or(Phase1::NotFound)
+                named_arg
+                    .map(named_to_lookup)
+                    .unwrap_or(DefinitionLookup::NotFound)
             };
             (p1, file) // `doc` dropped here
         };
 
         // Phase 2: resolve span + source URI (may require cross-doc lookup).
-        let (def_uri, span) = match phase1 {
-            Phase1::Found(span) => (uri.clone(), span),
-            Phase1::CrossDoc(ty, member) => match self.resolve_member_cross_doc(&ty, &member) {
-                Some((src_uri, e)) => (src_uri, e.span),
-                None => return Ok(None),
-            },
-            Phase1::CrossDocNamedArg(recv_ty, method, param) => {
+        let (def_uri, span) = match definition_lookup {
+            DefinitionLookup::Found(span) => (uri.clone(), span),
+            DefinitionLookup::CrossDoc(ty, member) => {
+                match self.resolve_member_cross_doc(&ty, &member) {
+                    Some((src_uri, e)) => (src_uri, e.span),
+                    None => return Ok(None),
+                }
+            }
+            DefinitionLookup::CrossDocNamedArg(recv_ty, method, param) => {
                 match self.resolve_member_cross_doc(&recv_ty, &method) {
                     Some((src_uri, e)) => {
                         let span = match e.param_names.iter().find(|(n, _)| *n == param) {
@@ -838,7 +874,7 @@ impl LanguageServer for FidanLsp {
                     None => return Ok(None),
                 }
             }
-            Phase1::ImportDoc(url, name) => {
+            DefinitionLookup::ImportDoc(url, name) => {
                 let span = {
                     let d = match self.store.get(&url) {
                         Some(d) => d,
@@ -852,8 +888,8 @@ impl LanguageServer for FidanLsp {
                 };
                 (url, span)
             }
-            Phase1::OpenFile(url) => (url, Span::default()),
-            Phase1::NotFound => return Ok(None),
+            DefinitionLookup::OpenFile(url) => (url, Span::default()),
+            DefinitionLookup::NotFound => return Ok(None),
         };
 
         // Build the LSP Range. Use the already-constructed `current_file` for
@@ -899,7 +935,7 @@ impl LanguageServer for FidanLsp {
             StdLibModule(String),
         }
 
-        struct Phase1 {
+        struct CompletionSeed {
             dot_res: Option<DotResolution>,
             /// Declared symbols (non-dot completion path).
             local_items: Vec<CompletionItem>,
@@ -924,7 +960,7 @@ impl LanguageServer for FidanLsp {
             StdLibMember(String, String), // (module_name, partial)
         }
 
-        let phase1 = {
+        let completion_seed = {
             let doc = match self.store.get(uri) {
                 Some(d) => d,
                 None => return Ok(None),
@@ -987,7 +1023,7 @@ impl LanguageServer for FidanLsp {
             // If we're in an import context, skip all other completion logic
             // and return early from Phase 1.
             if import_ctx.is_some() {
-                Phase1 {
+                CompletionSeed {
                     dot_res: None,
                     local_items: vec![],
                     named_param_entries: vec![],
@@ -1025,7 +1061,7 @@ impl LanguageServer for FidanLsp {
 
                 // If dot-triggered and resolved, skip standard items entirely.
                 if dot_res.is_some() {
-                    Phase1 {
+                    CompletionSeed {
                         dot_res,
                         local_items: vec![],
                         named_param_entries: vec![],
@@ -1146,7 +1182,7 @@ impl LanguageServer for FidanLsp {
                         }
                     }
 
-                    Phase1 {
+                    CompletionSeed {
                         dot_res,
                         local_items,
                         named_param_entries,
@@ -1161,7 +1197,7 @@ impl LanguageServer for FidanLsp {
         // ── Phase 2: cross-document resolution + assemble response ────────────
 
         // ── Import context: file-path or stdlib completion ────────────────────
-        if let Some(import_ctx) = phase1.import_ctx {
+        if let Some(import_ctx) = completion_seed.import_ctx {
             let items: Vec<CompletionItem> = match import_ctx {
                 ImportContext::StdLib(partial) => {
                     // Suggest matching `std.*` modules.
@@ -1337,7 +1373,7 @@ impl LanguageServer for FidanLsp {
         }
 
         // Dot-triggered: collect members (walking full cross-module chain).
-        if let Some(dot_res) = phase1.dot_res {
+        if let Some(dot_res) = completion_seed.dot_res {
             match dot_res {
                 DotResolution::TypeName(ty) => {
                     let members = self.store.collect_type_members(&ty);
@@ -1421,7 +1457,7 @@ impl LanguageServer for FidanLsp {
         }
 
         // Named-param cross-doc resolution.
-        let mut named_param_items: Vec<CompletionItem> = phase1
+        let mut named_param_items: Vec<CompletionItem> = completion_seed
             .named_param_entries
             .iter()
             .map(|(name, _)| CompletionItem {
@@ -1434,7 +1470,7 @@ impl LanguageServer for FidanLsp {
             .collect();
 
         if named_param_items.is_empty()
-            && let Some((recv_ty, method_name)) = phase1.named_param_cross
+            && let Some((recv_ty, method_name)) = completion_seed.named_param_cross
             && let Some((_, entry)) = self.resolve_member_cross_doc(&recv_ty, &method_name)
         {
             named_param_items = entry
@@ -1453,7 +1489,7 @@ impl LanguageServer for FidanLsp {
         // Assemble final list: named params first (sort_text "0…" keeps them
         // at the top), then declared symbols, then keywords, then builtins.
         let mut items = named_param_items;
-        items.extend(phase1.local_items);
+        items.extend(completion_seed.local_items);
 
         // Language keywords.
         for &kw in COMPLETION_KEYWORDS {
@@ -1471,6 +1507,12 @@ impl LanguageServer for FidanLsp {
                 kind: Some(CompletionItemKind::FUNCTION),
                 insert_text: Some(format!("{}($0)", builtin)),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
+                documentation: builtin_hover_markdown(builtin).map(|value| {
+                    Documentation::MarkupContent(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value,
+                    })
+                }),
                 ..Default::default()
             });
         }
@@ -1488,7 +1530,7 @@ impl LanguageServer for FidanLsp {
         let pos = &params.text_document_position_params.position;
 
         // Phase 1: gather everything from the document while holding the lock.
-        enum SigPhase1 {
+        enum SignatureLookup {
             /// Entry resolved locally — ready to build the response.
             Found {
                 fn_name: String,
@@ -1505,7 +1547,7 @@ impl LanguageServer for FidanLsp {
             NotFound,
         }
 
-        let phase1 = {
+        let signature_lookup = {
             let doc = match self.store.get(uri) {
                 Some(d) => d,
                 None => return Ok(None),
@@ -1592,9 +1634,9 @@ impl LanguageServer for FidanLsp {
 
             if let Some(entry) = local_entry {
                 if entry.param_types.is_empty() {
-                    SigPhase1::NotFound
+                    SignatureLookup::NotFound
                 } else {
-                    SigPhase1::Found {
+                    SignatureLookup::Found {
                         fn_name,
                         param_types: entry.param_types.clone(),
                         detail: entry.detail.clone(),
@@ -1614,28 +1656,28 @@ impl LanguageServer for FidanLsp {
                             .and_then(|e| e.ty_name.clone())
                     });
                 match recv_ty {
-                    Some(ty) => SigPhase1::CrossDoc {
+                    Some(ty) => SignatureLookup::CrossDoc {
                         recv_ty: ty,
                         method_name: fn_name,
                         active_param,
                     },
-                    None => SigPhase1::NotFound,
+                    None => SignatureLookup::NotFound,
                 }
             } else {
-                SigPhase1::NotFound
+                SignatureLookup::NotFound
             }
             // doc dropped here
         };
 
         // Phase 2: finalise response (cross-doc lookup if needed).
-        let (fn_name, param_types, detail, active_param) = match phase1 {
-            SigPhase1::Found {
+        let (fn_name, param_types, detail, active_param) = match signature_lookup {
+            SignatureLookup::Found {
                 fn_name,
                 param_types,
                 detail,
                 active_param,
             } => (fn_name, param_types, detail, active_param),
-            SigPhase1::CrossDoc {
+            SignatureLookup::CrossDoc {
                 recv_ty,
                 method_name,
                 active_param,
@@ -1648,7 +1690,7 @@ impl LanguageServer for FidanLsp {
                 ),
                 _ => return Ok(None),
             },
-            SigPhase1::NotFound => return Ok(None),
+            SignatureLookup::NotFound => return Ok(None),
         };
 
         // Build parameter labels from the detail string or param_types.
@@ -2506,13 +2548,29 @@ mod tests {
     }
 
     #[test]
+    fn builtin_hover_docs_cover_functions_and_type_like_values() {
+        let len = builtin_hover_markdown("len").expect("missing len hover doc");
+        assert!(len.contains("len(value) -> integer"));
+
+        let integer = builtin_hover_markdown("integer").expect("missing integer hover doc");
+        assert!(integer.contains("integer(value) -> integer"));
+    }
+
+    #[test]
     fn stdlib_member_hover_docs_cover_recent_exports() {
         let sleep =
             stdlib_member_hover_markdown("time", "sleep").expect("missing std.time.sleep doc");
-        assert!(sleep.contains("std.time.sleep"));
+        assert!(sleep.contains("std.time.sleep(ms) -> nothing"));
 
         let wait_any = stdlib_member_hover_markdown("async", "waitAny")
             .expect("missing std.async.waitAny doc");
-        assert!(wait_any.contains("std.async.waitAny"));
+        assert!(wait_any.contains("std.async.waitAny(handles) -> Pending"));
+    }
+
+    #[test]
+    fn stdlib_module_hover_docs_cover_import_targets() {
+        let env = stdlib_module_hover_markdown("env").expect("missing std.env hover doc");
+        assert!(env.contains("use std.env"));
+        assert!(env.contains("Environment variables"));
     }
 }
