@@ -41,3 +41,4 @@ urlencoding = { workspace = true }
 keyring = { workspace = true }
 crossterm = { workspace = true }
 sha2 = { workspace = true }
+globset = { workspace = true }

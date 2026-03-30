@@ -1,8 +1,10 @@
 //! Low-level output buffer used by all emitters.
 
+use crate::comments::{FmtComment, normalize_comment_lines};
 use crate::config::FormatOptions;
 use fidan_ast::AstArena;
 use fidan_lexer::{Symbol, SymbolInterner};
+use fidan_source::{SourceFile, Span};
 use std::sync::Arc;
 
 /// Accumulates formatted text with indentation and blank-line management.
@@ -15,10 +17,19 @@ pub struct Printer<'a> {
     pub arena: &'a AstArena,
     pub interner: &'a SymbolInterner,
     pub opts: &'a FormatOptions,
+    source: &'a SourceFile,
+    comments: Vec<FmtComment>,
+    next_comment: usize,
 }
 
 impl<'a> Printer<'a> {
-    pub fn new(arena: &'a AstArena, interner: &'a SymbolInterner, opts: &'a FormatOptions) -> Self {
+    pub fn new(
+        arena: &'a AstArena,
+        interner: &'a SymbolInterner,
+        opts: &'a FormatOptions,
+        source: &'a SourceFile,
+        comments: Vec<FmtComment>,
+    ) -> Self {
         Self {
             out: String::with_capacity(4096),
             indent: 0,
@@ -26,6 +37,9 @@ impl<'a> Printer<'a> {
             arena,
             interner,
             opts,
+            source,
+            comments,
+            next_comment: 0,
         }
     }
 
@@ -56,6 +70,14 @@ impl<'a> Printer<'a> {
         self.out.push_str(s);
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.out.is_empty()
+    }
+
+    pub fn source_slice(&self, span: Span) -> &str {
+        &self.source.src[span.start as usize..span.end as usize]
+    }
+
     /// End the current line (write `\n`).
     /// Trailing spaces on the current line are trimmed before the newline.
     pub fn nl(&mut self) {
@@ -78,6 +100,70 @@ impl<'a> Printer<'a> {
         self.out.push('\n');
         // Still at start-of-line after the blank.
         self.at_sol = true;
+    }
+
+    pub fn emit_comments_before(&mut self, offset: u32) {
+        while self.next_comment < self.comments.len()
+            && self.comments[self.next_comment].start < offset
+        {
+            let comment = self.comments[self.next_comment].clone();
+            self.emit_comment_standalone(&comment);
+            self.next_comment += 1;
+        }
+    }
+
+    pub fn emit_trailing_comments_for(&mut self, span_end: u32) {
+        let owner_offset = span_end.saturating_sub(1);
+        let owner_line = self.source.line_col(owner_offset).0;
+        while self.next_comment < self.comments.len() {
+            let comment = self.comments[self.next_comment].clone();
+            let comment_line = self.source.line_col(comment.start).0;
+            if !comment.inline || comment_line != owner_line {
+                break;
+            }
+            if self.at_sol {
+                self.w("");
+            }
+            self.w("  ");
+            self.emit_comment_inline(&comment);
+            self.next_comment += 1;
+        }
+    }
+
+    pub fn emit_remaining_comments(&mut self) {
+        while self.next_comment < self.comments.len() {
+            let comment = self.comments[self.next_comment].clone();
+            self.emit_comment_standalone(&comment);
+            self.next_comment += 1;
+        }
+    }
+
+    fn emit_comment_standalone(&mut self, comment: &FmtComment) {
+        if !self.at_sol {
+            self.nl();
+        }
+        let lines = normalize_comment_lines(&comment.text);
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                self.nl();
+            }
+            if !line.is_empty() {
+                self.w(line);
+            }
+        }
+        self.nl();
+    }
+
+    fn emit_comment_inline(&mut self, comment: &FmtComment) {
+        let lines = normalize_comment_lines(&comment.text);
+        for (i, line) in lines.iter().enumerate() {
+            if i > 0 {
+                self.nl();
+            }
+            if !line.is_empty() {
+                self.w(line);
+            }
+        }
     }
 
     // ── Indentation ────────────────────────────────────────────────────────

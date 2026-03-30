@@ -708,3 +708,83 @@ fn fmt_type_expr(te: &TypeExpr, interner: &SymbolInterner) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fidan_lexer::Lexer;
+    use fidan_source::{FileId, SourceFile};
+    use std::sync::Arc;
+
+    fn build_symbols(src: &str) -> SymbolTable {
+        let interner = Arc::new(SymbolInterner::new());
+        let file = SourceFile::new(FileId(0), "<symbols>", src);
+        let (tokens, lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        assert!(lex_diags.is_empty(), "lexer diagnostics: {lex_diags:#?}");
+        let (module, parse_diags) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+        assert!(
+            parse_diags.is_empty(),
+            "parser diagnostics: {parse_diags:#?}"
+        );
+        let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+        assert!(
+            typed
+                .diagnostics
+                .iter()
+                .all(|diag| diag.severity != fidan_diagnostics::Severity::Error),
+            "type diagnostics: {:#?}",
+            typed.diagnostics
+        );
+        build(&module, &typed, &interner)
+    }
+
+    #[test]
+    fn hover_details_use_current_type_spellings() {
+        let table = build_symbols(
+            r#"action work with (optional name oftype dynamic = r"{guest}") returns dynamic {
+    return name
+}
+
+var result = work()
+"#,
+        );
+
+        let action = table.get("work").expect("action symbol");
+        assert!(action.detail.contains("optional name -> dynamic"));
+        assert!(action.detail.contains("action work"));
+
+        let var = table.get("result").expect("var symbol");
+        assert!(var.detail.contains("var result -> dynamic"));
+        assert!(!var.detail.contains("flexible"));
+    }
+
+    #[test]
+    fn object_method_symbols_cover_enum_and_concurrency_adjacent_surface() {
+        let table = build_symbols(
+            r#"enum Result {
+    Ok(string)
+    Err(integer, dynamic)
+}
+
+action helper returns dynamic {
+    return "ok"
+}
+
+object Worker {
+    var name oftype string
+
+    action run returns dynamic {
+        var pending = spawn helper()
+        return await pending
+    }
+}
+"#,
+        );
+
+        let object = table.get("Worker").expect("object symbol");
+        assert!(object.detail.contains("object Worker"));
+        let method = table.get("Worker.run").expect("method symbol");
+        assert!(method.detail.contains("action run"));
+        assert!(method.detail.contains("-> dynamic"));
+    }
+}

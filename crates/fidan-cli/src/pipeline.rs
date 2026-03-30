@@ -307,13 +307,7 @@ pub(crate) fn run_fmt(
 ) -> Result<()> {
     let src = std::fs::read_to_string(&file).with_context(|| format!("cannot read {:?}", file))?;
 
-    let mut opts = fidan_fmt::FormatOptions::default();
-    if let Some(w) = indent_width {
-        opts.indent_width = w;
-    }
-    if let Some(l) = max_line_len {
-        opts.max_line_len = l;
-    }
+    let opts = fidan_fmt::resolve_format_options_for_path(Some(&file), indent_width, max_line_len)?;
 
     let formatted = fidan_fmt::format_source(&src, &opts);
 

@@ -15,6 +15,7 @@ fidan-parser = { workspace = true }
 fidan-diagnostics = { workspace = true }
 fidan-typeck = { workspace = true }
 fidan-fmt = { workspace = true }
+fidan-stdlib = { workspace = true }
 anyhow = { workspace = true }
 dashmap = { workspace = true }
 rustc-hash = { workspace = true }

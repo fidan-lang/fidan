@@ -7,6 +7,7 @@
 // fully-typed HIR tree.
 
 use fidan_ast::{Arg, AstArena, Expr, ExprId, InterpPart, Item, Module, Param, Stmt, StmtId};
+use fidan_config::BUILTIN_DECORATORS;
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::Span;
 use fidan_typeck::{ActionInfo, FidanType, TypedModule};
@@ -15,16 +16,6 @@ use fidan_typeck::{ActionInfo, FidanType, TypedModule};
 /// a single constant prevents typo-divergence.
 const DECORATOR_PRECOMPILE: &str = "precompile";
 const DECORATOR_EXTERN: &str = "extern";
-const DECORATOR_UNSAFE: &str = "unsafe";
-
-/// All built-in decorator names.  Any decorator NOT in this list and present in
-/// the symbol table as an `Action` is treated as a user-defined custom decorator.
-const BUILTIN_DECORATORS: &[&str] = &[
-    DECORATOR_PRECOMPILE,
-    "deprecated",
-    DECORATOR_EXTERN,
-    DECORATOR_UNSAFE,
-];
 
 use crate::hir::{
     CustomDecorator, DecoratorArg, HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf,

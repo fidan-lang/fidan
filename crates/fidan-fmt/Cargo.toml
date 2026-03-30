@@ -11,6 +11,8 @@ fidan-source = { workspace = true }
 fidan-lexer = { workspace = true }
 fidan-ast = { workspace = true }
 fidan-parser = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+toml = { workspace = true }
 
 [dev-dependencies]
 fidan-parser = { workspace = true }

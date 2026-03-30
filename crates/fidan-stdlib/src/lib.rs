@@ -29,6 +29,70 @@ pub mod time;
 /// A dispatched stdlib call result.
 pub use sandbox::{SandboxPolicy, SandboxViolation};
 
+#[derive(Clone, Copy)]
+pub struct StdlibModuleInfo {
+    pub name: &'static str,
+    pub exports: fn() -> &'static [&'static str],
+    pub doc: &'static str,
+}
+
+pub const STDLIB_MODULES: &[StdlibModuleInfo] = &[
+    StdlibModuleInfo {
+        name: "async",
+        exports: fidan_runtime::stdlib::async_std::exported_names,
+        doc: "Same-thread async helpers like sleep, gather, waitAny, and timeout.",
+    },
+    StdlibModuleInfo {
+        name: "collections",
+        exports: fidan_runtime::stdlib::collections::exported_names,
+        doc: "Collection helpers like zip, enumerate, chunk, window, partition, and groupBy.",
+    },
+    StdlibModuleInfo {
+        name: "env",
+        exports: fidan_runtime::stdlib::env::exported_names,
+        doc: "Environment variables and process arguments.",
+    },
+    StdlibModuleInfo {
+        name: "io",
+        exports: fidan_runtime::stdlib::io::exported_names,
+        doc: "Printing, input, file I/O, paths, directories, and terminal helpers.",
+    },
+    StdlibModuleInfo {
+        name: "math",
+        exports: fidan_runtime::stdlib::math::exported_names,
+        doc: "Math functions, constants, random helpers, and numeric transforms.",
+    },
+    StdlibModuleInfo {
+        name: "parallel",
+        exports: parallel::exported_names,
+        doc: "Thread-backed parallel collection helpers.",
+    },
+    StdlibModuleInfo {
+        name: "regex",
+        exports: fidan_runtime::stdlib::regex::exported_names,
+        doc: "Regex compile, match, capture, replace, and split helpers.",
+    },
+    StdlibModuleInfo {
+        name: "string",
+        exports: fidan_runtime::stdlib::string::exported_names,
+        doc: "String transforms, parsing, slicing, casing, and character helpers.",
+    },
+    StdlibModuleInfo {
+        name: "test",
+        exports: test_runner::exported_names,
+        doc: "Assertion helpers used by `fidan test` and inline test blocks.",
+    },
+    StdlibModuleInfo {
+        name: "time",
+        exports: fidan_runtime::stdlib::time::exported_names,
+        doc: "Clocks, elapsed timing, sleep/wait, and date/time helpers.",
+    },
+];
+
+pub fn module_info(module: &str) -> Option<&'static StdlibModuleInfo> {
+    STDLIB_MODULES.iter().find(|info| info.name == module)
+}
+
 /// A dispatched stdlib call result.
 pub enum StdlibResult {
     /// Synchronous result value.
@@ -86,17 +150,15 @@ pub fn dispatch_stdlib(
 
 /// Returns true when `module` is a known stdlib module name.
 pub fn is_stdlib_module(module: &str) -> bool {
-    module == "parallel" || fidan_runtime::stdlib::is_stdlib_module(module)
+    module_info(module).is_some()
 }
 
 /// Returns all exported function names for a given stdlib module.
 /// Used by `use std.module.{name}` to validate name lists at import resolution time.
 pub fn module_exports(module: &str) -> &'static [&'static str] {
-    match module {
-        "test" => test_runner::exported_names(),
-        "parallel" => parallel::exported_names(),
-        _ => fidan_runtime::stdlib::module_exports(module),
-    }
+    module_info(module)
+        .map(|info| (info.exports)())
+        .unwrap_or(&[])
 }
 
 /// Dispatch a test assertion — returns `Err(failure_message)` on failure.

@@ -16,14 +16,19 @@
 //! fidan format file.fdn --check    # exit 1 if not already formatted (CI mode)
 //! ```
 
+mod comments;
 pub mod config;
 mod emit_expr;
 mod emit_item;
 mod emit_stmt;
 mod printer;
 
-pub use config::FormatOptions;
+pub use config::{
+    FormatConfigError, FormatOptions, find_format_config, load_format_options_for_path,
+    resolve_format_options_for_path,
+};
 
+use comments::collect_comments;
 use emit_item::emit_module;
 use fidan_lexer::{Lexer, SymbolInterner};
 use fidan_source::{FileId, SourceFile};
@@ -40,9 +45,10 @@ use std::sync::Arc;
 pub fn format_source(src: &str, opts: &FormatOptions) -> String {
     let interner = Arc::new(SymbolInterner::new());
     let file = SourceFile::new(FileId(0), "<fmt>", src);
+    let comments = collect_comments(&file);
     let (tokens, _lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
     let (module, _parse_diags) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
-    let mut p = printer::Printer::new(&module.arena, &interner, opts);
+    let mut p = printer::Printer::new(&module.arena, &interner, opts, &file, comments);
     emit_module(&mut p, &module);
     p.finish()
 }
@@ -60,9 +66,69 @@ pub fn check_formatted(src: &str, opts: &FormatOptions) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fidan_diagnostics::Severity;
+    use fidan_lexer::{Lexer, SymbolInterner};
+    use fidan_source::{FileId, SourceFile};
+    use std::sync::Arc;
 
     fn fmt(src: &str) -> String {
         format_source(src, &FormatOptions::default())
+    }
+
+    fn workspace_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
+    fn assert_round_trip_file(rel_path: &str) {
+        let path = workspace_root().join(rel_path);
+        let original = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+
+        let item_count_original = {
+            let interner = Arc::new(SymbolInterner::new());
+            let file = SourceFile::new(FileId(0), "<original>", original.as_str());
+            let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, _) = fidan_parser::parse(&tokens, FileId(0), interner);
+            module.items.len()
+        };
+
+        let opts = FormatOptions::default();
+        let formatted = format_source(&original, &opts);
+
+        let item_count_formatted = {
+            let interner = Arc::new(SymbolInterner::new());
+            let file = SourceFile::new(FileId(0), "<formatted>", formatted.as_str());
+            let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, diags) = fidan_parser::parse(&tokens, FileId(0), interner);
+            let errors: Vec<_> = diags
+                .iter()
+                .filter(|d| d.severity == Severity::Error)
+                .collect();
+            assert!(
+                errors.is_empty(),
+                "re-parsing formatted source produced errors for {}:\n{errors:#?}\n\nFormatted source:\n{formatted}",
+                rel_path
+            );
+            module.items.len()
+        };
+
+        assert_eq!(
+            item_count_original, item_count_formatted,
+            "top-level item count changed after formatting {}: {item_count_original} -> {item_count_formatted}",
+            rel_path
+        );
+
+        let formatted2 = format_source(&formatted, &opts);
+        assert_eq!(
+            formatted, formatted2,
+            "formatter is not idempotent on {}!\nfirst pass:\n{formatted}\nsecond pass:\n{formatted2}",
+            rel_path
+        );
     }
 
     // ── Idempotence ───────────────────────────────────────────────────────
@@ -128,6 +194,118 @@ mod tests {
         let src = "parallel action fetch with (certain url oftype string) returns string {\n    return url\n}\n";
         let out = fmt(src);
         assert_eq!(out, src);
+    }
+
+    #[test]
+    fn formats_recent_feature_surface_cleanly() {
+        let src = r#"@extern("kernel32", "Beep")
+action beep with (certain freq oftype integer, certain ms oftype integer) returns nothing
+
+enum Result {
+    Ok(string)
+    Err(integer, dynamic)
+}
+
+action demo with (optional name oftype dynamic = r"{literal}") returns dynamic {
+    var values oftype tuple = (1, 2, 3)
+    var first = values[0]
+    var slice = [1, 2, 3, 4][1..3]
+    var maybe = nothing ?? "fallback"
+    var comp = [x * 2 for x in [1, 2, 3] if x > 1]
+    var map = {x: x + 1 for x in [1, 2, 3] if x > 1}
+    var pending = spawn work(name)
+    var result = await pending
+    concurrent {
+        task reader {
+            print(r"\n {name}")
+        }
+        task writer {
+            print(result)
+        }
+    }
+    parallel {
+        task A {
+            print("a")
+        }
+        task B {
+            print("b")
+        }
+    }
+    check result {
+        "ok" => {
+            return result
+        }
+        _ => {
+            panic("bad result")
+        }
+    }
+}
+"#;
+        let expected = r#"@extern("kernel32", "Beep")
+action beep with (certain freq oftype integer, certain ms oftype integer) returns nothing
+
+enum Result {
+    Ok(string)
+    Err(integer, dynamic)
+}
+
+action demo with (optional name oftype dynamic = "\{literal\}") returns dynamic {
+    var values oftype tuple = (1, 2, 3)
+    var first = values[0]
+    var slice = [1, 2, 3, 4][1..3]
+    var maybe = nothing ?? "fallback"
+    var comp = [x * 2 for x in [1, 2, 3] if x > 1]
+    var map = {x: x + 1 for x in [1, 2, 3] if x > 1}
+    var pending = spawn work(name)
+    var result = await pending
+
+    concurrent {
+        task reader {
+            print("\\n \{name\}")
+        }
+        task writer {
+            print(result)
+        }
+    }
+    parallel {
+        task A {
+            print("a")
+        }
+        task B {
+            print("b")
+        }
+    }
+    check result {
+        "ok" => {
+            return result
+        }
+        _ => {
+            panic("bad result")
+        }
+    }
+}
+"#;
+        assert_eq!(fmt(src), expected);
+        assert_idempotent(expected);
+    }
+
+    #[test]
+    fn enum_payloads_and_dynamic_types_round_trip() {
+        let src = "enum Value {\n    Text(string)\n    Pair(integer, dynamic)\n}\n";
+        assert_eq!(fmt(src), src);
+        assert_idempotent(src);
+    }
+
+    #[test]
+    fn preserves_line_and_block_comments() {
+        let src = r#"## heading
+var x=1 # tail
+#/ block
+   keep
+/#"#;
+        let expected = "## heading\nvar x = 1  # tail\n#/ block\n   keep\n/#\n";
+        assert_eq!(fmt(src), expected);
+        assert_idempotent(expected);
     }
 
     #[test]
@@ -206,16 +384,21 @@ mod tests {
 
     #[test]
     fn blank_line_between_items() {
-        // Consecutive simple items (var, use, expr-stmts) must NOT get a blank
-        // line inserted between them.
+        // Consecutive declarations stay grouped.
         let src = "var a = 1\nvar b = 2\n";
         assert_eq!(fmt(src), src);
         assert_idempotent(src);
 
-        // Any blank lines the user wrote between simple items are stripped
-        // (formatter is the authority on spacing).
+        // Any blank lines the user wrote between grouped declarations are stripped.
         let src_with_blank = "var a = 1\n\nvar b = 2\n";
         assert_eq!(fmt(src_with_blank), "var a = 1\nvar b = 2\n");
+
+        // Imports and declarations get separated into distinct groups.
+        let imports_then_vars = "use std.io\nuse std.math\nvar a = 1\n";
+        assert_eq!(
+            fmt(imports_then_vars),
+            "use std.io\nuse std.math\n\nvar a = 1\n"
+        );
 
         // Block-level items (actions, objects) get a blank line before and after.
         let src_action = "var x = 1\naction foo {\n}\nvar y = 2\n";
@@ -228,6 +411,13 @@ mod tests {
             formatted.contains("}\n\nvar"),
             "expected blank line after action block, got:\n{formatted}"
         );
+    }
+
+    #[test]
+    fn blank_line_between_decls_and_control_flow_in_blocks() {
+        let src = "action demo {\n    var a = 1\n    var b = 2\n\n    if a < b {\n        print(a)\n    }\n}\n";
+        assert_eq!(fmt(src), src);
+        assert_idempotent(src);
     }
 
     // ── check_formatted ───────────────────────────────────────────────────
@@ -257,59 +447,20 @@ mod tests {
     ///   3. A third format pass is identical to the second (idempotence).
     #[test]
     fn round_trip_test_fdn() {
-        use fidan_diagnostics::Severity;
-        use fidan_lexer::{Lexer, SymbolInterner};
-        use fidan_source::{FileId, SourceFile};
-        use std::sync::Arc;
+        assert_round_trip_file("test/examples/test.fdn");
+    }
 
-        // ── locate test/examples/test.fdn relative to workspace root ──────
-        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let workspace = manifest.parent().unwrap().parent().unwrap();
-        let path = workspace.join("test").join("examples").join("test.fdn");
-        let original = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-
-        // ── count top-level items in the original source ───────────────────
-        let item_count_original = {
-            let interner = Arc::new(SymbolInterner::new());
-            let file = SourceFile::new(FileId(0), "<original>", original.as_str());
-            let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
-            let (module, _) = fidan_parser::parse(&tokens, FileId(0), interner);
-            module.items.len()
-        };
-
-        // ── pass 1: format the original ───────────────────────────────────
-        let opts = FormatOptions::default();
-        let formatted = format_source(&original, &opts);
-
-        // ── pass 2: re-parse the formatted source — must be error-free ────
-        let item_count_formatted = {
-            let interner = Arc::new(SymbolInterner::new());
-            let file = SourceFile::new(FileId(0), "<formatted>", formatted.as_str());
-            let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
-            let (module, diags) = fidan_parser::parse(&tokens, FileId(0), interner);
-            let errors: Vec<_> = diags
-                .iter()
-                .filter(|d| d.severity == Severity::Error)
-                .collect();
-            assert!(
-                errors.is_empty(),
-                "re-parsing formatted source produced errors:\n{errors:#?}\n\nFormatted source:\n{formatted}"
-            );
-            module.items.len()
-        };
-
-        // ── item count must be preserved ──────────────────────────────────
-        assert_eq!(
-            item_count_original, item_count_formatted,
-            "top-level item count changed after formatting: {item_count_original} → {item_count_formatted}"
-        );
-
-        // ── idempotence: a second format pass must be a no-op ─────────────
-        let formatted2 = format_source(&formatted, &opts);
-        assert_eq!(
-            formatted, formatted2,
-            "formatter is not idempotent on test.fdn!\nfirst pass:\n{formatted}\nsecond pass:\n{formatted2}"
-        );
+    #[test]
+    fn round_trip_current_feature_examples() {
+        for rel_path in [
+            "test/examples/check_val.fdn",
+            "test/examples/async_demo.fdn",
+            "test/examples/concurrency_showcase.fdn",
+            "test/examples/parallel_demo.fdn",
+            "test/examples/enum_test.fdn",
+            "test/examples/spawn_method_test.fdn",
+        ] {
+            assert_round_trip_file(rel_path);
+        }
     }
 }

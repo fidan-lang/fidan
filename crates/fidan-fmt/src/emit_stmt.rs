@@ -3,6 +3,34 @@
 use crate::emit_expr::{emit_expr, emit_type};
 use crate::printer::Printer;
 use fidan_ast::{Stmt, StmtId};
+use fidan_source::Span;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StmtGroup {
+    Declaration,
+    Simple,
+    Block,
+}
+
+fn stmt_group(stmt: &Stmt) -> StmtGroup {
+    match stmt {
+        Stmt::VarDecl { .. } | Stmt::Destructure { .. } => StmtGroup::Declaration,
+        Stmt::If { .. }
+        | Stmt::Check { .. }
+        | Stmt::For { .. }
+        | Stmt::While { .. }
+        | Stmt::Attempt { .. }
+        | Stmt::ParallelFor { .. }
+        | Stmt::ConcurrentBlock { .. } => StmtGroup::Block,
+        Stmt::Assign { .. }
+        | Stmt::Expr { .. }
+        | Stmt::Return { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Panic { .. }
+        | Stmt::Error { .. } => StmtGroup::Simple,
+    }
+}
 
 // ── Public entry ──────────────────────────────────────────────────────────────
 
@@ -10,6 +38,8 @@ use fidan_ast::{Stmt, StmtId};
 /// cursor at the start of a fresh indented line before calling this.
 pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
     let stmt = p.arena.get_stmt(id).clone();
+    let stmt_span = stmt_span(&stmt);
+    p.emit_comments_before(stmt_span.start);
     match stmt {
         // ── Variable / const declarations ─────────────────────────────────
         Stmt::VarDecl {
@@ -82,23 +112,25 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
             then_body,
             else_ifs,
             else_body,
-            ..
+            span,
         } => {
             p.w("if ");
             emit_expr(p, condition);
             p.w(" {");
-            emit_block(p, &then_body);
+            emit_block(p, &then_body, Some(span.end));
             p.w("}");
             for ei in &else_ifs {
+                p.emit_comments_before(ei.span.start);
                 p.w(" otherwise when ");
                 emit_expr(p, ei.condition);
                 p.w(" {");
-                emit_block(p, &ei.body);
+                emit_block(p, &ei.body, Some(ei.span.end));
                 p.w("}");
+                p.emit_trailing_comments_for(ei.span.end);
             }
             if let Some(ref else_b) = else_body {
                 p.w(" else {");
-                emit_block(p, else_b);
+                emit_block(p, else_b, Some(span.end));
                 p.w("}");
             }
         }
@@ -112,11 +144,13 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
             p.w(" {");
             p.indent_in();
             for arm in &arms {
+                p.emit_comments_before(arm.span.start);
                 p.nl();
                 emit_expr(p, arm.pattern);
                 p.w(" => {");
-                emit_block(p, &arm.body);
+                emit_block(p, &arm.body, Some(arm.span.end));
                 p.w("}");
+                p.emit_trailing_comments_for(arm.span.end);
             }
             p.indent_out();
             p.nl();
@@ -128,7 +162,7 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
             binding,
             iterable,
             body,
-            ..
+            span,
         } => {
             p.w("for ");
             let b = p.sym_s(binding);
@@ -136,7 +170,7 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
             p.w(" in ");
             emit_expr(p, iterable);
             p.w(" {");
-            emit_block(p, &body);
+            emit_block(p, &body, Some(span.end));
             p.w("}");
         }
 
@@ -147,7 +181,7 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
             p.w("while ");
             emit_expr(p, condition);
             p.w(" {");
-            emit_block(p, &body);
+            emit_block(p, &body, Some(stmt_span.end));
             p.w("}");
         }
 
@@ -157,12 +191,13 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
             catches,
             otherwise,
             finally,
-            ..
+            span,
         } => {
             p.w("attempt {");
-            emit_block(p, &body);
+            emit_block(p, &body, Some(span.end));
             p.w("}");
             for catch in &catches {
+                p.emit_comments_before(catch.span.start);
                 p.w(" catch");
                 if catch.binding.is_some() || catch.ty.is_some() {
                     p.w(" ");
@@ -176,17 +211,18 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
                     }
                 }
                 p.w(" {");
-                emit_block(p, &catch.body);
+                emit_block(p, &catch.body, Some(catch.span.end));
                 p.w("}");
+                p.emit_trailing_comments_for(catch.span.end);
             }
             if let Some(ref ow) = otherwise {
                 p.w(" otherwise {");
-                emit_block(p, ow);
+                emit_block(p, ow, Some(span.end));
                 p.w("}");
             }
             if let Some(ref fin) = finally {
                 p.w(" finally {");
-                emit_block(p, fin);
+                emit_block(p, fin, Some(span.end));
                 p.w("}");
             }
         }
@@ -196,7 +232,7 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
             binding,
             iterable,
             body,
-            ..
+            span,
         } => {
             p.w("parallel for ");
             let b = p.sym_s(binding);
@@ -204,7 +240,7 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
             p.w(" in ");
             emit_expr(p, iterable);
             p.w(" {");
-            emit_block(p, &body);
+            emit_block(p, &body, Some(span.end));
             p.w("}");
         }
 
@@ -219,6 +255,7 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
             }
             p.indent_in();
             for task in &tasks {
+                p.emit_comments_before(task.span.start);
                 p.nl();
                 p.w("task");
                 if let Some(name) = task.name {
@@ -227,8 +264,9 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
                     p.w(&n);
                 }
                 p.w(" {");
-                emit_block(p, &task.body);
+                emit_block(p, &task.body, Some(task.span.end));
                 p.w("}");
+                p.emit_trailing_comments_for(task.span.end);
             }
             p.indent_out();
             p.nl();
@@ -247,6 +285,7 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
             p.w("# <parse error>");
         }
     }
+    p.emit_trailing_comments_for(stmt_span.end);
 }
 
 // ── Block helper ──────────────────────────────────────────────────────────────
@@ -254,17 +293,51 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
 /// Emit a `{ body }` block: indents, emits each statement on its own line,
 /// then de-indents.  The opening `{` and closing `}` are NOT emitted here —
 /// the caller wrote `{` just before calling this and writes `}` afterwards.
-pub fn emit_block(p: &mut Printer<'_>, stmts: &[StmtId]) {
+pub fn emit_block(p: &mut Printer<'_>, stmts: &[StmtId], block_end: Option<u32>) {
     if stmts.is_empty() {
-        // Empty block: just a single space so it formats as `{ }`
-        // (actually most formatters put nothing, resulting in `{}`)
+        if let Some(end) = block_end {
+            p.emit_comments_before(end);
+        }
         return;
     }
     p.indent_in();
+    let mut prev_group: Option<StmtGroup> = None;
     for &sid in stmts {
+        let stmt = p.arena.get_stmt(sid);
+        let curr_group = stmt_group(stmt);
         p.nl();
+        if let Some(prev) = prev_group
+            && prev != curr_group
+        {
+            p.blank();
+        }
         emit_stmt(p, sid);
+        prev_group = Some(curr_group);
+    }
+    if let Some(end) = block_end {
+        p.emit_comments_before(end);
     }
     p.indent_out();
     p.nl();
+}
+
+fn stmt_span(stmt: &Stmt) -> Span {
+    match stmt {
+        Stmt::VarDecl { span, .. } => *span,
+        Stmt::Destructure { span, .. } => *span,
+        Stmt::Assign { span, .. } => *span,
+        Stmt::Expr { span, .. } => *span,
+        Stmt::Return { span, .. } => *span,
+        Stmt::Break { span } => *span,
+        Stmt::Continue { span } => *span,
+        Stmt::If { span, .. } => *span,
+        Stmt::Check { span, .. } => *span,
+        Stmt::For { span, .. } => *span,
+        Stmt::While { span, .. } => *span,
+        Stmt::Attempt { span, .. } => *span,
+        Stmt::ParallelFor { span, .. } => *span,
+        Stmt::ConcurrentBlock { span, .. } => *span,
+        Stmt::Panic { span, .. } => *span,
+        Stmt::Error { span } => *span,
+    }
 }

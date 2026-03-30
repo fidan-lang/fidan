@@ -337,3 +337,115 @@ fn extract_type_from_detail(detail: &str) -> &str {
     }
     "?"
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn workspace_root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
+    fn assert_file_analyzes_without_errors(rel_path: &str) {
+        let path = workspace_root().join(rel_path);
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+        let uri = format!("file:///{}", path.display().to_string().replace('\\', "/"));
+        let result = analyze(&src, &uri);
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|diag| diag.severity == Some(DiagnosticSeverity::ERROR))
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "expected no analysis errors for {} but got: {errors:#?}",
+            rel_path
+        );
+    }
+
+    #[test]
+    fn analyze_recent_feature_surface_without_errors() {
+        let src = r#"use std.async
+use std.collections as collections
+use std.regex
+
+enum Result {
+    Ok(string)
+    Err(integer, dynamic)
+}
+
+@extern("kernel32", symbol = "Beep")
+action beep with (certain freq oftype integer, certain ms oftype integer) returns nothing
+
+action work with (optional name oftype dynamic = r"{guest}") returns dynamic {
+    return name
+}
+
+action main {
+    var raw = r"\n {literal}"
+    var grouped = collections.groupBy([1, 1, 2])
+    var parts = collections.chunk([1, 2, 3, 4], 2)
+    var windows = collections.window([1, 2, 3], 2)
+    var rows = collections.enumerate([10, 20])
+    concurrent {
+        task reader {
+            print(raw)
+        }
+        task writer {
+            print(await async.gather([spawn work("Ada")]))
+        }
+    }
+}
+"#;
+
+        let result = analyze(src, "file:///feature_surface.fdn");
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|diag| diag.severity == Some(DiagnosticSeverity::ERROR))
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "expected no analysis errors, got: {errors:#?}"
+        );
+        assert!(
+            result
+                .stdlib_imports
+                .iter()
+                .any(|(alias, module)| alias == "async" && module == "async")
+        );
+        assert!(
+            result
+                .stdlib_imports
+                .iter()
+                .any(|(alias, module)| alias == "collections" && module == "collections")
+        );
+        assert!(
+            result
+                .stdlib_imports
+                .iter()
+                .any(|(alias, module)| alias == "regex" && module == "regex")
+        );
+    }
+
+    #[test]
+    fn analyze_current_feature_examples_without_errors() {
+        for rel_path in [
+            "test/examples/check_val.fdn",
+            "test/examples/async_demo.fdn",
+            "test/examples/concurrency_showcase.fdn",
+            "test/examples/parallel_demo.fdn",
+            "test/examples/trace_demo.fdn",
+            "test/examples/spawn_method_test.fdn",
+        ] {
+            assert_file_analyzes_without_errors(rel_path);
+        }
+    }
+}

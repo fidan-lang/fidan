@@ -11,41 +11,77 @@ pub mod time;
 
 use crate::FidanValue;
 
+#[derive(Clone, Copy)]
+struct ValueModuleInfo {
+    name: &'static str,
+    dispatch: fn(&str, Vec<FidanValue>) -> Option<FidanValue>,
+    exports: fn() -> &'static [&'static str],
+}
+
+const VALUE_MODULES: &[ValueModuleInfo] = &[
+    ValueModuleInfo {
+        name: "math",
+        dispatch: math::dispatch,
+        exports: math::exported_names,
+    },
+    ValueModuleInfo {
+        name: "string",
+        dispatch: string::dispatch,
+        exports: string::exported_names,
+    },
+    ValueModuleInfo {
+        name: "io",
+        dispatch: io::dispatch,
+        exports: io::exported_names,
+    },
+    ValueModuleInfo {
+        name: "collections",
+        dispatch: collections::dispatch,
+        exports: collections::exported_names,
+    },
+    ValueModuleInfo {
+        name: "env",
+        dispatch: env::dispatch,
+        exports: env::exported_names,
+    },
+    ValueModuleInfo {
+        name: "regex",
+        dispatch: regex::dispatch,
+        exports: regex::exported_names,
+    },
+    ValueModuleInfo {
+        name: "time",
+        dispatch: time::dispatch,
+        exports: time::exported_names,
+    },
+];
+
+fn value_module(module: &str) -> Option<ValueModuleInfo> {
+    VALUE_MODULES
+        .iter()
+        .copied()
+        .find(|info| info.name == module)
+}
+
 pub fn dispatch_value_module(
     module: &str,
     name: &str,
     args: Vec<FidanValue>,
 ) -> Option<FidanValue> {
-    match module {
-        "math" => math::dispatch(name, args),
-        "string" => string::dispatch(name, args),
-        "io" => io::dispatch(name, args),
-        "collections" => collections::dispatch(name, args),
-        "env" => env::dispatch(name, args),
-        "regex" => regex::dispatch(name, args),
-        "time" => time::dispatch(name, args),
-        _ => None,
-    }
+    let info = value_module(module)?;
+    (info.dispatch)(name, args)
 }
 
 pub fn module_exports(module: &str) -> &'static [&'static str] {
     match module {
         "async" => async_std::exported_names(),
-        "math" => math::exported_names(),
-        "string" => string::exported_names(),
-        "io" => io::exported_names(),
-        "collections" => collections::exported_names(),
-        "env" => env::exported_names(),
-        "regex" => regex::exported_names(),
-        "time" => time::exported_names(),
         "test" => test_runner::exported_names(),
-        _ => &[],
+        _ => value_module(module)
+            .map(|info| (info.exports)())
+            .unwrap_or(&[]),
     }
 }
 
 pub fn is_stdlib_module(module: &str) -> bool {
-    matches!(
-        module,
-        "async" | "math" | "string" | "io" | "collections" | "env" | "regex" | "time" | "test"
-    )
+    matches!(module, "async" | "test") || value_module(module).is_some()
 }

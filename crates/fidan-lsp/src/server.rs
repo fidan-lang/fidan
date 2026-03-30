@@ -5,8 +5,9 @@ use crate::{
     symbols::SymbolEntry,
 };
 use fidan_config::BUILTIN_FUNCTIONS;
-use fidan_fmt::{FormatOptions, format_source};
+use fidan_fmt::{FormatOptions, format_source, load_format_options_for_path};
 use fidan_source::{FileId, SourceFile, Span};
+use fidan_stdlib::{STDLIB_MODULES, module_info as stdlib_module_info};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result as RpcResult;
@@ -51,6 +52,7 @@ const COMPLETION_KEYWORDS: &[&str] = &[
     "Pending",
     "WeakShared",
     "test",
+    "enum",
     "tuple",
     "nothing",
     "true",
@@ -67,310 +69,17 @@ const COMPLETION_KEYWORDS: &[&str] = &[
     "new",
 ];
 
-/// All known `std.*` module names for import completion.
-const STD_MODULES: &[(&str, &str)] = &[
-    ("io", "File I/O, stdin/stdout/stderr, paths, directories"),
-    ("net", "TcpSocket, HttpClient, HttpServer"),
-    (
-        "collections",
-        "Set, Queue, Deque, BTreeMap, parallel collection ops",
-    ),
-    (
-        "math",
-        "sin, cos, sqrt, floor, ceil, abs, min, max, random, pi, e",
-    ),
-    (
-        "string",
-        "split, join, trim, replace, contains, startsWith, endsWith",
-    ),
-    (
-        "concurrent",
-        "Task, Channel — cooperative scheduler helpers",
-    ),
-    (
-        "parallel",
-        "Shared, Pending, parallelMap, parallelFilter, parallelFor",
-    ),
-    ("debug", "assert, assertEq, inspect, profile"),
-    ("test", "describe/it blocks, expect(...).to... matchers"),
-    ("cli", "Argument parsing, coloured output, progress bars"),
-    ("time", "DateTime, Duration, wait"),
-    ("json", "parse, stringify, path queries"),
-    ("env", "Environment variables, platform info"),
-];
-
-/// Members exported by each implemented stdlib module.
-/// Kept in sync with each module's `exported_names()` function.
-const STD_MODULE_MEMBERS: &[(&str, &[&str])] = &[
-    (
-        "io",
-        &[
-            "print",
-            "eprint",
-            "readLine",
-            "read_line",
-            "readline",
-            "readFile",
-            "read_file",
-            "writeFile",
-            "write_file",
-            "appendFile",
-            "append_file",
-            "deleteFile",
-            "delete_file",
-            "fileExists",
-            "file_exists",
-            "exists",
-            "isFile",
-            "is_file",
-            "isDir",
-            "is_dir",
-            "makeDir",
-            "make_dir",
-            "mkdir",
-            "listDir",
-            "list_dir",
-            "readDir",
-            "read_dir",
-            "copyFile",
-            "copy_file",
-            "renameFile",
-            "rename_file",
-            "join",
-            "joinPath",
-            "join_path",
-            "dirname",
-            "dir_name",
-            "basename",
-            "base_name",
-            "fileName",
-            "file_name",
-            "extension",
-            "cwd",
-            "currentDir",
-            "current_dir",
-            "absolutePath",
-            "absolute_path",
-            "getEnv",
-            "get_env",
-            "env",
-            "setEnv",
-            "set_env",
-            "args",
-            "argv",
-            "flush",
-            "isatty",
-        ],
-    ),
-    (
-        "math",
-        &[
-            "sin",
-            "cos",
-            "tan",
-            "asin",
-            "acos",
-            "atan",
-            "atan2",
-            "sinh",
-            "cosh",
-            "tanh",
-            "sqrt",
-            "cbrt",
-            "pow",
-            "exp",
-            "exp2",
-            "log",
-            "log2",
-            "log10",
-            "logN",
-            "floor",
-            "ceil",
-            "round",
-            "trunc",
-            "fract",
-            "abs",
-            "sign",
-            "signum",
-            "min",
-            "max",
-            "clamp",
-            "hypot",
-            "pi",
-            "e",
-            "tau",
-            "inf",
-            "nan",
-            "isNan",
-            "is_nan",
-            "isInfinite",
-            "is_infinite",
-            "isFinite",
-            "is_finite",
-            "random",
-            "randomInt",
-            "random_int",
-            "toDeg",
-            "to_deg",
-            "degrees",
-            "toRad",
-            "to_rad",
-            "radians",
-        ],
-    ),
-    (
-        "string",
-        &[
-            "toUpper",
-            "upper",
-            "toLower",
-            "lower",
-            "capitalize",
-            "trim",
-            "trimStart",
-            "ltrim",
-            "trim_start",
-            "trimEnd",
-            "rtrim",
-            "trim_end",
-            "split",
-            "join",
-            "lines",
-            "contains",
-            "startsWith",
-            "starts_with",
-            "endsWith",
-            "ends_with",
-            "indexOf",
-            "index_of",
-            "lastIndexOf",
-            "last_index_of",
-            "replace",
-            "replaceFirst",
-            "replace_first",
-            "slice",
-            "substr",
-            "padStart",
-            "pad_start",
-            "padEnd",
-            "pad_end",
-            "repeat",
-            "reverse",
-            "len",
-            "length",
-            "isEmpty",
-            "is_empty",
-            "format",
-            "parseInt",
-            "parse_int",
-            "parseFloat",
-            "parse_float",
-            "chars",
-            "bytes",
-            "fromChars",
-            "from_chars",
-            "charCode",
-            "char_code",
-            "fromCharCode",
-            "from_char_code",
-        ],
-    ),
-    (
-        "collections",
-        &[
-            "range",
-            "Set",
-            "setAdd",
-            "set_add",
-            "setRemove",
-            "set_remove",
-            "setContains",
-            "set_contains",
-            "setToList",
-            "set_to_list",
-            "setLen",
-            "set_len",
-            "setUnion",
-            "set_union",
-            "setIntersect",
-            "set_intersect",
-            "setDiff",
-            "set_diff",
-            "Queue",
-            "enqueue",
-            "dequeue",
-            "peek",
-            "Stack",
-            "push",
-            "pop",
-            "top",
-            "stackPeek",
-            "flatten",
-            "zip",
-            "unique",
-            "dedup",
-            "reverse",
-            "sort",
-            "count",
-            "length",
-            "len",
-            "isEmpty",
-            "is_empty",
-            "concat",
-            "slice",
-            "first",
-            "last",
-            "join",
-            "sum",
-            "product",
-            "min",
-            "max",
-        ],
-    ),
-    (
-        "time",
-        &[
-            "now",
-            "timestamp",
-            "sleep",
-            "wait",
-            "elapsed",
-            "date",
-            "time",
-            "datetime",
-            "format",
-            "year",
-            "month",
-            "day",
-            "hour",
-            "minute",
-            "second",
-            "weekday",
-        ],
-    ),
-    (
-        "parallel",
-        &[
-            "parallelMap",
-            "parallel_map",
-            "parallelFilter",
-            "parallel_filter",
-            "parallelForEach",
-            "parallel_for_each",
-            "parallelReduce",
-            "parallel_reduce",
-        ],
-    ),
-];
-
-/// Returns the exported member names for a stdlib module, or an empty slice
-/// if the module is not found. Used by both import-context and dot-completion.
 fn stdlib_members(mod_name: &str) -> &'static [&'static str] {
-    STD_MODULE_MEMBERS
-        .iter()
-        .find(|(name, _)| *name == mod_name)
-        .map(|(_, fns)| *fns)
+    stdlib_module_info(mod_name)
+        .map(|info| (info.exports)())
         .unwrap_or(&[])
+}
+
+#[cfg(test)]
+fn stdlib_module_doc(mod_name: &str) -> &'static str {
+    stdlib_module_info(mod_name)
+        .map(|info| info.doc)
+        .unwrap_or("")
 }
 
 // ── Named-arg goto-def result ───────────────────────────────────────────────
@@ -1383,18 +1092,18 @@ impl LanguageServer for FidanLsp {
             let items: Vec<CompletionItem> = match import_ctx {
                 ImportContext::StdLib(partial) => {
                     // Suggest matching `std.*` modules.
-                    STD_MODULES
+                    STDLIB_MODULES
                         .iter()
-                        .filter(|(name, _)| name.starts_with(partial.as_str()))
-                        .map(|(name, doc)| CompletionItem {
-                            label: format!("std.{}", name),
+                        .filter(|info| info.name.starts_with(partial.as_str()))
+                        .map(|info| CompletionItem {
+                            label: format!("std.{}", info.name),
                             kind: Some(CompletionItemKind::MODULE),
-                            insert_text: Some(format!("std.{}", name)),
+                            insert_text: Some(format!("std.{}", info.name)),
                             documentation: Some(Documentation::MarkupContent(MarkupContent {
                                 kind: MarkupKind::PlainText,
-                                value: doc.to_string(),
+                                value: info.doc.to_string(),
                             })),
-                            sort_text: Some(format!("0std.{}", name)),
+                            sort_text: Some(format!("0std.{}", info.name)),
                             ..Default::default()
                         })
                         .collect()
@@ -1470,8 +1179,8 @@ impl LanguageServer for FidanLsp {
                     let mut items: Vec<CompletionItem> = vec![];
 
                     // Stdlib modules whose first segment starts with the partial.
-                    for (name, doc) in STD_MODULES {
-                        let full = format!("std.{}", name);
+                    for info in STDLIB_MODULES {
+                        let full = format!("std.{}", info.name);
                         if full.starts_with(partial.as_str()) || "std".starts_with(partial.as_str())
                         {
                             items.push(CompletionItem {
@@ -1480,7 +1189,7 @@ impl LanguageServer for FidanLsp {
                                 insert_text: Some(full.clone()),
                                 documentation: Some(Documentation::MarkupContent(MarkupContent {
                                     kind: MarkupKind::PlainText,
-                                    value: doc.to_string(),
+                                    value: info.doc.to_string(),
                                 })),
                                 sort_text: Some(format!("0{}", full)),
                                 ..Default::default()
@@ -2285,9 +1994,30 @@ impl LanguageServer for FidanLsp {
         let text = doc.text.clone();
         drop(doc);
 
-        let opts = FormatOptions {
-            indent_width: params.options.tab_size as usize,
-            ..Default::default()
+        let opts = match uri.to_file_path() {
+            Ok(path) => match load_format_options_for_path(Some(&path)) {
+                Ok(Some(opts)) => opts,
+                Ok(None) => FormatOptions {
+                    indent_width: params.options.tab_size as usize,
+                    ..Default::default()
+                },
+                Err(err) => {
+                    self.client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!("ignored .fidanfmt for {}: {err}", path.display()),
+                        )
+                        .await;
+                    FormatOptions {
+                        indent_width: params.options.tab_size as usize,
+                        ..Default::default()
+                    }
+                }
+            },
+            Err(_) => FormatOptions {
+                indent_width: params.options.tab_size as usize,
+                ..Default::default()
+            },
         };
 
         let formatted = format_source(&text, &opts);
@@ -2621,4 +2351,50 @@ fn find_named_arg_param(
         break; // Only consider the nearest callee.
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stdlib_completion_surface_tracks_runtime_modules() {
+        assert!(STDLIB_MODULES.iter().any(|info| info.name == "async"));
+        assert!(STDLIB_MODULES.iter().any(|info| info.name == "collections"));
+        assert!(STDLIB_MODULES.iter().any(|info| info.name == "parallel"));
+        assert!(!STDLIB_MODULES.iter().any(|info| info.name == "net"));
+        assert!(!STDLIB_MODULES.iter().any(|info| info.name == "json"));
+    }
+
+    #[test]
+    fn stdlib_completion_members_include_recent_exports() {
+        assert!(stdlib_members("async").contains(&"gather"));
+        assert!(stdlib_members("async").contains(&"waitAny"));
+        assert!(stdlib_members("collections").contains(&"enumerate"));
+        assert!(stdlib_members("collections").contains(&"chunk"));
+        assert!(stdlib_members("collections").contains(&"window"));
+        assert!(stdlib_members("collections").contains(&"partition"));
+        assert!(stdlib_members("collections").contains(&"groupBy"));
+        assert!(stdlib_members("regex").contains(&"match"));
+    }
+
+    #[test]
+    fn completion_keywords_cover_recent_language_features() {
+        assert!(COMPLETION_KEYWORDS.contains(&"spawn"));
+        assert!(COMPLETION_KEYWORDS.contains(&"await"));
+        assert!(COMPLETION_KEYWORDS.contains(&"concurrent"));
+        assert!(COMPLETION_KEYWORDS.contains(&"parallel"));
+        assert!(COMPLETION_KEYWORDS.contains(&"enum"));
+    }
+
+    #[test]
+    fn stdlib_module_docs_cover_current_modules() {
+        for info in STDLIB_MODULES {
+            assert!(
+                !stdlib_module_doc(info.name).is_empty(),
+                "missing completion documentation for std.{}",
+                info.name
+            );
+        }
+    }
 }

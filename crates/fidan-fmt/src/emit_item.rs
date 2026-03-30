@@ -4,6 +4,7 @@ use crate::emit_expr::{emit_expr, emit_type};
 use crate::emit_stmt::{emit_block, emit_stmt};
 use crate::printer::Printer;
 use fidan_ast::{Item, ItemId, Module, Param};
+use fidan_source::Span;
 
 fn has_extern_decorator(p: &Printer<'_>, decorators: &[fidan_ast::Decorator]) -> bool {
     decorators
@@ -23,7 +24,33 @@ fn is_block_item(item: &Item) -> bool {
             | Item::ExtensionAction { .. }
             | Item::ObjectDecl { .. }
             | Item::TestDecl { .. }
+            | Item::EnumDecl { .. }
     )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ItemGroup {
+    Import,
+    Declaration,
+    Other,
+    Block,
+}
+
+fn item_group(item: &Item) -> ItemGroup {
+    if is_block_item(item) {
+        return ItemGroup::Block;
+    }
+
+    match item {
+        Item::Use { .. } => ItemGroup::Import,
+        Item::VarDecl { .. } | Item::Destructure { .. } => ItemGroup::Declaration,
+        Item::ExprStmt(_) | Item::Assign { .. } | Item::Stmt(_) => ItemGroup::Other,
+        Item::ObjectDecl { .. }
+        | Item::ActionDecl { .. }
+        | Item::ExtensionAction { .. }
+        | Item::TestDecl { .. }
+        | Item::EnumDecl { .. } => ItemGroup::Block,
+    }
 }
 
 /// Emit all items in a `Module`, inserting blank lines only around block-level
@@ -31,11 +58,24 @@ fn is_block_item(item: &Item) -> bool {
 /// assignments) are emitted without blank lines between them.
 pub fn emit_module(p: &mut Printer<'_>, module: &Module) {
     let items: Vec<ItemId> = module.items.clone();
+    if let Some(&first) = items.first() {
+        let span = item_span(p, module.arena.get_item(first));
+        p.emit_comments_before(span.start);
+        if !p.is_empty() && item_group(module.arena.get_item(first)) == ItemGroup::Import {
+            p.blank();
+        }
+    } else {
+        p.emit_remaining_comments();
+        return;
+    }
     for (i, &iid) in items.iter().enumerate() {
         if i > 0 {
-            let prev_is_block = is_block_item(module.arena.get_item(items[i - 1]));
-            let curr_is_block = is_block_item(module.arena.get_item(iid));
-            if prev_is_block || curr_is_block {
+            let prev_group = item_group(module.arena.get_item(items[i - 1]));
+            let curr_group = item_group(module.arena.get_item(iid));
+            if prev_group == ItemGroup::Block
+                || curr_group == ItemGroup::Block
+                || prev_group != curr_group
+            {
                 // `blank()` ends the current line then adds the blank separator.
                 for _ in 0..p.opts.blank_lines_between_items {
                     p.blank();
@@ -48,6 +88,7 @@ pub fn emit_module(p: &mut Printer<'_>, module: &Module) {
         let item = module.arena.get_item(iid).clone();
         emit_item(p, &item, false);
     }
+    p.emit_remaining_comments();
     // Final newline is handled by Printer::finish().
 }
 
@@ -59,6 +100,9 @@ pub fn emit_module(p: &mut Printer<'_>, module: &Module) {
 /// body — this changes `action` emission (no leading blank line, `new`
 /// constructors use the `new` keyword).
 pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
+    let item_span = item_span(p, item);
+    p.emit_comments_before(item_span.start);
+
     match item {
         // ── Module-level var / const var ──────────────────────────────────
         Item::VarDecl {
@@ -181,7 +225,7 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
             parent,
             fields,
             methods,
-            ..
+            span,
         } => {
             p.w("object ");
             let n = p.sym_s(*name);
@@ -204,6 +248,7 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
 
                 // Fields
                 for field in fields {
+                    p.emit_comments_before(field.span.start);
                     p.nl();
                     if field.certain {
                         p.w("certain ");
@@ -217,6 +262,7 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
                         p.w(" = ");
                         emit_expr(p, default);
                     }
+                    p.emit_trailing_comments_for(field.span.end);
                 }
 
                 // Methods (separated by a blank line from fields if any exist)
@@ -236,6 +282,7 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
                     emit_item(p, &method, true);
                 }
 
+                p.emit_comments_before(span.end);
                 p.indent_out();
             }
             p.nl();
@@ -250,7 +297,7 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
             body,
             decorators,
             is_parallel,
-            ..
+            span,
         } => {
             // Decorators
             for dec in decorators {
@@ -292,9 +339,7 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
 
             // Parameters
             if !params.is_empty() {
-                p.w(" with (");
-                emit_params(p, params);
-                p.w(")");
+                emit_params_clause(p, " with ", params);
             }
 
             // Return type
@@ -304,11 +349,12 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
             }
 
             if has_extern_decorator(p, decorators) && body.is_empty() {
+                p.emit_trailing_comments_for(span.end);
                 return;
             }
 
             p.w(" {");
-            emit_block(p, body);
+            emit_block(p, body, Some(span.end));
             p.w("}");
         }
 
@@ -321,7 +367,7 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
             body,
             decorators,
             is_parallel,
-            ..
+            span,
         } => {
             for dec in decorators {
                 p.w("@");
@@ -356,30 +402,31 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
             let ext = p.sym_s(*extends);
             p.w(&ext);
             if !params.is_empty() {
-                p.w(" with (");
-                emit_params(p, params);
-                p.w(")");
+                emit_params_clause(p, " with ", params);
             }
             if let Some(rt) = return_ty {
                 p.w(" returns ");
                 emit_type(p, rt);
             }
             p.w(" {");
-            emit_block(p, body);
+            emit_block(p, body, Some(span.end));
             p.w("}");
         }
 
         // ── Wrapped statement ─────────────────────────────────────────────
         Item::Stmt(sid) => {
             emit_stmt(p, *sid);
+            return;
         }
 
         // ── Test block ────────────────────────────────────────────────────
-        Item::TestDecl { name, body, .. } => {
+        Item::TestDecl {
+            name, body, span, ..
+        } => {
             p.w("test ");
             p.w(&escape_string_lit(name));
             p.w(" {");
-            emit_block(p, body);
+            emit_block(p, body, Some(span.end));
             p.w("}");
         }
 
@@ -395,7 +442,14 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
                 let vs = p.sym_s(v.name);
                 p.w(&vs);
                 if !v.payload_types.is_empty() {
-                    p.w(&format!("({})", v.payload_types.len()));
+                    p.w("(");
+                    for (i, payload_ty) in v.payload_types.iter().enumerate() {
+                        if i > 0 {
+                            p.w(", ");
+                        }
+                        emit_type(p, payload_ty);
+                    }
+                    p.w(")");
                 }
             }
             p.indent_out();
@@ -403,6 +457,8 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
             p.w("}");
         }
     }
+
+    p.emit_trailing_comments_for(item_span.end);
 }
 
 // ── Parameter list ────────────────────────────────────────────────────────────
@@ -431,6 +487,138 @@ fn emit_params(p: &mut Printer<'_>, params: &[Param]) {
     }
 }
 
+fn emit_params_clause(p: &mut Printer<'_>, prefix: &str, params: &[Param]) {
+    p.w(prefix);
+    if should_break_params(p, params, prefix.len()) {
+        p.w("(");
+        p.indent_in();
+        for (i, param) in params.iter().enumerate() {
+            p.nl();
+            emit_single_param(p, param);
+            if i + 1 < params.len() || p.opts.trailing_comma {
+                p.w(",");
+            }
+        }
+        p.indent_out();
+        p.nl();
+        p.w(")");
+    } else {
+        p.w("(");
+        emit_params(p, params);
+        p.w(")");
+    }
+}
+
+fn emit_single_param(p: &mut Printer<'_>, param: &Param) {
+    if param.certain {
+        p.w("certain ");
+    } else if param.optional {
+        p.w("optional ");
+    }
+
+    let pn = p.sym_s(param.name);
+    p.w(&pn);
+    p.w(" oftype ");
+    emit_type(p, &param.ty);
+
+    if let Some(default) = param.default {
+        p.w(" = ");
+        emit_expr(p, default);
+    }
+}
+
+fn should_break_params(p: &Printer<'_>, params: &[Param], prefix_len: usize) -> bool {
+    if params.is_empty() {
+        return false;
+    }
+
+    if let Some(span) = params_span(params)
+        && p.source_slice(span).contains('\n')
+    {
+        return true;
+    }
+
+    let estimated = prefix_len + 2 + estimated_param_list_len(p, params);
+    estimated > p.opts.max_line_len
+}
+
+fn params_span(params: &[Param]) -> Option<Span> {
+    let first = params.first()?;
+    let last = params.last()?;
+    Some(first.span.merge(last.span))
+}
+
+fn estimated_param_list_len(p: &Printer<'_>, params: &[Param]) -> usize {
+    params
+        .iter()
+        .enumerate()
+        .map(|(i, param)| estimated_param_len(p, param) + if i > 0 { 2 } else { 0 })
+        .sum()
+}
+
+fn estimated_param_len(p: &Printer<'_>, param: &Param) -> usize {
+    let qualifier_len = if param.certain {
+        "certain ".len()
+    } else if param.optional {
+        "optional ".len()
+    } else {
+        0
+    };
+    let name_len = p.sym_s(param.name).len();
+    let type_len = estimated_type_len(p, &param.ty);
+    let default_len = param
+        .default
+        .map(|expr| 3 + estimated_expr_len(p, expr))
+        .unwrap_or(0);
+    qualifier_len + name_len + " oftype ".len() + type_len + default_len
+}
+
+fn estimated_type_len(p: &Printer<'_>, ty: &fidan_ast::TypeExpr) -> usize {
+    match ty {
+        fidan_ast::TypeExpr::Named { name, .. } => p.sym_s(*name).len(),
+        fidan_ast::TypeExpr::Oftype { base, param, .. } => {
+            estimated_type_len(p, base) + " oftype ".len() + estimated_type_len(p, param)
+        }
+        fidan_ast::TypeExpr::Tuple { elements, .. } => {
+            if elements.is_empty() {
+                "tuple".len()
+            } else {
+                2 + elements
+                    .iter()
+                    .enumerate()
+                    .map(|(i, elem)| estimated_type_len(p, elem) + if i > 0 { 2 } else { 0 })
+                    .sum::<usize>()
+            }
+        }
+        fidan_ast::TypeExpr::Dynamic { .. } => "dynamic".len(),
+        fidan_ast::TypeExpr::Nothing { .. } => "nothing".len(),
+    }
+}
+
+fn estimated_expr_len(p: &Printer<'_>, expr: fidan_ast::ExprId) -> usize {
+    match p.arena.get_expr(expr) {
+        fidan_ast::Expr::IntLit { value, .. } => value.to_string().len(),
+        fidan_ast::Expr::FloatLit { value, .. } => {
+            if value.fract() == 0.0 {
+                format!("{value:.1}").len()
+            } else {
+                format!("{value}").len()
+            }
+        }
+        fidan_ast::Expr::StrLit { value, .. } => value.len() + 2,
+        fidan_ast::Expr::BoolLit { value, .. } => {
+            if *value {
+                4
+            } else {
+                5
+            }
+        }
+        fidan_ast::Expr::Nothing { .. } => "nothing".len(),
+        fidan_ast::Expr::Ident { name, .. } => p.sym_s(*name).len(),
+        _ => p.opts.max_line_len,
+    }
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 /// Escape a plain Rust string back into a Fidan string literal with quotes.
@@ -441,4 +629,41 @@ fn escape_string_lit(s: &str) -> String {
     out.push_str(&escape_str_inner(s));
     out.push('"');
     out
+}
+
+fn item_span(p: &Printer<'_>, item: &Item) -> Span {
+    match item {
+        Item::VarDecl { span, .. } => *span,
+        Item::ExprStmt(expr) => p.arena.get_expr(*expr).span(),
+        Item::Assign { span, .. } => *span,
+        Item::Destructure { span, .. } => *span,
+        Item::ObjectDecl { span, .. } => *span,
+        Item::ActionDecl { span, .. } => *span,
+        Item::ExtensionAction { span, .. } => *span,
+        Item::Use { span, .. } => *span,
+        Item::Stmt(stmt) => stmt_span(p.arena.get_stmt(*stmt)),
+        Item::TestDecl { span, .. } => *span,
+        Item::EnumDecl { span, .. } => *span,
+    }
+}
+
+fn stmt_span(stmt: &fidan_ast::Stmt) -> Span {
+    match stmt {
+        fidan_ast::Stmt::VarDecl { span, .. } => *span,
+        fidan_ast::Stmt::Destructure { span, .. } => *span,
+        fidan_ast::Stmt::Assign { span, .. } => *span,
+        fidan_ast::Stmt::Expr { span, .. } => *span,
+        fidan_ast::Stmt::Return { span, .. } => *span,
+        fidan_ast::Stmt::Break { span } => *span,
+        fidan_ast::Stmt::Continue { span } => *span,
+        fidan_ast::Stmt::If { span, .. } => *span,
+        fidan_ast::Stmt::Check { span, .. } => *span,
+        fidan_ast::Stmt::For { span, .. } => *span,
+        fidan_ast::Stmt::While { span, .. } => *span,
+        fidan_ast::Stmt::Attempt { span, .. } => *span,
+        fidan_ast::Stmt::ParallelFor { span, .. } => *span,
+        fidan_ast::Stmt::ConcurrentBlock { span, .. } => *span,
+        fidan_ast::Stmt::Panic { span, .. } => *span,
+        fidan_ast::Stmt::Error { span } => *span,
+    }
 }

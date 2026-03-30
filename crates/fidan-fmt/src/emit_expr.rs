@@ -442,7 +442,7 @@ pub fn emit_type(p: &mut Printer<'_>, ty: &TypeExpr) {
                 p.w(")");
             }
         }
-        TypeExpr::Dynamic { .. } => p.w("flexible"),
+        TypeExpr::Dynamic { .. } => p.w("dynamic"),
         TypeExpr::Nothing { .. } => p.w("nothing"),
     }
 }

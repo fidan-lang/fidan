@@ -4,7 +4,7 @@ use crate::types::FidanType;
 use fidan_ast::{
     AstArena, BinOp, Decorator, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp,
 };
-use fidan_config::BUILTIN_BINDINGS;
+use fidan_config::{BUILTIN_BINDINGS, BUILTIN_DECORATORS};
 use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::{FileId, Span};
@@ -3066,10 +3066,9 @@ impl TypeChecker {
     ///   must match the number of *remaining* parameters (params after the first
     ///   `action` param).  Too many or too few is an error.
     fn check_decorators(&mut self, decorators: &[Decorator], params: &[Param]) {
-        const KNOWN: &[&str] = &["precompile", "deprecated", "extern", "unsafe"];
         for dec in decorators {
             let name = self.interner.resolve(dec.name);
-            if KNOWN.contains(&name.as_ref()) {
+            if BUILTIN_DECORATORS.contains(&name.as_ref()) {
                 continue; // built-in decorator — always valid
             }
             // A user-defined action in scope is a valid custom decorator.
