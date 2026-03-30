@@ -25,7 +25,7 @@ impl FixEngine {
     /// # Example
     /// ```
     /// use fidan_diagnostics::FixEngine;
-    /// let best = FixEngine::suggest_name("pritn", ["print", "println"].into_iter());
+    /// let best = FixEngine::suggest_name("pritn", ["print", "eprint"].into_iter());
     /// assert_eq!(best, Some("print".to_string()));
     /// ```
     pub fn suggest_name<'a>(

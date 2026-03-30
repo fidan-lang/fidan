@@ -7,6 +7,9 @@ use fidan_diagnostics::{Diagnostic, Label, diag_code};
 use fidan_source::{FileId, SourceFile, Span};
 use std::sync::Arc;
 
+pub const ESCAPED_INTERP_OPEN: char = '\u{E000}';
+pub const ESCAPED_INTERP_CLOSE: char = '\u{E001}';
+
 /// The Fidan lexer.
 ///
 /// Consumes a `SourceFile` and produces a flat `Vec<Token>`.
@@ -219,7 +222,8 @@ impl<'src> Lexer<'src> {
                         Some('r') => s.push('\r'),
                         Some('"') => s.push('"'),
                         Some('\\') => s.push('\\'),
-                        Some('{') => s.push('{'),
+                        Some('{') => s.push(ESCAPED_INTERP_OPEN),
+                        Some('}') => s.push(ESCAPED_INTERP_CLOSE),
                         Some(c) => {
                             s.push('\\');
                             s.push(c);
@@ -491,6 +495,19 @@ mod tests {
     fn test_string() {
         let tokens = lex("\"hello world\"");
         assert_eq!(tokens[0], TokenKind::LitString("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_string_escapes() {
+        let tokens = lex("\"line1\\nline2\\tindent\\rquote:\\\" slash:\\\\ braces:\\{ok\\}\"");
+        assert_eq!(
+            tokens[0],
+            TokenKind::LitString(format!(
+                "line1\nline2\tindent\rquote:\" slash:\\ braces:{open}ok{close}",
+                open = ESCAPED_INTERP_OPEN,
+                close = ESCAPED_INTERP_CLOSE,
+            ))
+        );
     }
 
     #[test]

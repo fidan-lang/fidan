@@ -2160,7 +2160,7 @@ impl TypeChecker {
                 let name_str = self.interner.resolve(name).to_string();
                 // Built-in return types
                 match name_str.as_str() {
-                    "print" | "println" | "eprint" => return FidanType::Nothing,
+                    "print" | "eprint" => return FidanType::Nothing,
                     "input" => return FidanType::String,
                     "len" => return FidanType::Integer,
                     "type" => return FidanType::String,

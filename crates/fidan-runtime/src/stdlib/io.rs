@@ -4,12 +4,12 @@ use super::common::{coerce_string, display_string, string_value};
 
 pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
     match name {
-        "print" | "println" => {
+        "print" => {
             let parts: Vec<String> = args.iter().map(format_val).collect();
             println!("{}", parts.join(" "));
             Some(FidanValue::Nothing)
         }
-        "eprint" | "eprintln" => {
+        "eprint" => {
             let parts: Vec<String> = args.iter().map(format_val).collect();
             eprintln!("{}", parts.join(" "));
             Some(FidanValue::Nothing)
@@ -202,9 +202,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
 pub fn exported_names() -> &'static [&'static str] {
     &[
         "print",
-        "println",
         "eprint",
-        "eprintln",
         "readLine",
         "read_line",
         "readline",

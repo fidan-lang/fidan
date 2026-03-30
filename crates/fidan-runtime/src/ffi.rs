@@ -2132,7 +2132,7 @@ pub unsafe extern "C" fn fdn_stdlib_call(
 /// To add a new stdlib module, add one arm here — nothing else needs changing.
 fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut FidanValue> {
     match func {
-        "print" | "println" => {
+        "print" => {
             let parts: Vec<String> = args.iter().map(display).collect();
             println!("{}", parts.join(" "));
             Some(into_raw(FidanValue::Nothing))

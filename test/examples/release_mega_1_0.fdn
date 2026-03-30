@@ -1599,7 +1599,7 @@ test "mega integration composite" {
 # Syntax coverage index 0290: std.time `second`
 # Syntax coverage index 0291: std.time `weekday`
 # Syntax coverage index 0292: std.io `print`
-# Syntax coverage index 0293: std.io `println`
+# Syntax coverage index 0293: std.io `print`
 # Syntax coverage index 0294: std.io `eprint`
 # Syntax coverage index 0295: std.io `readLine`
 # Syntax coverage index 0296: std.io `read_line`

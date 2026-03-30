@@ -12,7 +12,6 @@ pub const BUILTIN_VALUE_MODULE: &str = "__builtin__";
 /// - editor-facing builtin completion subsets
 pub const BUILTIN_BINDINGS: &[&str] = &[
     "print",
-    "println",
     "eprint",
     "input",
     "len",
@@ -33,7 +32,6 @@ pub const BUILTIN_BINDINGS: &[&str] = &[
 /// LSP already surfaces through keyword completion.
 pub const BUILTIN_FUNCTIONS: &[&str] = &[
     "print",
-    "println",
     "eprint",
     "input",
     "len",

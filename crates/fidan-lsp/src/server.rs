@@ -106,7 +106,6 @@ const STD_MODULE_MEMBERS: &[(&str, &[&str])] = &[
         "io",
         &[
             "print",
-            "println",
             "eprint",
             "readLine",
             "read_line",

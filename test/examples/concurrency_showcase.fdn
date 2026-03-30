@@ -1,0 +1,47 @@
+# concurrency_showcase.fdn
+#
+# Small showcase of Fidan's current concurrency split:
+#   - `parallel` / `parallel for` use real OS threads
+#   - `concurrent` uses cooperative same-thread tasks
+#   - `spawn` / `await` use explicit deferred same-thread handles
+
+action square with (certain n oftype integer) returns integer {
+    return n * n
+}
+
+print("== spawn / await ==")
+var handle = spawn square(12)
+print("spawn returned a pending handle immediately")
+print("await result = {string(await handle)}\n")
+
+print("== concurrent ==")
+var seen = []
+concurrent {
+    task first {
+        seen.push("task A start")
+    }
+    task second {
+        var nested = spawn square(5)
+        seen.push("task B before await")
+        seen.push("nested spawn result = {string(await nested)}")
+        seen.push("task B after await")
+    }
+}
+for entry in seen {
+    print("  {entry}")
+}
+
+print("\n== parallel ==")
+parallel {
+    task left {
+        print("  parallel task A")
+    }
+    task right {
+        print("  parallel task B")
+    }
+}
+
+print("\n== parallel for ==")
+parallel for value in [1, 2, 3, 4] {
+    print("  square({string(value)}) = {string(square(value))}")
+}

@@ -243,6 +243,17 @@ fn var_string_ok() {
 }
 
 #[test]
+fn string_interpolation_escaped_braces_render_literal_braces() {
+    let result = run_src(
+        r#"
+var value = "Ada"
+assert_eq("literal \{name\} and {value}", "literal \{name\} and Ada")
+"#,
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
 fn action_call_ok() {
     assert!(
         run_src(

@@ -1,9 +1,19 @@
 // fidan-parser — Pratt (top-down operator precedence) expression parser
 use crate::parser::Parser;
 use fidan_ast::{BinOp, CheckArm, Expr, ExprId, InterpPart, Stmt, UnOp};
-use fidan_lexer::{Lexer, TokenKind};
+use fidan_lexer::{ESCAPED_INTERP_CLOSE, ESCAPED_INTERP_OPEN, Lexer, TokenKind};
 use fidan_source::{SourceFile, Span};
 use std::sync::Arc;
+
+fn unescape_interpolated_literal(s: &str) -> String {
+    s.chars()
+        .map(|ch| match ch {
+            ESCAPED_INTERP_OPEN => '{',
+            ESCAPED_INTERP_CLOSE => '}',
+            other => other,
+        })
+        .collect()
+}
 
 // ── Binding-power table (ascending precedence) ───────────────────────────────
 //
@@ -687,17 +697,19 @@ impl<'t> Parser<'t> {
 
     pub(crate) fn parse_string_interp(&mut self, raw: String, span: Span) -> ExprId {
         if !raw.contains('{') {
-            return self
-                .module
-                .arena
-                .alloc_expr(Expr::StrLit { value: raw, span });
+            return self.module.arena.alloc_expr(Expr::StrLit {
+                value: unescape_interpolated_literal(&raw),
+                span,
+            });
         }
         let mut parts = vec![];
         let mut rest = raw.as_str();
 
         while let Some(brace) = rest.find('{') {
             if brace > 0 {
-                parts.push(InterpPart::Literal(rest[..brace].to_string()));
+                parts.push(InterpPart::Literal(unescape_interpolated_literal(
+                    &rest[..brace],
+                )));
             }
             rest = &rest[brace + 1..];
             if let Some(close) = rest.find('}') {
@@ -706,12 +718,12 @@ impl<'t> Parser<'t> {
                 let expr = self.parse_interp_fragment(inner, span);
                 parts.push(InterpPart::Expr(expr));
             } else {
-                parts.push(InterpPart::Literal(rest.to_string()));
+                parts.push(InterpPart::Literal(unescape_interpolated_literal(rest)));
                 break;
             }
         }
         if !rest.is_empty() {
-            parts.push(InterpPart::Literal(rest.to_string()));
+            parts.push(InterpPart::Literal(unescape_interpolated_literal(rest)));
         }
         // Degenerate: only one literal part after stripping braces
         if parts.len() == 1

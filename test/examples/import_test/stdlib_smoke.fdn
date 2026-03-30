@@ -18,5 +18,5 @@ io.print(string.len("abc"))         # 3
 io.print(string.contains("foobar", "oba"))  # true
 
 # IO module
-io.println("io.println works")
+io.print("io.print works")
 io.print("done")

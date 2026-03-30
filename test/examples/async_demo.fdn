@@ -1,0 +1,37 @@
+# async_demo.fdn
+#
+# Small showcase of `std.async` helpers on top of Fidan pending handles.
+
+use std.async
+
+action compute returns integer {
+    return 21 * 2
+}
+
+print("== async.ready ==")
+var immediate = async.ready("done")
+print("{await immediate}\n")
+
+print("== spawn / await ==")
+var computed = spawn compute()
+print("{await computed}\n")
+
+print("== async.gather ==")
+var gathered = async.gather([async.ready(1), async.ready(42), async.ready(3)])
+var results = await gathered
+print("{results}\n")
+
+print("== async.waitAny ==")
+var raced = await async.waitAny([async.sleep(25), async.ready(99)])
+print("{raced}\n")
+
+print("== async.timeout ==")
+var fast = await async.timeout(async.ready(7), 10)
+print("{fast}\n")
+var slow = await async.timeout(async.sleep(20), 1)
+print("{slow}\n")
+
+print("== async.sleep ==")
+var sleeper = async.sleep(1)
+await sleeper
+print("slept without blocking the whole async API surface")

@@ -325,6 +325,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn string_interpolation_escaped_braces() {
+        let (_, diags) = parse_src(r#"var msg = "literal \{name\} and {value}""#);
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
     // ── Concurrency syntax ────────────────────────────────────────────────────
 
     #[test]
