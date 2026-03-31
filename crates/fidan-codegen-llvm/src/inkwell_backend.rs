@@ -372,7 +372,7 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                     .map(|param| self.native_extern_param_type(&param.ty))
                     .collect::<Result<Vec<_>>>()?;
                 let fn_type = match function.return_ty {
-                    fidan_mir::MirTy::Nothing | fidan_mir::MirTy::Error => {
+                    MirTy::Nothing | MirTy::Error => {
                         self.context.void_type().fn_type(&params, false)
                     }
                     _ => self
@@ -392,26 +392,20 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
         Ok(imported)
     }
 
-    fn native_extern_param_type(
-        &self,
-        ty: &fidan_mir::MirTy,
-    ) -> Result<BasicMetadataTypeEnum<'ctx>> {
+    fn native_extern_param_type(&self, ty: &MirTy) -> Result<BasicMetadataTypeEnum<'ctx>> {
         Ok(match ty {
-            fidan_mir::MirTy::Integer | fidan_mir::MirTy::Handle => self.i64_type.into(),
-            fidan_mir::MirTy::Float => self.f64_type.into(),
-            fidan_mir::MirTy::Boolean => self.i8_type.into(),
+            MirTy::Integer | MirTy::Handle => self.i64_type.into(),
+            MirTy::Float => self.f64_type.into(),
+            MirTy::Boolean => self.i8_type.into(),
             other => bail!("unsupported native @extern parameter type in LLVM backend: {other:?}"),
         })
     }
 
-    fn native_extern_return_type(
-        &self,
-        ty: &fidan_mir::MirTy,
-    ) -> Result<inkwell::types::BasicTypeEnum<'ctx>> {
+    fn native_extern_return_type(&self, ty: &MirTy) -> Result<inkwell::types::BasicTypeEnum<'ctx>> {
         Ok(match ty {
-            fidan_mir::MirTy::Integer | fidan_mir::MirTy::Handle => self.i64_type.into(),
-            fidan_mir::MirTy::Float => self.f64_type.into(),
-            fidan_mir::MirTy::Boolean => self.i8_type.into(),
+            MirTy::Integer | MirTy::Handle => self.i64_type.into(),
+            MirTy::Float => self.f64_type.into(),
+            MirTy::Boolean => self.i8_type.into(),
             other => bail!("unsupported native @extern return type in LLVM backend: {other:?}"),
         })
     }
@@ -601,16 +595,16 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
         let mut args = Vec::with_capacity(function.params.len());
         for (param, boxed) in function.params.iter().zip(boxed_params.iter().copied()) {
             let value: BasicMetadataValueEnum<'ctx> = match param.ty {
-                fidan_mir::MirTy::Integer => self
+                MirTy::Integer => self
                     .call_runtime_i64("fdn_unbox_int", &[boxed.into()])?
                     .into(),
-                fidan_mir::MirTy::Float => self
+                MirTy::Float => self
                     .call_runtime_f64("fdn_unbox_float", &[boxed.into()])?
                     .into(),
-                fidan_mir::MirTy::Boolean => self
+                MirTy::Boolean => self
                     .call_runtime_i8("fdn_unbox_bool", &[boxed.into()])?
                     .into(),
-                fidan_mir::MirTy::Handle => self
+                MirTy::Handle => self
                     .call_runtime_i64("fdn_unbox_handle", &[boxed.into()])?
                     .into(),
                 ref other => {
@@ -627,10 +621,8 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             .map_err(|err| anyhow!("{err}"))?;
 
         match function.return_ty {
-            fidan_mir::MirTy::Nothing | fidan_mir::MirTy::Error => {
-                self.call_runtime_ptr("fdn_box_nothing", &[])
-            }
-            fidan_mir::MirTy::Integer => {
+            MirTy::Nothing | MirTy::Error => self.call_runtime_ptr("fdn_box_nothing", &[]),
+            MirTy::Integer => {
                 let value = call
                     .try_as_basic_value()
                     .basic()
@@ -638,7 +630,7 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                     .into_int_value();
                 self.call_runtime_ptr("fdn_box_int", &[value.into()])
             }
-            fidan_mir::MirTy::Float => {
+            MirTy::Float => {
                 let value = call
                     .try_as_basic_value()
                     .basic()
@@ -646,7 +638,7 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                     .into_float_value();
                 self.call_runtime_ptr("fdn_box_float", &[value.into()])
             }
-            fidan_mir::MirTy::Boolean => {
+            MirTy::Boolean => {
                 let value = call
                     .try_as_basic_value()
                     .basic()
@@ -654,7 +646,7 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                     .into_int_value();
                 self.call_runtime_ptr("fdn_box_bool", &[value.into()])
             }
-            fidan_mir::MirTy::Handle => {
+            MirTy::Handle => {
                 let value = call
                     .try_as_basic_value()
                     .basic()
@@ -2320,9 +2312,11 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             "assert" => {
                 let cond = self.lower_operand(&args[0])?;
                 let truthy = self.call_i8("fdn_truthy", &[cond.into()])?;
-                let truthy_i64 =
-                    self.builder
-                        .build_int_z_extend(truthy, self.i64_type, "assert_truthy_i64")?;
+                let truthy_i64 = self.module.builder.build_int_z_extend(
+                    truthy,
+                    self.module.i64_type,
+                    "assert_truthy_i64",
+                )?;
                 let msg = if let Some(arg) = args.get(1) {
                     self.lower_operand(arg)?
                 } else {
