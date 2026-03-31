@@ -57,6 +57,9 @@ pub struct CompileOptions {
     pub strip: StripMode,
     /// AOT codegen backend selection policy.
     pub backend: Backend,
+    /// Optional AOT target CPU hint.
+    /// `None` = backend default; `"native"` = host-tuned when supported.
+    pub target_cpu: Option<String>,
 }
 
 impl Default for CompileOptions {
@@ -80,6 +83,7 @@ impl Default for CompileOptions {
             lto: LtoMode::Off,
             strip: StripMode::Off,
             backend: Backend::Auto,
+            target_cpu: None,
         }
     }
 }

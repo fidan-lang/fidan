@@ -62,7 +62,7 @@ pub fn compile_request(helper_path: &Path, request: &CompileRequest) -> Result<P
         crate::inkwell_backend::compile_and_link_module(&layout, &backend, request)
             .with_context(|| {
                 format!(
-                    "failed to compile LLVM module (toolchain={}, llvm={}, init={}, main={}, opt={}, lto={}, strip={}, emit_obj={}, link_dynamic={})",
+                    "failed to compile LLVM module (toolchain={}, llvm={}, init={}, main={}, opt={}, lto={}, strip={}, emit_obj={}, link_dynamic={}, target_cpu={})",
                     layout.metadata.toolchain_version,
                     layout.metadata.tool_version,
                     init_symbol.as_deref().unwrap_or("none"),
@@ -71,7 +71,8 @@ pub fn compile_request(helper_path: &Path, request: &CompileRequest) -> Result<P
                     request.lto_name(),
                     request.strip_name(),
                     request.emit_obj,
-                    request.link_dynamic
+                    request.link_dynamic,
+                    request.target_cpu.as_deref().unwrap_or("default")
                 )
             })
     }

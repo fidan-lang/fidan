@@ -402,6 +402,10 @@ struct FnCtx<'p> {
     lambda_sym: Symbol,
     /// Reserved builtins that can be referenced as first-class values.
     builtin_value_names: FxHashMap<Symbol, String>,
+    /// Namespace aliases introduced by `use std.foo as bar` / `use foo as bar`.
+    /// Used to lower `bar.method(...)` directly to a namespace literal instead
+    /// of loading a boxed namespace sentinel global first.
+    namespace_aliases: FxHashMap<Symbol, String>,
     /// True only for the top-level init function (FunctionId(0)).  Used to
     /// decide whether a `VarDecl` should also write to the global table.
     is_init_fn: bool,
@@ -424,6 +428,18 @@ impl<'p> FnCtx<'p> {
     }
     fn alloc_block(&mut self) -> BlockId {
         self.func_mut().alloc_block()
+    }
+
+    fn namespace_receiver(&self, expr: &HirExpr) -> Option<Operand> {
+        if let HirExprKind::Var(name) = &expr.kind {
+            return self
+                .namespace_aliases
+                .get(name)
+                .cloned()
+                .map(MirLit::Namespace)
+                .map(Operand::Const);
+        }
+        None
     }
 
     // ── Instruction emission ─────────────────────────────────────────────────
@@ -834,7 +850,9 @@ impl<'p> FnCtx<'p> {
                             });
                             return Operand::Local(this_local);
                         }
-                        let recv = self.lower_expr(object);
+                        let recv = self
+                            .namespace_receiver(object)
+                            .unwrap_or_else(|| self.lower_expr(object));
                         Callee::Method {
                             receiver: recv,
                             method: *field,
@@ -1527,7 +1545,9 @@ impl<'p> FnCtx<'p> {
                                     });
                                     return;
                                 }
-                                let recv = self.lower_expr(object);
+                                let recv = self
+                                    .namespace_receiver(object)
+                                    .unwrap_or_else(|| self.lower_expr(object));
                                 Callee::Method {
                                     receiver: recv,
                                     method: *field,
@@ -2989,6 +3009,7 @@ pub fn lower_program(
     // first so every symbol retains its GID across recompilations.
     // For non-REPL compilation `existing_globals` is empty and this is a no-op.
     let mut global_map: FxHashMap<Symbol, GlobalId> = FxHashMap::default();
+    let mut namespace_aliases: FxHashMap<Symbol, String> = FxHashMap::default();
     for (i, name) in existing_globals.iter().enumerate() {
         let sym = interner.intern(name.as_str());
         let gid = GlobalId(i as u32);
@@ -3009,6 +3030,7 @@ pub fn lower_program(
             let module = &decl.module_path[1];
             let ns_alias = decl.alias.clone().unwrap_or_else(|| module.clone());
             let alias_sym = interner.intern(&ns_alias);
+            namespace_aliases.insert(alias_sym, module.clone());
             namespace_global_count += 1;
             if let std::collections::hash_map::Entry::Vacant(e) = global_map.entry(alias_sym) {
                 let gid = GlobalId(prog.globals.len() as u32);
@@ -3025,6 +3047,7 @@ pub fn lower_program(
                 .clone()
                 .unwrap_or_else(|| decl.module_path[0].clone());
             let alias_sym = interner.intern(&ns_alias);
+            namespace_aliases.insert(alias_sym, decl.module_path[0].clone());
             namespace_global_count += 1;
             if let std::collections::hash_map::Entry::Vacant(e) = global_map.entry(alias_sym) {
                 let gid = GlobalId(prog.globals.len() as u32);
@@ -3158,6 +3181,7 @@ pub fn lower_program(
             wildcard_sym,
             lambda_sym,
             builtin_value_names: builtin_value_names.clone(),
+            namespace_aliases: namespace_aliases.clone(),
             par_for_pending: pending,
             is_init_fn: false,
             fn_param_names: fn_param_names.clone(),
@@ -3280,6 +3304,7 @@ pub fn lower_program(
             wildcard_sym,
             lambda_sym,
             builtin_value_names: builtin_value_names.clone(),
+            namespace_aliases: namespace_aliases.clone(),
             par_for_pending: Rc::clone(&pending_par_fors),
             is_init_fn: true,
             fn_param_names: fn_param_names.clone(),
@@ -3441,6 +3466,7 @@ pub fn lower_program(
                     wildcard_sym,
                     lambda_sym,
                     builtin_value_names: builtin_value_names.clone(),
+                    namespace_aliases: namespace_aliases.clone(),
                     par_for_pending: Rc::clone(&pending_par_fors),
                     is_init_fn: false,
                     fn_param_names: fn_param_names.clone(),
@@ -3515,6 +3541,7 @@ pub fn lower_program(
             wildcard_sym,
             lambda_sym,
             builtin_value_names: builtin_value_names.clone(),
+            namespace_aliases: namespace_aliases.clone(),
             par_for_pending: Rc::clone(&pending_par_fors),
             is_init_fn: false,
             fn_param_names: fn_param_names.clone(),

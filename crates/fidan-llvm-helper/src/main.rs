@@ -146,5 +146,6 @@ fn to_backend_request(value: LlvmCompileRequest) -> LlvmBackendRequest {
         emit_obj: value.emit_obj,
         extra_lib_dirs: value.extra_lib_dirs,
         link_dynamic: value.link_dynamic,
+        target_cpu: value.target_cpu,
     }
 }

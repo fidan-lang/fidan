@@ -251,6 +251,7 @@ fn compile_fixture_program(
         lto: LtoMode::Off,
         strip: StripMode::Off,
         backend,
+        target_cpu: None,
     };
     compile(&Session::new(), mir, interner, &opts).expect("compile extern smoke program");
 }

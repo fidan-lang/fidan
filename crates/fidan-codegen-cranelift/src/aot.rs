@@ -38,10 +38,10 @@ use fidan_lexer::SymbolInterner;
 use fidan_mir::{
     BlockId as MirBlockId, Callee, FunctionId as MirFunctionId, GlobalId, Instr, LocalId,
     MirExternAbi, MirFunction, MirLit, MirProgram, MirStringPart, MirTy, Operand, Rvalue,
-    Terminator,
+    Terminator, collect_effective_local_types, collect_may_throw_functions,
 };
 use fidan_stdlib::{
-    MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_receiver_method, infer_stdlib_method,
+    MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_stdlib_method, is_stdlib_module,
     module_exports,
 };
 use std::collections::HashMap;
@@ -91,6 +91,9 @@ pub struct AotOptions {
     pub extra_lib_dirs: Vec<PathBuf>,
     /// Link the Fidan runtime as a shared library.
     pub link_dynamic: bool,
+    /// Optional target CPU hint. Cranelift currently supports only the host ISA,
+    /// so `None`/`"native"` are accepted and other values are rejected.
+    pub target_cpu: Option<String>,
 }
 
 impl Default for AotOptions {
@@ -103,6 +106,7 @@ impl Default for AotOptions {
             emit_obj: false,
             extra_lib_dirs: vec![],
             link_dynamic: false,
+            target_cpu: None,
         }
     }
 }
@@ -117,6 +121,15 @@ impl AotCompiler {
         interner: Arc<SymbolInterner>,
         opts: &AotOptions,
     ) -> Result<PathBuf> {
+        if let Some(target_cpu) = opts.target_cpu.as_deref() {
+            let requested = target_cpu.trim().to_ascii_lowercase();
+            if !requested.is_empty() && requested != "native" {
+                bail!(
+                    "Cranelift AOT currently supports only the host ISA (`--target-cpu native` or omitted); use `--backend llvm --target-cpu {target_cpu}` for portable/custom CPU targets"
+                );
+            }
+        }
+
         // ── Build ISA / settings ───────────────────────────────────────────────
         let mut flag_builder = settings::builder();
         let opt_str = match opts.opt_level {
@@ -150,6 +163,7 @@ impl AotCompiler {
 
         // ── Declare all external C-ABI runtime symbols ─────────────────────────
         let rt = RuntimeDecls::declare(&mut module)?;
+        let function_throw_map = collect_may_throw_functions(program);
 
         // ── Forward-declare all Fidan functions ────────────────────────────────
         let fn_ids = declare_all_functions(&mut module, program, &interner)?;
@@ -191,6 +205,7 @@ impl AotCompiler {
                 &fn_ids,
                 &extern_fn_ids,
                 &global_data_ids,
+                &function_throw_map,
                 &mut ctx,
                 &mut builder_ctx,
                 program,
@@ -889,6 +904,7 @@ fn lower_function(
     fn_ids: &[cranelift_module::FuncId],
     extern_fn_ids: &HashMap<u32, cranelift_module::FuncId>,
     global_data_ids: &[cranelift_module::DataId],
+    function_throw_map: &HashMap<MirFunctionId, bool>,
     ctx: &mut Context,
     builder_ctx: &mut FunctionBuilderContext,
     program: &MirProgram,
@@ -1014,6 +1030,7 @@ fn lower_function(
                 rt,
                 fn_ids,
                 global_data_ids,
+                function_throw_map,
                 &mut builder,
                 &cl_vars,
                 &local_types,
@@ -1142,6 +1159,7 @@ fn lower_instr(
     rt: &RuntimeDecls,
     fn_ids: &[cranelift_module::FuncId],
     global_data_ids: &[cranelift_module::DataId],
+    function_throw_map: &HashMap<MirFunctionId, bool>,
     builder: &mut FunctionBuilder<'_>,
     cl_vars: &[Variable],
     local_types: &HashMap<u32, MirTy>,
@@ -1185,7 +1203,16 @@ fn lower_instr(
                 val
             };
             builder.def_var(cl_vars[dest.0 as usize], val);
-            if matches!(rhs, Rvalue::Call { .. }) {
+            if let Rvalue::Call { callee, args } = rhs
+                && call_may_throw(
+                    callee,
+                    args,
+                    local_types,
+                    namespace_locals,
+                    function_throw_map,
+                    interner,
+                )?
+            {
                 emit_pending_exception_check(
                     module,
                     rt,
@@ -1250,18 +1277,27 @@ fn lower_instr(
                 };
                 builder.def_var(cl_vars[d.0 as usize], v);
             }
-            emit_pending_exception_check(
-                module,
-                rt,
-                builder,
-                cl_blocks,
-                cl_vars,
+            if call_may_throw(
+                callee,
+                args,
                 local_types,
-                mf,
-                bi,
-                current_catch_stack,
+                namespace_locals,
+                function_throw_map,
                 interner,
-            )?;
+            )? {
+                emit_pending_exception_check(
+                    module,
+                    rt,
+                    builder,
+                    cl_blocks,
+                    cl_vars,
+                    local_types,
+                    mf,
+                    bi,
+                    current_catch_stack,
+                    interner,
+                )?;
+            }
         }
 
         Instr::GetField {
@@ -1347,6 +1383,10 @@ fn lower_instr(
         }
 
         Instr::CertainCheck { operand, name } => {
+            let operand_ty = operand_mir_ty(local_types, operand);
+            if !matches!(operand_ty, MirTy::Dynamic | MirTy::Error | MirTy::Nothing) {
+                return Ok(());
+            }
             let val = lower_operand_boxed(builder, cl_vars, local_types, operand, rt, module)?;
             let (np, nl) = str_const(module, builder, interner.resolve(*name).as_ref())?;
             call_rt(module, builder, rt.certain_check, &[val, np, nl])?;
@@ -1372,12 +1412,10 @@ fn lower_instr(
                 let gv = module.declare_data_in_func(data_id, builder.func);
                 let addr = builder.ins().global_value(PTR_TY, gv);
                 let val = builder.ins().load(PTR_TY, MemFlags::new(), addr, 0);
-                let cloned = call_rt(module, builder, rt.clone_any, &[val])?
-                    .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
-                builder.def_var(cl_vars[dest.0 as usize], cloned);
+                store_local_from_boxed(builder, cl_vars, local_types, *dest, val, rt, module)?;
             } else {
                 namespace_locals.remove(dest);
-                let zero = builder.ins().iconst(PTR_TY, 0);
+                let zero = zero_value_for_local(builder, local_types.get(&dest.0));
                 builder.def_var(cl_vars[dest.0 as usize], zero);
             }
         }
@@ -2143,6 +2181,10 @@ fn lower_binary(
 ) -> Result<cranelift_codegen::ir::Value> {
     use fidan_ast::BinOp::*;
 
+    fn known_nonzero_integer(op: &Operand) -> bool {
+        matches!(op, Operand::Const(MirLit::Int(value)) if *value != 0)
+    }
+
     let lhs_mir = operand_mir_ty(local_types, lhs);
     let rhs_mir = operand_mir_ty(local_types, rhs);
     let lhs_ty = mir_ty_to_cl(&lhs_mir);
@@ -2158,49 +2200,51 @@ fn lower_binary(
             Sub => builder.ins().isub(l, r),
             Mul => builder.ins().imul(l, r),
             Div => {
-                // Guard against divide-by-zero: call fdn_panic if rhs == 0.
-                let zero = builder.ins().iconst(I64, 0);
-                let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
-                let ok_block = builder.create_block();
-                let trap_block = builder.create_block();
-                builder.ins().brif(is_zero, trap_block, &[], ok_block, &[]);
-                // Trap block: call fdn_panic with a static error message.
-                builder.switch_to_block(trap_block);
-                builder.seal_block(trap_block);
-                let (mp, ml) = str_const(module, builder, "division by zero")?;
-                let msg_ptr = {
-                    let r2 = module.declare_func_in_func(rt.box_str, builder.func);
-                    let inst = builder.ins().call(r2, &[mp, ml]);
-                    builder.inst_results(inst)[0]
-                };
-                let panic_ref = module.declare_func_in_func(rt.panic_fn, builder.func);
-                builder.ins().call(panic_ref, &[msg_ptr]);
-                builder.ins().trap(TrapCode::unwrap_user(1));
-                // OK block: perform division.
-                builder.switch_to_block(ok_block);
-                builder.seal_block(ok_block);
+                if !known_nonzero_integer(rhs) {
+                    // Guard against divide-by-zero only when the divisor is not a known nonzero literal.
+                    let zero = builder.ins().iconst(I64, 0);
+                    let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
+                    let ok_block = builder.create_block();
+                    let trap_block = builder.create_block();
+                    builder.ins().brif(is_zero, trap_block, &[], ok_block, &[]);
+                    builder.switch_to_block(trap_block);
+                    builder.seal_block(trap_block);
+                    let (mp, ml) = str_const(module, builder, "division by zero")?;
+                    let msg_ptr = {
+                        let r2 = module.declare_func_in_func(rt.box_str, builder.func);
+                        let inst = builder.ins().call(r2, &[mp, ml]);
+                        builder.inst_results(inst)[0]
+                    };
+                    let panic_ref = module.declare_func_in_func(rt.panic_fn, builder.func);
+                    builder.ins().call(panic_ref, &[msg_ptr]);
+                    builder.ins().trap(TrapCode::unwrap_user(1));
+                    builder.switch_to_block(ok_block);
+                    builder.seal_block(ok_block);
+                }
                 builder.ins().sdiv(l, r)
             }
             Rem => {
-                // Guard against divide-by-zero for remainder.
-                let zero = builder.ins().iconst(I64, 0);
-                let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
-                let ok_block = builder.create_block();
-                let trap_block = builder.create_block();
-                builder.ins().brif(is_zero, trap_block, &[], ok_block, &[]);
-                builder.switch_to_block(trap_block);
-                builder.seal_block(trap_block);
-                let (mp, ml) = str_const(module, builder, "remainder by zero")?;
-                let msg_ptr = {
-                    let r2 = module.declare_func_in_func(rt.box_str, builder.func);
-                    let inst = builder.ins().call(r2, &[mp, ml]);
-                    builder.inst_results(inst)[0]
-                };
-                let panic_ref = module.declare_func_in_func(rt.panic_fn, builder.func);
-                builder.ins().call(panic_ref, &[msg_ptr]);
-                builder.ins().trap(TrapCode::unwrap_user(1));
-                builder.switch_to_block(ok_block);
-                builder.seal_block(ok_block);
+                if !known_nonzero_integer(rhs) {
+                    // Guard against divide-by-zero only when the divisor is not a known nonzero literal.
+                    let zero = builder.ins().iconst(I64, 0);
+                    let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
+                    let ok_block = builder.create_block();
+                    let trap_block = builder.create_block();
+                    builder.ins().brif(is_zero, trap_block, &[], ok_block, &[]);
+                    builder.switch_to_block(trap_block);
+                    builder.seal_block(trap_block);
+                    let (mp, ml) = str_const(module, builder, "remainder by zero")?;
+                    let msg_ptr = {
+                        let r2 = module.declare_func_in_func(rt.box_str, builder.func);
+                        let inst = builder.ins().call(r2, &[mp, ml]);
+                        builder.inst_results(inst)[0]
+                    };
+                    let panic_ref = module.declare_func_in_func(rt.panic_fn, builder.func);
+                    builder.ins().call(panic_ref, &[msg_ptr]);
+                    builder.ins().trap(TrapCode::unwrap_user(1));
+                    builder.switch_to_block(ok_block);
+                    builder.seal_block(ok_block);
+                }
                 builder.ins().srem(l, r)
             }
             Eq => builder.ins().icmp(IntCC::Equal, l, r),
@@ -2482,12 +2526,7 @@ fn emit_call(
         }
 
         Callee::Method { receiver, method } => {
-            if let Callee::Method {
-                receiver: Operand::Local(recv),
-                ..
-            } = callee
-                && let Some(ns) = namespace_locals.get(recv)
-            {
+            if let Some(ns) = stdlib_namespace(receiver, namespace_locals) {
                 let method_name = interner.resolve(*method);
                 if let Some(val) = emit_stdlib_method_call(
                     module,
@@ -2495,7 +2534,7 @@ fn emit_call(
                     builder,
                     cl_vars,
                     local_types,
-                    ns.as_ref(),
+                    ns.as_str(),
                     method_name.as_ref(),
                     args,
                     result_ty,
@@ -3238,247 +3277,9 @@ fn build_local_type_map(
     program: &MirProgram,
     interner: &SymbolInterner,
 ) -> HashMap<u32, MirTy> {
-    fn mark_pointer_like_local(map: &mut HashMap<u32, MirTy>, op: &Operand) {
-        if let Operand::Local(local) = op
-            && matches!(map.get(&local.0), Some(MirTy::Error))
-        {
-            map.insert(local.0, MirTy::Dynamic);
-        }
-    }
-
-    let mut map = HashMap::new();
-    let global_ns_map = build_global_namespace_map(program, interner);
-    let mut namespace_locals: HashMap<LocalId, String> = HashMap::new();
-
-    for p in &mf.params {
-        map.insert(p.local.0, p.ty.clone());
-    }
-    for bb in &mf.blocks {
-        namespace_locals.clear();
-        for phi in &bb.phis {
-            map.entry(phi.result.0).or_insert_with(|| phi.ty.clone());
-        }
-        for instr in &bb.instructions {
-            match instr {
-                Instr::GetField { object, .. }
-                | Instr::SetField { object, .. }
-                | Instr::GetIndex { object, .. }
-                | Instr::SetIndex { object, .. } => mark_pointer_like_local(&mut map, object),
-                Instr::Call {
-                    callee: Callee::Method { receiver, .. },
-                    ..
-                } => mark_pointer_like_local(&mut map, receiver),
-                Instr::SpawnDynamic {
-                    method: Some(_),
-                    args,
-                    ..
-                } => {
-                    if let Some(receiver) = args.first() {
-                        mark_pointer_like_local(&mut map, receiver);
-                    }
-                }
-                _ => {}
-            }
-
-            match instr {
-                Instr::Assign { dest, ty, rhs } => {
-                    // When the declared type is Dynamic/Error, try to deduce the real type
-                    // from the rvalue so hot loops can stay on native scalar paths.
-                    let effective_ty = if matches!(ty, MirTy::Dynamic | MirTy::Error) {
-                        infer_rvalue_type(rhs, program, &map, &namespace_locals, interner)
-                    } else {
-                        ty.clone()
-                    };
-                    map.insert(dest.0, effective_ty);
-                    namespace_locals.remove(dest);
-                    match rhs {
-                        Rvalue::Literal(MirLit::Namespace(ns)) => {
-                            namespace_locals.insert(*dest, ns.clone());
-                        }
-                        Rvalue::Use(Operand::Local(src)) => {
-                            if let Some(ns) = namespace_locals.get(src).cloned() {
-                                namespace_locals.insert(*dest, ns);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Instr::Call {
-                    dest: Some(d),
-                    result_ty,
-                    callee,
-                    args,
-                    ..
-                } => {
-                    let inferred_ty = result_ty
-                        .clone()
-                        .filter(|ty| !matches!(ty, MirTy::Dynamic | MirTy::Error))
-                        .or_else(|| {
-                            infer_call_result_ty(
-                                callee,
-                                program,
-                                args,
-                                &map,
-                                &namespace_locals,
-                                interner,
-                            )
-                        })
-                        .unwrap_or(MirTy::Dynamic);
-                    map.insert(d.0, inferred_ty);
-                }
-                Instr::GetField { dest, .. } | Instr::GetIndex { dest, .. } => {
-                    map.insert(dest.0, MirTy::Dynamic);
-                    namespace_locals.remove(dest);
-                }
-                Instr::LoadGlobal { dest, global } => {
-                    map.entry(dest.0).or_insert(MirTy::Dynamic);
-                    if let Some(ns) = global_ns_map.get(global) {
-                        namespace_locals.insert(*dest, ns.clone());
-                    } else {
-                        namespace_locals.remove(dest);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    map
-}
-
-fn infer_stdlib_method_return_ty(
-    ns: &str,
-    method: &str,
-    arg_kinds: &[StdlibValueKind],
-) -> Option<MirTy> {
-    infer_stdlib_method(ns, method, arg_kinds).map(|info| stdlib_kind_to_mir_ty(info.return_kind))
-}
-
-fn infer_call_result_ty(
-    callee: &Callee,
-    program: &MirProgram,
-    args: &[Operand],
-    map: &HashMap<u32, MirTy>,
-    namespace_locals: &HashMap<LocalId, String>,
-    interner: &SymbolInterner,
-) -> Option<MirTy> {
-    match callee {
-        Callee::Fn(fn_id) => {
-            let return_ty = effective_return_ty(&program.functions[fn_id.0 as usize]);
-            if matches!(return_ty, MirTy::Nothing | MirTy::Error) {
-                None
-            } else {
-                Some(return_ty)
-            }
-        }
-        Callee::Method {
-            receiver: Operand::Local(recv),
-            method,
-        } => {
-            let method_name = interner.resolve(*method);
-            let arg_kinds = args
-                .iter()
-                .map(|arg| operand_stdlib_kind(arg, map))
-                .collect::<Vec<_>>();
-            namespace_locals
-                .get(recv)
-                .and_then(|ns| {
-                    infer_stdlib_method_return_ty(ns.as_str(), method_name.as_ref(), &arg_kinds)
-                })
-                .or_else(|| {
-                    map.get(&recv.0).and_then(|receiver_ty| {
-                        infer_receiver_method_return_ty(
-                            receiver_ty,
-                            method_name.as_ref(),
-                            &arg_kinds,
-                        )
-                    })
-                })
-        }
-        _ => None,
-    }
-}
-
-fn infer_receiver_method_return_ty(
-    receiver_ty: &MirTy,
-    method: &str,
-    arg_kinds: &[StdlibValueKind],
-) -> Option<MirTy> {
-    infer_receiver_method(
-        mir_ty_to_stdlib_kind(receiver_ty.clone()),
-        method,
-        arg_kinds,
-    )
-    .map(|info| stdlib_kind_to_mir_ty(info.return_kind))
-}
-
-/// Try to infer the type of an rvalue from its operands when the declared type is `Error`.
-fn infer_rvalue_type(
-    rhs: &Rvalue,
-    program: &MirProgram,
-    map: &HashMap<u32, MirTy>,
-    namespace_locals: &HashMap<LocalId, String>,
-    interner: &SymbolInterner,
-) -> MirTy {
-    use fidan_ast::BinOp::*;
-    match rhs {
-        Rvalue::Binary { op, lhs, rhs } => {
-            let l_ty = infer_operand_type(lhs, map);
-            let r_ty = infer_operand_type(rhs, map);
-            match op {
-                // Comparison operators always produce boolean.
-                Eq | NotEq | Lt | LtEq | Gt | GtEq => MirTy::Boolean,
-                // Float ops if either side is definitely float.
-                Add | Sub | Mul | Div | Rem | Pow
-                    if matches!(l_ty, MirTy::Float) || matches!(r_ty, MirTy::Float) =>
-                {
-                    MirTy::Float
-                }
-                // Integer ops if both sides are definitely integer-typed.
-                Add | Sub | Mul | Div | Rem | Pow
-                    if matches!(l_ty, MirTy::Integer) && matches!(r_ty, MirTy::Integer) =>
-                {
-                    MirTy::Integer
-                }
-                // If either side is still dynamic/unknown, keep the result boxed.
-                Add | Sub | Mul | Div | Rem | Pow => MirTy::Dynamic,
-                And | Or => MirTy::Boolean,
-                Range | RangeInclusive => MirTy::Dynamic,
-                _ => MirTy::Dynamic,
-            }
-        }
-        Rvalue::Unary { op, operand } => {
-            let oty = infer_operand_type(operand, map);
-            match op {
-                fidan_ast::UnOp::Not => MirTy::Boolean,
-                fidan_ast::UnOp::Neg | fidan_ast::UnOp::Pos
-                    if matches!(oty, MirTy::Error | MirTy::Dynamic) =>
-                {
-                    MirTy::Dynamic
-                }
-                fidan_ast::UnOp::Neg | fidan_ast::UnOp::Pos => oty,
-            }
-        }
-        Rvalue::Literal(MirLit::Int(_)) => MirTy::Integer,
-        Rvalue::Literal(MirLit::Float(_)) => MirTy::Float,
-        Rvalue::Literal(MirLit::Bool(_)) => MirTy::Boolean,
-        Rvalue::Literal(MirLit::Str(_)) => MirTy::String,
-        Rvalue::Use(op) => infer_operand_type(op, map),
-        Rvalue::Call { callee, args } => {
-            infer_call_result_ty(callee, program, args, map, namespace_locals, interner)
-                .unwrap_or(MirTy::Dynamic)
-        }
-        _ => MirTy::Dynamic,
-    }
-}
-
-fn infer_operand_type(op: &Operand, map: &HashMap<u32, MirTy>) -> MirTy {
-    match op {
-        Operand::Local(l) => map.get(&l.0).cloned().unwrap_or(MirTy::Error),
-        Operand::Const(MirLit::Int(_)) => MirTy::Integer,
-        Operand::Const(MirLit::Float(_)) => MirTy::Float,
-        Operand::Const(MirLit::Bool(_)) => MirTy::Boolean,
-        _ => MirTy::Error,
-    }
+    collect_effective_local_types(mf, program, |symbol| {
+        Some(interner.resolve(symbol).to_string())
+    })
 }
 
 // ── Small helpers ──────────────────────────────────────────────────────────────
@@ -3576,6 +3377,41 @@ fn lower_operand_boxed(
             }
         }
         _ => Ok(val), // already a pointer
+    }
+}
+
+fn store_local_from_boxed(
+    builder: &mut FunctionBuilder<'_>,
+    cl_vars: &[Variable],
+    local_types: &HashMap<u32, MirTy>,
+    local: LocalId,
+    boxed: cranelift_codegen::ir::Value,
+    rt: &RuntimeDecls,
+    module: &mut ObjectModule,
+) -> Result<()> {
+    let value = match local_types.get(&local.0) {
+        Some(MirTy::Integer) => call_rt(module, builder, rt.unbox_int, &[boxed])?.unwrap_or(boxed),
+        Some(MirTy::Float) => call_rt(module, builder, rt.unbox_float, &[boxed])?.unwrap_or(boxed),
+        Some(MirTy::Boolean) => call_rt(module, builder, rt.unbox_bool, &[boxed])?.unwrap_or(boxed),
+        Some(MirTy::Handle) => {
+            call_rt(module, builder, rt.unbox_handle, &[boxed])?.unwrap_or(boxed)
+        }
+        _ => call_rt(module, builder, rt.clone_any, &[boxed])?
+            .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)),
+    };
+    builder.def_var(cl_vars[local.0 as usize], value);
+    Ok(())
+}
+
+fn zero_value_for_local(
+    builder: &mut FunctionBuilder<'_>,
+    ty: Option<&MirTy>,
+) -> cranelift_codegen::ir::Value {
+    match ty {
+        Some(MirTy::Integer) | Some(MirTy::Handle) => builder.ins().iconst(I64, 0),
+        Some(MirTy::Float) => builder.ins().f64const(0.0),
+        Some(MirTy::Boolean) => builder.ins().iconst(I8, 0),
+        _ => builder.ins().iconst(PTR_TY, 0),
     }
 }
 
@@ -4007,18 +3843,23 @@ fn resolve_windows_link_input(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::resolve_windows_link_input;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    #[test]
-    fn windows_link_input_prefers_dll_lib_sidecar() {
+    fn unique_temp_dir() -> std::path::PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let suffix = COUNTER.fetch_add(1, Ordering::Relaxed);
         let temp = std::env::temp_dir().join(format!(
             "fidan_cranelift_link_input_{}_{}",
             std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock before unix epoch")
-                .as_nanos()
+            suffix
         ));
         std::fs::create_dir_all(&temp).expect("create temp dir");
+        temp
+    }
+
+    #[test]
+    fn windows_link_input_prefers_dll_lib_sidecar() {
+        let temp = unique_temp_dir();
         let dll = temp.join("ffi_demo.dll");
         let dll_lib = temp.join("ffi_demo.dll.lib");
         std::fs::write(&dll, []).expect("write dll placeholder");
@@ -4032,15 +3873,7 @@ mod tests {
 
     #[test]
     fn windows_link_input_falls_back_to_plain_lib_sidecar() {
-        let temp = std::env::temp_dir().join(format!(
-            "fidan_cranelift_link_input_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock before unix epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&temp).expect("create temp dir");
+        let temp = unique_temp_dir();
         let dll = temp.join("ffi_demo.dll");
         let lib = temp.join("ffi_demo.lib");
         std::fs::write(&dll, []).expect("write dll placeholder");
@@ -4414,15 +4247,43 @@ fn mir_ty_to_stdlib_kind(ty: MirTy) -> StdlibValueKind {
     }
 }
 
-fn stdlib_kind_to_mir_ty(kind: StdlibValueKind) -> MirTy {
-    match kind {
-        StdlibValueKind::Integer => MirTy::Integer,
-        StdlibValueKind::Float => MirTy::Float,
-        StdlibValueKind::Boolean => MirTy::Boolean,
-        StdlibValueKind::String => MirTy::String,
-        StdlibValueKind::List => MirTy::List(Box::new(MirTy::Dynamic)),
-        StdlibValueKind::Dict => MirTy::Dict(Box::new(MirTy::Dynamic), Box::new(MirTy::Dynamic)),
-        StdlibValueKind::Nothing => MirTy::Nothing,
-        StdlibValueKind::Dynamic => MirTy::Dynamic,
+fn call_may_throw(
+    callee: &Callee,
+    args: &[Operand],
+    local_types: &HashMap<u32, MirTy>,
+    namespace_locals: &HashMap<LocalId, String>,
+    function_throw_map: &HashMap<MirFunctionId, bool>,
+    interner: &SymbolInterner,
+) -> Result<bool> {
+    match callee {
+        Callee::Fn(function_id) => Ok(function_throw_map.get(function_id).copied().unwrap_or(true)),
+        Callee::Method { receiver, method } => {
+            let Some(namespace) = stdlib_namespace(receiver, namespace_locals) else {
+                return Ok(true);
+            };
+            let method_name = interner.resolve(*method).to_string();
+            let arg_kinds = args
+                .iter()
+                .map(|arg| operand_stdlib_kind(arg, local_types))
+                .collect::<Vec<_>>();
+            Ok(
+                infer_stdlib_method(namespace.as_str(), method_name.as_str(), &arg_kinds)
+                    .and_then(|info| info.intrinsic)
+                    .is_none(),
+            )
+        }
+        _ => Ok(true),
     }
+}
+
+fn stdlib_namespace(
+    receiver: &Operand,
+    namespace_locals: &HashMap<LocalId, String>,
+) -> Option<String> {
+    let namespace = match receiver {
+        Operand::Local(local) => namespace_locals.get(local).cloned(),
+        Operand::Const(MirLit::Namespace(namespace)) => Some(namespace.clone()),
+        _ => None,
+    }?;
+    is_stdlib_module(namespace.as_str()).then_some(namespace)
 }

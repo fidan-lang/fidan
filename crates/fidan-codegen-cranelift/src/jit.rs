@@ -31,10 +31,10 @@ use cranelift_module::{FuncId, Linkage, Module as CraneliftModule};
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{
     BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirFunction, MirLit, MirProgram, MirTy,
-    Operand, Rvalue, Terminator,
+    Operand, Rvalue, Terminator, collect_effective_local_types,
 };
 use fidan_stdlib::{
-    MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_receiver_method, infer_stdlib_method,
+    MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_stdlib_method, is_stdlib_module,
 };
 use libffi::middle::{Cif, CodePtr, Type, arg};
 use std::cell::Cell;
@@ -132,192 +132,12 @@ fn build_local_type_map(
     program: &MirProgram,
     interner: &SymbolInterner,
 ) -> HashMap<LocalId, MirTy> {
-    let mut map: HashMap<LocalId, MirTy> = HashMap::new();
-    let mut global_ns_map: HashMap<GlobalId, String> = HashMap::new();
-    let mut namespace_locals: HashMap<LocalId, String> = HashMap::new();
-
-    for (i, g) in program.globals.iter().enumerate() {
-        let g_name = interner.resolve(g.name);
-        for decl in &program.use_decls {
-            if decl.is_stdlib
-                && decl.specific_names.is_none()
-                && g_name.as_ref() == decl.alias.as_str()
-            {
-                global_ns_map.insert(GlobalId(i as u32), decl.module.clone());
-            }
-        }
-    }
-
-    // Params
-    for p in &func.params {
-        map.insert(p.local, p.ty.clone());
-    }
-
-    for bb in &func.blocks {
-        namespace_locals.clear();
-        // Instructions only on the first pass — phi types are resolved below.
-        for phi in &bb.phis {
-            // Seed phi results with their declared type (may be Dynamic/non-primitive).
-            map.insert(phi.result, phi.ty.clone());
-        }
-        // Instructions
-        for instr in &bb.instructions {
-            match instr {
-                Instr::Assign { dest, ty, rhs } => {
-                    let effective_ty = match rhs {
-                        Rvalue::Call { callee, args }
-                            if matches!(ty, MirTy::Dynamic | MirTy::Error) =>
-                        {
-                            infer_call_result_ty(callee, args, &map, &namespace_locals, interner)
-                                .unwrap_or_else(|| ty.clone())
-                        }
-                        _ => ty.clone(),
-                    };
-                    map.insert(*dest, effective_ty);
-                    namespace_locals.remove(dest);
-                    match rhs {
-                        Rvalue::Literal(MirLit::Namespace(ns)) => {
-                            namespace_locals.insert(*dest, ns.clone());
-                        }
-                        Rvalue::Use(Operand::Local(src)) => {
-                            if let Some(ns) = namespace_locals.get(src).cloned() {
-                                namespace_locals.insert(*dest, ns);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Instr::LoadGlobal { dest, global } => {
-                    if let Some(ns) = global_ns_map.get(global) {
-                        // Namespace sentinels are only used for stdlib method dispatch.
-                        map.insert(*dest, MirTy::Integer);
-                        namespace_locals.insert(*dest, ns.clone());
-                    } else {
-                        let global_ty = program
-                            .globals
-                            .get(global.0 as usize)
-                            .map(|g| g.ty.clone())
-                            .unwrap_or(MirTy::Dynamic);
-                        map.insert(*dest, global_ty);
-                        namespace_locals.remove(dest);
-                    }
-                }
-                Instr::GetField { dest, .. } | Instr::GetIndex { dest, .. } => {
-                    map.insert(*dest, MirTy::Dynamic);
-                    namespace_locals.remove(dest);
-                }
-                Instr::Call {
-                    dest: Some(d),
-                    result_ty,
-                    callee,
-                    args,
-                    ..
-                } => {
-                    let inferred_ty = result_ty
-                        .clone()
-                        .filter(|ty| !matches!(ty, MirTy::Dynamic | MirTy::Error))
-                        .or_else(|| {
-                            infer_call_result_ty(callee, args, &map, &namespace_locals, interner)
-                        })
-                        .unwrap_or(MirTy::Dynamic);
-                    map.insert(*d, inferred_ty);
-                    namespace_locals.remove(d);
-                }
-                _ => {}
-            }
-        }
-    }
-    // Worklist phi-type inference: repeat until no phi type changes.
-    // This handles loop-carried variables where a phi's operand is itself
-    // another phi whose type is only known from a later block (e.g., a
-    // float accumulator seeded with an integer constant on the back-edge).
-    loop {
-        let mut changed = false;
-        for bb in &func.blocks {
-            for phi in &bb.phis {
-                if is_jit_primitive(map.get(&phi.result).unwrap_or(&MirTy::Dynamic)) {
-                    continue; // already resolved — skip
-                }
-                let inferred = if is_jit_primitive(&phi.ty) {
-                    Some(phi.ty.clone())
-                } else {
-                    phi.operands.iter().find_map(|(_, op)| match op {
-                        Operand::Local(l) => map.get(l).filter(|t| is_jit_primitive(t)).cloned(),
-                        Operand::Const(MirLit::Float(_)) => Some(MirTy::Float),
-                        Operand::Const(MirLit::Int(_)) => Some(MirTy::Integer),
-                        Operand::Const(MirLit::Bool(_)) => Some(MirTy::Boolean),
-                        _ => None,
-                    })
-                };
-                if let Some(ty) = inferred {
-                    map.insert(phi.result, ty);
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-
-    map
-}
-
-fn infer_stdlib_method_return_ty(
-    ns: &str,
-    method: &str,
-    arg_kinds: &[StdlibValueKind],
-) -> Option<MirTy> {
-    infer_stdlib_method(ns, method, arg_kinds).map(|info| stdlib_kind_to_mir_ty(info.return_kind))
-}
-
-fn infer_call_result_ty(
-    callee: &Callee,
-    args: &[Operand],
-    map: &HashMap<LocalId, MirTy>,
-    namespace_locals: &HashMap<LocalId, String>,
-    interner: &SymbolInterner,
-) -> Option<MirTy> {
-    match callee {
-        Callee::Method {
-            receiver: Operand::Local(recv),
-            method,
-        } => {
-            let method_name = interner.resolve(*method);
-            let arg_kinds = args
-                .iter()
-                .map(|arg| operand_stdlib_kind(arg, map))
-                .collect::<Vec<_>>();
-            namespace_locals
-                .get(recv)
-                .and_then(|ns| {
-                    infer_stdlib_method_return_ty(ns.as_str(), method_name.as_ref(), &arg_kinds)
-                })
-                .or_else(|| {
-                    map.get(recv).and_then(|receiver_ty| {
-                        infer_receiver_method_return_ty(
-                            receiver_ty,
-                            method_name.as_ref(),
-                            &arg_kinds,
-                        )
-                    })
-                })
-        }
-        _ => None,
-    }
-}
-
-fn infer_receiver_method_return_ty(
-    receiver_ty: &MirTy,
-    method: &str,
-    arg_kinds: &[StdlibValueKind],
-) -> Option<MirTy> {
-    infer_receiver_method(
-        mir_ty_to_stdlib_kind(receiver_ty.clone()),
-        method,
-        arg_kinds,
-    )
-    .map(|info| stdlib_kind_to_mir_ty(info.return_kind))
+    collect_effective_local_types(func, program, |symbol| {
+        Some(interner.resolve(symbol).to_string())
+    })
+    .into_iter()
+    .map(|(local, ty)| (LocalId(local), ty))
+    .collect()
 }
 
 // ── JitCompiler ────────────────────────────────────────────────────────────────
@@ -616,17 +436,14 @@ impl JitCompiler {
                             dest, callee, args, ..
                         } => {
                             let val = match callee {
-                                Callee::Method {
-                                    receiver: Operand::Local(recv),
-                                    method,
-                                } => {
-                                    let ns = namespace_locals.get(recv)?;
+                                Callee::Method { receiver, method } => {
+                                    let ns = stdlib_namespace(receiver, &namespace_locals)?;
                                     let mname = interner.resolve(*method);
                                     emit_stdlib_method_call(
                                         &mut builder,
                                         &cl_vars,
                                         &local_types,
-                                        ns.as_ref(),
+                                        ns.as_str(),
                                         mname.as_ref(),
                                         args,
                                     )?
@@ -1090,6 +907,18 @@ fn emit_stdlib_method_call(
     }
 }
 
+fn stdlib_namespace(
+    receiver: &Operand,
+    namespace_locals: &HashMap<LocalId, String>,
+) -> Option<String> {
+    let namespace = match receiver {
+        Operand::Local(local) => namespace_locals.get(local).cloned(),
+        Operand::Const(MirLit::Namespace(namespace)) => Some(namespace.clone()),
+        _ => None,
+    }?;
+    is_stdlib_module(namespace.as_str()).then_some(namespace)
+}
+
 // ── Operand loading ────────────────────────────────────────────────────────────
 
 fn load_operand(builder: &mut FunctionBuilder, vars: &[Variable], op: &Operand) -> Value {
@@ -1315,19 +1144,6 @@ fn jit_abi_ffi_type(_ty: &MirTy) -> Type {
     Type::i64()
 }
 
-fn stdlib_kind_to_mir_ty(kind: StdlibValueKind) -> MirTy {
-    match kind {
-        StdlibValueKind::Integer => MirTy::Integer,
-        StdlibValueKind::Float => MirTy::Float,
-        StdlibValueKind::Boolean => MirTy::Boolean,
-        StdlibValueKind::String => MirTy::String,
-        StdlibValueKind::List => MirTy::List(Box::new(MirTy::Dynamic)),
-        StdlibValueKind::Dict => MirTy::Dict(Box::new(MirTy::Dynamic), Box::new(MirTy::Dynamic)),
-        StdlibValueKind::Nothing => MirTy::Nothing,
-        StdlibValueKind::Dynamic => MirTy::Dynamic,
-    }
-}
-
 fn value_type_to_stdlib_kind(ty: cranelift_codegen::ir::Type) -> StdlibValueKind {
     if ty == F64 {
         StdlibValueKind::Float
@@ -1337,35 +1153,6 @@ fn value_type_to_stdlib_kind(ty: cranelift_codegen::ir::Type) -> StdlibValueKind
         StdlibValueKind::Integer
     } else {
         StdlibValueKind::Dynamic
-    }
-}
-
-fn operand_stdlib_kind(op: &Operand, map: &HashMap<LocalId, MirTy>) -> StdlibValueKind {
-    match op {
-        Operand::Local(local) => map
-            .get(local)
-            .cloned()
-            .map(mir_ty_to_stdlib_kind)
-            .unwrap_or(StdlibValueKind::Dynamic),
-        Operand::Const(MirLit::Int(_)) => StdlibValueKind::Integer,
-        Operand::Const(MirLit::Float(_)) => StdlibValueKind::Float,
-        Operand::Const(MirLit::Bool(_)) => StdlibValueKind::Boolean,
-        Operand::Const(MirLit::Str(_)) => StdlibValueKind::String,
-        Operand::Const(MirLit::Nothing) => StdlibValueKind::Nothing,
-        _ => StdlibValueKind::Dynamic,
-    }
-}
-
-fn mir_ty_to_stdlib_kind(ty: MirTy) -> StdlibValueKind {
-    match ty {
-        MirTy::Integer => StdlibValueKind::Integer,
-        MirTy::Float => StdlibValueKind::Float,
-        MirTy::Boolean => StdlibValueKind::Boolean,
-        MirTy::String => StdlibValueKind::String,
-        MirTy::List(_) => StdlibValueKind::List,
-        MirTy::Dict(_, _) => StdlibValueKind::Dict,
-        MirTy::Nothing => StdlibValueKind::Nothing,
-        _ => StdlibValueKind::Dynamic,
     }
 }
 

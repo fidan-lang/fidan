@@ -11,6 +11,7 @@ fidan-config = { workspace = true }
 fidan-source = { workspace = true }
 fidan-lexer = { workspace = true }
 fidan-ast = { workspace = true }
+fidan-stdlib = { workspace = true }
 fidan-hir = { workspace = true }
 fidan-typeck = { workspace = true }
 rustc-hash = { workspace = true }

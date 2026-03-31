@@ -1,9 +1,11 @@
 //! `fidan-mir` — SSA/CFG Mid-Level IR types and HIR→MIR lowering.
 
+mod analysis;
 mod display;
 mod lower;
 mod mir;
 
+pub use analysis::{collect_effective_local_types, collect_may_throw_functions};
 pub use display::print_program;
 pub use lower::lower_program;
 pub use mir::{
@@ -137,6 +139,53 @@ mod tests {
                 .flat_map(|bb| &bb.instructions)
                 .any(|instr| matches!(instr, Instr::SpawnConcurrent { .. })),
             "parallel block must not lower to SpawnConcurrent"
+        );
+    }
+
+    #[test]
+    fn pure_direct_functions_are_marked_non_throwing() {
+        let mir = lower(
+            "action step with (x oftype integer) returns integer { return x + 1 }\n\
+             action main returns integer { return step(41) }",
+        );
+        let throw_map = collect_may_throw_functions(&mir);
+        assert_eq!(throw_map.get(&FunctionId(1)), Some(&false));
+        assert_eq!(throw_map.get(&FunctionId(2)), Some(&false));
+    }
+
+    #[test]
+    fn throwing_functions_are_marked_throwing() {
+        let mir = lower(
+            "action boom { panic(\"nope\") }\n\
+             action main { boom() }",
+        );
+        let throw_map = collect_may_throw_functions(&mir);
+        assert_eq!(throw_map.get(&FunctionId(1)), Some(&true));
+        assert_eq!(throw_map.get(&FunctionId(2)), Some(&true));
+    }
+
+    #[test]
+    fn namespace_method_calls_use_namespace_literals() {
+        let mir = lower(
+            "use std.math\n\
+             action main returns float { return math.sqrt(9) }",
+        );
+        let main = &mir.functions[1];
+        assert!(
+            main.blocks
+                .iter()
+                .flat_map(|block| &block.instructions)
+                .any(|instr| matches!(
+                    instr,
+                    Instr::Call {
+                        callee: Callee::Method {
+                            receiver: Operand::Const(MirLit::Namespace(namespace)),
+                            ..
+                        },
+                        ..
+                    } if namespace == "math"
+                )),
+            "expected stdlib namespace method call to lower as a namespace literal receiver"
         );
     }
 }

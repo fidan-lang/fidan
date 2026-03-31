@@ -121,6 +121,7 @@ fn compile_aot_cranelift(
         emit_obj: opts.emit.contains(&crate::options::EmitKind::Obj),
         extra_lib_dirs: opts.extra_lib_dirs.clone(),
         link_dynamic: opts.link_dynamic,
+        target_cpu: opts.target_cpu.clone(),
     };
 
     let out = CraneliftAotCompiler::compile(program, interner, &aot_opts)?;

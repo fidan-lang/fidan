@@ -315,6 +315,20 @@ print("ok")
 "#
 }
 
+fn top_level_scalar_globals_source() -> &'static str {
+    r#"var a = 120000000
+var b = 60000000
+var c = 80000000
+var d = 4
+
+assert_eq(a, 120000000)
+assert_eq(b, 60000000)
+assert_eq(c, 80000000)
+assert_eq(d, 4)
+print("ok")
+"#
+}
+
 fn compile_program(source: &str, backend: Backend, output_path: &Path) {
     let src_path = output_path.with_extension("fdn");
     fs::write(&src_path, source).expect("write concurrent smoke source");
@@ -339,6 +353,7 @@ fn compile_program(source: &str, backend: Backend, output_path: &Path) {
         lto: LtoMode::Off,
         strip: StripMode::Off,
         backend,
+        target_cpu: None,
     };
     compile(&Session::new(), mir, interner, &opts).expect("compile concurrent smoke program");
 }
@@ -803,6 +818,43 @@ fn raw_string_llvm_aot_stays_literal() {
         sandbox.join("raw_string_smoke")
     };
     compile_program(raw_string_source(), Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn top_level_scalar_globals_cranelift_aot_round_trip_cleanly() {
+    let sandbox = temp_dir("fidan_top_level_scalar_globals_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("top_level_scalar_globals.exe")
+    } else {
+        sandbox.join("top_level_scalar_globals")
+    };
+    compile_program(
+        top_level_scalar_globals_source(),
+        Backend::Cranelift,
+        &output,
+    );
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn top_level_scalar_globals_llvm_aot_round_trip_cleanly() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM top-level scalar-global AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_top_level_scalar_globals_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("top_level_scalar_globals.exe")
+    } else {
+        sandbox.join("top_level_scalar_globals")
+    };
+    compile_program(top_level_scalar_globals_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
     fs::remove_dir_all(&sandbox).ok();
 }

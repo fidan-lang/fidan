@@ -114,8 +114,9 @@ enum Command {
         /// Optimisation level: O0, O1, O2 (default), O3, Os, Oz
         #[arg(long, default_value = "O2")]
         opt: String,
-        /// Shorthand for --opt O3 (release mode)
-        #[arg(long, conflicts_with = "opt")]
+        /// Full release profile: O3 + full LTO + strip all + host-tuned CPU
+        /// unless explicitly overridden by the corresponding flags.
+        #[arg(long)]
         release: bool,
         /// Link-time optimization mode for AOT builds: off | full
         #[arg(long, value_name = "off|full", default_value = "off")]
@@ -151,6 +152,11 @@ enum Command {
         /// AOT codegen backend: `auto` (prefer installed LLVM), `cranelift`, or `llvm`
         #[arg(long, default_value = "auto")]
         backend: String,
+        /// Target CPU for AOT codegen: `generic` (portable), `native` (host-tuned), or
+        /// a backend-specific CPU name. LLVM fully supports this today; Cranelift
+        /// currently treats `native`/omitted as host ISA and rejects other values.
+        #[arg(long)]
+        target_cpu: Option<String>,
     },
     /// Profile a Fidan source file: call counts, time per action, hot-path hints
     Profile {
@@ -490,6 +496,7 @@ fn run_cli() -> Result<()> {
             strict,
             suppress,
             backend,
+            target_cpu,
         } => {
             // Apply --linker before the pipeline so FIDAN_LINKER is set for
             // the Cranelift codegen backend.  This takes priority over any
@@ -500,13 +507,24 @@ fn run_cli() -> Result<()> {
                 unsafe { std::env::set_var("FIDAN_LINKER", l) };
             }
             let emit_kinds = parse_emit(&emit)?;
-            let opt_level = if release {
+            let opt_is_default = opt.trim().eq_ignore_ascii_case("O2");
+            let lto_is_default = lto.trim().eq_ignore_ascii_case("off");
+            let strip_is_default = strip.trim().eq_ignore_ascii_case("off");
+            let opt_level = if release && opt_is_default {
                 OptLevel::O3
             } else {
                 parse_opt_level(&opt)?
             };
-            let lto = parse_lto_mode(&lto)?;
-            let strip = parse_strip_mode(&strip)?;
+            let lto = if release && lto_is_default {
+                LtoMode::Full
+            } else {
+                parse_lto_mode(&lto)?
+            };
+            let strip = if release && strip_is_default {
+                StripMode::All
+            } else {
+                parse_strip_mode(&strip)?
+            };
             let link_dynamic = match link_runtime.trim().to_lowercase().as_str() {
                 "static" | "s" => false,
                 "dynamic" | "dyn" | "d" => true,
@@ -524,6 +542,11 @@ fn run_cli() -> Result<()> {
                     other
                 ),
             };
+            let effective_target_cpu = if release && target_cpu.is_none() {
+                Some("native".to_string())
+            } else {
+                target_cpu
+            };
             let opts = CompileOptions {
                 input: file,
                 output: Some(output),
@@ -537,6 +560,7 @@ fn run_cli() -> Result<()> {
                 strict_mode: strict,
                 suppress,
                 backend,
+                target_cpu: effective_target_cpu,
                 ..Default::default()
             };
             pipeline::run_pipeline(opts)

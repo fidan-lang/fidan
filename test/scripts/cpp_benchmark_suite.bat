@@ -9,12 +9,17 @@ rem ============================================================
 set "ROOT=%~dp0..\.."
 for %%I in ("%ROOT%") do set "ROOT=%%~fI"
 set "OUT=%ROOT%\target\perf_suite"
+set "RUN_ID=%RANDOM%%RANDOM%%RANDOM%"
 set "CPP_SRC=%ROOT%\test\cpp_benchmark\performance_suite.cpp"
-set "CPP_BIN=%OUT%\cpp_perf_suite.exe"
+set "CPP_BIN=%OUT%\cpp_perf_suite_%RUN_ID%.exe"
 set "FDN_SRC=%ROOT%\test\examples\performance_suite.fdn"
-set "FDN_CR=%OUT%\fidan_perf_cranelift.exe"
-set "FDN_LL=%OUT%\fidan_perf_llvm.exe"
-set "RUN_ARGS=%*"
+set "FDN_CR=%OUT%\fidan_perf_cranelift_%RUN_ID%.exe"
+set "FDN_LL=%OUT%\fidan_perf_llvm_%RUN_ID%.exe"
+if "%~1"=="" (
+    set "RUN_ARGS=120000000 60000000 80000000"
+) else (
+    set "RUN_ARGS=%*"
+)
 
 echo.
 echo ============================================================
@@ -41,7 +46,7 @@ echo       done.
 echo.
 echo [2/4] Compiling Fidan suite ^(Cranelift^): %FDN_SRC%
 set "FDN_CR_OK=0"
-"%ROOT%\target\release\fidan.exe" build --backend cranelift "%FDN_SRC%" -o "%FDN_CR%"
+"%ROOT%\target\release\fidan.exe" build --backend cranelift --target-cpu native "%FDN_SRC%" -o "%FDN_CR%"
 if errorlevel 1 (
     echo FAIL: fidan build --backend cranelift returned error
 ) else (
@@ -52,7 +57,7 @@ if errorlevel 1 (
 echo.
 echo [3/4] Compiling Fidan suite ^(LLVM^): %FDN_SRC%
 set "FDN_LL_OK=0"
-"%ROOT%\target\release\fidan.exe" build --backend llvm "%FDN_SRC%" -o "%FDN_LL%"
+"%ROOT%\target\release\fidan.exe" build --backend llvm --target-cpu native "%FDN_SRC%" -o "%FDN_LL%"
 if errorlevel 1 (
     echo SKIP: LLVM backend unavailable or build failed
 ) else (
@@ -68,7 +73,7 @@ set "CLANGXX_PATH="
 
 where g++ >nul 2>&1
 if not errorlevel 1 (
-    g++ -O2 -std=c++17 -pthread -o "%CPP_BIN%" "%CPP_SRC%"
+    g++ -O2 -march=native -std=c++17 -pthread -o "%CPP_BIN%" "%CPP_SRC%"
     if not errorlevel 1 (
         echo       Compiled with g++ -O2
         set "CPP_OK=1"
@@ -80,7 +85,7 @@ if "!CPP_OK!"=="0" (
     if defined GXX_PATH (
         for %%I in ("!GXX_PATH!") do set "GXX_DIR=%%~dpI"
         set "PATH=!GXX_DIR!;!PATH!"
-        "!GXX_PATH!" -O2 -std=c++17 -pthread -o "%CPP_BIN%" "%CPP_SRC%"
+        "!GXX_PATH!" -O2 -march=native -std=c++17 -pthread -o "%CPP_BIN%" "%CPP_SRC%"
         if not errorlevel 1 (
             echo       Compiled with g++ -O2 via PowerShell-discovered toolchain
             set "CPP_OK=1"
@@ -91,7 +96,7 @@ if "!CPP_OK!"=="0" (
 if "!CPP_OK!"=="0" (
     where clang++ >nul 2>&1
     if not errorlevel 1 (
-        clang++ -O2 -std=c++17 -pthread -o "%CPP_BIN%" "%CPP_SRC%"
+        clang++ -O2 -march=native -std=c++17 -pthread -o "%CPP_BIN%" "%CPP_SRC%"
         if not errorlevel 1 (
             echo       Compiled with clang++ -O2
             set "CPP_OK=1"
@@ -104,7 +109,7 @@ if "!CPP_OK!"=="0" (
     if defined CLANGXX_PATH (
         for %%I in ("!CLANGXX_PATH!") do set "CLANGXX_DIR=%%~dpI"
         set "PATH=!CLANGXX_DIR!;!PATH!"
-        "!CLANGXX_PATH!" -O2 -std=c++17 -pthread -o "%CPP_BIN%" "%CPP_SRC%"
+        "!CLANGXX_PATH!" -O2 -march=native -std=c++17 -pthread -o "%CPP_BIN%" "%CPP_SRC%"
         if not errorlevel 1 (
             echo       Compiled with clang++ -O2 via PowerShell-discovered toolchain
             set "CPP_OK=1"

@@ -40,6 +40,7 @@ pub struct CompileRequest {
     pub emit_obj: bool,
     pub extra_lib_dirs: Vec<PathBuf>,
     pub link_dynamic: bool,
+    pub target_cpu: Option<String>,
 }
 
 #[derive(Debug, Clone)]

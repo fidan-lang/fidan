@@ -21,6 +21,7 @@ pub struct LlvmCompileRequest {
     pub emit_obj: bool,
     pub extra_lib_dirs: Vec<PathBuf>,
     pub link_dynamic: bool,
+    pub target_cpu: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,6 +132,7 @@ pub fn invoke_llvm_helper(
         emit_obj: opts.emit.contains(&crate::EmitKind::Obj),
         extra_lib_dirs: opts.extra_lib_dirs.clone(),
         link_dynamic: opts.link_dynamic,
+        target_cpu: opts.target_cpu.clone(),
     };
     let request_bytes =
         serde_json::to_vec(&request).context("failed to serialize LLVM compile request")?;

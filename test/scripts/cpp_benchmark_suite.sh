@@ -8,12 +8,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OUT="$ROOT/target/perf_suite"
+RUN_ID="${RANDOM}${RANDOM}${RANDOM}"
 CPP_SRC="$ROOT/test/cpp_benchmark/performance_suite.cpp"
-CPP_BIN="$OUT/cpp_perf_suite"
+CPP_BIN="$OUT/cpp_perf_suite_$RUN_ID"
 FDN_SRC="$ROOT/test/examples/performance_suite.fdn"
-FDN_CR="$OUT/fidan_perf_cranelift"
-FDN_LL="$OUT/fidan_perf_llvm"
-RUN_ARGS=("$@")
+FDN_CR="$OUT/fidan_perf_cranelift_$RUN_ID"
+FDN_LL="$OUT/fidan_perf_llvm_$RUN_ID"
+if [ "$#" -eq 0 ]; then
+    RUN_ARGS=("120000000" "60000000" "80000000")
+else
+    RUN_ARGS=("$@")
+fi
 
 echo ""
 echo "============================================================"
@@ -31,7 +36,7 @@ echo "      done."
 echo ""
 echo "[2/4] Compiling Fidan suite (Cranelift): $FDN_SRC"
 FDN_CR_OK=0
-if "$ROOT/target/release/fidan" build --backend cranelift "$FDN_SRC" -o "$FDN_CR" 2>/dev/null; then
+if "$ROOT/target/release/fidan" build --backend cranelift --target-cpu native "$FDN_SRC" -o "$FDN_CR" 2>/dev/null; then
     echo "      Compiled to $FDN_CR"
     FDN_CR_OK=1
 else
@@ -41,7 +46,7 @@ fi
 echo ""
 echo "[3/4] Compiling Fidan suite (LLVM): $FDN_SRC"
 FDN_LL_OK=0
-if "$ROOT/target/release/fidan" build --backend llvm "$FDN_SRC" -o "$FDN_LL" 2>/dev/null; then
+if "$ROOT/target/release/fidan" build --backend llvm --target-cpu native "$FDN_SRC" -o "$FDN_LL" 2>/dev/null; then
     echo "      Compiled to $FDN_LL"
     FDN_LL_OK=1
 else
@@ -52,12 +57,12 @@ echo ""
 echo "[4/4] Compiling C++ suite: $CPP_SRC"
 CPP_OK=0
 if command -v g++ &>/dev/null; then
-    if g++ -O2 -std=c++17 -pthread -o "$CPP_BIN" "$CPP_SRC" 2>/dev/null; then
+    if g++ -O2 -march=native -std=c++17 -pthread -o "$CPP_BIN" "$CPP_SRC" 2>/dev/null; then
         echo "      Compiled with g++ -O2"
         CPP_OK=1
     fi
 elif command -v clang++ &>/dev/null; then
-    if clang++ -O2 -std=c++17 -pthread -o "$CPP_BIN" "$CPP_SRC" 2>/dev/null; then
+    if clang++ -O2 -march=native -std=c++17 -pthread -o "$CPP_BIN" "$CPP_SRC" 2>/dev/null; then
         echo "      Compiled with clang++ -O2"
         CPP_OK=1
     fi
