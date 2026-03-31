@@ -32,7 +32,8 @@ use llvm_sys::bit_writer::LLVMWriteBitcodeToMemoryBuffer;
 use llvm_sys::core::{LLVMDisposeMessage, LLVMSetTarget};
 use llvm_sys::target::{LLVMDisposeTargetData, LLVMSetModuleDataLayout};
 use llvm_sys::target_machine::{
-    LLVMCreateTargetDataLayout, LLVMCreateTargetMachine, LLVMGetTargetFromTriple,
+    LLVMCreateTargetDataLayout, LLVMCreateTargetMachine, LLVMGetHostCPUFeatures,
+    LLVMGetHostCPUName, LLVMGetTargetFromTriple,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, CString};
@@ -40,52 +41,161 @@ use std::fs;
 use std::path::PathBuf;
 use std::ptr;
 
-fn resolve_target_cpu(request: &CompileRequest) -> (String, String) {
+#[derive(Debug, Clone)]
+struct TargetCpuSpec {
+    cpu: String,
+    features: String,
+}
+
+fn resolve_target_cpu(request: &CompileRequest, target_triple: &str) -> Result<TargetCpuSpec> {
     match request.target_cpu.as_deref().map(str::trim) {
-        Some(native) if native.eq_ignore_ascii_case("native") => native_target_cpu(),
-        Some(custom) if !custom.is_empty() => (custom.to_string(), String::new()),
-        _ => ("generic".to_string(), String::new()),
+        Some(spec) if spec.eq_ignore_ascii_case("native") => native_target_cpu(target_triple),
+        Some(spec) if spec.len() >= 7 && spec[..7].eq_ignore_ascii_case("native,") => {
+            let mut native = native_target_cpu(target_triple)?;
+            native.features = merge_feature_strings(&native.features, &spec[7..])?;
+            Ok(native)
+        }
+        Some(spec) if !spec.is_empty() => parse_custom_cpu_spec(spec),
+        _ => Ok(TargetCpuSpec {
+            cpu: "generic".to_string(),
+            features: String::new(),
+        }),
     }
 }
 
-#[cfg(all(target_arch = "x86_64", target_os = "windows"))]
-fn native_target_cpu() -> (String, String) {
-    let cpu = if std::is_x86_feature_detected!("avx512f")
-        && std::is_x86_feature_detected!("avx512bw")
-        && std::is_x86_feature_detected!("avx512cd")
-        && std::is_x86_feature_detected!("avx512dq")
-        && std::is_x86_feature_detected!("avx512vl")
-    {
-        "x86-64-v4"
-    } else if std::is_x86_feature_detected!("avx2")
-        && std::is_x86_feature_detected!("avx")
-        && std::is_x86_feature_detected!("bmi1")
-        && std::is_x86_feature_detected!("bmi2")
-        && std::is_x86_feature_detected!("f16c")
-        && std::is_x86_feature_detected!("fma")
-        && std::is_x86_feature_detected!("lzcnt")
-        && std::is_x86_feature_detected!("movbe")
-    {
-        "x86-64-v3"
-    } else if std::is_x86_feature_detected!("sse3")
-        && std::is_x86_feature_detected!("ssse3")
-        && std::is_x86_feature_detected!("sse4.1")
-        && std::is_x86_feature_detected!("sse4.2")
-        && std::is_x86_feature_detected!("popcnt")
-    {
-        "x86-64-v2"
-    } else {
-        "x86-64"
-    };
-    (cpu.to_string(), String::new())
+fn parse_custom_cpu_spec(spec: &str) -> Result<TargetCpuSpec> {
+    let (cpu, feature_suffix) = split_cpu_and_features(spec)?;
+    Ok(TargetCpuSpec {
+        cpu: cpu.to_string(),
+        features: normalize_feature_string(feature_suffix)?,
+    })
 }
 
-#[cfg(not(all(target_arch = "x86_64", target_os = "windows")))]
-fn native_target_cpu() -> (String, String) {
-    (
-        TargetMachine::get_host_cpu_name().to_string(),
-        String::new(),
-    )
+fn native_target_cpu(target_triple: &str) -> Result<TargetCpuSpec> {
+    let host_triple = current_host_triple()?;
+    if host_triple != target_triple {
+        bail!(
+            "`--target-cpu native` targets the current compiler host (`{host_triple}`), but the active LLVM target triple is `{target_triple}`"
+        );
+    }
+    Ok(TargetCpuSpec {
+        cpu: llvm_host_string(unsafe { LLVMGetHostCPUName() })?,
+        features: llvm_host_string(unsafe { LLVMGetHostCPUFeatures() })?,
+    })
+}
+
+fn split_cpu_and_features(spec: &str) -> Result<(&str, &str)> {
+    let trimmed = spec.trim();
+    let (cpu, features) = match trimmed.find(',') {
+        Some(index) => (&trimmed[..index], &trimmed[index + 1..]),
+        None => (trimmed, ""),
+    };
+    let cpu = cpu.trim();
+    if cpu.is_empty() {
+        bail!("target CPU spec `{trimmed}` is missing a CPU name");
+    }
+    Ok((cpu, features))
+}
+
+fn normalize_feature_string(features: &str) -> Result<String> {
+    if features.trim().is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut ordered = Vec::new();
+    let mut latest = HashMap::new();
+    for raw in features.split(',') {
+        let token = raw.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if token.len() < 2 || !matches!(token.as_bytes()[0], b'+' | b'-') {
+            bail!(
+                "target CPU feature `{token}` must start with `+` or `-` (for example `+avx2` or `-avx512f`)"
+            );
+        }
+        let feature_name = token[1..].trim();
+        if feature_name.is_empty() {
+            bail!("target CPU feature override `{token}` is missing a feature name");
+        }
+        let normalized = format!("{}{}", &token[..1], feature_name);
+        if !latest.contains_key(feature_name) {
+            ordered.push(feature_name.to_string());
+        }
+        latest.insert(feature_name.to_string(), normalized);
+    }
+
+    Ok(ordered
+        .into_iter()
+        .filter_map(|name| latest.remove(&name))
+        .collect::<Vec<_>>()
+        .join(","))
+}
+
+fn merge_feature_strings(base: &str, overrides: &str) -> Result<String> {
+    if base.trim().is_empty() {
+        return normalize_feature_string(overrides);
+    }
+    if overrides.trim().is_empty() {
+        return normalize_feature_string(base);
+    }
+    normalize_feature_string(&format!("{base},{overrides}"))
+}
+
+fn llvm_host_string(raw: *mut core::ffi::c_char) -> Result<String> {
+    if raw.is_null() {
+        bail!("LLVM returned a null host CPU string");
+    }
+    let value = unsafe { CStr::from_ptr(raw) }
+        .to_string_lossy()
+        .trim()
+        .to_string();
+    unsafe {
+        LLVMDisposeMessage(raw);
+    }
+    if value.is_empty() {
+        bail!("LLVM returned an empty host CPU string");
+    }
+    Ok(value)
+}
+
+fn current_host_triple() -> Result<String> {
+    let os = match std::env::consts::OS {
+        "windows" => "pc-windows-msvc",
+        "macos" => "apple-darwin",
+        "linux" => "unknown-linux-gnu",
+        other => bail!("unsupported operating system `{other}`"),
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        other => bail!("unsupported architecture `{other}`"),
+    };
+    Ok(format!("{arch}-{os}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_feature_strings, normalize_feature_string, parse_custom_cpu_spec};
+
+    #[test]
+    fn parse_custom_cpu_spec_splits_cpu_and_features() {
+        let spec = parse_custom_cpu_spec("znver4,+avx2,-avx512f").unwrap();
+        assert_eq!(spec.cpu, "znver4");
+        assert_eq!(spec.features, "+avx2,-avx512f");
+    }
+
+    #[test]
+    fn normalize_feature_string_last_override_wins() {
+        let normalized = normalize_feature_string("+avx2,-fma,+fma").unwrap();
+        assert_eq!(normalized, "+avx2,+fma");
+    }
+
+    #[test]
+    fn merge_feature_strings_preserves_base_order_and_overrides() {
+        let merged = merge_feature_strings("+avx2,-fma", "+fma,+bmi2").unwrap();
+        assert_eq!(merged, "+avx2,+fma,+bmi2");
+    }
 }
 
 pub fn compile_and_link_module(
@@ -125,10 +235,10 @@ pub fn compile_and_link_module(
     }
     let target = unsafe { Target::new(target_ref) };
     trace("inkwell:create_target_machine");
-    let (cpu_name, feature_string) = resolve_target_cpu(request);
-    let cpu = CString::new(cpu_name.as_str())
+    let target_cpu = resolve_target_cpu(request, layout.metadata.host_triple.as_str())?;
+    let cpu = CString::new(target_cpu.cpu.as_str())
         .context("target CPU string contains an interior NUL byte")?;
-    let features = CString::new(feature_string.as_str())
+    let features = CString::new(target_cpu.features.as_str())
         .context("target CPU features contain an interior NUL byte")?;
     let machine_ref = unsafe {
         LLVMCreateTargetMachine(
