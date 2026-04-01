@@ -99,12 +99,12 @@ Use the bootstrap script from this repository:
 
 ```bash
 # Linux / macOS
-curl -fsSL https://raw.githubusercontent.com/fidan-lang/fidan/main/scripts/bootstrap.sh | sh
+curl -fsSL https://fidan.dev/install.sh | sh
 ```
 
 ```powershell
 # Windows (PowerShell)
-iwr https://raw.githubusercontent.com/fidan-lang/fidan/main/scripts/bootstrap.ps1 -UseBasicParsing | iex
+iwr https://fidan.dev/install.ps1 -UseBasicParsing | iex
 ```
 
 The bootstrap installer downloads the latest published Fidan release for your host, installs it into the standard Fidan install directory, and makes the first installed version active.
