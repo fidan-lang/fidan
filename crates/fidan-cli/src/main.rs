@@ -62,8 +62,8 @@ enum Command {
         /// Print the call stack on uncaught panics: none | short | full | compact
         #[arg(long, default_value = "none")]
         trace: String,
-        /// Stop after this many errors (0 = no limit)
-        #[arg(long, default_value = "0")]
+        /// Stop after this many errors (default: 1, 0 = no limit)
+        #[arg(long, default_value = "1")]
         max_errors: usize,
         /// JIT compilation threshold: compile a function after this many calls (0 = off)
         #[arg(long, default_value = "500")]
@@ -152,6 +152,9 @@ enum Command {
         /// AOT codegen backend: `auto` (prefer installed LLVM), `cranelift`, or `llvm`
         #[arg(long, default_value = "auto")]
         backend: String,
+        /// Stop after this many errors (default: 1, 0 = no limit)
+        #[arg(long, default_value = "1")]
+        max_errors: usize,
         /// Target CPU for AOT codegen: `generic` (portable), `native` (host-tuned), or
         /// a backend-specific CPU name. LLVM fully supports this today; Cranelift
         /// currently treats `native`/omitted as host ISA and rejects other values.
@@ -165,6 +168,9 @@ enum Command {
         /// Write profiling data to a file in JSON format
         #[arg(long)]
         profile_out: Option<PathBuf>,
+        /// Stop after this many errors (default: 1, 0 = no limit)
+        #[arg(long, default_value = "1")]
+        max_errors: usize,
         /// Suppress specific diagnostic codes (comma-separated)
         #[arg(long, value_delimiter = ',')]
         suppress: Vec<String>,
@@ -172,6 +178,9 @@ enum Command {
     /// Run `test { ... }` blocks in a Fidan source file
     Test {
         file: PathBuf,
+        /// Stop after this many errors (default: 1, 0 = no limit)
+        #[arg(long, default_value = "1")]
+        max_errors: usize,
         /// Suppress specific diagnostic codes (comma-separated, e.g. `W5003,W1004`)
         #[arg(long, value_delimiter = ',')]
         suppress: Vec<String>,
@@ -181,6 +190,10 @@ enum Command {
         /// Print the call stack on uncaught panics: none | short | full | compact
         #[arg(long, default_value = "short")]
         trace: String,
+        /// Stop after this many errors for each submitted REPL input
+        /// (default: 1, 0 = no limit)
+        #[arg(long, default_value = "1")]
+        max_errors_per_input: usize,
     },
     /// Start the language server (LSP)
     Lsp {
@@ -496,6 +509,7 @@ fn run_cli() -> Result<()> {
             strict,
             suppress,
             backend,
+            max_errors,
             target_cpu,
         } => {
             // Apply --linker before the pipeline so FIDAN_LINKER is set for
@@ -558,6 +572,11 @@ fn run_cli() -> Result<()> {
                 extra_lib_dirs: lib_dir,
                 link_dynamic,
                 strict_mode: strict,
+                max_errors: if max_errors == 0 {
+                    None
+                } else {
+                    Some(max_errors)
+                },
                 suppress,
                 backend,
                 target_cpu: effective_target_cpu,
@@ -568,21 +587,36 @@ fn run_cli() -> Result<()> {
         Command::Profile {
             file,
             profile_out,
+            max_errors,
             suppress,
         } => {
             let opts = CompileOptions {
                 input: file,
                 output: profile_out,
                 mode: ExecutionMode::Profile,
+                max_errors: if max_errors == 0 {
+                    None
+                } else {
+                    Some(max_errors)
+                },
                 suppress,
                 ..Default::default()
             };
             pipeline::run_pipeline(opts)
         }
-        Command::Test { file, suppress } => {
+        Command::Test {
+            file,
+            max_errors,
+            suppress,
+        } => {
             let opts = CompileOptions {
                 input: file,
                 mode: ExecutionMode::Test,
+                max_errors: if max_errors == 0 {
+                    None
+                } else {
+                    Some(max_errors)
+                },
                 suppress,
                 ..Default::default()
             };
@@ -625,9 +659,12 @@ fn run_cli() -> Result<()> {
             line,
             end_line,
         } => explain::run_explain_line(file, line, end_line.unwrap_or(line)),
-        Command::Repl { trace } => {
+        Command::Repl {
+            trace,
+            max_errors_per_input,
+        } => {
             let trace_mode = parse_trace(&trace)?;
-            repl::run_repl(trace_mode)
+            repl::run_repl(trace_mode, max_errors_per_input)
         }
         Command::Lsp { .. } => {
             fidan_lsp::run();

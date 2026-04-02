@@ -1,6 +1,6 @@
-use crate::pipeline::{emit_mir_safety_diags, render_trace_to_stderr};
+use crate::pipeline::{DiagnosticBudget, emit_mir_safety_diags, render_trace_to_stderr};
 use anyhow::Result;
-use fidan_diagnostics::{Severity, render_message_to_stderr};
+use fidan_diagnostics::{Diagnostic, Severity, render_message_to_stderr};
 use fidan_driver::TraceMode;
 
 // ── REPL helper ─────────────────────────────────────────────────────────────────────
@@ -97,6 +97,37 @@ fn count_brace_delta(line: &str) -> i32 {
     delta
 }
 
+fn normalize_max_errors_per_input(max_errors_per_input: usize) -> Option<usize> {
+    if max_errors_per_input == 0 {
+        None
+    } else {
+        Some(max_errors_per_input)
+    }
+}
+
+fn render_repl_diagnostics(
+    diags: &[Diagnostic],
+    source_map: &std::sync::Arc<fidan_source::SourceMap>,
+    budget: &mut DiagnosticBudget,
+    error_history: Option<&mut Vec<String>>,
+) -> bool {
+    let mut rendered_any = false;
+    let mut error_history = error_history;
+
+    for diag in diags {
+        if budget.would_block_further_errors() {
+            break;
+        }
+        budget.render_diag(diag, source_map, &[]);
+        rendered_any = true;
+        if let Some(history) = error_history.as_deref_mut() {
+            history.push(format!("[{}]: {}", diag.code, diag.message));
+        }
+    }
+
+    rendered_any
+}
+
 // ── REPL ─────────────────────────────────────────────────────────────────────────────
 
 /// Interactive lex + parse + typecheck + interpret loop.
@@ -115,32 +146,25 @@ fn render_plain_diagnostics(
     plain_src: &str,
     interner: &std::sync::Arc<fidan_lexer::SymbolInterner>,
     boot_fid: fidan_source::FileId,
+    max_errors_per_input: Option<usize>,
     error_history: &mut Vec<String>,
 ) -> bool {
-    use fidan_diagnostics::render_to_stderr;
     use fidan_lexer::Lexer;
     use fidan_source::SourceMap;
     use std::sync::Arc;
 
     let ps = Arc::new(SourceMap::new());
     let pf = ps.add_file("<repl>", plain_src);
+    let mut budget = DiagnosticBudget::new(max_errors_per_input);
 
     let (pt, ld) = Lexer::new(&pf, Arc::clone(interner)).tokenise();
     if !ld.is_empty() {
-        for d in &ld {
-            render_to_stderr(d, &ps);
-            error_history.push(format!("[{}]: {}", d.code, d.message));
-        }
-        return true;
+        return render_repl_diagnostics(&ld, &ps, &mut budget, Some(error_history));
     }
 
     let (pm, pd) = fidan_parser::parse(&pt, pf.id, Arc::clone(interner));
     if !pd.is_empty() {
-        for d in &pd {
-            render_to_stderr(d, &ps);
-            error_history.push(format!("[{}]: {}", d.code, d.message));
-        }
-        return true;
+        return render_repl_diagnostics(&pd, &ps, &mut budget, Some(error_history));
     }
 
     let mut tc = fidan_typeck::TypeChecker::new(Arc::clone(interner), boot_fid);
@@ -148,16 +172,12 @@ fn render_plain_diagnostics(
     tc.check_module(&pm);
     let ty = tc.finish_typed();
     if !ty.diagnostics.is_empty() {
-        for d in &ty.diagnostics {
-            render_to_stderr(d, &ps);
-            error_history.push(format!("[{}]: {}", d.code, d.message));
-        }
-        return true;
+        return render_repl_diagnostics(&ty.diagnostics, &ps, &mut budget, Some(error_history));
     }
     false
 }
 
-pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
+pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Result<()> {
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
     use rustyline::error::ReadlineError;
@@ -213,6 +233,7 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
     // ── Multiline state ────────────────────────────────────────────────────
     let mut open_braces: i32 = 0;
     let mut pending_input = String::new();
+    let max_errors_per_input = normalize_max_errors_per_input(max_errors_per_input);
 
     let mut line_no: u32 = 0;
     let mut error_history: Vec<String> = Vec::new();
@@ -314,19 +335,18 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
                     let sname = format!("<repl:{line_no}>");
                     let smap = Arc::new(SourceMap::new());
                     let f = smap.add_file(sname.as_str(), cmd_arg);
+                    let mut diag_budget = DiagnosticBudget::new(max_errors_per_input);
                     let (toks, lex_diags) = Lexer::new(&f, Arc::clone(&interner)).tokenise();
-                    for d in &lex_diags {
-                        fidan_diagnostics::render_to_stderr(d, &smap);
+                    if render_repl_diagnostics(&lex_diags, &smap, &mut diag_budget, None) {
+                        continue;
                     }
                     let (m, ast_diags) = fidan_parser::parse(&toks, f.id, Arc::clone(&interner));
-                    for d in &ast_diags {
-                        fidan_diagnostics::render_to_stderr(d, &smap);
+                    if render_repl_diagnostics(&ast_diags, &smap, &mut diag_budget, None) {
+                        continue;
                     }
-                    if ast_diags.is_empty() {
-                        println!("  items : {}", m.items.len());
-                        println!("  exprs : {}", m.arena.exprs.len());
-                        println!("  stmts : {}", m.arena.stmts.len());
-                    }
+                    println!("  items : {}", m.items.len());
+                    println!("  exprs : {}", m.arena.exprs.len());
+                    println!("  stmts : {}", m.arena.stmts.len());
                     continue;
                 }
 
@@ -340,21 +360,20 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
                     let sname = format!("<repl:{line_no}>");
                     let smap = Arc::new(SourceMap::new());
                     let f = smap.add_file(sname.as_str(), cmd_arg);
+                    let mut diag_budget = DiagnosticBudget::new(max_errors_per_input);
                     let (toks, lex_diags) = Lexer::new(&f, Arc::clone(&interner)).tokenise();
-                    for d in &lex_diags {
-                        fidan_diagnostics::render_to_stderr(d, &smap);
+                    if render_repl_diagnostics(&lex_diags, &smap, &mut diag_budget, None) {
+                        continue;
                     }
                     let (m, parse_diags) = fidan_parser::parse(&toks, f.id, Arc::clone(&interner));
-                    for d in &parse_diags {
-                        fidan_diagnostics::render_to_stderr(d, &smap);
+                    if render_repl_diagnostics(&parse_diags, &smap, &mut diag_budget, None) {
+                        continue;
                     }
-                    if lex_diags.is_empty() && parse_diags.is_empty() {
-                        match tc.infer_snippet_type(&m) {
-                            Some(ty_name) => println!("  : {ty_name}"),
-                            None => eprintln!("  (snippet has no bare expression to infer)"),
-                        }
-                        let _ = tc.drain_diags(); // discard type errors — :type is query-only
+                    match tc.infer_snippet_type(&m) {
+                        Some(ty_name) => println!("  : {ty_name}"),
+                        None => eprintln!("  (snippet has no bare expression to infer)"),
                     }
+                    let _ = tc.drain_diags(); // discard type errors — :type is query-only
                     continue;
                 }
 
@@ -468,15 +487,24 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
         // ── Lex + parse the full candidate source ──────────────────────────
         let exec_smap = Arc::new(SourceMap::new());
         let exec_file = exec_smap.add_file("<repl>", &*candidate_source);
+        let mut diag_budget = DiagnosticBudget::new(max_errors_per_input);
         let (exec_toks, lex_diags) = Lexer::new(&exec_file, Arc::clone(&interner)).tokenise();
         if !lex_diags.is_empty() {
             let used_plain = echo_sym_opt.is_some()
-                && render_plain_diagnostics(&plain_source, &interner, boot_fid, &mut error_history);
+                && render_plain_diagnostics(
+                    &plain_source,
+                    &interner,
+                    boot_fid,
+                    max_errors_per_input,
+                    &mut error_history,
+                );
             if !used_plain {
-                for d in &lex_diags {
-                    fidan_diagnostics::render_to_stderr(d, &exec_smap);
-                    error_history.push(format!("[{}]: {}", d.code, d.message));
-                }
+                let _ = render_repl_diagnostics(
+                    &lex_diags,
+                    &exec_smap,
+                    &mut diag_budget,
+                    Some(&mut error_history),
+                );
             }
             continue;
         }
@@ -485,12 +513,20 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
             fidan_parser::parse(&exec_toks, exec_file.id, Arc::clone(&interner));
         if !parse_diags.is_empty() {
             let used_plain = echo_sym_opt.is_some()
-                && render_plain_diagnostics(&plain_source, &interner, boot_fid, &mut error_history);
+                && render_plain_diagnostics(
+                    &plain_source,
+                    &interner,
+                    boot_fid,
+                    max_errors_per_input,
+                    &mut error_history,
+                );
             if !used_plain {
-                for d in &parse_diags {
-                    fidan_diagnostics::render_to_stderr(d, &exec_smap);
-                    error_history.push(format!("[{}]: {}", d.code, d.message));
-                }
+                let _ = render_repl_diagnostics(
+                    &parse_diags,
+                    &exec_smap,
+                    &mut diag_budget,
+                    Some(&mut error_history),
+                );
             }
             continue;
         }
@@ -502,12 +538,20 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
         let typed = exec_tc.finish_typed();
         if !typed.diagnostics.is_empty() {
             let used_plain = echo_sym_opt.is_some()
-                && render_plain_diagnostics(&plain_source, &interner, boot_fid, &mut error_history);
+                && render_plain_diagnostics(
+                    &plain_source,
+                    &interner,
+                    boot_fid,
+                    max_errors_per_input,
+                    &mut error_history,
+                );
             if !used_plain {
-                for d in &typed.diagnostics {
-                    fidan_diagnostics::render_to_stderr(d, &exec_smap);
-                    error_history.push(format!("[{}]: {}", d.code, d.message));
-                }
+                let _ = render_repl_diagnostics(
+                    &typed.diagnostics,
+                    &exec_smap,
+                    &mut diag_budget,
+                    Some(&mut error_history),
+                );
             }
             continue;
         }
@@ -517,7 +561,10 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
         let mut mir =
             fidan_mir::lower_program(&hir, &interner, &mir_repl_state.persistent_global_names);
         // Run MIR safety diagnostics (W2006 null-safety, W1004 unawaited, etc.).
-        emit_mir_safety_diags(&mir, &interner, false, &[]);
+        emit_mir_safety_diags(&mir, &interner, false, &[], &mut diag_budget);
+        if diag_budget.error_count() > 0 {
+            continue;
+        }
         fidan_passes::run_all(&mut mir);
 
         // ── Execute the new delta on the MIR machine ───────────────────────
@@ -567,4 +614,20 @@ pub(crate) fn run_repl(trace_mode: TraceMode) -> Result<()> {
     println!();
     println!("Bye! 👋");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_max_errors_per_input_zero_is_unlimited() {
+        assert_eq!(normalize_max_errors_per_input(0), None);
+    }
+
+    #[test]
+    fn normalize_max_errors_per_input_positive_is_preserved() {
+        assert_eq!(normalize_max_errors_per_input(1), Some(1));
+        assert_eq!(normalize_max_errors_per_input(3), Some(3));
+    }
 }

@@ -1,5 +1,6 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn workspace_root() -> PathBuf {
@@ -166,5 +167,102 @@ main()
     assert!(
         stdout.contains("ARGS alpha beta"),
         "interpreted run should forward args after `--` into env.args():\n{stdout}"
+    );
+}
+
+#[test]
+fn run_max_errors_one_stops_after_first_parse_error() {
+    let file = make_temp_program(
+        "max_errors_one",
+        r#"use std.async as async
+use std.io as io
+
+action main {
+    parallel {
+        task io.print("native work")
+        task io.print("real threads")
+    }
+
+    concurrent {
+        task {
+            await async.sleep(40)
+            io.print("cooperative scheduling")
+        }
+    }
+
+    io.print("Built for native speed.")
+}
+"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("run")
+        .arg(&file)
+        .args(["--max-errors", "1"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan max-errors demo");
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        !output.status.success(),
+        "expected malformed program to fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expected `LBrace`, found `Dot`"),
+        "expected the first parse error to be shown:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("expected `task` inside concurrent/parallel block"),
+        "max-errors=1 should suppress follow-up parse errors:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("could not run") && stderr.contains("1 error"),
+        "footer should report a single error:\n{stderr}"
+    );
+}
+
+#[test]
+fn repl_max_errors_per_input_one_stops_after_first_parse_error() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("repl")
+        .args(["--max-errors-per-input", "1"])
+        .current_dir(workspace_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn fidan repl");
+
+    {
+        let stdin = child.stdin.as_mut().expect("repl stdin");
+        stdin
+            .write_all(
+                br#"parallel {
+    task io.print("native work")
+    task io.print("real threads")
+}
+:quit
+"#,
+            )
+            .expect("write repl input");
+    }
+
+    let output = child.wait_with_output().expect("wait for repl output");
+    assert!(
+        output.status.success(),
+        "repl should exit cleanly after :quit:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("expected `LBrace`, found `Dot`"),
+        "expected the first REPL parse error to be shown:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("expected `task` inside concurrent/parallel block"),
+        "max-errors-per-input=1 should suppress follow-up REPL parse errors:\n{stderr}"
     );
 }
