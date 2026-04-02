@@ -78,13 +78,13 @@ function Get-LibFidanArtifactNames {
   if ($IsMacOS) {
     return @(
       @{ Source = "liblibfidan.a"; Destination = "libfidan.a" },
-      @{ Source = "libfidan.dylib"; Destination = "libfidan.dylib" }
+      @{ Source = "liblibfidan.dylib"; Destination = "libfidan.dylib" }
     )
   }
 
   return @(
     @{ Source = "liblibfidan.a"; Destination = "libfidan.a" },
-    @{ Source = "libfidan.so"; Destination = "libfidan.so" }
+    @{ Source = "liblibfidan.so"; Destination = "libfidan.so" }
   )
 }
 
@@ -120,7 +120,7 @@ foreach ($artifact in (Get-LibFidanArtifactNames)) {
     throw "Expected libfidan artifact at '$path'"
   }
   $libfidanArtifacts += [PSCustomObject]@{
-    SourcePath = $path
+    SourcePath      = $path
     DestinationName = $artifact.Destination
   }
 }

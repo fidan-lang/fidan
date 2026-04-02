@@ -151,17 +151,28 @@ releases = [r for r in manifest.get("fidan_versions", []) if r.get("host_triple"
 if not releases:
     raise SystemExit(f"no Fidan releases are available for host '{host}'")
 
+def parse_version_tuple(version):
+    parts = []
+    for item in version.split("."):
+        digits = ""
+        for ch in item:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        parts.append(int(digits or "0"))
+    return tuple(parts)
+
+def is_prerelease(version):
+    return "-" in version or "+" in version
+
 def sort_key(release):
-    try:
-        parts = []
-        for item in release["version"].split("."):
-            try:
-                parts.append(int(item))
-            except ValueError:
-                parts.append(0)
-        return tuple(parts)
-    except Exception:
-        return (0, 0, 0)
+    version = release.get("version", "")
+    return (
+        parse_version_tuple(version),
+        0 if is_prerelease(version) else 1,
+        version,
+    )
 
 releases.sort(key=sort_key, reverse=True)
 if requested != "latest":
