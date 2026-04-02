@@ -69,7 +69,7 @@ function Read-TextResource {
     $path = $Url.Substring(7)
     return Get-Content -LiteralPath $path -Raw
   }
-  return Invoke-RestMethod -Uri $Url
+  return (Invoke-WebRequest -Uri $Url).Content
 }
 
 function Save-ResourceToFile {
