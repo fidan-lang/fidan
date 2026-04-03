@@ -1621,10 +1621,32 @@ impl MirMachine {
                     .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture()))
                     .collect();
 
-                if let FidanValue::List(list_ref) = coll {
-                    // Snapshot the list before spawning (immutable during iter).
-                    let items: Vec<FidanValue> = list_ref.borrow().iter().cloned().collect();
+                let items: Option<Vec<FidanValue>> = match coll {
+                    FidanValue::List(list_ref) => {
+                        // Snapshot the list before spawning (immutable during iter).
+                        Some(list_ref.borrow().iter().cloned().collect())
+                    }
+                    FidanValue::Range {
+                        start,
+                        end,
+                        inclusive,
+                    } => {
+                        let mut items = Vec::new();
+                        if inclusive {
+                            for n in start..=end {
+                                items.push(FidanValue::Integer(n));
+                            }
+                        } else {
+                            for n in start..end {
+                                items.push(FidanValue::Integer(n));
+                            }
+                        }
+                        Some(items)
+                    }
+                    _ => None,
+                };
 
+                if let Some(items) = items {
                     // Collect the first error from any iteration.
                     // All threads are joined when the scope exits, so it is safe
                     // to read this slot immediately after the scope.

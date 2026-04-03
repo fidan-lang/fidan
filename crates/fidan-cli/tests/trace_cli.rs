@@ -44,6 +44,25 @@ fn make_temp_program(name: &str, source: &str) -> PathBuf {
     path
 }
 
+fn run_repl_session(args: &[&str], input: &[u8]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("repl")
+        .args(args)
+        .current_dir(workspace_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn fidan repl");
+
+    {
+        let stdin = child.stdin.as_mut().expect("repl stdin");
+        stdin.write_all(input).expect("write repl input");
+    }
+
+    child.wait_with_output().expect("wait for repl output")
+}
+
 #[test]
 fn cli_trace_modes_have_distinct_output_shapes() {
     let (ok_none, _stdout_none, stderr_none) = run_trace("none");
@@ -224,31 +243,15 @@ action main {
 
 #[test]
 fn repl_max_errors_per_input_one_stops_after_first_parse_error() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fidan"))
-        .arg("repl")
-        .args(["--max-errors-per-input", "1"])
-        .current_dir(workspace_root())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn fidan repl");
-
-    {
-        let stdin = child.stdin.as_mut().expect("repl stdin");
-        stdin
-            .write_all(
-                br#"parallel {
+    let output = run_repl_session(
+        &["--max-errors-per-input", "1"],
+        br#"parallel {
     task io.print("native work")
     task io.print("real threads")
 }
 :quit
 "#,
-            )
-            .expect("write repl input");
-    }
-
-    let output = child.wait_with_output().expect("wait for repl output");
+    );
     assert!(
         output.status.success(),
         "repl should exit cleanly after :quit:\nstdout:\n{}\nstderr:\n{}",
@@ -264,5 +267,159 @@ fn repl_max_errors_per_input_one_stops_after_first_parse_error() {
     assert!(
         !stderr.contains("expected `task` inside concurrent/parallel block"),
         "max-errors-per-input=1 should suppress follow-up REPL parse errors:\n{stderr}"
+    );
+}
+
+#[test]
+fn repl_top_level_for_does_not_poison_subsequent_inputs() {
+    let output = run_repl_session(
+        &[],
+        br#"for _ in 1..3 { print(_) }
+print(99)
+:quit
+"#,
+    );
+    assert!(
+        output.status.success(),
+        "repl should exit cleanly after :quit:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("1") && stdout.contains("2") && stdout.contains("99"),
+        "expected both the loop output and the later print output:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("Lt` on nothing and nothing"),
+        "top-level for should not corrupt later REPL inputs:\n{stderr}"
+    );
+}
+
+#[test]
+fn repl_top_level_for_mutation_persists_and_follow_up_runs() {
+    let output = run_repl_session(
+        &[],
+        br#"var total = 0
+for _ in 1..4 { total = total + 1 }
+print(total)
+print(123)
+:quit
+"#,
+    );
+
+    assert!(
+        output.status.success(),
+        "repl should exit cleanly after :quit:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("4") && stdout.contains("123"),
+        "expected loop mutation to persist and later input to run:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("Lt` on nothing and nothing"),
+        "top-level for mutation should not poison later REPL inputs:\n{stderr}"
+    );
+}
+
+#[test]
+fn repl_top_level_parallel_for_range_does_not_poison_subsequent_inputs() {
+    let output = run_repl_session(
+        &[],
+        br#"var seen = Shared(false)
+parallel for n in 1..5 {
+    if n == 4 {
+        seen.set(true)
+    }
+}
+print(seen.get())
+print(77)
+:quit
+"#,
+    );
+
+    assert!(
+        output.status.success(),
+        "repl should exit cleanly after :quit:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("true") && stdout.contains("77"),
+        "expected range-based parallel for to run and later input to stay healthy:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("Lt` on nothing and nothing"),
+        "top-level parallel for should not poison later REPL inputs:\n{stderr}"
+    );
+}
+
+#[test]
+fn repl_runtime_error_does_not_break_later_inputs() {
+    let output = run_repl_session(
+        &[],
+        br#"panic("boom")
+print(42)
+:quit
+"#,
+    );
+
+    assert!(
+        output.status.success(),
+        "repl should exit cleanly after :quit:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("boom"),
+        "expected the original runtime error to be reported:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("42"),
+        "expected later input to keep working after a runtime error:\n{stdout}"
+    );
+    assert!(
+        !stderr.contains("Lt` on nothing and nothing"),
+        "runtime errors should not poison later REPL inputs:\n{stderr}"
+    );
+}
+
+#[test]
+fn repl_reset_clears_prior_bindings() {
+    let output = run_repl_session(
+        &[],
+        br#"var answer = 42
+:reset
+print(answer)
+:quit
+"#,
+    );
+
+    assert!(
+        output.status.success(),
+        "repl should exit cleanly after :quit:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown variable `answer`")
+            || stderr.contains("unknown name `answer`")
+            || stderr.contains("answer"),
+        "expected :reset to clear previously-defined bindings:\n{stderr}"
     );
 }

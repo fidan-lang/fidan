@@ -1,7 +1,9 @@
 use crate::pipeline::{DiagnosticBudget, emit_mir_safety_diags, render_trace_to_stderr};
 use anyhow::Result;
+use fidan_ast::{Item, Module, Stmt};
 use fidan_diagnostics::{Diagnostic, Severity, render_message_to_stderr};
 use fidan_driver::TraceMode;
+use fidan_source::Span;
 
 // ── REPL helper ─────────────────────────────────────────────────────────────────────
 //
@@ -102,6 +104,101 @@ fn normalize_max_errors_per_input(max_errors_per_input: usize) -> Option<usize> 
         None
     } else {
         Some(max_errors_per_input)
+    }
+}
+
+fn stmt_span(stmt: &Stmt) -> Span {
+    match stmt {
+        Stmt::VarDecl { span, .. }
+        | Stmt::Destructure { span, .. }
+        | Stmt::Assign { span, .. }
+        | Stmt::Expr { span, .. }
+        | Stmt::Return { span, .. }
+        | Stmt::Break { span }
+        | Stmt::Continue { span }
+        | Stmt::If { span, .. }
+        | Stmt::Check { span, .. }
+        | Stmt::For { span, .. }
+        | Stmt::While { span, .. }
+        | Stmt::Attempt { span, .. }
+        | Stmt::ParallelFor { span, .. }
+        | Stmt::ConcurrentBlock { span, .. }
+        | Stmt::Panic { span, .. }
+        | Stmt::Error { span } => *span,
+    }
+}
+
+fn item_span(module: &Module, item: &Item) -> Span {
+    match item {
+        Item::VarDecl { span, .. }
+        | Item::Assign { span, .. }
+        | Item::Destructure { span, .. }
+        | Item::ObjectDecl { span, .. }
+        | Item::ActionDecl { span, .. }
+        | Item::ExtensionAction { span, .. }
+        | Item::Use { span, .. }
+        | Item::TestDecl { span, .. }
+        | Item::EnumDecl { span, .. } => *span,
+        Item::ExprStmt(expr_id) => module.arena.get_expr(*expr_id).span(),
+        Item::Stmt(stmt_id) => stmt_span(module.arena.get_stmt(*stmt_id)),
+    }
+}
+
+struct ReplChunkRewrite {
+    chunk: String,
+    echo_last_expr: bool,
+    transformed: bool,
+}
+
+fn rewrite_repl_chunk(
+    module: &Module,
+    input: &str,
+    synthetic_exec_counter: &mut u32,
+) -> ReplChunkRewrite {
+    let mut chunk = String::new();
+    let mut transformed = false;
+    let last_index = module.items.len().saturating_sub(1);
+    let mut echo_last_expr = false;
+
+    for (index, item_id) in module.items.iter().enumerate() {
+        let item = module.arena.get_item(*item_id);
+        let span = item_span(module, item);
+        let raw = &input[span.start as usize..span.end as usize];
+
+        match item {
+            // Keep declarations at top-level so globals/imports persist across REPL inputs.
+            // Wrap control-flow statements into synthetic actions so the REPL does not need
+            // to delta-execute through old top-level control-flow blocks.
+            Item::Stmt(_) => {
+                transformed = true;
+                *synthetic_exec_counter += 1;
+                let action_name = format!("__repl_exec_{}__", *synthetic_exec_counter);
+                chunk.push_str("action ");
+                chunk.push_str(&action_name);
+                chunk.push_str(" {\n");
+                chunk.push_str(raw.trim());
+                chunk.push_str("\n}\n");
+                chunk.push_str(&action_name);
+                chunk.push_str("()\n");
+            }
+            // Preserve auto-echo for a trailing bare expression.
+            Item::ExprStmt(_) if index == last_index => {
+                echo_last_expr = true;
+                chunk.push_str("var __repl_echo__ set ");
+                chunk.push_str(raw.trim());
+                chunk.push('\n');
+            }
+            _ => {
+                chunk.push_str(raw.trim());
+                chunk.push('\n');
+            }
+        }
+    }
+
+    ReplChunkRewrite {
+        chunk,
+        echo_last_expr,
+        transformed,
     }
 }
 
@@ -234,6 +331,7 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
     let mut open_braces: i32 = 0;
     let mut pending_input = String::new();
     let max_errors_per_input = normalize_max_errors_per_input(max_errors_per_input);
+    let mut synthetic_exec_counter: u32 = 0;
 
     let mut line_no: u32 = 0;
     let mut error_history: Vec<String> = Vec::new();
@@ -435,53 +533,24 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
         //   `var __repl_echo__ set <expr>` so the value is preserved in a
         //   global after execution and can be displayed without calling print().
         let echo_sym = interner.intern("__repl_echo__");
-        let (echo_sym_opt, candidate_source) = {
-            use fidan_ast::Item;
+        let (echo_sym_opt, candidate_source, transformed_input) = {
             let mini_smap = Arc::new(SourceMap::new());
             let mini_file = mini_smap.add_file("<echo-check>", complete_input.as_str());
             let (mini_toks, _) = Lexer::new(&mini_file, Arc::clone(&interner)).tokenise();
             let (mini_mod, _) =
                 fidan_parser::parse(&mini_toks, mini_file.id, Arc::clone(&interner));
-            let last = mini_mod.items.last().map(|id| mini_mod.arena.get_item(*id));
-            if let Some(Item::ExprStmt(expr_id)) = last {
-                let accumulated = &mir_repl_state.accumulated_source;
-                let wrapped = if mini_mod.items.len() == 1 {
-                    // Entire input is the bare expression — wrap it directly.
-                    if accumulated.is_empty() {
-                        format!("var __repl_echo__ set {}\n", complete_input.trim())
-                    } else {
-                        format!(
-                            "{}\nvar __repl_echo__ set {}\n",
-                            accumulated,
-                            complete_input.trim()
-                        )
-                    }
-                } else {
-                    // Multiple items: use the expr span to find the split point.
-                    let span = mini_mod.arena.get_expr(*expr_id).span();
-                    let lo = span.start as usize;
-                    let hi = span.end as usize;
-                    let expr_text = &complete_input[lo..hi.min(complete_input.len())];
-                    let prefix = &complete_input[..lo];
-                    if accumulated.is_empty() {
-                        format!("{}var __repl_echo__ set {}\n", prefix, expr_text)
-                    } else {
-                        format!(
-                            "{}\n{}var __repl_echo__ set {}\n",
-                            accumulated, prefix, expr_text
-                        )
-                    }
-                };
-                (Some(echo_sym), wrapped)
-            } else {
-                let mut s = mir_repl_state.accumulated_source.clone();
-                if !s.is_empty() {
-                    s.push('\n');
-                }
-                s.push_str(&complete_input);
+            let rewritten =
+                rewrite_repl_chunk(&mini_mod, &complete_input, &mut synthetic_exec_counter);
+            let mut s = mir_repl_state.accumulated_source.clone();
+            if !s.is_empty() && !rewritten.chunk.is_empty() {
                 s.push('\n');
-                (None, s)
             }
+            s.push_str(&rewritten.chunk);
+            (
+                rewritten.echo_last_expr.then_some(echo_sym),
+                s,
+                rewritten.transformed,
+            )
         };
 
         // ── Lex + parse the full candidate source ──────────────────────────
@@ -490,7 +559,7 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
         let mut diag_budget = DiagnosticBudget::new(max_errors_per_input);
         let (exec_toks, lex_diags) = Lexer::new(&exec_file, Arc::clone(&interner)).tokenise();
         if !lex_diags.is_empty() {
-            let used_plain = echo_sym_opt.is_some()
+            let used_plain = (echo_sym_opt.is_some() || transformed_input)
                 && render_plain_diagnostics(
                     &plain_source,
                     &interner,
@@ -512,7 +581,7 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
         let (full_module, parse_diags) =
             fidan_parser::parse(&exec_toks, exec_file.id, Arc::clone(&interner));
         if !parse_diags.is_empty() {
-            let used_plain = echo_sym_opt.is_some()
+            let used_plain = (echo_sym_opt.is_some() || transformed_input)
                 && render_plain_diagnostics(
                     &plain_source,
                     &interner,
@@ -537,7 +606,7 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
         exec_tc.check_module(&full_module);
         let typed = exec_tc.finish_typed();
         if !typed.diagnostics.is_empty() {
-            let used_plain = echo_sym_opt.is_some()
+            let used_plain = (echo_sym_opt.is_some() || transformed_input)
                 && render_plain_diagnostics(
                     &plain_source,
                     &interner,

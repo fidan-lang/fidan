@@ -776,6 +776,42 @@ fn parallel_for_uses_worker_threads_with_jit_enabled() {
 }
 
 #[test]
+fn parallel_for_accepts_ranges() {
+    assert!(
+        run_src(
+            r#"var seen = Shared(false)
+        parallel for n in 1..5 {
+            if n == 4 {
+                seen.set(true)
+            }
+        }
+        assert_eq(seen.get(), true)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn parallel_for_accepts_ranges_with_jit_enabled() {
+    assert!(
+        run_src_with_threshold(
+            r#"action warm with (n oftype integer) returns integer { return n + 1 }
+        var warmup = warm(1)
+        warmup = warm(warmup)
+        var seen = Shared(false)
+        parallel for n in 1..5 {
+            if n == 4 {
+                seen.set(true)
+            }
+        }
+        assert_eq(seen.get(), true)"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn concurrent_block_ok() {
     assert!(
         run_src(

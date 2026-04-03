@@ -2532,8 +2532,29 @@ pub unsafe extern "C" fn fdn_parallel_iter_seq(
     } else {
         &[]
     };
-    if let FidanValue::List(list_ref) = coll {
-        let items: Vec<FidanValue> = list_ref.borrow().iter().cloned().collect();
+    let items: Option<Vec<FidanValue>> = match coll {
+        FidanValue::List(list_ref) => Some(list_ref.borrow().iter().cloned().collect()),
+        FidanValue::Range {
+            start,
+            end,
+            inclusive,
+        } => {
+            let mut items = Vec::new();
+            if inclusive {
+                for n in start..=end {
+                    items.push(FidanValue::Integer(n));
+                }
+            } else {
+                for n in start..end {
+                    items.push(FidanValue::Integer(n));
+                }
+            }
+            Some(items)
+        }
+        _ => None,
+    };
+
+    if let Some(items) = items {
         let env_caps: Vec<ParallelCapture> = env_slice
             .iter()
             .map(|ptr| ParallelCapture(borrow(*ptr).parallel_capture()))
