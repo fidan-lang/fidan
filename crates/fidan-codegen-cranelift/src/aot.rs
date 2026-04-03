@@ -21,7 +21,7 @@
 //   Unix:    `cc <obj> -lfidan_runtime -lpthread -ldl -lm -o <out>`
 //   Windows: `link.exe <obj> fidan_runtime.lib /OUT:<out>`
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, anyhow, bail};
 use cranelift_codegen::{
     Context,
     ir::{
@@ -29,6 +29,7 @@ use cranelift_codegen::{
         condcodes::{FloatCC, IntCC},
         types::{F64, I8, I32, I64},
     },
+    isa,
     settings::{self, Configurable},
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -47,6 +48,7 @@ use fidan_stdlib::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use target_lexicon::{Architecture, Triple};
 
 /// Optimisation level for the Cranelift AOT backend.
 /// (Cranelift does not expose as many levels as LLVM.)
@@ -91,8 +93,13 @@ pub struct AotOptions {
     pub extra_lib_dirs: Vec<PathBuf>,
     /// Link the Fidan runtime as a shared library.
     pub link_dynamic: bool,
-    /// Optional target CPU hint. Cranelift currently supports only the host ISA,
-    /// so `None`/`"native"` are accepted and other values are rejected.
+    /// Optional target CPU hint.
+    ///
+    /// Cranelift supports:
+    /// - omitted / `native`: use the host ISA via `cranelift_native`
+    /// - `generic`: use the generic ISA for the current host triple
+    /// - custom presets/features: use the host triple with explicit Cranelift
+    ///   CPU presets and ISA feature flags
     pub target_cpu: Option<String>,
 }
 
@@ -121,15 +128,6 @@ impl AotCompiler {
         interner: Arc<SymbolInterner>,
         opts: &AotOptions,
     ) -> Result<PathBuf> {
-        if let Some(target_cpu) = opts.target_cpu.as_deref() {
-            let requested = target_cpu.trim().to_ascii_lowercase();
-            if !requested.is_empty() && requested != "native" {
-                bail!(
-                    "Cranelift AOT currently supports only the host ISA (`--target-cpu native` or omitted); use `--backend llvm --target-cpu {target_cpu}` for portable/custom CPU targets"
-                );
-            }
-        }
-
         // ── Build ISA / settings ───────────────────────────────────────────────
         let mut flag_builder = settings::builder();
         let opt_str = match opts.opt_level {
@@ -145,10 +143,7 @@ impl AotCompiler {
             .set("is_pic", "true")
             .expect("Cranelift: unknown is_pic");
         let flags = settings::Flags::new(flag_builder);
-        let isa = cranelift_native::builder()
-            .map_err(|e| anyhow::anyhow!("cranelift-native: unsupported host: {e}"))?
-            .finish(flags)
-            .map_err(|e| anyhow::anyhow!("cranelift-native: ISA build failed: {e}"))?;
+        let isa = build_target_isa(opts.target_cpu.as_deref(), flags)?;
 
         // ── Build ObjectModule ────────────────────────────────────────────────
         let module_name = opts
@@ -274,6 +269,175 @@ impl AotCompiler {
 
         Ok(opts.output.clone())
     }
+}
+
+fn build_target_isa(
+    target_cpu: Option<&str>,
+    flags: settings::Flags,
+) -> Result<cranelift_codegen::isa::OwnedTargetIsa> {
+    let triple = current_host_triple();
+    match target_cpu.map(str::trim) {
+        None | Some("") | Some("native") => build_native_target_isa(flags),
+        Some(spec) if spec.eq_ignore_ascii_case("generic") => {
+            build_generic_target_isa(triple, flags)
+        }
+        Some(spec) => build_custom_target_isa(triple, spec, flags),
+    }
+}
+
+fn build_native_target_isa(
+    flags: settings::Flags,
+) -> Result<cranelift_codegen::isa::OwnedTargetIsa> {
+    cranelift_native::builder()
+        .map_err(|e| anyhow!("cranelift-native: unsupported host: {e}"))?
+        .finish(flags)
+        .map_err(|e| anyhow!("cranelift-native: ISA build failed: {e}"))
+}
+
+fn build_generic_target_isa(
+    triple: Triple,
+    flags: settings::Flags,
+) -> Result<cranelift_codegen::isa::OwnedTargetIsa> {
+    isa::lookup(triple)
+        .map_err(|e| anyhow!("cranelift generic ISA lookup failed: {e}"))?
+        .finish(flags)
+        .map_err(|e| anyhow!("cranelift generic ISA build failed: {e}"))
+}
+
+fn build_custom_target_isa(
+    triple: Triple,
+    spec: &str,
+    flags: settings::Flags,
+) -> Result<cranelift_codegen::isa::OwnedTargetIsa> {
+    let (cpu, feature_suffix) = split_target_cpu_spec(spec)?;
+    let mut builder = isa::lookup(triple.clone())
+        .map_err(|e| anyhow!("cranelift custom ISA lookup failed: {e}"))?;
+
+    if !cpu.eq_ignore_ascii_case("generic") {
+        let preset = normalize_target_cpu_preset(triple.architecture, cpu);
+        builder.enable(preset.as_str()).map_err(|err| {
+            anyhow!(
+                "Cranelift target CPU preset `{cpu}` is not supported for `{}`: {err}",
+                triple
+            )
+        })?;
+    }
+
+    apply_target_cpu_features(&mut builder, triple.architecture, feature_suffix)
+        .map_err(|err| anyhow!("Cranelift target CPU spec `{spec}` is invalid: {err}"))?;
+
+    builder
+        .finish(flags)
+        .map_err(|e| anyhow!("cranelift custom ISA build failed: {e}"))
+}
+
+fn split_target_cpu_spec(spec: &str) -> Result<(&str, &str)> {
+    let trimmed = spec.trim();
+    let (cpu, features) = match trimmed.find(',') {
+        Some(index) => (&trimmed[..index], &trimmed[index + 1..]),
+        None => (trimmed, ""),
+    };
+    let cpu = cpu.trim();
+    if cpu.is_empty() {
+        bail!("target CPU spec `{trimmed}` is missing a CPU preset or `generic`");
+    }
+    Ok((cpu, features))
+}
+
+fn normalize_target_cpu_preset(arch: Architecture, cpu: &str) -> String {
+    let trimmed = cpu.trim();
+    match arch {
+        Architecture::X86_64 => trimmed.replace('_', "-"),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn apply_target_cpu_features(
+    builder: &mut impl Configurable,
+    arch: Architecture,
+    features: &str,
+) -> Result<()> {
+    for raw in features.split(',') {
+        let token = raw.trim();
+        if token.is_empty() {
+            continue;
+        }
+        if token.len() < 2 || !matches!(token.as_bytes()[0], b'+' | b'-') {
+            bail!(
+                "target CPU feature `{token}` must start with `+` or `-` (for example `+avx2` or `-has_avx2`)"
+            );
+        }
+        let enabled = token.as_bytes()[0] == b'+';
+        let feature = token[1..].trim();
+        if feature.is_empty() {
+            bail!("target CPU feature override `{token}` is missing a feature name");
+        }
+        let name = map_target_cpu_feature_name(arch, feature);
+        builder
+            .set(name.as_str(), if enabled { "true" } else { "false" })
+            .map_err(|err| {
+                anyhow!(
+                    "target CPU feature `{feature}` is not supported for `{}`: {err}",
+                    architecture_name(arch)
+                )
+            })?;
+    }
+    Ok(())
+}
+
+fn map_target_cpu_feature_name(arch: Architecture, feature: &str) -> String {
+    let trimmed = feature.trim();
+    if trimmed.starts_with("has_")
+        || trimmed.starts_with("use_")
+        || trimmed.starts_with("sign_return_address")
+    {
+        return trimmed.to_string();
+    }
+
+    match arch {
+        Architecture::X86_64 => match trimmed.to_ascii_lowercase().as_str() {
+            "cx16" | "cmpxchg16b" => "has_cmpxchg16b".to_string(),
+            "sse3" => "has_sse3".to_string(),
+            "ssse3" => "has_ssse3".to_string(),
+            "sse4.1" | "sse4_1" | "sse41" => "has_sse41".to_string(),
+            "sse4.2" | "sse4_2" | "sse42" => "has_sse42".to_string(),
+            "popcnt" => "has_popcnt".to_string(),
+            "avx" => "has_avx".to_string(),
+            "avx2" => "has_avx2".to_string(),
+            "fma" => "has_fma".to_string(),
+            "bmi1" => "has_bmi1".to_string(),
+            "bmi2" => "has_bmi2".to_string(),
+            "avx512bitalg" => "has_avx512bitalg".to_string(),
+            "avx512dq" => "has_avx512dq".to_string(),
+            "avx512f" => "has_avx512f".to_string(),
+            "avx512vl" => "has_avx512vl".to_string(),
+            "avx512vbmi" => "has_avx512vbmi".to_string(),
+            "lzcnt" => "has_lzcnt".to_string(),
+            other => other.to_string(),
+        },
+        Architecture::Aarch64(_) => match trimmed.to_ascii_lowercase().as_str() {
+            "lse" => "has_lse".to_string(),
+            "pauth" | "paca" => "has_pauth".to_string(),
+            "fp16" => "has_fp16".to_string(),
+            "bti" => "use_bti".to_string(),
+            other => other.to_string(),
+        },
+        _ => trimmed.to_string(),
+    }
+}
+
+fn architecture_name(arch: Architecture) -> &'static str {
+    match arch {
+        Architecture::X86_64 => "x86_64",
+        Architecture::Aarch64(_) => "aarch64",
+        Architecture::Riscv64(_) => "riscv64",
+        Architecture::S390x => "s390x",
+        _ => "this architecture",
+    }
+}
+
+fn current_host_triple() -> Triple {
+    Triple::host()
 }
 
 // ── External runtime symbol table ─────────────────────────────────────────────
@@ -3852,8 +4016,12 @@ fn resolve_windows_link_input(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_windows_link_input;
+    use super::{
+        map_target_cpu_feature_name, normalize_target_cpu_preset, resolve_windows_link_input,
+        split_target_cpu_spec,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
+    use target_lexicon::Architecture;
 
     fn unique_temp_dir() -> std::path::PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -3893,6 +4061,33 @@ mod tests {
         assert_eq!(resolved, lib.to_string_lossy());
 
         std::fs::remove_dir_all(&temp).ok();
+    }
+
+    #[test]
+    fn target_cpu_spec_splits_cpu_and_features() {
+        let (cpu, features) = split_target_cpu_spec("haswell,+avx2,-bmi2").unwrap();
+        assert_eq!(cpu, "haswell");
+        assert_eq!(features, "+avx2,-bmi2");
+    }
+
+    #[test]
+    fn x64_feature_aliases_map_to_cranelift_flags() {
+        assert_eq!(
+            map_target_cpu_feature_name(Architecture::X86_64, "sse4.1"),
+            "has_sse41"
+        );
+        assert_eq!(
+            map_target_cpu_feature_name(Architecture::X86_64, "cx16"),
+            "has_cmpxchg16b"
+        );
+    }
+
+    #[test]
+    fn x64_presets_normalize_underscores() {
+        assert_eq!(
+            normalize_target_cpu_preset(Architecture::X86_64, "x86_64_v3"),
+            "x86-64-v3"
+        );
     }
 }
 

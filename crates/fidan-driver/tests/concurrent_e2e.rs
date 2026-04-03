@@ -1,7 +1,7 @@
 use fidan_driver::install::{installed_llvm_toolchains, resolve_fidan_home};
 use fidan_driver::{
-    Backend, CompileOptions, ExecutionMode, FrontendOutput, LtoMode, OptLevel, Session, StripMode,
-    compile, compile_file_to_mir,
+    Backend, CompileOptions, EmitKind, ExecutionMode, FrontendOutput, LtoMode, OptLevel, Session,
+    StripMode, compile, compile_file_to_mir,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -351,7 +351,35 @@ print("ok")
 "#
 }
 
+#[derive(Debug, Clone)]
+struct AotTestSettings {
+    emit_obj: bool,
+    lto: LtoMode,
+    strip: StripMode,
+    target_cpu: Option<String>,
+}
+
+impl Default for AotTestSettings {
+    fn default() -> Self {
+        Self {
+            emit_obj: false,
+            lto: LtoMode::Off,
+            strip: StripMode::Off,
+            target_cpu: None,
+        }
+    }
+}
+
 fn compile_program(source: &str, backend: Backend, output_path: &Path) {
+    compile_program_with_settings(source, backend, output_path, &AotTestSettings::default());
+}
+
+fn compile_program_with_settings(
+    source: &str,
+    backend: Backend,
+    output_path: &Path,
+    settings: &AotTestSettings,
+) {
     let src_path = output_path.with_extension("fdn");
     fs::write(&src_path, source).expect("write concurrent smoke source");
     let FrontendOutput { interner, mir, .. } =
@@ -360,7 +388,11 @@ fn compile_program(source: &str, backend: Backend, output_path: &Path) {
         input: src_path,
         output: Some(output_path.to_path_buf()),
         mode: ExecutionMode::Build,
-        emit: vec![],
+        emit: if settings.emit_obj {
+            vec![EmitKind::Obj]
+        } else {
+            vec![]
+        },
         trace: fidan_driver::TraceMode::None,
         max_errors: None,
         jit_threshold: 0,
@@ -372,12 +404,56 @@ fn compile_program(source: &str, backend: Backend, output_path: &Path) {
         opt_level: OptLevel::O2,
         extra_lib_dirs: vec![],
         link_dynamic: false,
-        lto: LtoMode::Off,
-        strip: StripMode::Off,
+        lto: settings.lto,
+        strip: settings.strip,
         backend,
-        target_cpu: None,
+        target_cpu: settings.target_cpu.clone(),
     };
     compile(&Session::new(), mir, interner, &opts).expect("compile concurrent smoke program");
+}
+
+fn sidecar_object_path(bin: &Path) -> PathBuf {
+    bin.with_extension(if cfg!(windows) { "obj" } else { "o" })
+}
+
+fn expect_compile_program_error(
+    source: &str,
+    backend: Backend,
+    output_path: &Path,
+    settings: &AotTestSettings,
+) -> String {
+    let src_path = output_path.with_extension("fdn");
+    fs::write(&src_path, source).expect("write concurrent smoke source");
+    let FrontendOutput { interner, mir, .. } =
+        compile_file_to_mir(&src_path).expect("compile source to MIR");
+    let opts = CompileOptions {
+        input: src_path,
+        output: Some(output_path.to_path_buf()),
+        mode: ExecutionMode::Build,
+        emit: if settings.emit_obj {
+            vec![EmitKind::Obj]
+        } else {
+            vec![]
+        },
+        trace: fidan_driver::TraceMode::None,
+        max_errors: None,
+        jit_threshold: 0,
+        strict_mode: false,
+        replay_inputs: vec![],
+        program_args: vec![],
+        suppress: vec![],
+        sandbox: None,
+        opt_level: OptLevel::O2,
+        extra_lib_dirs: vec![],
+        link_dynamic: false,
+        lto: settings.lto,
+        strip: settings.strip,
+        backend,
+        target_cpu: settings.target_cpu.clone(),
+    };
+    compile(&Session::new(), mir, interner, &opts)
+        .expect_err("expected compile to fail")
+        .to_string()
 }
 
 fn run_compiled_binary(bin: &Path, expected_stdout_fragment: &str) {
@@ -910,6 +986,296 @@ fn top_level_scalar_globals_llvm_aot_round_trip_cleanly() {
         sandbox.join("top_level_scalar_globals")
     };
     compile_program(top_level_scalar_globals_source(), Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn cranelift_aot_accepts_target_cpu_native() {
+    let sandbox = temp_dir("fidan_target_cpu_native_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("target_cpu_native.exe")
+    } else {
+        sandbox.join("target_cpu_native")
+    };
+    let settings = AotTestSettings {
+        target_cpu: Some("native".to_string()),
+        ..Default::default()
+    };
+    compile_program_with_settings(
+        builtin_assert_source(),
+        Backend::Cranelift,
+        &output,
+        &settings,
+    );
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn cranelift_aot_accepts_target_cpu_generic() {
+    let sandbox = temp_dir("fidan_target_cpu_generic_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("target_cpu_generic.exe")
+    } else {
+        sandbox.join("target_cpu_generic")
+    };
+    let settings = AotTestSettings {
+        target_cpu: Some("generic".to_string()),
+        ..Default::default()
+    };
+    compile_program_with_settings(
+        builtin_assert_source(),
+        Backend::Cranelift,
+        &output,
+        &settings,
+    );
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn cranelift_aot_accepts_custom_target_cpu_preset() {
+    let sandbox = temp_dir("fidan_target_cpu_custom_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("target_cpu_custom.exe")
+    } else {
+        sandbox.join("target_cpu_custom")
+    };
+    let settings = AotTestSettings {
+        target_cpu: Some("haswell".to_string()),
+        ..Default::default()
+    };
+    compile_program_with_settings(
+        builtin_assert_source(),
+        Backend::Cranelift,
+        &output,
+        &settings,
+    );
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn cranelift_aot_accepts_custom_target_cpu_feature_aliases() {
+    let sandbox = temp_dir("fidan_target_cpu_custom_features_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("target_cpu_custom_features.exe")
+    } else {
+        sandbox.join("target_cpu_custom_features")
+    };
+    let settings = AotTestSettings {
+        target_cpu: Some("generic,+sse3,+ssse3,+sse4.1,+popcnt".to_string()),
+        ..Default::default()
+    };
+    compile_program_with_settings(
+        builtin_assert_source(),
+        Backend::Cranelift,
+        &output,
+        &settings,
+    );
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn cranelift_aot_rejects_unknown_target_cpu_feature() {
+    let sandbox = temp_dir("fidan_target_cpu_bad_feature_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("target_cpu_bad_feature.exe")
+    } else {
+        sandbox.join("target_cpu_bad_feature")
+    };
+    let settings = AotTestSettings {
+        target_cpu: Some("generic,+totally_fake_feature".to_string()),
+        ..Default::default()
+    };
+    let error = expect_compile_program_error(
+        builtin_assert_source(),
+        Backend::Cranelift,
+        &output,
+        &settings,
+    );
+    assert!(
+        error.contains("target CPU feature `totally_fake_feature`"),
+        "unexpected error: {error}"
+    );
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn llvm_aot_accepts_target_cpu_generic() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM generic target-cpu smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_target_cpu_generic_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("target_cpu_generic.exe")
+    } else {
+        sandbox.join("target_cpu_generic")
+    };
+    let settings = AotTestSettings {
+        target_cpu: Some("generic".to_string()),
+        ..Default::default()
+    };
+    compile_program_with_settings(builtin_assert_source(), Backend::Llvm, &output, &settings);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn llvm_aot_accepts_target_cpu_native() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM native target-cpu smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_target_cpu_native_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("target_cpu_native.exe")
+    } else {
+        sandbox.join("target_cpu_native")
+    };
+    let settings = AotTestSettings {
+        target_cpu: Some("native".to_string()),
+        ..Default::default()
+    };
+    compile_program_with_settings(builtin_assert_source(), Backend::Llvm, &output, &settings);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn llvm_aot_accepts_custom_target_cpu_spec() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM custom target-cpu smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_target_cpu_custom_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("target_cpu_custom.exe")
+    } else {
+        sandbox.join("target_cpu_custom")
+    };
+    let settings = AotTestSettings {
+        target_cpu: Some("x86-64,+sse2".to_string()),
+        ..Default::default()
+    };
+    compile_program_with_settings(builtin_assert_source(), Backend::Llvm, &output, &settings);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn cranelift_aot_emit_obj_keeps_object_sidecar() {
+    let sandbox = temp_dir("fidan_emit_obj_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("emit_obj.exe")
+    } else {
+        sandbox.join("emit_obj")
+    };
+    let settings = AotTestSettings {
+        emit_obj: true,
+        ..Default::default()
+    };
+    compile_program_with_settings(
+        builtin_assert_source(),
+        Backend::Cranelift,
+        &output,
+        &settings,
+    );
+    run_compiled_binary_clean(&output, "ok");
+    assert!(
+        sidecar_object_path(&output).is_file(),
+        "expected object sidecar at `{}`",
+        sidecar_object_path(&output).display()
+    );
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn llvm_aot_emit_obj_keeps_object_sidecar() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM emit-obj smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_emit_obj_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("emit_obj.exe")
+    } else {
+        sandbox.join("emit_obj")
+    };
+    let settings = AotTestSettings {
+        emit_obj: true,
+        ..Default::default()
+    };
+    compile_program_with_settings(builtin_assert_source(), Backend::Llvm, &output, &settings);
+    run_compiled_binary_clean(&output, "ok");
+    assert!(
+        sidecar_object_path(&output).is_file(),
+        "expected object sidecar at `{}`",
+        sidecar_object_path(&output).display()
+    );
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn cranelift_aot_lto_full_smoke() {
+    let sandbox = temp_dir("fidan_lto_full_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("lto_full.exe")
+    } else {
+        sandbox.join("lto_full")
+    };
+    let settings = AotTestSettings {
+        lto: LtoMode::Full,
+        ..Default::default()
+    };
+    compile_program_with_settings(
+        builtin_assert_source(),
+        Backend::Cranelift,
+        &output,
+        &settings,
+    );
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn llvm_aot_lto_full_smoke() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM full-LTO smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_lto_full_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("lto_full.exe")
+    } else {
+        sandbox.join("lto_full")
+    };
+    let settings = AotTestSettings {
+        lto: LtoMode::Full,
+        ..Default::default()
+    };
+    compile_program_with_settings(builtin_assert_source(), Backend::Llvm, &output, &settings);
     run_compiled_binary_clean(&output, "ok");
     fs::remove_dir_all(&sandbox).ok();
 }

@@ -78,10 +78,11 @@ fn native_target_cpu(target_triple: &str) -> Result<TargetCpuSpec> {
             "`--target-cpu native` targets the current compiler host (`{host_triple}`), but the active LLVM target triple is `{target_triple}`"
         );
     }
-    Ok(TargetCpuSpec {
-        cpu: llvm_host_string(unsafe { LLVMGetHostCPUName() })?,
-        features: llvm_host_string(unsafe { LLVMGetHostCPUFeatures() })?,
-    })
+    let raw_cpu = unsafe { LLVMGetHostCPUName() };
+    let cpu = llvm_host_string(raw_cpu, "host CPU name")?;
+    let raw_features = unsafe { LLVMGetHostCPUFeatures() };
+    let features = llvm_host_string(raw_features, "host CPU features")?;
+    Ok(TargetCpuSpec { cpu, features })
 }
 
 fn split_cpu_and_features(spec: &str) -> Result<(&str, &str)> {
@@ -142,21 +143,37 @@ fn merge_feature_strings(base: &str, overrides: &str) -> Result<String> {
     normalize_feature_string(&format!("{base},{overrides}"))
 }
 
-fn llvm_host_string(raw: *mut core::ffi::c_char) -> Result<String> {
+fn llvm_host_string(raw: *mut core::ffi::c_char, label: &str) -> Result<String> {
     if raw.is_null() {
-        bail!("LLVM returned a null host CPU string");
+        bail!("LLVM returned a null {label}");
     }
     let value = unsafe { CStr::from_ptr(raw) }
         .to_string_lossy()
         .trim()
         .to_string();
-    unsafe {
-        LLVMDisposeMessage(raw);
+    let skip_dispose = should_skip_host_cpu_dispose(label);
+    if skip_dispose {
+    } else {
+        unsafe {
+            LLVMDisposeMessage(raw);
+        }
     }
     if value.is_empty() {
-        bail!("LLVM returned an empty host CPU string");
+        bail!("LLVM returned an empty {label}");
     }
     Ok(value)
+}
+
+fn should_skip_host_cpu_dispose(label: &str) -> bool {
+    // LLVM's host-CPU C API returns heap-owned strings, but on Windows the
+    // dispose path currently crashes inside the helper for both
+    // `LLVMGetHostCPUName()` and `LLVMGetHostCPUFeatures()`. The helper is a
+    // short-lived process, so we intentionally keep these two tiny buffers
+    // alive until process exit rather than crashing native AOT builds.
+    if cfg!(windows) && matches!(label, "host CPU name" | "host CPU features") {
+        return true;
+    }
+    false
 }
 
 fn current_host_triple() -> Result<String> {
@@ -234,12 +251,14 @@ pub fn compile_and_link_module(
         );
     }
     let target = unsafe { Target::new(target_ref) };
-    trace("inkwell:create_target_machine");
+    trace("inkwell:resolve_target_cpu");
     let target_cpu = resolve_target_cpu(request, layout.metadata.host_triple.as_str())?;
+    trace("inkwell:resolved_target_cpu");
     let cpu = CString::new(target_cpu.cpu.as_str())
         .context("target CPU string contains an interior NUL byte")?;
     let features = CString::new(target_cpu.features.as_str())
         .context("target CPU features contain an interior NUL byte")?;
+    trace("inkwell:create_target_machine");
     let machine_ref = unsafe {
         LLVMCreateTargetMachine(
             target.as_mut_ptr(),
@@ -251,6 +270,7 @@ pub fn compile_and_link_module(
             CodeModel::Default.into(),
         )
     };
+    trace("inkwell:created_target_machine");
     if machine_ref.is_null() {
         bail!(
             "failed to create target machine for `{}`",
