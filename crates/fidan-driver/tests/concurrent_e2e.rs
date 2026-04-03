@@ -99,6 +99,28 @@ main()
 "#
 }
 
+fn weak_shared_source() -> &'static str {
+    r#"action main {
+    var shared = Shared(12)
+    var weak = WeakShared(shared)
+    assert_eq(type(weak), "WeakShared")
+    assert_eq(weak.isAlive(), true)
+
+    var revived = weak.upgrade()
+    assert_eq(type(revived), "Shared")
+    assert_eq(revived.get(), 12)
+
+    revived = nothing
+    shared = nothing
+    assert_eq(weak.isAlive(), false)
+    assert_eq(weak.upgrade(), nothing)
+    print("weak-ok")
+}
+
+main()
+"#
+}
+
 fn object_method_source() -> &'static str {
     r#"use std.math.{sqrt}
 
@@ -499,6 +521,39 @@ fn spawn_llvm_aot_defers_until_await() {
     };
     compile_program(spawn_source(), Backend::Llvm, &output);
     run_compiled_binary(&output, "2");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn weak_shared_cranelift_aot_round_trip_ok() {
+    let sandbox = temp_dir("fidan_weak_shared_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("weak_shared_smoke.exe")
+    } else {
+        sandbox.join("weak_shared_smoke")
+    };
+    compile_program(weak_shared_source(), Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "weak-ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn weak_shared_llvm_aot_round_trip_ok() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM weak-shared smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_weak_shared_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("weak_shared_smoke.exe")
+    } else {
+        sandbox.join("weak_shared_smoke")
+    };
+    compile_program(weak_shared_source(), Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "weak-ok");
     fs::remove_dir_all(&sandbox).ok();
 }
 

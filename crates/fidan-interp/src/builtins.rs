@@ -144,19 +144,32 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanVal
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Ok(Some(FidanValue::String(FidanString::new(v.type_name()))))
         }
-
         _ => Ok(None),
     }
 }
 
 /// Try to handle a call to a builtin type constructor (e.g. `Shared(val)`).
-pub fn call_builtin_constructor(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
+pub fn call_builtin_constructor(
+    name: &str,
+    args: Vec<FidanValue>,
+) -> Result<Option<FidanValue>, BuiltinError> {
     match name {
         "Shared" => {
             let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            Some(FidanValue::Shared(SharedRef::new(inner)))
+            Ok(Some(FidanValue::Shared(SharedRef::new(inner))))
         }
-        _ => None,
+        "WeakShared" => {
+            let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            match inner {
+                FidanValue::Shared(shared) => Ok(Some(FidanValue::WeakShared(shared.downgrade()))),
+                FidanValue::WeakShared(weak) => Ok(Some(FidanValue::WeakShared(weak))),
+                other => Err(BuiltinError::runtime(format!(
+                    "WeakShared(shared) expects a Shared value, got {}",
+                    other.type_name()
+                ))),
+            }
+        }
+        _ => Ok(None),
     }
 }
 

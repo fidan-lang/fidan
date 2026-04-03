@@ -248,6 +248,7 @@ fn fmt_ty(ty: &MirTy) -> String {
         MirTy::Object(s) => sym_str(s.0),
         MirTy::Enum(s) => format!("enum({})", sym_str(s.0)),
         MirTy::Shared(t) => format!("shared<{}>", fmt_ty(t)),
+        MirTy::WeakShared(t) => format!("weakshared<{}>", fmt_ty(t)),
         MirTy::Pending(t) => format!("pending<{}>", fmt_ty(t)),
         MirTy::Function => "action".to_string(),
         MirTy::Error => "<error>".to_string(),

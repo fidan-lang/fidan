@@ -29,6 +29,7 @@ pub enum FidanType {
     ClassType(Symbol),
     // Concurrency wrappers
     Shared(Box<FidanType>),
+    WeakShared(Box<FidanType>),
     Pending(Box<FidanType>),
     // First-class action type (future)
     Function,
@@ -89,6 +90,7 @@ impl FidanType {
                 sk.is_assignable_from(ok) && sv.is_assignable_from(ov)
             }
             (FidanType::Shared(s), FidanType::Shared(o)) => s.is_assignable_from(o),
+            (FidanType::WeakShared(s), FidanType::WeakShared(o)) => s.is_assignable_from(o),
             (FidanType::Pending(s), FidanType::Pending(o)) => s.is_assignable_from(o),
             (FidanType::Tuple(st), FidanType::Tuple(ot)) => {
                 // Empty tuple on either side = untyped — allow assignment.
@@ -140,6 +142,9 @@ impl FidanType {
                 }
             }
             FidanType::Shared(inner) => format!("Shared oftype {}", inner.display_name(resolve)),
+            FidanType::WeakShared(inner) => {
+                format!("WeakShared oftype {}", inner.display_name(resolve))
+            }
             FidanType::Pending(inner) => format!("Pending oftype {}", inner.display_name(resolve)),
             FidanType::Object(sym) => resolve(*sym),
             FidanType::Enum(sym) => resolve(*sym),

@@ -21,6 +21,7 @@ pub const BUILTIN_BINDINGS: &[&str] = &[
     "float",
     "boolean",
     "Shared",
+    "WeakShared",
     "assert",
     "assert_eq",
     "assert_ne",
@@ -114,6 +115,11 @@ pub const LANGUAGE_BUILTINS: &[BuiltinInfo] = &[
         doc: "Create a shared, thread-safe wrapper so values can be mutated safely across parallel work.",
     },
     BuiltinInfo {
+        name: "WeakShared",
+        signature: "WeakShared(shared) -> WeakShared",
+        doc: "Create a non-owning weak handle to an existing Shared value. Use `upgrade()` to recover a Shared while it is still alive.",
+    },
+    BuiltinInfo {
         name: "assert",
         signature: "assert(condition, message?) -> nothing",
         doc: "Fail immediately when the condition is not truthy.",
@@ -201,9 +207,11 @@ mod tests {
     }
 
     #[test]
-    fn shared_is_reserved_but_not_function_completion() {
+    fn shared_constructors_are_reserved_but_not_function_completion() {
         assert!(BUILTIN_BINDINGS.contains(&"Shared"));
+        assert!(BUILTIN_BINDINGS.contains(&"WeakShared"));
         assert!(!BUILTIN_FUNCTIONS.contains(&"Shared"));
+        assert!(!BUILTIN_FUNCTIONS.contains(&"WeakShared"));
     }
 
     #[test]

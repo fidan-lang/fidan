@@ -547,6 +547,19 @@ impl MirMachine {
         }
     }
 
+    fn cleanup_frame_locals(&mut self, frame: &mut CallFrame) -> Result<(), MirSignal> {
+        // Make function-exit lifetime semantics explicit so weak/shared handles
+        // observe collection before control returns to the caller.
+        for idx in (0..frame.locals.len()).rev() {
+            let local = LocalId(idx as u32);
+            self.exec_drop_dispatch(local, frame)?;
+            if let Some(slot) = frame.locals.get_mut(idx) {
+                *slot = FidanValue::Nothing;
+            }
+        }
+        Ok(())
+    }
+
     fn prepare_call_args(
         &self,
         func: &MirFunction,
@@ -1155,6 +1168,7 @@ impl MirMachine {
 
         // Block-level execution starting at entry (BlockId(0)).
         let result = self.run_function(fn_id, &mut frame);
+        let cleanup_result = self.cleanup_frame_locals(&mut frame);
 
         // Capture the trace at the innermost frame (only once — don't overwrite).
         // Exclude the module-level entry function (FunctionId(0)) from the trace
@@ -1213,7 +1227,11 @@ impl MirMachine {
             }
         }
 
-        result.map(|v| v.unwrap_or(FidanValue::Nothing))
+        match (result, cleanup_result) {
+            (Ok(v), Ok(())) => Ok(v.unwrap_or(FidanValue::Nothing)),
+            (Ok(_), Err(e)) => Err(e),
+            (Err(e), _) => Err(e),
+        }
     }
 
     fn run_function(
@@ -1398,6 +1416,7 @@ impl MirMachine {
                 // object whose class defines a `drop` action, call it now — before
                 // the Rc refcount actually reaches zero via the frame slot overwrite.
                 self.exec_drop_dispatch(*local, frame)?;
+                frame.store(*local, FidanValue::Nothing);
             }
             Instr::CertainCheck { operand, name } => {
                 if matches!(self.eval_operand(operand, frame), FidanValue::Nothing) {
@@ -1995,7 +2014,9 @@ impl MirMachine {
                 // true language builtins (print, input, len, type conversions, math).
                 // String/list/dict receiver methods are NOT free functions and must
                 // be invoked via `receiver.method()` — they live in call_bootstrap_method.
-                if let Some(value) = builtins::call_builtin_constructor(&name, args.clone()) {
+                if let Some(value) = builtins::call_builtin_constructor(&name, args.clone())
+                    .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
+                {
                     return Ok(value);
                 }
                 if let Some(value) = builtins::call_builtin(&name, args)
@@ -2076,6 +2097,22 @@ impl MirMachine {
                     let val = args.into_iter().next().unwrap_or(FidanValue::Nothing);
                     *sr.0.lock().unwrap() = val;
                     return Ok(FidanValue::Nothing);
+                }
+                "weak" | "downgrade" => return Ok(FidanValue::WeakShared(sr.downgrade())),
+                _ => {}
+            }
+        }
+        if let FidanValue::WeakShared(ref ws) = receiver {
+            let method_name = self.sym_str(method);
+            match method_name.as_ref() {
+                "upgrade" => {
+                    return Ok(ws
+                        .upgrade()
+                        .map(FidanValue::Shared)
+                        .unwrap_or(FidanValue::Nothing));
+                }
+                "isAlive" | "is_alive" | "alive" => {
+                    return Ok(FidanValue::Boolean(ws.is_alive()));
                 }
                 _ => {}
             }
@@ -2181,7 +2218,9 @@ impl MirMachine {
         args: Vec<FidanValue>,
     ) -> Result<FidanValue, MirSignal> {
         if module == "__builtin__" {
-            if let Some(value) = builtins::call_builtin_constructor(name, args.clone()) {
+            if let Some(value) = builtins::call_builtin_constructor(name, args.clone())
+                .map_err(|err| MirSignal::Panic(err.message))?
+            {
                 return Ok(value);
             }
             if let Some(value) =

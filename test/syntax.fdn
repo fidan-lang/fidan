@@ -512,6 +512,13 @@ action demonstrateConcurrency {
     }
     print("Counter = {counter.get()}")    # 2
 
+    # ── WeakShared oftype T — non-owning weak handle to a Shared value ───────
+    var weakCounter oftype WeakShared oftype integer = counter.weak()
+    assert_eq(type(weakCounter), "WeakShared")
+    var upgradedCounter = weakCounter.upgrade()
+    assert_eq(type(upgradedCounter), "Shared")
+    assert_eq(upgradedCounter.get(), 2)
+
     # ── parallel action returns Pending automatically ─────────────────────────
     var pending = fetchData("https://example.com/3")        # type: Pending oftype string
     var result  = await pending                             # type: string

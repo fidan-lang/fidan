@@ -67,6 +67,16 @@ fn into_raw(v: FidanValue) -> *mut FidanValue {
     Box::into_raw(Box::new(v))
 }
 
+fn panic_missing_method(receiver: &FidanValue, method_name: &str) -> ! {
+    let msg = format!(
+        "no method `{}` found for `{}`",
+        method_name,
+        receiver.type_name()
+    );
+    let msg_val = into_raw(FidanValue::String(FidanString::new(&msg)));
+    unsafe { fdn_panic(msg_val) }
+}
+
 /// Coerce to `FidanString` if possible, otherwise stringify.
 #[inline]
 fn as_fidan_string(v: &FidanValue) -> FidanString {
@@ -180,13 +190,18 @@ pub unsafe extern "C" fn fdn_make_shared(ptr: *mut FidanValue) -> *mut FidanValu
 /// Clone: borrows `ptr`, returns a new owned copy.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_clone(ptr: *mut FidanValue) -> *mut FidanValue {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
     into_raw(borrow(ptr).clone())
 }
 
 /// Drop: the ONLY function that consumes its argument.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_drop(ptr: *mut FidanValue) {
-    debug_assert!(!ptr.is_null());
+    if ptr.is_null() {
+        return;
+    }
     drop(Box::from_raw(ptr));
 }
 
@@ -1165,23 +1180,19 @@ pub unsafe extern "C" fn fdn_obj_invoke(
                 *sr.0.lock().unwrap() = val;
                 into_raw(FidanValue::Nothing)
             }
-            _ => {
-                eprintln!(
-                    "AOT: method dispatch not implemented: {}.{}()",
-                    recv.type_name(),
-                    method_name
-                );
-                into_raw(FidanValue::Nothing)
-            }
+            "weak" | "downgrade" => into_raw(FidanValue::WeakShared(sr.downgrade())),
+            _ => panic_missing_method(recv, &method_name),
         },
-        _ => {
-            eprintln!(
-                "AOT: method dispatch not implemented: {}.{}()",
-                recv.type_name(),
-                method_name
-            );
-            into_raw(FidanValue::Nothing)
-        }
+        FidanValue::WeakShared(ws) => match method_name.as_str() {
+            "upgrade" => into_raw(
+                ws.upgrade()
+                    .map(FidanValue::Shared)
+                    .unwrap_or(FidanValue::Nothing),
+            ),
+            "isAlive" | "is_alive" | "alive" => into_raw(FidanValue::Boolean(ws.is_alive())),
+            _ => panic_missing_method(recv, &method_name),
+        },
+        _ => panic_missing_method(recv, &method_name),
     }
 }
 
@@ -2230,6 +2241,16 @@ fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut Fid
         "Shared" => {
             let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Some(into_raw(FidanValue::Shared(SharedRef::new(inner))))
+        }
+        "WeakShared" => {
+            let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            match inner {
+                FidanValue::Shared(shared) => {
+                    Some(into_raw(FidanValue::WeakShared(shared.downgrade())))
+                }
+                FidanValue::WeakShared(weak) => Some(into_raw(FidanValue::WeakShared(weak))),
+                _ => Some(into_raw(FidanValue::Nothing)),
+            }
         }
         "assertEq" | "assert_eq" | "assertNe" | "assert_ne" => Some(dispatch_test(func, args)),
         _ => None,

@@ -1380,6 +1380,8 @@ fn lower_instr(
                 let v = builder.use_var(cl_vars[local.0 as usize]);
                 call_rt(module, builder, rt.drop_any, &[v])?;
             }
+            let zero = zero_value_for_local(builder, local_types.get(&local.0));
+            builder.def_var(cl_vars[local.0 as usize], zero);
         }
 
         Instr::CertainCheck { operand, name } => {
@@ -1881,8 +1883,15 @@ fn lower_rvalue(
                     }
                     _ => Ok(raw),
                 }
+            } else if is_scalar(&op_mir_ty) {
+                if is_scalar(ty) {
+                    Ok(lower_operand(builder, cl_vars, op))
+                } else {
+                    lower_operand_boxed(builder, cl_vars, local_types, op, rt, module)
+                }
             } else {
-                Ok(lower_operand(builder, cl_vars, op))
+                let boxed = lower_operand(builder, cl_vars, op);
+                Ok(call_rt(module, builder, rt.clone_any, &[boxed])?.unwrap_or(boxed))
             }
         }
 
@@ -3529,6 +3538,7 @@ fn widen_to_i8(
         | MirTy::Object(_)
         | MirTy::Enum(_)
         | MirTy::Shared(_)
+        | MirTy::WeakShared(_)
         | MirTy::Pending(_)
         | MirTy::Function
         | MirTy::Nothing

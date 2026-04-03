@@ -716,6 +716,7 @@ fn resolve_type_expr_simple(te: &fidan_ast::TypeExpr, interner: &SymbolInterner)
                 FidanType::Object(sym) => match interner.resolve(sym).as_ref() {
                     "list" | "List" => FidanType::List(Box::new(p)),
                     "Shared" => FidanType::Shared(Box::new(p)),
+                    "WeakShared" => FidanType::WeakShared(Box::new(p)),
                     "Pending" => FidanType::Pending(Box::new(p)),
                     _ => FidanType::Dynamic,
                 },

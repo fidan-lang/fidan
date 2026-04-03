@@ -223,6 +223,7 @@ fn display_mir_ty(ty: &MirTy) -> String {
         MirTy::Object(_) => "object".to_string(),
         MirTy::Enum(_) => "enum".to_string(),
         MirTy::Shared(inner) => format!("Shared<{}>", display_mir_ty(inner)),
+        MirTy::WeakShared(inner) => format!("WeakShared<{}>", display_mir_ty(inner)),
         MirTy::Pending(inner) => format!("Pending<{}>", display_mir_ty(inner)),
         MirTy::Function => "action".to_string(),
         MirTy::Error => "<error>".to_string(),

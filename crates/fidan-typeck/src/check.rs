@@ -2195,6 +2195,28 @@ impl TypeChecker {
                     FidanType::Dynamic
                 }
             }
+            FidanType::Shared(inner) => {
+                let f = self.interner.resolve(field);
+                match f.as_ref() {
+                    "get" | "set" | "weak" | "downgrade" => FidanType::Function,
+                    "type" => FidanType::String,
+                    _ => {
+                        let _ = inner;
+                        FidanType::Dynamic
+                    }
+                }
+            }
+            FidanType::WeakShared(inner) => {
+                let f = self.interner.resolve(field);
+                match f.as_ref() {
+                    "upgrade" | "isAlive" | "is_alive" | "alive" => FidanType::Function,
+                    "type" => FidanType::String,
+                    _ => {
+                        let _ = inner;
+                        FidanType::Dynamic
+                    }
+                }
+            }
             // First-class action values expose `.name` (the declared action name).
             FidanType::Function => {
                 let f = self.interner.resolve(field);
@@ -2235,6 +2257,50 @@ impl TypeChecker {
                     "integer" => return FidanType::Integer,
                     "float" | "sqrt" => return FidanType::Float,
                     "boolean" => return FidanType::Boolean,
+                    "WeakShared" => {
+                        let inferred_args: Vec<FidanType> = args
+                            .iter()
+                            .map(|(_, expr_id)| self.infer_expr(*expr_id, module))
+                            .collect();
+                        if inferred_args.is_empty() {
+                            self.emit_error(
+                                fidan_diagnostics::diag_code!("E0301"),
+                                "WeakShared(shared) requires a Shared argument",
+                                span,
+                            );
+                            return FidanType::WeakShared(Box::new(FidanType::Dynamic));
+                        }
+                        if inferred_args.len() > 1 {
+                            self.emit_error(
+                                fidan_diagnostics::diag_code!("E0302"),
+                                "WeakShared(shared) accepts exactly one argument",
+                                span,
+                            );
+                        }
+                        return match inferred_args.first() {
+                            Some(FidanType::Shared(inner)) => {
+                                FidanType::WeakShared(Box::new((**inner).clone()))
+                            }
+                            Some(FidanType::WeakShared(inner)) => {
+                                FidanType::WeakShared(Box::new((**inner).clone()))
+                            }
+                            Some(FidanType::Dynamic | FidanType::Unknown | FidanType::Error) => {
+                                FidanType::WeakShared(Box::new(FidanType::Dynamic))
+                            }
+                            Some(other) => {
+                                self.emit_error(
+                                    fidan_diagnostics::diag_code!("E0302"),
+                                    format!(
+                                        "WeakShared(shared) expects a Shared value, found `{}`",
+                                        self.ty_name(other)
+                                    ),
+                                    span,
+                                );
+                                FidanType::WeakShared(Box::new(FidanType::Dynamic))
+                            }
+                            None => FidanType::WeakShared(Box::new(FidanType::Dynamic)),
+                        };
+                    }
                     "floor" | "ceil" | "round" => return FidanType::Integer,
                     "abs" | "max" | "min" => return FidanType::Dynamic,
                     _ => {}
@@ -2330,6 +2396,23 @@ impl TypeChecker {
                             }
                         }
                         ret
+                    }
+                    FidanType::Shared(inner) => {
+                        let method_name = self.interner.resolve(field);
+                        match method_name.as_ref() {
+                            "get" => *inner,
+                            "set" => FidanType::Nothing,
+                            "weak" | "downgrade" => FidanType::WeakShared(inner),
+                            _ => FidanType::Dynamic,
+                        }
+                    }
+                    FidanType::WeakShared(inner) => {
+                        let method_name = self.interner.resolve(field);
+                        match method_name.as_ref() {
+                            "upgrade" => FidanType::Shared(inner),
+                            "isAlive" | "is_alive" | "alive" => FidanType::Boolean,
+                            _ => FidanType::Dynamic,
+                        }
                     }
                     _ => FidanType::Dynamic,
                 }
@@ -2828,13 +2911,14 @@ impl TypeChecker {
                     "list" => FidanType::List(Box::new(inner)),
                     "dict" | "map" => FidanType::Dict(Box::new(FidanType::String), Box::new(inner)),
                     "shared" => FidanType::Shared(Box::new(inner)),
+                    "weakshared" => FidanType::WeakShared(Box::new(inner)),
                     "pending" => FidanType::Pending(Box::new(inner)),
                     _ => {
                         // Unknown container base (e.g. `lis oftype integer`)
                         if self.registering {
                             return FidanType::Error;
                         }
-                        let candidates = ["list", "dict", "map", "shared", "pending"];
+                        let candidates = ["list", "dict", "map", "shared", "weakshared", "pending"];
                         let mut diag = Diagnostic::error(
                             fidan_diagnostics::diag_code!("E0105"),
                             format!("undefined type `{base_str}`"),
@@ -2878,7 +2962,9 @@ impl TypeChecker {
             // First-class action/callable type
             "action" | "callable" | "fn" => FidanType::Function,
             // Bare container keywords without `oftype` — treat as dynamic rather than erroring
-            "list" | "dict" | "map" | "shared" | "pending" | "tuple" => FidanType::Dynamic,
+            "list" | "dict" | "map" | "shared" | "weakshared" | "pending" | "tuple" => {
+                FidanType::Dynamic
+            }
             _ => {
                 // Might be a user-defined object type
                 if self.objects.contains_key(&sym) {
@@ -2896,8 +2982,19 @@ impl TypeChecker {
                     return FidanType::Error;
                 }
                 let builtin_names = [
-                    "integer", "float", "boolean", "string", "handle", "nothing", "dynamic",
-                    "list", "dict", "map", "shared", "pending",
+                    "integer",
+                    "float",
+                    "boolean",
+                    "string",
+                    "handle",
+                    "nothing",
+                    "dynamic",
+                    "list",
+                    "dict",
+                    "map",
+                    "shared",
+                    "weakshared",
+                    "pending",
                 ];
                 let obj_names: Vec<String> = self
                     .objects

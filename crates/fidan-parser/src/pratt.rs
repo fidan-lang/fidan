@@ -636,10 +636,13 @@ impl<'t> Parser<'t> {
                     span: Span::new(self.module.file, span.start, end),
                 })
             }
-            // `Shared(value)` / `Pending(value)` — wrap keyword as Ident so infix `(` handles the call
-            TokenKind::Shared | TokenKind::Pending => {
+            // `Shared(value)` / `WeakShared(value)` / `Pending(value)` — wrap keyword
+            // as Ident so infix `(` handles the call.
+            TokenKind::Shared | TokenKind::Weak | TokenKind::Pending => {
                 let name_str = if matches!(self.peek(), TokenKind::Shared) {
                     "Shared"
+                } else if matches!(self.peek(), TokenKind::Weak) {
+                    "WeakShared"
                 } else {
                     "Pending"
                 };

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::parallel::FidanPending;
-use crate::{FidanDict, FidanList, FidanObject, FidanString, OwnedRef, SharedRef};
+use crate::{FidanDict, FidanList, FidanObject, FidanString, OwnedRef, SharedRef, WeakSharedRef};
 
 /// Opaque function identifier — same as fidan-mir's FunctionId but re-exported here
 /// so fidan-runtime doesn't depend on fidan-mir (no circular dep).
@@ -30,6 +30,8 @@ pub enum FidanValue {
     Object(OwnedRef<FidanObject>),
     /// `Shared oftype T` — explicit ARC, cross-thread safe.
     Shared(SharedRef<FidanValue>),
+    /// `WeakShared oftype T` — non-owning weak handle to a `Shared`.
+    WeakShared(WeakSharedRef<FidanValue>),
     Function(FunctionId),
     /// Tuple: `(v1, v2, ...)`
     Tuple(Vec<FidanValue>),
@@ -84,6 +86,7 @@ impl FidanValue {
             FidanValue::Dict(_) => "dict",
             FidanValue::Object(_) => "object",
             FidanValue::Shared(_) => "Shared",
+            FidanValue::WeakShared(_) => "WeakShared",
             FidanValue::Function(_) => "action",
             FidanValue::Closure { .. } => "action",
             FidanValue::Tuple(_) => "tuple",
@@ -121,6 +124,7 @@ impl FidanValue {
                     start < end
                 }
             }
+            FidanValue::WeakShared(ws) => ws.is_alive(),
             _ => true,
         }
     }
@@ -172,6 +176,7 @@ impl FidanValue {
 
             // Intentionally shared across threads.
             FidanValue::Shared(s) => FidanValue::Shared(s.clone()),
+            FidanValue::WeakShared(ws) => FidanValue::WeakShared(ws.clone()),
 
             // Share the Arc<Mutex<JoinHandle>>.
             FidanValue::Pending(p) => FidanValue::Pending(p.clone()),
@@ -265,6 +270,14 @@ pub fn display(val: &FidanValue) -> String {
         FidanValue::Shared(s) => {
             let inner = s.0.lock().unwrap();
             format!("Shared({})", display(&inner))
+        }
+        FidanValue::WeakShared(ws) => {
+            if let Some(shared) = ws.upgrade() {
+                let inner = shared.0.lock().unwrap();
+                format!("WeakShared({})", display(&inner))
+            } else {
+                "WeakShared(<collected>)".to_string()
+            }
         }
         FidanValue::Pending(_) | FidanValue::PendingTask(_) => "<pending>".to_string(),
         FidanValue::Function(id) => format!("<action#{}>", id.0),

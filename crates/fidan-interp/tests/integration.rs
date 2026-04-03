@@ -812,6 +812,75 @@ fn parallel_for_accepts_ranges_with_jit_enabled() {
 }
 
 #[test]
+fn weak_shared_supports_upgrade_and_collection() {
+    assert!(
+        run_src(
+            r#"var shared = Shared(41)
+        var weak = WeakShared(shared)
+        assert_eq(type(weak), "WeakShared")
+        assert_eq(weak.isAlive(), true)
+
+        var revived = weak.upgrade()
+        assert_eq(type(revived), "Shared")
+        assert_eq(revived.get(), 41)
+
+        revived = nothing
+        shared = nothing
+        assert_eq(weak.isAlive(), false)
+        assert_eq(weak.upgrade(), nothing)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn weak_shared_supports_upgrade_and_collection_with_jit_enabled() {
+    assert!(
+        run_src_with_threshold(
+            r#"action warm with (n oftype integer) returns integer { return n + 1 }
+        var warmup = warm(1)
+        warmup = warm(warmup)
+
+        var shared = Shared(7)
+        var weak = shared.weak()
+        assert_eq(type(weak), "WeakShared")
+        assert_eq(weak.isAlive(), true)
+        var revived = weak.upgrade()
+        assert_eq(revived.get(), 7)
+
+        revived = nothing
+        shared = nothing
+        assert_eq(weak.isAlive(), false)
+        assert_eq(weak.upgrade(), nothing)"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn weak_shared_survives_function_scope_copy_chain() {
+    assert!(
+        run_src(
+            r#"action makeWeak returns WeakShared oftype integer {
+        var shared = Shared(41)
+        var alias = shared
+        var weak = alias.weak()
+        assert_eq(type(shared), "Shared")
+        assert_eq(type(alias), "Shared")
+        assert_eq(type(weak), "WeakShared")
+        return weak
+    }
+
+    var weak = makeWeak()
+    assert_eq(weak.isAlive(), false)
+    assert_eq(weak.upgrade(), nothing)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn concurrent_block_ok() {
     assert!(
         run_src(

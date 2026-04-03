@@ -11,6 +11,16 @@ pub struct CopyPropagation;
 impl crate::Pass for CopyPropagation {
     fn run(&self, prog: &mut MirProgram) {
         for func in &mut prog.functions {
+            let dropped_locals = func
+                .blocks
+                .iter()
+                .flat_map(|bb| bb.instructions.iter())
+                .filter_map(|instr| match instr {
+                    Instr::Drop { local } => Some(*local),
+                    _ => None,
+                })
+                .collect::<std::collections::HashSet<_>>();
+
             // Build copy map: local -> what it copies from.
             // We only forward one level (chains are resolved by running the pass
             // twice, but a single pass already handles most cases).
@@ -23,6 +33,9 @@ impl crate::Pass for CopyPropagation {
                         ..
                     } = instr
                     {
+                        if matches!(src, Operand::Local(local) if dropped_locals.contains(local)) {
+                            continue;
+                        }
                         copy_map.insert(*dest, src.clone());
                     }
                 }

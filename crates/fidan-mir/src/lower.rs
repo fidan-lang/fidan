@@ -299,6 +299,7 @@ fn fidan_ty_to_mir(ty: &FidanType) -> MirTy {
         FidanType::Enum(s) => MirTy::Enum(*s),
         FidanType::ClassType(_) => MirTy::Dynamic,
         FidanType::Shared(t) => MirTy::Shared(Box::new(fidan_ty_to_mir(t))),
+        FidanType::WeakShared(t) => MirTy::WeakShared(Box::new(fidan_ty_to_mir(t))),
         FidanType::Pending(t) => MirTy::Pending(Box::new(fidan_ty_to_mir(t))),
         FidanType::Function => MirTy::Function,
         FidanType::Unknown | FidanType::Error => MirTy::Error,
@@ -1335,6 +1336,9 @@ impl<'p> FnCtx<'p> {
     }
 
     fn lower_stmt(&mut self, stmt: &HirStmt) {
+        let stmt_alloc_start = self.func().local_count;
+        let live_before: FxHashSet<LocalId> = self.env.values().copied().collect();
+
         match stmt {
             // ── Variable declaration ────────────────────────────────────────────
             HirStmt::VarDecl { name, ty, init, .. } => {
@@ -1366,9 +1370,11 @@ impl<'p> FnCtx<'p> {
                         global: gid,
                         value: Operand::Local(dest),
                     });
-                    return; // do NOT define_var — keep globals out of the SSA env
+                    // Do NOT define_var — keep globals out of the SSA env.
+                    // The temporary local is dropped by the statement cleanup below.
+                } else {
+                    self.define_var(*name, dest);
                 }
-                self.define_var(*name, dest);
             }
 
             HirStmt::Destructure {
@@ -1809,6 +1815,26 @@ impl<'p> FnCtx<'p> {
             }
 
             HirStmt::Error { .. } => {} // skip error placeholders
+        }
+
+        if !self.terminated {
+            let live_after: FxHashSet<LocalId> = self.env.values().copied().collect();
+            let mut dead_locals: Vec<LocalId> =
+                live_before.difference(&live_after).copied().collect();
+
+            for raw in stmt_alloc_start..self.func().local_count {
+                let local = LocalId(raw);
+                if !live_after.contains(&local) {
+                    dead_locals.push(local);
+                }
+            }
+
+            dead_locals.sort_by_key(|local| std::cmp::Reverse(local.0));
+            dead_locals.dedup_by_key(|local| local.0);
+
+            for local in dead_locals {
+                self.emit(Instr::Drop { local });
+            }
         }
     }
 
@@ -2889,7 +2915,7 @@ pub fn lower_program(
     let this_name = interner.intern("this");
 
     // ── Pre-pass ①: sentinel top-level init fn ───────────────────────────────
-    let init_sym = Symbol(0);
+    let init_sym = interner.intern("__init__");
     prog.functions
         .push(MirFunction::new(FunctionId(0), init_sym, MirTy::Nothing));
 

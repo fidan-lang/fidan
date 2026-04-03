@@ -1083,6 +1083,7 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
         }
 
         for name in [
+            "fdn_clone",
             "fdn_dyn_not",
             "fdn_dyn_neg",
             "fdn_to_string",
@@ -1094,6 +1095,13 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
         ] {
             self.declare_runtime_fn(name, self.ptr_type.fn_type(&[self.ptr_type.into()], false));
         }
+
+        self.declare_runtime_fn(
+            "fdn_drop",
+            self.context
+                .void_type()
+                .fn_type(&[self.ptr_type.into()], false),
+        );
 
         for name in [
             "fdn_dyn_eq",
@@ -1905,7 +1913,18 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 let value = self.lower_operand(value)?;
                 self.call_void("fdn_list_set", &[object.into(), index.into(), value.into()])
             }
-            Instr::Drop { .. } | Instr::Nop | Instr::PushCatch(..) | Instr::PopCatch => Ok(()),
+            Instr::Drop { local } => {
+                let local_ty = self.local_type(*local);
+                if !is_native_scalar_ty(&local_ty)
+                    && !matches!(local_ty, MirTy::Nothing | MirTy::Error)
+                {
+                    let value = self.lower_operand(&Operand::Local(*local))?;
+                    self.call_void("fdn_drop", &[value.into()])?;
+                }
+                let slot = self.slot(*local)?;
+                self.store_slot_default(*local, slot)
+            }
+            Instr::Nop | Instr::PushCatch(..) | Instr::PopCatch => Ok(()),
             Instr::CertainCheck { operand, name } => {
                 let operand_ty = self.operand_type(operand);
                 if !matches!(operand_ty, MirTy::Dynamic | MirTy::Error | MirTy::Nothing) {
@@ -1928,7 +1947,8 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     .build_load(self.module.ptr_type, global.as_pointer_value(), &name)
                     .map_err(|err| anyhow!("{err}"))?
                     .into_pointer_value();
-                self.store_local_boxed(*dest, value)?;
+                let cloned = self.call_ptr("fdn_clone", &[value.into()])?;
+                self.store_local_boxed(*dest, cloned)?;
                 if let Some(namespace) = self.global_namespace_map.get(&global_id).cloned() {
                     self.namespace_locals.insert(*dest, namespace);
                 } else {
@@ -1939,9 +1959,22 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             Instr::StoreGlobal { global, value } => {
                 let value = self.lower_operand(value)?;
                 let global = self.global(*global)?;
+                let current_name = self.temp("gcurrent");
+                let current = self
+                    .module
+                    .builder
+                    .build_load(
+                        self.module.ptr_type,
+                        global.as_pointer_value(),
+                        &current_name,
+                    )
+                    .map_err(|err| anyhow!("{err}"))?
+                    .into_pointer_value();
+                self.call_void("fdn_drop", &[current.into()])?;
+                let cloned = self.call_ptr("fdn_clone", &[value.into()])?;
                 self.module
                     .builder
-                    .build_store(global.as_pointer_value(), value)
+                    .build_store(global.as_pointer_value(), cloned)
                     .map_err(|err| anyhow!("{err}"))?;
                 Ok(())
             }
@@ -2364,7 +2397,15 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
 
     fn lower_rvalue(&mut self, rhs: &Rvalue) -> Result<PointerValue<'ctx>> {
         match rhs {
-            Rvalue::Use(operand) => self.lower_operand(operand),
+            Rvalue::Use(operand) => {
+                let value = self.lower_operand(operand)?;
+                match operand {
+                    Operand::Local(local) if !is_native_scalar_ty(&self.local_type(*local)) => {
+                        self.call_ptr("fdn_clone", &[value.into()])
+                    }
+                    _ => Ok(value),
+                }
+            }
             Rvalue::Binary { op, lhs, rhs } => self.lower_binary(*op, lhs, rhs),
             Rvalue::Unary { op, operand } => self.lower_unary(*op, operand),
             Rvalue::NullCoalesce { lhs, rhs } => {
@@ -3795,6 +3836,14 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             self.store_local_native(local, value)
         } else {
             let slot = self.slot(local)?;
+            let load_name = self.temp("old.boxed");
+            let previous = self
+                .module
+                .builder
+                .build_load(self.module.ptr_type, slot, &load_name)
+                .map_err(|err| anyhow!("{err}"))?
+                .into_pointer_value();
+            self.call_void("fdn_drop", &[previous.into()])?;
             self.module
                 .builder
                 .build_store(slot, boxed)

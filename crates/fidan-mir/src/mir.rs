@@ -54,6 +54,7 @@ pub enum MirTy {
     /// Enum type (variants declared in an `enum` block).
     Enum(Symbol),
     Shared(Box<MirTy>),
+    WeakShared(Box<MirTy>),
     Pending(Box<MirTy>),
     Function,
     Error,

@@ -985,6 +985,23 @@ impl<'t> Parser<'t> {
                     span: Span::new(self.module.file, span.start, end),
                 }
             }
+            TokenKind::Weak => {
+                self.advance();
+                let param = if self.eat_type_ann() {
+                    self.parse_type_expr()
+                } else {
+                    TypeExpr::Dynamic {
+                        span: self.current_span(),
+                    }
+                };
+                let end = param.span_end();
+                let name = self.interner.intern("WeakShared");
+                TypeExpr::Oftype {
+                    base: Box::new(TypeExpr::Named { name, span }),
+                    param: Box::new(param),
+                    span: Span::new(self.module.file, span.start, end),
+                }
+            }
             TokenKind::LParen => {
                 // Tuple type: `(T1, T2, ...)` — always emits TypeExpr::Tuple.
                 // Single-element `(T)` = 1-tuple (wrapping is not transparent in types).
