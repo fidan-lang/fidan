@@ -32,22 +32,115 @@ fn parse_diagnostic_code(code: &str) -> Result<String> {
     }
 }
 
-fn parse_line_range_suffix(raw: &str) -> Option<(PathBuf, usize, usize)> {
-    let colon = raw.rfind(':')?;
-    let (path_part, range_part) = raw.split_at(colon);
-    let range_part = &range_part[1..];
-    if path_part.is_empty() || range_part.is_empty() {
-        return None;
+enum ParsedTarget {
+    PlainPath(PathBuf),
+    PathWithRange(PathBuf, usize, usize),
+    InvalidRangeSuffix,
+}
+
+fn parse_target_with_optional_range(raw: &str) -> ParsedTarget {
+    fn parse_line_number(s: &str) -> Option<usize> {
+        let n = s.parse::<usize>().ok()?;
+        (n > 0).then_some(n)
     }
 
-    let (start_s, end_s) = match range_part.split_once('-') {
-        Some((start, end)) => (start, Some(end)),
-        None => (range_part, None),
-    };
+    fn is_valid_path_prefix(path: &str) -> bool {
+        if path.is_empty() || path.ends_with(':') {
+            return false;
+        }
 
-    let start = start_s.parse::<usize>().ok()?;
-    let end = end_s.and_then(|s| s.parse::<usize>().ok()).unwrap_or(start);
-    Some((PathBuf::from(path_part), start, end))
+        match path.find(':') {
+            None => true,
+            Some(1) => {
+                path.as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_alphabetic())
+                    && path[2..].find(':').is_none()
+            }
+            Some(_) => false,
+        }
+    }
+
+    fn parse_range(raw: &str) -> Option<(PathBuf, usize, usize)> {
+        // path:start:end
+        {
+            let mut parts = raw.rsplitn(3, ':');
+            let end_s = parts.next();
+            let start_s = parts.next();
+            let path = parts.next();
+
+            if let (Some(end_s), Some(start_s), Some(path)) = (end_s, start_s, path)
+                && is_valid_path_prefix(path)
+                && !start_s.is_empty()
+                && !end_s.is_empty()
+                && !start_s.contains(':')
+                && !start_s.contains('-')
+                && !end_s.contains(':')
+                && !end_s.contains('-')
+                && let (Some(start), Some(end)) =
+                    (parse_line_number(start_s), parse_line_number(end_s))
+                && start <= end
+            {
+                return Some((PathBuf::from(path), start, end));
+            }
+        }
+
+        // path:start-end
+        if let Some((path, tail)) = raw.rsplit_once(':')
+            && is_valid_path_prefix(path)
+        {
+            if let Some((start_s, end_s)) = tail.split_once('-') {
+                if !start_s.is_empty()
+                    && !end_s.is_empty()
+                    && !start_s.contains(':')
+                    && !start_s.contains('-')
+                    && !end_s.contains(':')
+                    && !end_s.contains('-')
+                    && let (Some(start), Some(end)) =
+                        (parse_line_number(start_s), parse_line_number(end_s))
+                    && start <= end
+                {
+                    return Some((PathBuf::from(path), start, end));
+                }
+            } else if !tail.is_empty()
+                && !tail.contains(':')
+                && !tail.contains('-')
+                && let Some(line) = parse_line_number(tail)
+            {
+                return Some((PathBuf::from(path), line, line));
+            }
+        }
+
+        None
+    }
+
+    fn looks_like_range_attempt(raw: &str) -> bool {
+        if !raw.contains(':') {
+            return false;
+        }
+
+        let tail = match raw.rsplit_once(':') {
+            Some((_, tail)) => tail,
+            None => return false,
+        };
+
+        if tail.is_empty() {
+            return true;
+        }
+
+        tail.chars()
+            .all(|c| c.is_ascii_digit() || c == ':' || c == '-')
+    }
+
+    if let Some((file, start, end)) = parse_range(raw) {
+        return ParsedTarget::PathWithRange(file, start, end);
+    }
+
+    if looks_like_range_attempt(raw) {
+        return ParsedTarget::InvalidRangeSuffix;
+    }
+
+    ParsedTarget::PlainPath(PathBuf::from(raw))
 }
 
 pub(crate) fn run_explain_command(args: ExplainArgs) -> Result<()> {
@@ -95,14 +188,21 @@ pub(crate) fn run_explain_command(args: ExplainArgs) -> Result<()> {
         "expected a source file target, `--diagnostic CODE`, or `--last-error`\n\nexamples:\n  fidan explain app.fdn --line 42\n  fidan explain app.fdn:42-45\n  fidan explain --diagnostic E0101\n  fidan explain --last-error",
     )?;
 
-    if let Some((file, alias_start, alias_end)) = parse_line_range_suffix(&target) {
-        if line.is_some() || end_line.is_some() {
-            bail!("`path:line-range` cannot be combined with `--line` or `--end-line`");
+    let file = match parse_target_with_optional_range(&target) {
+        ParsedTarget::PathWithRange(file, alias_start, alias_end) => {
+            if line.is_some() || end_line.is_some() {
+                bail!("`path:line-range` cannot be combined with `--line` or `--end-line`");
+            }
+            return run_explain_line(file, alias_start, alias_end);
         }
-        return run_explain_line(file, alias_start, alias_end);
-    }
-
-    let file = PathBuf::from(&target);
+        ParsedTarget::InvalidRangeSuffix => {
+            bail!(
+                "invalid line range suffix in `{}`\n\nexpected one of:\n  path:LINE\n  path:START-END\n  path:START:END",
+                target
+            );
+        }
+        ParsedTarget::PlainPath(file) => file,
+    };
     let total_lines = source_line_count(&file)?;
     let line_start = line.unwrap_or(1);
     let line_end = end_line.unwrap_or_else(|| {
