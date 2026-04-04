@@ -28,6 +28,7 @@ fidan-interp = { workspace = true }
 fidan-runtime = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
+indicatif = { workspace = true }
 rustyline = { workspace = true }
 mimalloc = { workspace = true }
 notify = { workspace = true }

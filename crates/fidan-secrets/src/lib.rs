@@ -14,11 +14,13 @@ pub fn resolve_secret(spec: &SecretSpec<'_>, explicit: Option<&str>) -> Result<O
         return Ok(Some(value));
     }
 
-    if let Some(env_name) = spec.env_var
-        && let Ok(value) = std::env::var(env_name)
-        && let Some(value) = normalize_secret_value(&value)
-    {
-        return Ok(Some(value));
+    if let Some(env_name) = spec.env_var {
+        let env_value = match std::env::var(env_name) {
+            Ok(v) => normalize_secret_value(&v),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(err) => return Err(err.into()),
+        };
+        return Ok(env_value);
     }
 
     load_secret(spec)

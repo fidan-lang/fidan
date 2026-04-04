@@ -4,6 +4,7 @@ use fidan_driver::{
     AI_ANALYSIS_HELPER_PROTOCOL_VERSION, AiAnalysisHelperCommand, AiAnalysisHelperRequest,
     AiAnalysisHelperResponse, AiAnalysisHelperResult, AiStructuredExplanation,
 };
+use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -253,6 +254,8 @@ fn run_explain_ai(
 
     let fidan_path = std::env::current_exe()
         .context("failed to resolve the running Fidan executable for ai-analysis")?;
+
+    let file_display = file.display().to_string();
     let request = AiAnalysisHelperRequest {
         protocol_version: AI_ANALYSIS_HELPER_PROTOCOL_VERSION,
         command: AiAnalysisHelperCommand::Explain {
@@ -286,9 +289,26 @@ fn run_explain_ai(
             .context("failed to send ai-analysis helper request")?;
     }
 
+    let spinner = if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+        let pb = indicatif::ProgressBar::new_spinner();
+        pb.set_style(
+            indicatif::ProgressStyle::with_template("  {spinner:.cyan}  {msg}")
+                .expect("valid spinner template")
+                .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+        );
+        pb.enable_steady_tick(std::time::Duration::from_millis(70));
+        pb.set_message("Analyzing code with AI…");
+        pb
+    } else {
+        indicatif::ProgressBar::hidden()
+    };
+
     let output = child
         .wait_with_output()
         .context("failed while waiting for ai-analysis helper to finish")?;
+
+    spinner.finish_and_clear();
+
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         bail!(
@@ -324,11 +344,258 @@ fn run_explain_ai(
     let AiAnalysisHelperResult::Explain(explanation) = response
         .result
         .context("ai-analysis helper returned no result")?;
-    render_ai_explanation(&explanation);
+    render_ai_explanation(&explanation, &file_display, line_start, line_end);
     Ok(())
 }
 
-fn render_ai_explanation(explanation: &AiStructuredExplanation) {
+// ── Rich terminal rendering ──────────────────────────────────────────────────
+
+fn term_width() -> usize {
+    crossterm::terminal::size()
+        .map(|(w, _)| (w as usize).clamp(40, 120))
+        .unwrap_or(80)
+}
+
+fn use_color() -> bool {
+    std::io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+/// Render inline markdown-like spans (backtick code, `**bold**`, URLs) using ANSI codes.
+/// Writes the rendered text into `out`.  If `color` is false, strips markers and returns plain.
+fn render_inline_md(text: &str, color: bool) -> String {
+    if !color {
+        // Just strip any **bold** markers and return as-is.
+        return text.replace("**", "");
+    }
+
+    let mut out = String::with_capacity(text.len() + 64);
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // `code` span
+        if chars[i] == '`'
+            && let Some(end) = chars[i + 1..].iter().position(|&c| c == '`')
+        {
+            let code: String = chars[i + 1..i + 1 + end].iter().collect();
+            out.push_str("\x1b[33m`");
+            out.push_str(&code);
+            out.push_str("`\x1b[0m");
+            i += end + 2;
+            continue;
+        }
+        // **bold** span
+        if i + 1 < len
+            && chars[i] == '*'
+            && chars[i + 1] == '*'
+            && let Some(end_off) = {
+                let tail = &chars[i + 2..];
+                tail.windows(2).position(|w| w[0] == '*' && w[1] == '*')
+            }
+        {
+            let bold_text: String = chars[i + 2..i + 2 + end_off].iter().collect();
+            out.push_str("\x1b[1m");
+            out.push_str(&bold_text);
+            out.push_str("\x1b[22m");
+            i += end_off + 4;
+            continue;
+        }
+        // [text](url) link
+        if chars[i] == '['
+            && let Some(close_bracket) = chars[i + 1..].iter().position(|&c| c == ']')
+        {
+            let link_text: String = chars[i + 1..i + 1 + close_bracket].iter().collect();
+            let after_bracket = i + 1 + close_bracket + 1;
+            if after_bracket < len
+                && chars[after_bracket] == '('
+                && let Some(close_paren) = chars[after_bracket + 1..].iter().position(|&c| c == ')')
+            {
+                let url: String = chars[after_bracket + 1..after_bracket + 1 + close_paren]
+                    .iter()
+                    .collect();
+                // OSC 8 hyperlink
+                out.push_str(&format!(
+                    "\x1b]8;;{url}\x1b\\\x1b[34;4m{link_text}\x1b[24;39m\x1b]8;;\x1b\\"
+                ));
+                i += 2 + close_bracket + 2 + close_paren + 1;
+                continue;
+            }
+        }
+        // bare https?:// URL
+        if chars[i] == 'h'
+            && chars[i..]
+                .iter()
+                .collect::<String>()
+                .starts_with("https://")
+            || chars[i..].iter().collect::<String>().starts_with("http://")
+        {
+            let rest: String = chars[i..].iter().collect();
+            let url_end = rest
+                .find(|c: char| c.is_whitespace() || matches!(c, ')' | ']' | '"' | '\''))
+                .unwrap_or(rest.len());
+            let url = &rest[..url_end];
+            out.push_str(&format!(
+                "\x1b]8;;{url}\x1b\\\x1b[34;4m{url}\x1b[24;39m\x1b]8;;\x1b\\"
+            ));
+            i += url_end;
+            continue;
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Word-wrap text to `max_width`, prepending `indent` to each line.
+/// ANSI escape sequences are not counted towards the width.
+fn word_wrap(text: &str, indent: &str, max_width: usize) -> String {
+    let visible_width = |s: &str| -> usize {
+        let mut w = 0;
+        let mut in_esc = false;
+        for c in s.chars() {
+            if in_esc {
+                if c.is_ascii_alphabetic() {
+                    in_esc = false;
+                }
+            } else if c == '\x1b' {
+                in_esc = true;
+            } else {
+                w += 1;
+            }
+        }
+        w
+    };
+
+    let indent_len = indent.len();
+    let usable = max_width.saturating_sub(indent_len);
+    let mut result = String::new();
+
+    for paragraph in text.split('\n') {
+        if paragraph.trim().is_empty() {
+            result.push('\n');
+            continue;
+        }
+        let mut line_buf = String::new();
+        let mut line_vis = 0usize;
+        for word in paragraph.split_whitespace() {
+            let word_vis = visible_width(word);
+            if line_vis == 0 {
+                line_buf.push_str(word);
+                line_vis = word_vis;
+            } else if line_vis + 1 + word_vis <= usable {
+                line_buf.push(' ');
+                line_buf.push_str(word);
+                line_vis += 1 + word_vis;
+            } else {
+                result.push_str(indent);
+                result.push_str(&line_buf);
+                result.push('\n');
+                line_buf = word.to_owned();
+                line_vis = word_vis;
+            }
+        }
+        if !line_buf.is_empty() {
+            result.push_str(indent);
+            result.push_str(&line_buf);
+            result.push('\n');
+        }
+    }
+    result
+}
+
+fn render_ai_explanation(
+    explanation: &AiStructuredExplanation,
+    file_display: &str,
+    line_start: usize,
+    line_end: usize,
+) {
+    let color = use_color();
+    let width = if color { term_width() } else { 80 };
+
+    if color {
+        render_ai_explanation_rich(explanation, width, file_display, line_start, line_end);
+    } else {
+        render_ai_explanation_plain(explanation);
+    }
+}
+
+fn render_ai_explanation_rich(
+    explanation: &AiStructuredExplanation,
+    width: usize,
+    file_display: &str,
+    line_start: usize,
+    line_end: usize,
+) {
+    let provider = explanation.provider.as_deref().unwrap_or("");
+    let model = explanation.model.as_deref().unwrap_or("");
+    let via = match (provider.is_empty(), model.is_empty()) {
+        (true, _) => String::new(),
+        (false, true) => format!(" via \x1b[96m{provider}\x1b[0m"),
+        (false, false) => format!(" via \x1b[96m{provider}\x1b[0m (\x1b[35m{model}\x1b[0m)"),
+    };
+
+    // ── top box ──────────────────────────────────────────────────────────────
+    let title = " ◆  AI analysis ";
+    // Visible widths: "╭─" (2) + title + "─" fill + via + " ─╮" (3)
+    let title_vis = title.chars().count(); // visible width (chars, not bytes)
+    let via_vis = match (provider.is_empty(), model.is_empty()) {
+        (true, _) => 0,
+        (false, true) => format!(" via {}", provider).chars().count(),
+        (false, false) => format!(" via {} ({})", provider, model).chars().count(),
+    };
+    // inner = width - 4  (for ╭─ ... ─╮)
+    let inner = width.saturating_sub(4);
+    let fill_len = inner.saturating_sub(title_vis + via_vis + 1).max(1);
+    let top_fill = "─".repeat(fill_len);
+    println!(
+        "\x1b[2m╭─\x1b[0m\x1b[1;37m{title}\x1b[0m\x1b[2m{top_fill}\x1b[0m{via}\x1b[2m ─╮\x1b[0m"
+    );
+    let subtitle = if line_start < line_end {
+        format!(
+            " {} (lines {}\u{2013}{})",
+            file_display, line_start, line_end
+        )
+    } else {
+        format!(" {} (line {})", file_display, line_start)
+    };
+    let subtitle_vis = subtitle.chars().count();
+    let subtitle_pad = " ".repeat(width.saturating_sub(subtitle_vis + 2));
+    println!("\x1b[2m│\x1b[0m\x1b[2m{subtitle}\x1b[0m{subtitle_pad}\x1b[2m│\x1b[0m");
+    let bottom_bar = "─".repeat(width.saturating_sub(2));
+    println!("\x1b[2m╰{bottom_bar}╯\x1b[0m");
+    println!();
+
+    let sections: &[(&str, &str)] = &[
+        ("Summary", &explanation.summary),
+        ("Input/output behavior", &explanation.input_output_behavior),
+        ("Dependencies", &explanation.dependencies),
+        ("Possible edge cases", &explanation.possible_edge_cases),
+        (
+            "Why a certain pattern is used",
+            &explanation.why_pattern_is_used,
+        ),
+        ("Related symbols", &explanation.related_symbols),
+        ("Underlying behaviour", &explanation.underlying_behaviour),
+    ];
+
+    let sep = "─".repeat(width.saturating_sub(2));
+
+    for (title, body) in sections {
+        if body.trim().is_empty() {
+            continue;
+        }
+        // Section header: "  ■ Title"
+        println!("  \x1b[1;36m■\x1b[0m \x1b[1;37m{title}\x1b[0m");
+        println!("\x1b[2m {sep}\x1b[0m");
+        let rendered_body = render_inline_md(body, true);
+        let wrapped = word_wrap(&rendered_body, "  ", width);
+        print!("{wrapped}");
+        println!();
+    }
+}
+
+fn render_ai_explanation_plain(explanation: &AiStructuredExplanation) {
     if explanation.provider.is_some() || explanation.model.is_some() {
         println!(
             "AI analysis{}{}",
@@ -347,7 +614,7 @@ fn render_ai_explanation(explanation: &AiStructuredExplanation) {
     }
 
     fn print_section(title: &str, body: &str) {
-        println!("{title}");
+        println!("# {title}");
         println!("{body}");
         println!();
     }
@@ -1720,4 +1987,97 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
     }
     println!();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fidan_driver::AiStructuredExplanation;
+
+    fn smoke_explanation() -> AiStructuredExplanation {
+        AiStructuredExplanation {
+            provider: Some("openai-compatible".to_string()),
+            model: Some("docker.io/ai/gemma3:latest".to_string()),
+            summary: "The code defines an action named `middle` that takes an integer as input \
+                and calls the `inner` action, constructing a string with interpolation using the \
+                input integer. The `inner` action builds interpolated strings and can potentially \
+                panic."
+                .to_string(),
+            input_output_behavior: "The `middle` action receives an integer as input. It then \
+                calls the `inner` action, passing a string built by interpolating the input \
+                integer into the string 'iteration {count}'. The `inner` action's output is not \
+                explicitly defined in the provided context, but it is known to build interpolated \
+                strings and potentially panic."
+                .to_string(),
+            dependencies: "The `middle` action depends on the `inner` action.".to_string(),
+            possible_edge_cases: "The `inner` action could panic if the interpolation fails or \
+                if the input integer is invalid. The exact behavior of `inner` is not fully \
+                defined in the provided context, so potential panics or other errors within \
+                `inner` are possible."
+                .to_string(),
+            why_pattern_is_used: "The `with` pattern is used to define the input parameter of \
+                the `middle` action, specifying that it expects an integer. The `inner` action \
+                uses the interpolation pattern (`iteration {count}`) to construct a string \
+                dynamically based on the input value, which is a common Fidan pattern for \
+                building dynamic strings."
+                .to_string(),
+            related_symbols: "The `inner` action is a related symbol, as `middle` calls it. \
+                `inner` is defined at line 1 in the same file and accepts a **string** argument \
+                via `msg`. See also: https://example.com/fidan-docs/actions"
+                .to_string(),
+            underlying_behaviour: "The `middle` action's behaviour is determined by the call to \
+                `inner`. The `inner` action builds a string using interpolation, which could lead \
+                to a panic if the interpolation fails. The call chain is: `outer` → `middle(42)` \
+                → `inner(\"iteration 42\")` → `panic(\"something went wrong: iteration 42\")`."
+                .to_string(),
+        }
+    }
+
+    /// Run with `cargo test -p fidan-cli render_rich -- --nocapture` to see the output.
+    #[test]
+    fn render_rich_smoke() {
+        let explanation = smoke_explanation();
+        println!(); // blank line before output in test runner
+        render_ai_explanation_rich(&explanation, 90, "example.rs", 1, 10);
+    }
+
+    /// Run with `cargo test -p fidan-cli render_plain -- --nocapture` to see plain fallback.
+    #[test]
+    fn render_plain_smoke() {
+        let explanation = smoke_explanation();
+        println!();
+        render_ai_explanation_plain(&explanation);
+    }
+
+    #[test]
+    fn inline_md_code_spans() {
+        let out = render_inline_md("use `middle` and `inner` together", true);
+        assert!(out.contains("\x1b[33m`middle`\x1b[0m"));
+        assert!(out.contains("\x1b[33m`inner`\x1b[0m"));
+    }
+
+    #[test]
+    fn inline_md_bold() {
+        let out = render_inline_md("a **strong** word", true);
+        assert!(out.contains("\x1b[1mstrong\x1b[22m"));
+    }
+
+    #[test]
+    fn inline_md_no_color_strips_markers() {
+        let out = render_inline_md("use `code` and **bold** here", false);
+        assert!(!out.contains('\x1b'));
+        assert!(out.contains("code"));
+        assert!(out.contains("bold"));
+        // backticks are kept in plain mode (no terminal, no highlight)
+        assert!(!out.contains('*'));
+    }
+
+    #[test]
+    fn word_wrap_respects_width() {
+        let text = "one two three four five six seven eight nine ten eleven twelve";
+        let wrapped = word_wrap(text, "  ", 30);
+        for line in wrapped.lines() {
+            assert!(line.len() <= 30, "line too long: {line:?}");
+        }
+    }
 }
