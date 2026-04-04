@@ -115,6 +115,8 @@ jobs:
           set -euo pipefail
           aws s3 sync dist/release/payload "s3://$R2_BUCKET/" \
             --endpoint-url "$R2_ENDPOINT" \
+            --checksum-algorithm SHA256 \
+            --cache-control "no-cache" \
             --no-progress
 
       - name: Upload manifest to R2

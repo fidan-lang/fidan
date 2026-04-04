@@ -8,7 +8,7 @@
 
 **A modern, expressive, human-readable programming language built for clarity, safety, and real-world performance.**
 
-[![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; ![Build](https://img.shields.io/badge/build-passing-brightgreen.svg) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://github.com/fidan-lang/fidan-editors/tree/main/vscode)
+[![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; [![CI](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml/badge.svg)](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://github.com/fidan-lang/fidan-editors/tree/main/vscode)
 
 [Getting Started](#getting-started) • [Language Tour](#language-tour) • [CLI Reference](#cli-reference) • [Standard Library](#standard-library) • [VS Code Extension](#vs-code-extension) • [Contributing](#contributing)
 
@@ -854,8 +854,7 @@ For each line in range, Fidan reports:
 
 Fidan's diagnostics are designed to be read, not feared.
 
-<!-- PLACEHOLDER: screenshot of a Fidan diagnostic -->
-![Diagnostic example](https://via.placeholder.com/800x300/1a1a2e/e0e0ff?text=Fidan+diagnostic+screenshot)
+![Diagnostic example](./assets/github/diagnostics.png)
 
 Every diagnostic includes:
 - **Source context** — the offending line(s) with line numbers
@@ -915,10 +914,9 @@ print(PI)            # 3.141592653589793
 
 ## VS Code Extension
 
-<!-- PLACEHOLDER: screenshot of extension in action -->
-![VS Code Extension](https://via.placeholder.com/800x400/1a1a2e/e0e0ff?text=VS+Code+Extension+screenshot)
+![VS Code Extension](./assets/github/vscode-ext.png)
 
-Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=fidan.fidan) *(coming soon)* or build locally:
+Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=fidan.fidan) or build locally:
 
 ```bash
 git clone https://github.com/fidan-lang/fidan-editors.git
