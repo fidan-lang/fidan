@@ -338,6 +338,13 @@ var x=1 # tail
         assert_eq!(out, "use std.io as io\n");
     }
 
+    #[test]
+    fn grouped_imports_stay_grouped() {
+        let src = "use std.math.{abs, sqrt, floor, ceil, round, max, min}\n";
+        assert_eq!(fmt(src), src);
+        assert_idempotent(src);
+    }
+
     // ── Control flow ──────────────────────────────────────────────────────
 
     #[test]

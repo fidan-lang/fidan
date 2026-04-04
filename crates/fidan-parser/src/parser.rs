@@ -42,6 +42,9 @@ pub struct Parser<'t> {
     /// When `Some`, `peek` / `advance` / `current_span` read from the fragment
     /// buffer instead of the main `tokens` slice.
     pub(crate) fragment: Option<(Vec<Token>, usize)>,
+    /// Additional top-level items parsed as part of a single syntactic form.
+    /// Used for grouped imports so source order is preserved in `module.items`.
+    pending_top_level_items: Vec<ItemId>,
 }
 
 impl<'t> Parser<'t> {
@@ -66,6 +69,7 @@ impl<'t> Parser<'t> {
             sym_step,
             in_slice_start: false,
             fragment: None,
+            pending_top_level_items: Vec::new(),
         }
     }
 
@@ -254,6 +258,9 @@ impl<'t> Parser<'t> {
             let pos_before = self.pos;
             if let Some(id) = self.parse_top_level() {
                 self.module.items.push(id);
+                if !self.pending_top_level_items.is_empty() {
+                    self.module.items.append(&mut self.pending_top_level_items);
+                }
             } else {
                 self.synchronize();
                 // If synchronize made no progress (e.g. stuck on a stray `}`),
@@ -1128,7 +1135,9 @@ impl<'t> Parser<'t> {
         self.skip_one_terminator();
 
         if let Some(names) = grouped_names {
-            // Emit one Use item per grouped name; push extras directly onto the module.
+            // Emit one Use item per grouped name while preserving source order.
+            // `parse_module` pushes the returned first item, then drains
+            // `pending_top_level_items` to append the remaining members.
             let mut first_id: Option<ItemId> = None;
             for name in names {
                 let mut full_path = path.clone();
@@ -1143,7 +1152,7 @@ impl<'t> Parser<'t> {
                 if first_id.is_none() {
                     first_id = Some(id);
                 } else {
-                    self.module.items.push(id);
+                    self.pending_top_level_items.push(id);
                 }
             }
             // If the group was empty, emit a single Use with the prefix path.

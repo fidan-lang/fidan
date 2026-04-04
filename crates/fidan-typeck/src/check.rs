@@ -1773,7 +1773,15 @@ impl TypeChecker {
             Expr::FloatLit { .. } => FidanType::Float,
             Expr::BoolLit { .. } => FidanType::Boolean,
             Expr::Nothing { .. } => FidanType::Nothing,
-            Expr::StrLit { .. } | Expr::StringInterp { .. } => FidanType::String,
+            Expr::StrLit { .. } => FidanType::String,
+            Expr::StringInterp { parts, .. } => {
+                for part in parts {
+                    if let fidan_ast::InterpPart::Expr(expr) = part {
+                        let _ = self.infer_expr(expr, module);
+                    }
+                }
+                FidanType::String
+            }
 
             Expr::Ident { name, span } => {
                 // `_` is the universal wildcard — it matches any type and is never

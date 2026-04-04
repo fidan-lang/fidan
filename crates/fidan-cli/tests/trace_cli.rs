@@ -624,6 +624,45 @@ main()
 }
 
 #[test]
+fn grouped_stdlib_function_imports_in_interpolation_count_as_used() {
+    let file = make_temp_program(
+        "grouped_stdlib_imports_used_in_interp",
+        r#"use std.math.{abs, sqrt, floor, ceil, round, max, min}
+
+action main {
+    print("math {abs(-7)} {sqrt(16.0)} {floor(3.7)} {ceil(3.2)} {round(2.5)} {max(3, 7)} {min(3, 7)}")
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("check")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan check on grouped stdlib imports inside interpolation");
+
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        output.status.success(),
+        "expected grouped stdlib import interpolation example to check cleanly:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    for name in ["abs", "sqrt", "floor", "ceil", "round", "max", "min"] {
+        assert!(
+            !stderr.contains(&format!("unused import `{name}`")),
+            "grouped stdlib import `{name}` should count as used inside interpolation:\n{stderr}"
+        );
+    }
+}
+
+#[test]
 fn fix_removes_grouped_duplicate_import_member_and_keeps_one_used_copy() {
     let file = make_temp_program(
         "fix_grouped_duplicate_import",

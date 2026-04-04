@@ -4,6 +4,7 @@ use crate::emit_expr::{emit_expr, emit_type};
 use crate::emit_stmt::{emit_block, emit_stmt};
 use crate::printer::Printer;
 use fidan_ast::{Item, ItemId, Module, Param};
+use fidan_lexer::Symbol;
 use fidan_source::Span;
 
 fn has_extern_decorator(p: &Printer<'_>, decorators: &[fidan_ast::Decorator]) -> bool {
@@ -68,7 +69,9 @@ pub fn emit_module(p: &mut Printer<'_>, module: &Module) {
         p.emit_remaining_comments();
         return;
     }
-    for (i, &iid) in items.iter().enumerate() {
+    let mut i = 0usize;
+    while i < items.len() {
+        let iid = items[i];
         if i > 0 {
             let prev_group = item_group(module.arena.get_item(items[i - 1]));
             let curr_group = item_group(module.arena.get_item(iid));
@@ -86,10 +89,82 @@ pub fn emit_module(p: &mut Printer<'_>, module: &Module) {
             }
         }
         let item = module.arena.get_item(iid).clone();
+        if let Some((re_export, prefix, first_name)) = grouped_use_parts(&item) {
+            let mut names = vec![first_name];
+            let mut last_end = item_span(p, &item).end;
+            let mut j = i + 1;
+            while j < items.len() {
+                let next = module.arena.get_item(items[j]);
+                if item_group(next) != ItemGroup::Import {
+                    break;
+                }
+                let Some((next_re_export, next_prefix, next_name)) = grouped_use_parts(next) else {
+                    break;
+                };
+                if next_re_export != re_export || next_prefix != prefix {
+                    break;
+                }
+                names.push(next_name);
+                last_end = item_span(p, next).end;
+                j += 1;
+            }
+            emit_grouped_use_cluster(p, re_export, &prefix, &names);
+            p.emit_trailing_comments_for(last_end);
+            i = j;
+            continue;
+        }
         emit_item(p, &item, false);
+        i += 1;
     }
     p.emit_remaining_comments();
     // Final newline is handled by Printer::finish().
+}
+
+fn grouped_use_parts(item: &Item) -> Option<(bool, Vec<Symbol>, Symbol)> {
+    match item {
+        Item::Use {
+            path,
+            alias,
+            re_export,
+            grouped,
+            ..
+        } if *grouped && alias.is_none() && !path.is_empty() => {
+            let (last, prefix) = path.split_last().unwrap();
+            Some((*re_export, prefix.to_vec(), *last))
+        }
+        _ => None,
+    }
+}
+
+fn emit_grouped_use_cluster(
+    p: &mut Printer<'_>,
+    re_export: bool,
+    prefix: &[Symbol],
+    names: &[Symbol],
+) {
+    if re_export {
+        p.w("export ");
+    }
+    p.w("use ");
+    for (idx, seg) in prefix.iter().enumerate() {
+        if idx > 0 {
+            p.w(".");
+        }
+        let s = p.sym_s(*seg);
+        p.w(&s);
+    }
+    if !prefix.is_empty() {
+        p.w(".");
+    }
+    p.w("{");
+    for (idx, name) in names.iter().enumerate() {
+        if idx > 0 {
+            p.w(", ");
+        }
+        let s = p.sym_s(*name);
+        p.w(&s);
+    }
+    p.w("}");
 }
 
 // ── Item dispatcher ───────────────────────────────────────────────────────────
