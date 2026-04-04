@@ -707,3 +707,32 @@ main()
         "expected one import and one call-site `sqrt` to remain:\n{patched}"
     );
 }
+
+#[test]
+fn explain_line_parent_constructor_is_described_humanly() {
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("explain-line")
+        .arg("test/examples/release_mega_1_0.fdn")
+        .arg("--line")
+        .arg("200")
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan explain-line on parent constructor call");
+
+    assert!(
+        output.status.success(),
+        "expected explain-line to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("calls the parent constructor"),
+        "expected beginner-friendly parent constructor explanation:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("passing `name`"),
+        "expected argument flow to be mentioned:\n{stdout}"
+    );
+}

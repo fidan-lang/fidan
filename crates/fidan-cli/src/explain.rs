@@ -308,110 +308,161 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
         typed: &fidan_typeck::TypedModule,
         depth: usize,
     ) -> String {
-        let expr = module.arena.get_expr(eid);
-        match expr {
-            Expr::IntLit { value, .. } => format!("integer literal `{value}`"),
-            Expr::FloatLit { value, .. } => format!("float literal `{value}`"),
-            Expr::StrLit { value, .. } => format!("string literal `\"{value}\"`"),
-            Expr::BoolLit { value, .. } => format!("boolean `{value}`"),
-            Expr::Nothing { .. } => "`nothing`".to_string(),
-            Expr::Ident { name, .. } => {
-                let s = interner.resolve(*name);
-                if let Some(ty) = typed.expr_types.get(&eid) {
-                    format!("`{s}` ({ty})")
-                } else {
+        fn describe_call_target(
+            callee: &Expr,
+            args: &[fidan_ast::Arg],
+            module: &fidan_ast::Module,
+            interner: &SymbolInterner,
+            typed: &fidan_typeck::TypedModule,
+            depth: usize,
+        ) -> String {
+            let arg_phrase = if args.is_empty() {
+                "with no arguments".to_string()
+            } else if args.len() == 1 {
+                format!(
+                    "passing {}",
+                    describe_expr(args[0].value, module, interner, typed, depth + 1)
+                )
+            } else {
+                format!("with {} arguments", args.len())
+            };
+
+            match callee {
+                Expr::Parent { .. } => format!("calls the parent constructor, {arg_phrase}"),
+                Expr::Ident { name, .. } => {
+                    let name_s = interner.resolve(*name);
+                    if args.is_empty() {
+                        format!("calls `{name_s}`")
+                    } else {
+                        format!("calls `{name_s}`, {arg_phrase}")
+                    }
+                }
+                Expr::Field { object, field, .. } => {
+                    let obj = describe_expr(*object, module, interner, typed, depth + 1);
+                    let field_s = interner.resolve(*field);
+                    if args.is_empty() {
+                        format!("calls method `{field_s}` on {obj}")
+                    } else {
+                        format!("calls method `{field_s}` on {obj}, {arg_phrase}")
+                    }
+                }
+                _ => {
+                    let callee_s = describe_expr_by_ref(callee, module, interner, typed, depth + 1);
+                    if args.is_empty() {
+                        format!("calls {callee_s}")
+                    } else {
+                        format!("calls {callee_s}, {arg_phrase}")
+                    }
+                }
+            }
+        }
+
+        fn describe_expr_by_ref(
+            expr: &Expr,
+            module: &fidan_ast::Module,
+            interner: &SymbolInterner,
+            typed: &fidan_typeck::TypedModule,
+            depth: usize,
+        ) -> String {
+            match expr {
+                Expr::IntLit { value, .. } => format!("integer literal `{value}`"),
+                Expr::FloatLit { value, .. } => format!("float literal `{value}`"),
+                Expr::StrLit { value, .. } => format!("string literal `\"{value}\"`"),
+                Expr::BoolLit { value, .. } => format!("boolean `{value}`"),
+                Expr::Nothing { .. } => "`nothing`".to_string(),
+                Expr::Ident { name, .. } => {
+                    let s = interner.resolve(*name);
                     format!("`{s}`")
                 }
-            }
-            Expr::Binary { op, lhs, rhs, .. } => {
-                let op_s = match op {
-                    BinOp::Add => "+",
-                    BinOp::Sub => "-",
-                    BinOp::Mul => "*",
-                    BinOp::Div => "/",
-                    BinOp::Rem => "%",
-                    BinOp::Pow => "**",
-                    BinOp::Eq => "==",
-                    BinOp::NotEq => "!=",
-                    BinOp::Lt => "<",
-                    BinOp::LtEq => "<=",
-                    BinOp::Gt => ">",
-                    BinOp::GtEq => ">=",
-                    BinOp::And => "and",
-                    BinOp::Or => "or",
-                    BinOp::Range => "..",
-                    BinOp::RangeInclusive => "...",
-                    _ => "op",
-                };
-                if depth < 2 {
-                    let l = describe_expr(*lhs, module, interner, typed, depth + 1);
-                    let r = describe_expr(*rhs, module, interner, typed, depth + 1);
-                    format!("{l} {op_s} {r}")
-                } else {
-                    format!("(binary `{op_s}`)")
+                Expr::Binary { op, lhs, rhs, .. } => {
+                    let op_s = match op {
+                        BinOp::Add => "+",
+                        BinOp::Sub => "-",
+                        BinOp::Mul => "*",
+                        BinOp::Div => "/",
+                        BinOp::Rem => "%",
+                        BinOp::Pow => "**",
+                        BinOp::Eq => "==",
+                        BinOp::NotEq => "!=",
+                        BinOp::Lt => "<",
+                        BinOp::LtEq => "<=",
+                        BinOp::Gt => ">",
+                        BinOp::GtEq => ">=",
+                        BinOp::And => "and",
+                        BinOp::Or => "or",
+                        BinOp::Range => "..",
+                        BinOp::RangeInclusive => "...",
+                        _ => "op",
+                    };
+                    if depth < 2 {
+                        let l = describe_expr(*lhs, module, interner, typed, depth + 1);
+                        let r = describe_expr(*rhs, module, interner, typed, depth + 1);
+                        format!("{l} {op_s} {r}")
+                    } else {
+                        format!("(binary `{op_s}`)")
+                    }
                 }
-            }
-            Expr::Unary { op, operand, .. } => {
-                let op_s = match op {
-                    fidan_ast::UnOp::Neg => "-",
-                    fidan_ast::UnOp::Not => "not ",
-                    fidan_ast::UnOp::Pos => "+",
-                };
-                let inner = describe_expr(*operand, module, interner, typed, depth + 1);
-                format!("{op_s}{inner}")
-            }
-            Expr::Call { callee, args, .. } => {
-                let callee_s = describe_expr(*callee, module, interner, typed, depth + 1);
-                if args.is_empty() {
-                    format!("call to `{callee_s}`")
-                } else {
-                    format!(
-                        "call to `{callee_s}` with {} argument{}",
-                        args.len(),
-                        if args.len() == 1 { "" } else { "s" }
-                    )
+                Expr::Unary { op, operand, .. } => {
+                    let op_s = match op {
+                        fidan_ast::UnOp::Neg => "-",
+                        fidan_ast::UnOp::Not => "not ",
+                        fidan_ast::UnOp::Pos => "+",
+                    };
+                    let inner = describe_expr(*operand, module, interner, typed, depth + 1);
+                    format!("{op_s}{inner}")
                 }
+                Expr::Call { callee, args, .. } => {
+                    let callee_expr = module.arena.get_expr(*callee);
+                    describe_call_target(callee_expr, args, module, interner, typed, depth)
+                }
+                Expr::Field { object, field, .. } => {
+                    let obj = describe_expr(*object, module, interner, typed, depth + 1);
+                    let f = interner.resolve(*field);
+                    format!("{obj}.{f}")
+                }
+                Expr::Index { object, index, .. } => {
+                    let obj = describe_expr(*object, module, interner, typed, depth + 1);
+                    let idx = describe_expr(*index, module, interner, typed, depth + 1);
+                    format!("{obj}[{idx}]")
+                }
+                Expr::StringInterp { .. } => {
+                    "builds a string using embedded expressions".to_string()
+                }
+                Expr::List { elements, .. } => format!(
+                    "list literal ({} element{})",
+                    elements.len(),
+                    if elements.len() == 1 { "" } else { "s" }
+                ),
+                Expr::Dict { entries, .. } => format!(
+                    "dict literal ({} entr{})",
+                    entries.len(),
+                    if entries.len() == 1 { "y" } else { "ies" }
+                ),
+                Expr::Tuple { elements, .. } => format!(
+                    "tuple ({} element{})",
+                    elements.len(),
+                    if elements.len() == 1 { "" } else { "s" }
+                ),
+                Expr::Ternary { condition, .. } => {
+                    let c = describe_expr(*condition, module, interner, typed, depth + 1);
+                    format!("conditional expression (condition: {c})")
+                }
+                Expr::Spawn { expr, .. } => {
+                    let inner = describe_expr(*expr, module, interner, typed, depth + 1);
+                    format!("spawns async task: {inner}")
+                }
+                Expr::Await { expr, .. } => {
+                    let inner = describe_expr(*expr, module, interner, typed, depth + 1);
+                    format!("awaits result of: {inner}")
+                }
+                Expr::This { .. } => "the current object (`this`)".to_string(),
+                Expr::Parent { .. } => "the parent constructor (`parent`)".to_string(),
+                _ => "(expression)".to_string(),
             }
-            Expr::Field { object, field, .. } => {
-                let obj = describe_expr(*object, module, interner, typed, depth + 1);
-                let f = interner.resolve(*field);
-                format!("{obj}.{f}")
-            }
-            Expr::Index { object, index, .. } => {
-                let obj = describe_expr(*object, module, interner, typed, depth + 1);
-                let idx = describe_expr(*index, module, interner, typed, depth + 1);
-                format!("{obj}[{idx}]")
-            }
-            Expr::StringInterp { .. } => "string interpolation".to_string(),
-            Expr::List { elements, .. } => format!(
-                "list literal ({} element{})",
-                elements.len(),
-                if elements.len() == 1 { "" } else { "s" }
-            ),
-            Expr::Dict { entries, .. } => format!(
-                "dict literal ({} entr{})",
-                entries.len(),
-                if entries.len() == 1 { "y" } else { "ies" }
-            ),
-            Expr::Tuple { elements, .. } => format!(
-                "tuple ({} element{})",
-                elements.len(),
-                if elements.len() == 1 { "" } else { "s" }
-            ),
-            Expr::Ternary { condition, .. } => {
-                let c = describe_expr(*condition, module, interner, typed, depth + 1);
-                format!("conditional expression (condition: {c})")
-            }
-            Expr::Spawn { expr, .. } => {
-                let inner = describe_expr(*expr, module, interner, typed, depth + 1);
-                format!("spawns async task: {inner}")
-            }
-            Expr::Await { expr, .. } => {
-                let inner = describe_expr(*expr, module, interner, typed, depth + 1);
-                format!("awaits result of: {inner}")
-            }
-            _ => "(expression)".to_string(),
         }
+
+        let expr = module.arena.get_expr(eid);
+        describe_expr_by_ref(expr, module, interner, typed, depth)
     }
 
     // Plain-English description of a statement.
