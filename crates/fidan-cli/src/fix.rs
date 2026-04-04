@@ -41,10 +41,8 @@ pub(crate) fn run_fix(file: PathBuf, dry_run: bool) -> Result<()> {
                 edits.push((edit.span.start, edit.span.end, edit.replacement.clone()));
             }
         }
-        if let Some(edit) = synthesize_grouped_import_edit(diag, &src) {
-            edits.push(edit);
-        }
     }
+    edits.extend(synthesize_grouped_import_edits(&type_diags, &src));
 
     if edits.is_empty() {
         render_message_to_stderr(Severity::Note, "", "no high-confidence fixes available");
@@ -95,48 +93,96 @@ pub(crate) fn run_fix(file: PathBuf, dry_run: bool) -> Result<()> {
     Ok(())
 }
 
-fn synthesize_grouped_import_edit(diag: &Diagnostic, src: &str) -> Option<(u32, u32, String)> {
-    if !matches!(diag.code.as_str(), "W1005" | "W1007") {
-        return None;
-    }
-    if diag.suggestions.iter().any(|s| s.edit.is_some()) {
-        return None;
+fn synthesize_grouped_import_edits(diags: &[Diagnostic], src: &str) -> Vec<(u32, u32, String)> {
+    use std::collections::{HashMap, HashSet};
+
+    #[derive(Default)]
+    struct GroupedImportPlan {
+        remove_unused: HashSet<String>,
+        duplicate_removals: HashMap<String, usize>,
     }
 
-    let import_name = extract_backticked_name(&diag.message)?;
-    let lo = diag.span.start as usize;
-    let hi = diag.span.end as usize;
-    let stmt = src.get(lo..hi)?;
-    let open = stmt.find('{')?;
-    let close = stmt.rfind('}')?;
-    if close <= open {
-        return None;
+    let mut plans: HashMap<(u32, u32), GroupedImportPlan> = HashMap::new();
+    for diag in diags {
+        if !matches!(diag.code.as_str(), "W1005" | "W1007") {
+            continue;
+        }
+        if diag.suggestions.iter().any(|s| s.edit.is_some()) {
+            continue;
+        }
+        let Some(import_name) = extract_backticked_name(&diag.message) else {
+            continue;
+        };
+        let key = (diag.span.start, diag.span.end);
+        let plan = plans.entry(key).or_default();
+        match diag.code.as_str() {
+            "W1005" => {
+                plan.remove_unused.insert(import_name.to_string());
+            }
+            "W1007" => {
+                *plan
+                    .duplicate_removals
+                    .entry(import_name.to_string())
+                    .or_insert(0) += 1;
+            }
+            _ => {}
+        }
     }
 
-    let prefix = &stmt[..open];
-    let suffix = &stmt[close + 1..];
-    let inner = &stmt[open + 1..close];
-    let members = parse_grouped_import_members(inner);
-    if members.is_empty() {
-        return None;
+    let mut edits = Vec::new();
+    for ((span_lo, span_hi), mut plan) in plans {
+        let lo = span_lo as usize;
+        let hi = span_hi as usize;
+        let Some(stmt) = src.get(lo..hi) else {
+            continue;
+        };
+        let Some(open) = stmt.find('{') else {
+            continue;
+        };
+        let Some(close) = stmt.rfind('}') else {
+            continue;
+        };
+        if close <= open {
+            continue;
+        }
+
+        let prefix = &stmt[..open];
+        let suffix = &stmt[close + 1..];
+        let inner = &stmt[open + 1..close];
+        let members = parse_grouped_import_members(inner);
+        if members.is_empty() {
+            continue;
+        }
+
+        let mut seen_counts: HashMap<&str, usize> = HashMap::new();
+        let mut remaining = Vec::new();
+        for member in members {
+            if plan.remove_unused.contains(member) {
+                continue;
+            }
+            let seen = seen_counts.entry(member).or_insert(0);
+            *seen += 1;
+            if *seen > 1
+                && let Some(removals_left) = plan.duplicate_removals.get_mut(member)
+                && *removals_left > 0
+            {
+                *removals_left -= 1;
+                continue;
+            }
+            remaining.push(member);
+        }
+
+        if remaining.is_empty() {
+            let (line_lo, line_hi) = expand_statement_to_trailing_newline(src, lo, hi);
+            edits.push((line_lo as u32, line_hi as u32, String::new()));
+            continue;
+        }
+
+        let replacement = format!("{}{{{}}}{}", prefix, remaining.join(", "), suffix);
+        edits.push((span_lo, span_hi, replacement));
     }
 
-    let remaining: Vec<&str> = members
-        .iter()
-        .copied()
-        .filter(|member| *member != import_name)
-        .collect();
-    if remaining.len() == members.len() {
-        return None;
-    }
-
-    if remaining.is_empty() {
-        let (line_lo, line_hi) = expand_statement_to_trailing_newline(src, lo, hi);
-        return Some((line_lo as u32, line_hi as u32, String::new()));
-    }
-
-    let replacement = format!("{}{{{}}}{}", prefix, remaining.join(", "), suffix);
-    Some((diag.span.start, diag.span.end, replacement))
+    edits
 }
 
 fn extract_backticked_name(message: &str) -> Option<&str> {

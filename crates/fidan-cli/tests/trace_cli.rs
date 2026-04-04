@@ -622,3 +622,49 @@ main()
         "direct imported stdlib function should count as used when called:\n{stderr}"
     );
 }
+
+#[test]
+fn fix_removes_grouped_duplicate_import_member_and_keeps_one_used_copy() {
+    let file = make_temp_program(
+        "fix_grouped_duplicate_import",
+        r#"use std.math.{sqrt, sqrt, floor}
+
+action main {
+    print(sqrt(9.0))
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("fix")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan fix on grouped duplicate import demo");
+
+    assert!(
+        output.status.success(),
+        "expected fidan fix to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let patched = std::fs::read_to_string(&file).expect("read patched file");
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        patched.contains("use std.math.{sqrt}"),
+        "expected exactly one used grouped import to remain:\n{patched}"
+    );
+    assert!(
+        !patched.contains("floor"),
+        "expected unused grouped imports to be removed:\n{patched}"
+    );
+    assert_eq!(
+        patched.matches("sqrt").count(),
+        2,
+        "expected one import and one call-site `sqrt` to remain:\n{patched}"
+    );
+}
