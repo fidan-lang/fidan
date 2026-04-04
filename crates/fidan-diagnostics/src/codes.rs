@@ -20,7 +20,7 @@
 //! | R4xxx  | Runtime — sandbox / security      |
 //! | R9xxx  | Runtime — parallel / concurrency  |
 //!
-//! Use `fidan explain-diag <code>` (Phase 10) for the full HTML/text description of
+//! Use `fidan explain --diagnostic <code>` (Phase 10) for the full HTML/text description of
 //! any code.
 
 /// Metadata for one Fidan diagnostic code.
@@ -28,7 +28,7 @@
 pub struct DiagnosticCode {
     /// Stable 5-character identifier, e.g. `"E0101"`.
     pub code: &'static str,
-    /// Short title shown by `fidan explain-diag` and in IDE tooltips.
+    /// Short title shown by `fidan explain --diagnostic` and in IDE tooltips.
     pub title: &'static str,
     /// Broad category tag, e.g. `"names"`, `"types"`, `"io"`.
     pub category: &'static str,

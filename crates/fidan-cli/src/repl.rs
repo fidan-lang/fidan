@@ -1,3 +1,4 @@
+use crate::last_error;
 use crate::pipeline::{DiagnosticBudget, emit_mir_safety_diags, render_trace_to_stderr};
 use anyhow::Result;
 use fidan_ast::{Item, Module, Stmt};
@@ -217,6 +218,7 @@ fn render_repl_diagnostics(
         }
         budget.render_diag(diag, source_map, &[]);
         rendered_any = true;
+        last_error::record(diag.code.as_str(), &diag.message);
         if let Some(history) = error_history.as_deref_mut() {
             history.push(format!("[{}]: {}", diag.code, diag.message));
         }
@@ -654,6 +656,7 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
             }
             Ok(None) => {}
             Err(e) => {
+                last_error::record(e.code, &e.message);
                 render_message_to_stderr(Severity::Error, e.code, &e.message);
                 render_trace_to_stderr(&e.trace, trace_mode);
                 if trace_mode != TraceMode::Full {

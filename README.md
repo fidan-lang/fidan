@@ -714,7 +714,7 @@ fidan <COMMAND> [OPTIONS] [FILE]
 | `fidan profile <file>` | Run with profiling output |
 | `fidan repl` | Start the interactive REPL |
 | `fidan lsp` | Start the Language Server (used by editors) |
-| `fidan explain-diag <code>` | Show detailed explanation of a diagnostic code |
+| `fidan explain --diagnostic <code>` | Show detailed explanation of a diagnostic code |
 | `fidan explain <file> --line N` | Explain what line N does (static analysis) |
 | `fidan new <name>` | Scaffold a new Fidan project |
 | `fidan new <name> --package` | Scaffold a Dal-ready package with `dal.toml` and `src/init.fdn` |
@@ -831,8 +831,14 @@ The REPL supports multi-line input, continuation prompts (`...`), `:cancel` to a
 ### `explain` — static analysis on demand
 
 ```bash
+fidan explain app.fdn            # explain the whole file
 fidan explain app.fdn --line 42
+fidan explain app.fdn --end-line 20
 fidan explain app.fdn --line 10 --end-line 20
+fidan explain app.fdn:42-45 # alias for range form
+fidan explain file.fdn --ai # AI-powered explanation of the whole file (requires toolchain)
+fidan explain --diagnostic E0401
+fidan explain --last-error
 ```
 
 For each line in range, Fidan reports:
@@ -873,7 +879,7 @@ Diagnostic codes:
 | `R9xxx` | Runtime errors | `R9001` parallel task failed |
 
 ```bash
-fidan explain-diag E0401    # print a full page of documentation for this code
+fidan explain --diagnostic E0401    # print a full page of documentation for this code
 ```
 
 ---
@@ -956,7 +962,7 @@ npm run compile
 | `Fidan: Build File` | Build binary (debug or release) |
 | `Fidan: Run Tests in Current File` | Run `test {}` blocks |
 | `Fidan: Profile Current File` | Profile execution |
-| `Fidan: Explain Diagnostic Code` | Prompt for a code → `fidan explain-diag` |
+| `Fidan: Explain Diagnostic Code` | Prompt for a code → `fidan explain --diagnostic` |
 | `Fidan: Explain Current Line(s)` | Selection-aware `fidan explain` |
 | `Fidan: New Project` | Scaffold project with folder picker |
 | `Fidan: Open REPL` | Open the interactive REPL |

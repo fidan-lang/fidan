@@ -1,13 +1,125 @@
+use crate::last_error;
 use anyhow::{Context, Result, bail};
 use std::path::PathBuf;
 
-pub(crate) fn run_explain(code: &str) {
+pub(crate) struct ExplainArgs {
+    pub target: Option<String>,
+    pub line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub diagnostic: Option<String>,
+    pub last_error: bool,
+    pub ai: bool,
+}
+
+fn source_line_count(file: &PathBuf) -> Result<usize> {
+    let src = std::fs::read_to_string(file).with_context(|| format!("cannot read {:?}", file))?;
+    Ok(src.lines().count().max(1))
+}
+
+fn parse_diagnostic_code(code: &str) -> Result<String> {
+    let normalized = code.trim().to_uppercase();
+    let bytes = normalized.as_bytes();
+    if bytes.len() == 5
+        && matches!(bytes[0], b'E' | b'W' | b'R')
+        && bytes[1..].iter().all(|b| b.is_ascii_digit())
+    {
+        Ok(normalized)
+    } else {
+        bail!(
+            "diagnostic code must look like E0101, W1005, or R0001; got `{}`",
+            code.trim()
+        )
+    }
+}
+
+fn parse_line_range_suffix(raw: &str) -> Option<(PathBuf, usize, usize)> {
+    let colon = raw.rfind(':')?;
+    let (path_part, range_part) = raw.split_at(colon);
+    let range_part = &range_part[1..];
+    if path_part.is_empty() || range_part.is_empty() {
+        return None;
+    }
+
+    let (start_s, end_s) = match range_part.split_once('-') {
+        Some((start, end)) => (start, Some(end)),
+        None => (range_part, None),
+    };
+
+    let start = start_s.parse::<usize>().ok()?;
+    let end = end_s.and_then(|s| s.parse::<usize>().ok()).unwrap_or(start);
+    Some((PathBuf::from(path_part), start, end))
+}
+
+pub(crate) fn run_explain_command(args: ExplainArgs) -> Result<()> {
+    let ExplainArgs {
+        target,
+        line,
+        end_line,
+        diagnostic,
+        last_error,
+        ai,
+    } = args;
+
+    if diagnostic.is_some() {
+        if target.is_some() || line.is_some() || end_line.is_some() || ai || last_error {
+            bail!(
+                "`--diagnostic` cannot be combined with a file target, `--line`, `--end-line`, `--ai`, or `--last-error`"
+            );
+        }
+        let code = parse_diagnostic_code(diagnostic.as_deref().unwrap())?;
+        return run_explain_diagnostic(&code);
+    }
+
+    if last_error {
+        if target.is_some() || line.is_some() || end_line.is_some() || ai {
+            bail!(
+                "`--last-error` cannot be combined with a file target, `--line`, `--end-line`, or `--ai`"
+            );
+        }
+        let record = last_error::load()?;
+        println!(
+            "last recorded diagnostic: {} — {}",
+            record.code, record.message
+        );
+        println!();
+        return run_explain_diagnostic(&record.code);
+    }
+
+    if ai {
+        bail!(
+            "`fidan explain --ai` is not wired yet. Use deterministic `fidan explain` for now, or install the AI explainer toolchain once it lands."
+        );
+    }
+
+    let target = target.context(
+        "expected a source file target, `--diagnostic CODE`, or `--last-error`\n\nexamples:\n  fidan explain app.fdn --line 42\n  fidan explain app.fdn:42-45\n  fidan explain --diagnostic E0101\n  fidan explain --last-error",
+    )?;
+
+    if let Some((file, alias_start, alias_end)) = parse_line_range_suffix(&target) {
+        if line.is_some() || end_line.is_some() {
+            bail!("`path:line-range` cannot be combined with `--line` or `--end-line`");
+        }
+        return run_explain_line(file, alias_start, alias_end);
+    }
+
+    let file = PathBuf::from(&target);
+    let total_lines = source_line_count(&file)?;
+    let line_start = line.unwrap_or(1);
+    let line_end = end_line.unwrap_or_else(|| {
+        if line.is_some() {
+            line_start
+        } else {
+            total_lines
+        }
+    });
+    run_explain_line(file, line_start, line_end)
+}
+
+fn run_explain_diagnostic(code: &str) -> Result<()> {
     let entry = match fidan_diagnostics::lookup_code(code) {
         Some(e) => e,
         None => {
-            eprintln!("  unknown diagnostic code `{code}`");
-            eprintln!("  run `fidan explain-diag` without arguments to list all codes");
-            return;
+            bail!("unknown diagnostic code `{code}`");
         }
     };
 
@@ -27,6 +139,7 @@ pub(crate) fn run_explain(code: &str) {
         Some(text) => print!("{text}"),
         None => println!("  (no extended explanation is available for this code yet)"),
     }
+    Ok(())
 }
 
 // ── fidan explain ───────────────────────────────────────────────────────────────────
@@ -43,9 +156,10 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
     if line_start == 0 {
         bail!("--line is 1-based; 0 is not a valid line number");
     }
-    let line_end = line_end.max(line_start);
-
     let src = std::fs::read_to_string(&file).with_context(|| format!("cannot read {:?}", file))?;
+    let total_lines = src.lines().count().max(1);
+    let line_start = line_start.min(total_lines);
+    let line_end = line_end.max(line_start).min(total_lines);
     let source_name = file.display().to_string();
     let source_map = Arc::new(SourceMap::new());
     let interner = Arc::new(SymbolInterner::new());

@@ -14,6 +14,7 @@ mod distribution;
 mod explain;
 mod fix;
 mod imports;
+mod last_error;
 mod pipeline;
 mod prompts;
 mod repl;
@@ -244,23 +245,27 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Print the description of a diagnostic code (e.g. `E0101`, `W2001`)
-    #[command(name = "explain-diag")]
-    ExplainDiag {
-        /// Diagnostic code
-        code: String,
-    },
-    /// Explain what one or more source lines do (static analysis, offline, zero AI)
+    /// Explain source lines, a diagnostic code, or the last recorded error
     #[command(name = "explain")]
     Explain {
-        /// Path to the .fdn source file
-        file: PathBuf,
+        /// Path to the .fdn source file.
+        /// You can also use `path/to/file.fdn:100` or `path/to/file.fdn:100-120`.
+        target: Option<String>,
         /// First line to explain (1-based)
         #[arg(long)]
-        line: usize,
+        line: Option<usize>,
         /// Last line to explain, inclusive (defaults to --line)
         #[arg(long)]
         end_line: Option<usize>,
+        /// Explain a diagnostic code instead of source lines (for example `E0101`)
+        #[arg(long)]
+        diagnostic: Option<String>,
+        /// Explain the last recorded diagnostic automatically
+        #[arg(long)]
+        last_error: bool,
+        /// Use an installed AI explainer instead of the deterministic explainer
+        #[arg(long)]
+        ai: bool,
     },
     /// Scaffold a new Fidan project in a new directory
     New {
@@ -652,15 +657,21 @@ fn run_cli() -> Result<()> {
             indent_width,
             max_line_len,
         } => pipeline::run_fmt(file, in_place, check, indent_width, max_line_len),
-        Command::ExplainDiag { code } => {
-            explain::run_explain(&code);
-            Ok(())
-        }
         Command::Explain {
-            file,
+            target,
             line,
             end_line,
-        } => explain::run_explain_line(file, line, end_line.unwrap_or(line)),
+            diagnostic,
+            last_error,
+            ai,
+        } => explain::run_explain_command(explain::ExplainArgs {
+            target,
+            line,
+            end_line,
+            diagnostic,
+            last_error,
+            ai,
+        }),
         Command::Repl {
             trace,
             max_errors_per_input,

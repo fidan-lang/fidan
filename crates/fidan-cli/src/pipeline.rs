@@ -1,4 +1,5 @@
 use crate::imports::{collect_file_import_paths, filter_hir_module, pre_register_hir_into_tc};
+use crate::last_error;
 use crate::replay::save_replay_bundle;
 use anyhow::{Context, Result, bail};
 use fidan_diagnostics::{Diagnostic, Severity, render_message_to_stderr};
@@ -467,6 +468,7 @@ impl DiagnosticBudget {
             return;
         }
         if !is_suppressed(diag.code.as_str(), suppress) {
+            last_error::record(diag.code.as_str(), &diag.message);
             fidan_diagnostics::render_to_stderr(diag, source_map);
         }
     }
@@ -475,7 +477,9 @@ impl DiagnosticBudget {
         if severity == Severity::Error && !self.count_error() {
             return;
         }
-        render_message_to_stderr(severity, code, message);
+        let code_s = code.to_string();
+        last_error::record(&code_s, message);
+        render_message_to_stderr(severity, code_s, message);
     }
 }
 
@@ -510,17 +514,19 @@ pub(crate) fn emit_mir_safety_diags(
             continue;
         }
         let pl = if diag.count == 1 { "" } else { "s" };
+        let message = format!(
+            "action `{}` contains {} unawaited `spawn` expression{} \
+                 — result{} silently discarded; use `await` or `var _ = spawn \u{2026}` to suppress",
+            diag.fn_name,
+            diag.count,
+            pl,
+            if diag.count == 1 { " is" } else { "s are" },
+        );
+        last_error::record("W1004", &message);
         render_message_to_stderr(
             Severity::Warning,
             fidan_diagnostics::diag_code!("W1004"),
-            &format!(
-                "action `{}` contains {} unawaited `spawn` expression{} \
-                 — result{} silently discarded; use `await` or `var _ = spawn \u{2026}` to suppress",
-                diag.fn_name,
-                diag.count,
-                pl,
-                if diag.count == 1 { " is" } else { "s are" },
-            ),
+            &message,
         );
     }
 
@@ -583,13 +589,15 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
         && opts.input.extension().and_then(|e| e.to_str()) != Some("fdn")
         && !is_suppressed("W2001", &opts.suppress)
     {
+        let message = format!(
+            "file '{}' does not have the '.fdn' extension",
+            opts.input.display()
+        );
+        last_error::record("W2001", &message);
         render_message_to_stderr(
             Severity::Warning,
             fidan_diagnostics::diag_code!("W2001"),
-            &format!(
-                "file '{}' does not have the '.fdn' extension",
-                opts.input.display()
-            ),
+            &message,
         );
     }
 
@@ -1008,6 +1016,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                         sandbox,
                     );
                     if let Err(err) = result {
+                        last_error::record(err.code, &err.message);
                         render_message_to_stderr(Severity::Error, err.code, &err.message);
                         if !err.trace.is_empty() && opts.trace != TraceMode::None {
                             render_trace_to_stderr(&err.trace, opts.trace);
@@ -1100,6 +1109,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                     &prog_name,
                 );
                 if let Err(ref err) = result {
+                    last_error::record(err.code, &err.message);
                     render_message_to_stderr(Severity::Error, err.code, &err.message);
                     if !err.trace.is_empty() {
                         render_trace_to_stderr(&err.trace, TraceMode::Short);
@@ -1117,7 +1127,11 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                             Err(e) => render_message_to_stderr(
                                 Severity::Error,
                                 fidan_diagnostics::diag_code!("R0001"),
-                                &format!("could not write profile output: {e}"),
+                                &{
+                                    let message = format!("could not write profile output: {e}");
+                                    last_error::record("R0001", &message);
+                                    message
+                                },
                             ),
                         }
                     }
@@ -1156,6 +1170,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                         ) {
                             (Err(err), _) => {
                                 // Initialisation (top-level code) crashed before tests ran.
+                                last_error::record(err.code, &err.message);
                                 render_message_to_stderr(
                                     Severity::Error,
                                     err.code,

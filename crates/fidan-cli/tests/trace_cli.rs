@@ -1,6 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn workspace_root() -> PathBuf {
@@ -61,6 +62,11 @@ fn run_repl_session(args: &[&str], input: &[u8]) -> std::process::Output {
     }
 
     child.wait_with_output().expect("wait for repl output")
+}
+
+fn last_error_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
 }
 
 #[test]
@@ -735,4 +741,202 @@ fn explain_line_parent_constructor_is_described_humanly() {
         stdout.contains("passing `name`"),
         "expected argument flow to be mentioned:\n{stdout}"
     );
+}
+
+#[test]
+fn explain_accepts_diagnostic_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("explain")
+        .arg("--diagnostic")
+        .arg("E0101")
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan explain --diagnostic");
+
+    assert!(
+        output.status.success(),
+        "expected explain --diagnostic to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("error[E0101]"),
+        "expected diagnostic explain header:\n{stdout}"
+    );
+}
+
+#[test]
+fn explain_accepts_file_range_alias() {
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("explain")
+        .arg("test/examples/release_mega_1_0.fdn:200-200")
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan explain with file:range alias");
+
+    assert!(
+        output.status.success(),
+        "expected explain file:range alias to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("calls the parent constructor"),
+        "expected file:range alias to reach the same line explanation:\n{stdout}"
+    );
+}
+
+#[test]
+fn explain_defaults_to_whole_file_when_no_line_flags_are_given() {
+    let file = make_temp_program(
+        "explain_whole_file",
+        r#"use std.io
+
+action main {
+    print("hello")
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("explain")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan explain on whole file");
+
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        output.status.success(),
+        "expected explain without line flags to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("imports namespace `std.io`"),
+        "expected whole-file explain to include top-level import lines:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("calls `print`, passing string literal `\"hello\"`")
+            && stdout.contains("calls `main`"),
+        "expected whole-file explain to include later statements too:\n{stdout}"
+    );
+}
+
+#[test]
+fn explain_with_only_end_line_starts_from_line_one() {
+    let file = make_temp_program(
+        "explain_end_line_only",
+        r#"use std.io
+
+action main {
+    print("hello")
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("explain")
+        .arg(&file)
+        .arg("--end-line")
+        .arg("1")
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan explain with only --end-line");
+
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        output.status.success(),
+        "expected explain with only --end-line to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("imports namespace `std.io`"),
+        "expected --end-line alone to start from line 1:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("declares action `main`"),
+        "expected --end-line 1 to stop before later lines:\n{stdout}"
+    );
+}
+
+#[test]
+fn explain_last_error_replays_last_recorded_diagnostic() {
+    let _guard = last_error_lock().lock().expect("last-error lock");
+    let cache_path = std::env::temp_dir().join(format!(
+        "fidan_last_error_test_{}_{}.txt",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos()
+    ));
+    let file = make_temp_program(
+        "explain_last_error",
+        r#"action main {
+    print(unknown_name)
+}
+
+main()
+"#,
+    );
+
+    let check_output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("check")
+        .arg(&file)
+        .env("FIDAN_LAST_ERROR_PATH", &cache_path)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan check to seed last error");
+
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        !check_output.status.success(),
+        "expected malformed program to fail check:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+
+    let explain_output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("explain")
+        .arg("--last-error")
+        .env("FIDAN_LAST_ERROR_PATH", &cache_path)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan explain --last-error");
+
+    assert!(
+        explain_output.status.success(),
+        "expected explain --last-error to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&explain_output.stdout),
+        String::from_utf8_lossy(&explain_output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&explain_output.stdout);
+    assert!(
+        stdout.contains("last recorded diagnostic: E0101"),
+        "expected last-error header to mention the recorded code:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("error[E0101]"),
+        "expected --last-error to explain the stored diagnostic:\n{stdout}"
+    );
+
+    std::fs::remove_file(&cache_path).ok();
 }
