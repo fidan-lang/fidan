@@ -6,6 +6,7 @@ members = [
   "crates/fidan-lexer",
   "crates/fidan-ast",
   "crates/fidan-parser",
+  "crates/fidan-secrets",
   "crates/fidan-diagnostics",
   "crates/fidan-typeck",
   "crates/fidan-hir",
@@ -19,6 +20,7 @@ members = [
   "crates/fidan-codegen-cranelift",
   "crates/fidan-codegen-llvm",
   "crates/fidan-llvm-helper",
+  "crates/fidan-ai-analysis-helper",
   "crates/fidan-stdlib",
   "crates/fidan-driver",
   "crates/fidan-fmt",
@@ -39,6 +41,7 @@ fidan-source = { path = "crates/fidan-source" }
 fidan-lexer = { path = "crates/fidan-lexer" }
 fidan-ast = { path = "crates/fidan-ast" }
 fidan-parser = { path = "crates/fidan-parser" }
+fidan-secrets = { path = "crates/fidan-secrets" }
 fidan-diagnostics = { path = "crates/fidan-diagnostics" }
 fidan-typeck = { path = "crates/fidan-typeck" }
 fidan-hir = { path = "crates/fidan-hir" }

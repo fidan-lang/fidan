@@ -48,7 +48,16 @@ pub struct ToolchainMetadata {
     pub backend_protocol_version: u32,
     pub helper_relpath: String,
     #[serde(default)]
+    pub exec_commands: Vec<ToolchainExecCommand>,
+    #[serde(default)]
     pub archive_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolchainExecCommand {
+    pub namespace: String,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -607,6 +616,17 @@ pub fn host_triple() -> String {
         std::env::consts::ARCH
     };
     format!("{arch}-{os}")
+}
+
+pub fn is_valid_exec_namespace(namespace: &str) -> bool {
+    let mut chars = namespace.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() {
+        return false;
+    }
+    chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
 }
 
 fn normalize_installs(mut installs: InstallsMetadata) -> InstallsMetadata {

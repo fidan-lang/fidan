@@ -39,6 +39,8 @@ pub struct ToolchainRelease {
     pub url: String,
     pub sha256: String,
     pub helper_relpath: String,
+    #[serde(default)]
+    pub exec_commands: Vec<fidan_driver::ToolchainExecCommand>,
     pub supported_fidan_versions: String,
     pub backend_protocol_version: u32,
 }

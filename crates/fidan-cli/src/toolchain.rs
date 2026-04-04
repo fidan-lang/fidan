@@ -166,6 +166,7 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
         supported_fidan_versions: release.supported_fidan_versions.clone(),
         backend_protocol_version: release.backend_protocol_version,
         helper_relpath: release.helper_relpath.clone(),
+        exec_commands: release.exec_commands.clone(),
         archive_sha256: Some(release.sha256.clone()),
     };
     let metadata_bytes =

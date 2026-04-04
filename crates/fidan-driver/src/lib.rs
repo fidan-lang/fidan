@@ -1,5 +1,6 @@
 //! `fidan-driver` — Compilation pipeline orchestration.
 
+mod ai_analysis;
 pub mod dal;
 mod frontend;
 pub mod install;
@@ -9,6 +10,13 @@ mod pipeline;
 pub mod progress;
 mod session;
 
+pub use ai_analysis::{
+    AI_ANALYSIS_HELPER_PROTOCOL_VERSION, AI_ANALYSIS_PROTOCOL_VERSION, AiAnalysisCommand,
+    AiAnalysisHelperCommand, AiAnalysisHelperRequest, AiAnalysisHelperResponse,
+    AiAnalysisHelperResult, AiAnalysisRequest, AiAnalysisResponse, AiAnalysisResult, AiDependency,
+    AiDeterministicExplainLine, AiDiagnosticSummary, AiExplainContext, AiModuleOutline,
+    AiOutlineItem, AiProjectSummary, AiStructuredExplanation, AiSymbolInfo, AiSymbolRef,
+};
 pub use frontend::{
     FrontendOutput, ImportFilter, ResolvedImport, UnresolvedImport, collect_file_import_paths,
     compile_file_to_mir, compile_source_to_mir, detect_import_cycles, filter_hir_module,
@@ -16,7 +24,8 @@ pub use frontend::{
 };
 pub use install::{
     ActiveVersionMetadata, EffectiveBackend, InstallEntry, InstallsMetadata, ResolvedToolchain,
-    ToolchainMetadata, resolve_fidan_home, resolve_install_root,
+    ToolchainExecCommand, ToolchainMetadata, is_valid_exec_namespace, resolve_fidan_home,
+    resolve_install_root,
 };
 pub use llvm_helper::{
     LLVM_BACKEND_PROTOCOL_VERSION, LlvmBackendPayload, LlvmCompileRequest, LlvmCompileResponse,

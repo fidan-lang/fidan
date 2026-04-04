@@ -1,0 +1,134 @@
+name: Toolchain Bundle Publish
+
+on:
+  workflow_call:
+    inputs:
+      artifact_pattern:
+        description: "Artifact name pattern to download"
+        required: true
+        type: string
+      bundle_artifact_name:
+        description: "Artifact name for the merged distribution bundle"
+        required: true
+        type: string
+      publish:
+        description: "Upload payload and manifest to R2"
+        required: true
+        type: boolean
+
+jobs:
+  bundle:
+    name: Merge manifest
+    runs-on: ubuntu-latest
+    environment: releases
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download toolchain artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: ${{ inputs.artifact_pattern }}
+          path: dist/release
+          merge-multiple: true
+
+      - name: Fetch existing manifest if present
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          AWS_REGION: auto
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/release
+          if aws s3api head-object \
+            --bucket "$R2_BUCKET" \
+            --key "manifest.json" \
+            --endpoint-url "$R2_ENDPOINT" >/dev/null 2>&1; then
+            if aws s3 cp "s3://$R2_BUCKET/manifest.json" dist/release/existing-manifest.json \
+              --endpoint-url "$R2_ENDPOINT" \
+              --no-progress; then
+              echo "Fetched existing manifest from R2"
+            else
+              echo "Remote manifest exists but could not be fetched from R2" >&2
+              exit 1
+            fi
+          else
+            status_code="$(curl -sS -o /dev/null -w "%{http_code}" "https://releases.fidan.dev/manifest.json" || true)"
+            if [ "$status_code" = "404" ]; then
+              echo "No existing manifest present yet"
+            elif [ -z "$status_code" ] || [ "$status_code" = "000" ]; then
+              echo "Failed to probe existing manifest state" >&2
+              exit 1
+            else
+              echo "Remote manifest appears to exist but could not be read from R2" >&2
+              exit 1
+            fi
+          fi
+
+      - name: Merge distribution manifest
+        shell: pwsh
+        run: |
+          if (Test-Path "dist/release/existing-manifest.json") {
+            ./scripts/merge-distribution-manifest.ps1 `
+              -FragmentsRoot "dist/release/fragments" `
+              -ExistingManifestPath "dist/release/existing-manifest.json" `
+              -OutputPath "dist/release/manifest.json"
+          } else {
+            ./scripts/merge-distribution-manifest.ps1 `
+              -FragmentsRoot "dist/release/fragments" `
+              -OutputPath "dist/release/manifest.json"
+          }
+
+      - name: Upload merged distribution bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ inputs.bundle_artifact_name }}
+          path: dist/release
+
+  publish:
+    name: Publish to R2
+    runs-on: ubuntu-latest
+    needs: bundle
+    if: ${{ inputs.publish }}
+    environment: releases
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ inputs.bundle_artifact_name }}
+          path: dist/release
+
+      - name: Upload payload to R2
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          AWS_REGION: auto
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          aws s3 sync dist/release/payload "s3://$R2_BUCKET/" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --no-progress
+
+      - name: Upload manifest to R2
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
+          AWS_REGION: auto
+          AWS_DEFAULT_REGION: auto
+          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
+        run: |
+          set -euo pipefail
+          aws s3 cp dist/release/manifest.json "s3://$R2_BUCKET/manifest.json" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --content-type "application/json" \
+            --cache-control "no-cache"

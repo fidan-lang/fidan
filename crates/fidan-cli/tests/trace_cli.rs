@@ -1,3 +1,7 @@
+use fidan_driver::{
+    AI_ANALYSIS_HELPER_PROTOCOL_VERSION, AI_ANALYSIS_PROTOCOL_VERSION, AiAnalysisCommand,
+    AiAnalysisRequest, AiAnalysisResponse, ToolchainExecCommand, ToolchainMetadata,
+};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -67,6 +71,151 @@ fn run_repl_session(args: &[&str], input: &[u8]) -> std::process::Output {
 fn last_error_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
+}
+
+fn make_temp_dir(name: &str) -> PathBuf {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system time before unix epoch")
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!("fidan_{name}_{}_{}", std::process::id(), nonce));
+    std::fs::create_dir_all(&path).expect("create temp dir");
+    path
+}
+
+fn host_triple() -> String {
+    if cfg!(target_os = "windows") {
+        if cfg!(target_arch = "x86_64") {
+            "x86_64-pc-windows-msvc".to_string()
+        } else {
+            "aarch64-pc-windows-msvc".to_string()
+        }
+    } else if cfg!(target_os = "macos") {
+        if cfg!(target_arch = "x86_64") {
+            "x86_64-apple-darwin".to_string()
+        } else {
+            "aarch64-apple-darwin".to_string()
+        }
+    } else if cfg!(target_arch = "x86_64") {
+        "x86_64-unknown-linux-gnu".to_string()
+    } else {
+        "aarch64-unknown-linux-gnu".to_string()
+    }
+}
+
+fn make_fake_ai_helper(root: &Path, response_json: &str, capture_path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        let helper = root.join("fidan-ai-analysis-helper.cmd");
+        let response_path = root.join("response.json");
+        std::fs::write(&response_path, response_json).expect("write helper response");
+        let escaped_capture = capture_path.display().to_string().replace('\'', "''");
+        let escaped_response = response_path.display().to_string().replace('\'', "''");
+        let script = format!(
+            "@echo off\r\npowershell -NoProfile -Command \"$inputJson = [Console]::In.ReadToEnd(); Set-Content -LiteralPath '{escaped_capture}' -Value $inputJson -NoNewline; [Console]::Out.Write((Get-Content -LiteralPath '{escaped_response}' -Raw))\"\r\n"
+        );
+        std::fs::write(&helper, script).expect("write helper cmd");
+        helper
+    } else {
+        let helper = root.join("fidan-ai-analysis-helper.sh");
+        let script = format!(
+            "#!/bin/sh\ncat > '{}'\nprintf '%s' '{}'\n",
+            capture_path.display(),
+            response_json.replace('\'', "'\"'\"'")
+        );
+        std::fs::write(&helper, script).expect("write helper sh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&helper)
+                .expect("helper metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&helper, perms).expect("set helper perms");
+        }
+        helper
+    }
+}
+
+fn install_fake_ai_toolchain(home: &Path, helper_path: &Path) {
+    install_fake_toolchain(
+        home,
+        "ai-analysis",
+        "1.0.2-test",
+        AI_ANALYSIS_HELPER_PROTOCOL_VERSION,
+        helper_path,
+        vec![ToolchainExecCommand {
+            namespace: "ai".to_string(),
+            description: Some("AI analysis helper commands".to_string()),
+        }],
+    );
+}
+
+fn install_fake_toolchain(
+    home: &Path,
+    kind: &str,
+    version: &str,
+    backend_protocol_version: u32,
+    helper_path: &Path,
+    exec_commands: Vec<ToolchainExecCommand>,
+) {
+    let toolchain_dir = home
+        .join("toolchains")
+        .join(kind)
+        .join(host_triple())
+        .join(version);
+    std::fs::create_dir_all(&toolchain_dir).expect("create toolchain dir");
+    let helper_name = helper_path.file_name().expect("helper filename");
+    std::fs::copy(helper_path, toolchain_dir.join(helper_name)).expect("copy helper");
+    let metadata = ToolchainMetadata {
+        schema_version: 1,
+        kind: kind.to_string(),
+        toolchain_version: version.to_string(),
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        host_triple: host_triple(),
+        supported_fidan_versions: format!("^{}", env!("CARGO_PKG_VERSION")),
+        backend_protocol_version,
+        helper_relpath: helper_name.to_string_lossy().to_string(),
+        exec_commands,
+        archive_sha256: None,
+    };
+    std::fs::write(
+        toolchain_dir.join("metadata.json"),
+        serde_json::to_vec_pretty(&metadata).expect("serialize metadata"),
+    )
+    .expect("write metadata");
+}
+
+fn make_fake_exec_helper(root: &Path, stdout_text: &str, args_capture_path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        let helper = root.join("fidan-exec-helper.cmd");
+        let stdout_path = root.join("stdout.txt");
+        std::fs::write(&stdout_path, stdout_text).expect("write helper stdout");
+        let escaped_args = args_capture_path.display().to_string().replace('\'', "''");
+        let escaped_stdout = stdout_path.display().to_string().replace('\'', "''");
+        let script = format!(
+            "@echo off\r\nset \"FAKE_EXEC_ARGS=%*\"\r\npowershell -NoProfile -Command \"Set-Content -LiteralPath '{escaped_args}' -Value $env:FAKE_EXEC_ARGS -NoNewline; [Console]::Out.Write((Get-Content -LiteralPath '{escaped_stdout}' -Raw))\"\r\n"
+        );
+        std::fs::write(&helper, script).expect("write exec helper cmd");
+        helper
+    } else {
+        let helper = root.join("fidan-exec-helper.sh");
+        let script = format!(
+            "#!/bin/sh\nprintf '%s' \"$*\" > '{}'\nprintf '%s' '{}'\n",
+            args_capture_path.display(),
+            stdout_text.replace('\'', "'\"'\"'")
+        );
+        std::fs::write(&helper, script).expect("write exec helper sh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&helper)
+                .expect("helper metadata")
+                .permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&helper, perms).expect("set helper perms");
+        }
+        helper
+    }
 }
 
 #[test]
@@ -939,4 +1088,444 @@ main()
     );
 
     std::fs::remove_file(&cache_path).ok();
+}
+
+#[test]
+fn internal_ai_analysis_explain_context_returns_grounded_data() {
+    let file = make_temp_program(
+        "ai_analysis_context",
+        r#"use std.io
+
+action main {
+    print("hello")
+}
+
+main()
+"#,
+    );
+    let request = AiAnalysisRequest {
+        protocol_version: AI_ANALYSIS_PROTOCOL_VERSION,
+        command: AiAnalysisCommand::ExplainContext {
+            file: file.clone(),
+            line_start: Some(1),
+            line_end: Some(6),
+        },
+    };
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("__ai-analysis")
+        .current_dir(workspace_root())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn fidan __ai-analysis");
+    child
+        .stdin
+        .as_mut()
+        .expect("analysis stdin")
+        .write_all(&serde_json::to_vec(&request).expect("serialize request"))
+        .expect("write analysis request");
+    let output = child.wait_with_output().expect("wait for analysis output");
+
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        output.status.success(),
+        "expected internal ai-analysis request to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let response: AiAnalysisResponse =
+        serde_json::from_slice(&output.stdout).expect("parse analysis response");
+    assert!(response.success, "expected success response: {response:?}");
+    let context = match response.result.expect("analysis result") {
+        fidan_driver::AiAnalysisResult::ExplainContext(context) => context,
+        other => panic!("unexpected result kind: {other:?}"),
+    };
+    assert!(context.selected_source.contains("print(\"hello\")"));
+    assert!(
+        context.dependencies.iter().any(|dep| dep.path == "std.io"),
+        "expected std.io dependency in context: {:?}",
+        context.dependencies
+    );
+    assert!(
+        context
+            .deterministic_lines
+            .iter()
+            .any(|line| line.what_it_does.contains("calls `print`")),
+        "expected print call in deterministic context: {:?}",
+        context.deterministic_lines
+    );
+    assert!(
+        context.module_outline.iter().any(|item| item.name == "main"
+            && item
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("calls `print`"))),
+        "expected outline to include action body summary: {:?}",
+        context.module_outline
+    );
+}
+
+#[test]
+fn explain_ai_uses_installed_toolchain_and_renders_structured_output() {
+    let home = make_temp_dir("ai_toolchain_home");
+    let helper_src = make_temp_dir("ai_toolchain_helper");
+    let capture_path = helper_src.join("capture.json");
+    let helper_response = serde_json::json!({
+        "protocol_version": AI_ANALYSIS_HELPER_PROTOCOL_VERSION,
+        "success": true,
+        "result": {
+            "kind": "explain",
+            "summary": "Simple summary",
+            "input_output_behavior": "Reads input and prints output.",
+            "dependencies": "Uses std.io.",
+            "possible_edge_cases": "No edge cases.",
+            "why_pattern_is_used": "The action keeps the entry point explicit.",
+            "related_symbols": "main",
+            "underlying_behaviour": "Runs top-level code and calls main().",
+            "provider": "test-provider",
+            "model": "test-model"
+        },
+        "error": null
+    });
+    let helper_path = make_fake_ai_helper(&helper_src, &helper_response.to_string(), &capture_path);
+    install_fake_ai_toolchain(&home, &helper_path);
+
+    let file = make_temp_program(
+        "explain_ai",
+        r#"action main {
+    print("hello")
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("explain")
+        .arg(&file)
+        .arg("--ai")
+        .env("FIDAN_HOME", &home)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan explain --ai");
+
+    std::fs::remove_file(&file).ok();
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&helper_src).ok();
+
+    assert!(
+        output.status.success(),
+        "expected explain --ai to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("summary"));
+    assert!(stdout.contains("input/output behavior"));
+    assert!(stdout.contains("underlying behaviour"));
+    assert!(stdout.contains("Simple summary"));
+}
+
+#[test]
+fn explain_ai_passes_optional_prompt_to_helper() {
+    let home = make_temp_dir("ai_toolchain_prompt_home");
+    let helper_src = make_temp_dir("ai_toolchain_prompt_helper");
+    let capture_path = helper_src.join("capture.json");
+    let helper_response = serde_json::json!({
+        "protocol_version": AI_ANALYSIS_HELPER_PROTOCOL_VERSION,
+        "success": true,
+        "result": {
+            "kind": "explain",
+            "summary": "Prompted summary",
+            "input_output_behavior": "IO behavior.",
+            "dependencies": "Dependencies.",
+            "possible_edge_cases": "Edge cases.",
+            "why_pattern_is_used": "Pattern reason.",
+            "related_symbols": "main",
+            "underlying_behaviour": "Behaviour.",
+            "provider": "test-provider",
+            "model": "test-model"
+        },
+        "error": null
+    });
+    let helper_path = make_fake_ai_helper(&helper_src, &helper_response.to_string(), &capture_path);
+    install_fake_ai_toolchain(&home, &helper_path);
+
+    let file = make_temp_program(
+        "explain_ai_prompt",
+        r#"action main {
+    print("hello")
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("explain")
+        .arg(&file)
+        .arg("--ai")
+        .arg("Explain this regarding control flow and user-visible effects.")
+        .env("FIDAN_HOME", &home)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan explain --ai with prompt");
+
+    assert!(
+        output.status.success(),
+        "expected explain --ai prompt to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let captured = std::fs::read_to_string(&capture_path).expect("read helper capture");
+    let request: fidan_driver::AiAnalysisHelperRequest =
+        serde_json::from_str(&captured).expect("parse helper request");
+    let prompt = match request.command {
+        fidan_driver::AiAnalysisHelperCommand::Explain { prompt, .. } => prompt,
+    };
+    assert_eq!(
+        prompt.as_deref(),
+        Some("Explain this regarding control flow and user-visible effects.")
+    );
+
+    std::fs::remove_file(&file).ok();
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&helper_src).ok();
+}
+
+#[test]
+fn explain_ai_path_range_alias_is_forwarded_to_helper() {
+    let home = make_temp_dir("ai_toolchain_alias_home");
+    let helper_src = make_temp_dir("ai_toolchain_alias_helper");
+    let capture_path = helper_src.join("capture.json");
+    let helper_response = serde_json::json!({
+        "protocol_version": AI_ANALYSIS_HELPER_PROTOCOL_VERSION,
+        "success": true,
+        "result": {
+            "kind": "explain",
+            "summary": "Alias summary",
+            "input_output_behavior": "IO behavior.",
+            "dependencies": "Dependencies.",
+            "possible_edge_cases": "Edge cases.",
+            "why_pattern_is_used": "Pattern reason.",
+            "related_symbols": "main",
+            "underlying_behaviour": "Behaviour.",
+            "provider": "test-provider",
+            "model": "test-model"
+        },
+        "error": null
+    });
+    let helper_path = make_fake_ai_helper(&helper_src, &helper_response.to_string(), &capture_path);
+    install_fake_ai_toolchain(&home, &helper_path);
+
+    let file = make_temp_program(
+        "explain_ai_alias",
+        r#"action main {
+    print("hello")
+    print("again")
+}
+
+main()
+"#,
+    );
+    let target = format!("{}:2-3", file.display());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("explain")
+        .arg(&target)
+        .arg("--ai")
+        .env("FIDAN_HOME", &home)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan explain path:range --ai");
+
+    assert!(
+        output.status.success(),
+        "expected explain path:range --ai to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let captured = std::fs::read_to_string(&capture_path).expect("read helper capture");
+    let request: fidan_driver::AiAnalysisHelperRequest =
+        serde_json::from_str(&captured).expect("parse helper request");
+    let (line_start, line_end) = match request.command {
+        fidan_driver::AiAnalysisHelperCommand::Explain {
+            line_start,
+            line_end,
+            ..
+        } => (line_start, line_end),
+    };
+    assert_eq!(line_start, Some(2));
+    assert_eq!(line_end, Some(3));
+
+    std::fs::remove_file(&file).ok();
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&helper_src).ok();
+}
+
+#[test]
+fn exec_lists_registered_namespaces() {
+    let home = make_temp_dir("exec_list_home");
+    let helper_src = make_temp_dir("exec_list_helper");
+    let args_capture = helper_src.join("args.txt");
+    let helper_path = make_fake_exec_helper(&helper_src, "doctor ok", &args_capture);
+    install_fake_ai_toolchain(&home, &helper_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("exec")
+        .env("FIDAN_HOME", &home)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan exec");
+
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&helper_src).ok();
+
+    assert!(
+        output.status.success(),
+        "expected `fidan exec` to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("ai"));
+    assert!(stdout.contains("AI analysis helper commands"));
+}
+
+#[test]
+fn exec_delegates_registered_namespace_to_helper() {
+    let home = make_temp_dir("exec_delegate_home");
+    let helper_src = make_temp_dir("exec_delegate_helper");
+    let args_capture = helper_src.join("args.txt");
+    let helper_path = make_fake_exec_helper(&helper_src, "doctor ok", &args_capture);
+    install_fake_ai_toolchain(&home, &helper_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .args(["exec", "ai", "doctor"])
+        .env("FIDAN_HOME", &home)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan exec ai doctor");
+
+    let captured_args = std::fs::read_to_string(&args_capture).expect("read exec args capture");
+
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&helper_src).ok();
+
+    assert!(
+        output.status.success(),
+        "expected `fidan exec ai doctor` to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(captured_args.trim(), "exec ai doctor");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("doctor ok"));
+}
+
+#[test]
+fn exec_rejects_unknown_namespace() {
+    let home = make_temp_dir("exec_unknown_home");
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .args(["exec", "missing"])
+        .env("FIDAN_HOME", &home)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan exec missing");
+
+    std::fs::remove_dir_all(&home).ok();
+
+    assert!(
+        !output.status.success(),
+        "expected unknown exec namespace to fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("no external exec namespaces are registered")
+            || String::from_utf8_lossy(&output.stderr).contains("is not registered"),
+        "expected missing namespace error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn exec_unknown_namespace_lists_available_namespaces() {
+    let home = make_temp_dir("exec_unknown_known_home");
+    let helper_src = make_temp_dir("exec_unknown_known_helper");
+    let args_capture = helper_src.join("args.txt");
+    let helper_path = make_fake_exec_helper(&helper_src, "doctor ok", &args_capture);
+    install_fake_ai_toolchain(&home, &helper_path);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .args(["exec", "missing"])
+        .env("FIDAN_HOME", &home)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan exec missing with registered namespaces");
+
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&helper_src).ok();
+
+    assert!(
+        !output.status.success(),
+        "expected unknown exec namespace to fail"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("available namespaces: ai"));
+}
+
+#[test]
+fn exec_rejects_conflicting_namespaces_from_different_toolchains() {
+    let home = make_temp_dir("exec_conflict_home");
+    let helper_src = make_temp_dir("exec_conflict_helper");
+    let args_capture = helper_src.join("args.txt");
+    let helper_path = make_fake_exec_helper(&helper_src, "doctor ok", &args_capture);
+    install_fake_toolchain(
+        &home,
+        "ai-analysis",
+        "1.0.2-test",
+        AI_ANALYSIS_HELPER_PROTOCOL_VERSION,
+        &helper_path,
+        vec![ToolchainExecCommand {
+            namespace: "ai".to_string(),
+            description: Some("AI analysis helper commands".to_string()),
+        }],
+    );
+    install_fake_toolchain(
+        &home,
+        "other-toolchain",
+        "1.0.2-test",
+        1,
+        &helper_path,
+        vec![ToolchainExecCommand {
+            namespace: "ai".to_string(),
+            description: Some("Conflicting namespace".to_string()),
+        }],
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .args(["exec", "ai"])
+        .env("FIDAN_HOME", &home)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run conflicting exec namespace");
+
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&helper_src).ok();
+
+    assert!(
+        !output.status.success(),
+        "expected conflicting namespace to fail"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("exported by both toolchains"),
+        "expected namespace conflict error:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

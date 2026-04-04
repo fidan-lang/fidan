@@ -27,6 +27,44 @@ function Get-WorkspaceVersion {
   return $match.Groups[1].Value
 }
 
+function Get-HelperPackageName {
+  param([string]$Kind)
+
+  switch ($Kind) {
+    "llvm" { return "fidan-llvm-helper" }
+    "ai-analysis" { return "fidan-ai-analysis-helper" }
+    default { throw "Unsupported toolchain kind '$Kind'" }
+  }
+}
+
+function Get-HelperBinaryName {
+  param([string]$Kind)
+
+  $baseName = Get-HelperPackageName -Kind $Kind
+  if ($IsWindows) {
+    return "$baseName.exe"
+  }
+  return $baseName
+}
+
+function Get-ExecCommandRegistrations {
+  param([string]$Kind)
+
+  switch ($Kind) {
+    "ai-analysis" {
+      return @(
+        @{
+          namespace   = "ai"
+          description = "AI analysis helper commands"
+        }
+      )
+    }
+    default {
+      return @()
+    }
+  }
+}
+
 function Get-LlvmBackendProtocolVersion {
   $source = Get-Content "crates/fidan-driver/src/llvm_helper.rs" -Raw
   $match = [regex]::Match(
@@ -433,6 +471,9 @@ function Get-UnixHostToolchainCommand {
 
 function Invoke-HelperBuild {
   param(
+    [string]$Kind,
+    [string]$HelperPackage,
+    [string]$HelperBinary,
     [string]$LlvmRoot,
     [string]$HelperCargoFeatures,
     [string]$LlvmSysPrefixEnvVar,
@@ -468,106 +509,111 @@ function Invoke-HelperBuild {
   }
 
   try {
-    $helperBinaryName = if ($IsWindows) { "fidan-llvm-helper.exe" } else { "fidan-llvm-helper" }
-    $helperPath = Join-Path "target/release" $helperBinaryName
+    $helperPath = Join-Path "target/release" $HelperBinary
     if (Test-Path -LiteralPath $helperPath) {
       Remove-Item -LiteralPath $helperPath -Force
     }
 
-    $llvmBinDir = Join-Path $LlvmRoot "bin"
-    $llvmLibDir = Join-Path $LlvmRoot "lib"
-    if (Test-Path -LiteralPath $llvmBinDir) {
-      if ($IsWindows) {
-        $env:PATH = "$llvmBinDir$([System.IO.Path]::PathSeparator)$previousPath"
+    if ($Kind -eq "llvm") {
+      if (-not $LlvmRoot) {
+        throw "LLVM helper build requires -LlvmRoot"
       }
-      else {
-        $env:PATH = "$previousPath$([System.IO.Path]::PathSeparator)$llvmBinDir"
-      }
-    }
 
-    if ($LlvmSysPrefixEnvVar) {
-      Set-Item -Path "Env:$LlvmSysPrefixEnvVar" -Value $LlvmRoot
-    }
-
-    $effectiveLibPaths = @($HelperAdditionalLibPaths | Where-Object { $_ })
-    $helperLibShimDir = New-HelperLibraryShim -LibraryPaths $effectiveLibPaths
-    if ($helperLibShimDir) {
-      $effectiveLibPaths = @($helperLibShimDir) + $effectiveLibPaths
-    }
-
-    if ($effectiveLibPaths.Count -gt 0) {
-      $libPathValue = $effectiveLibPaths -join [System.IO.Path]::PathSeparator
-      if ($libPathValue) {
-        if ($hadLib -and $previousLib) {
-          $env:LIB = "$libPathValue$([System.IO.Path]::PathSeparator)$previousLib"
+      $llvmBinDir = Join-Path $LlvmRoot "bin"
+      $llvmLibDir = Join-Path $LlvmRoot "lib"
+      if (Test-Path -LiteralPath $llvmBinDir) {
+        if ($IsWindows) {
+          $env:PATH = "$llvmBinDir$([System.IO.Path]::PathSeparator)$previousPath"
         }
         else {
-          $env:LIB = $libPathValue
+          $env:PATH = "$previousPath$([System.IO.Path]::PathSeparator)$llvmBinDir"
         }
       }
-    }
 
-    $llvmConfigPath = Get-LlvmConfigPath -LlvmRoot $LlvmRoot
-    if ($llvmConfigPath) {
-      $env:LLVM_CONFIG_PATH = $llvmConfigPath
-    }
-    elseif ($hadLlvmConfigPath) {
-      $env:LLVM_CONFIG_PATH = $previousLlvmConfigPath
-    }
-    else {
-      Remove-Item Env:LLVM_CONFIG_PATH -ErrorAction SilentlyContinue
-    }
-
-    if (-not $IsWindows) {
-      $env:CC = Get-UnixHostToolchainCommand -Candidates @("cc", "clang", "gcc") -XcrunFind "clang"
-      $env:CXX = Get-UnixHostToolchainCommand -Candidates @("c++", "clang++", "g++") -XcrunFind "clang++"
-      $env:AR = Get-UnixHostToolchainCommand -Candidates @("ar", "llvm-ar") -XcrunFind "ar"
-      $env:RANLIB = Get-UnixHostToolchainCommand -Candidates @("ranlib", "llvm-ranlib") -XcrunFind "ranlib"
-    }
-    if ($IsMacOS) {
-      if (Test-Path -LiteralPath $llvmLibDir) {
-        Get-ChildItem -LiteralPath $llvmLibDir -Force |
-        Where-Object {
-          -not $_.PSIsContainer -and (
-            $_.Name -like "libc++*.dylib*" -or
-            $_.Name -like "libc++abi*.dylib*" -or
-            $_.Name -like "libunwind*.dylib*"
-          )
-        } |
-        Remove-Item -Force
+      if ($LlvmSysPrefixEnvVar) {
+        Set-Item -Path "Env:$LlvmSysPrefixEnvVar" -Value $LlvmRoot
       }
 
-      # Use the host C++ driver for the helper binary itself so it links against
-      # the platform runtime, while still routing through ld64.lld via RUSTFLAGS.
-      # Using the packaged LLVM clang here can bake in @rpath/libc++.1.dylib
-      # without an LC_RPATH on the helper binary.
-      Set-Item -Path "Env:$linkerEnvName" -Value $env:CXX
+      $effectiveLibPaths = @($HelperAdditionalLibPaths | Where-Object { $_ })
+      $helperLibShimDir = New-HelperLibraryShim -LibraryPaths $effectiveLibPaths
+      if ($helperLibShimDir) {
+        $effectiveLibPaths = @($helperLibShimDir) + $effectiveLibPaths
+      }
 
-      $macOsRustFlags = @(
-        "-Clink-arg=-fuse-ld=lld",
-        "-Clink-arg=-lc++abi"
-      )
-      if ($hadRustFlags -and $previousRustFlags) {
-        $env:RUSTFLAGS = $previousRustFlags
-        foreach ($flag in $macOsRustFlags) {
-          if ($env:RUSTFLAGS -notmatch [regex]::Escape($flag)) {
-            $env:RUSTFLAGS = "$($env:RUSTFLAGS) $flag"
+      if ($effectiveLibPaths.Count -gt 0) {
+        $libPathValue = $effectiveLibPaths -join [System.IO.Path]::PathSeparator
+        if ($libPathValue) {
+          if ($hadLib -and $previousLib) {
+            $env:LIB = "$libPathValue$([System.IO.Path]::PathSeparator)$previousLib"
+          }
+          else {
+            $env:LIB = $libPathValue
           }
         }
       }
+
+      $llvmConfigPath = Get-LlvmConfigPath -LlvmRoot $LlvmRoot
+      if ($llvmConfigPath) {
+        $env:LLVM_CONFIG_PATH = $llvmConfigPath
+      }
+      elseif ($hadLlvmConfigPath) {
+        $env:LLVM_CONFIG_PATH = $previousLlvmConfigPath
+      }
       else {
-        $env:RUSTFLAGS = ($macOsRustFlags -join " ")
+        Remove-Item Env:LLVM_CONFIG_PATH -ErrorAction SilentlyContinue
+      }
+
+      if (-not $IsWindows) {
+        $env:CC = Get-UnixHostToolchainCommand -Candidates @("cc", "clang", "gcc") -XcrunFind "clang"
+        $env:CXX = Get-UnixHostToolchainCommand -Candidates @("c++", "clang++", "g++") -XcrunFind "clang++"
+        $env:AR = Get-UnixHostToolchainCommand -Candidates @("ar", "llvm-ar") -XcrunFind "ar"
+        $env:RANLIB = Get-UnixHostToolchainCommand -Candidates @("ranlib", "llvm-ranlib") -XcrunFind "ranlib"
+      }
+      if ($IsMacOS) {
+        if (Test-Path -LiteralPath $llvmLibDir) {
+          Get-ChildItem -LiteralPath $llvmLibDir -Force |
+          Where-Object {
+            -not $_.PSIsContainer -and (
+              $_.Name -like "libc++*.dylib*" -or
+              $_.Name -like "libc++abi*.dylib*" -or
+              $_.Name -like "libunwind*.dylib*"
+            )
+          } |
+          Remove-Item -Force
+        }
+
+        # Use the host C++ driver for the helper binary itself so it links against
+        # the platform runtime, while still routing through ld64.lld via RUSTFLAGS.
+        # Using the packaged LLVM clang here can bake in @rpath/libc++.1.dylib
+        # without an LC_RPATH on the helper binary.
+        Set-Item -Path "Env:$linkerEnvName" -Value $env:CXX
+
+        $macOsRustFlags = @(
+          "-Clink-arg=-fuse-ld=lld",
+          "-Clink-arg=-lc++abi"
+        )
+        if ($hadRustFlags -and $previousRustFlags) {
+          $env:RUSTFLAGS = $previousRustFlags
+          foreach ($flag in $macOsRustFlags) {
+            if ($env:RUSTFLAGS -notmatch [regex]::Escape($flag)) {
+              $env:RUSTFLAGS = "$($env:RUSTFLAGS) $flag"
+            }
+          }
+        }
+        else {
+          $env:RUSTFLAGS = ($macOsRustFlags -join " ")
+        }
       }
     }
 
     if ($HelperCargoFeatures) {
-      cargo build -p fidan-llvm-helper --release --features $HelperCargoFeatures
+      cargo build -p $HelperPackage --release --features $HelperCargoFeatures
     }
     else {
-      cargo build -p fidan-llvm-helper --release
+      cargo build -p $HelperPackage --release
     }
     if ($LASTEXITCODE -ne 0) {
-      throw "Failed to build fidan-llvm-helper"
+      throw "Failed to build $HelperPackage"
     }
   }
   finally {
@@ -644,8 +690,9 @@ function Invoke-HelperBuild {
   }
 }
 
-if (($UpstreamArchivePath -eq "") -and ($UpstreamArchiveUrl -eq "")) {
-  throw "Either -UpstreamArchivePath or -UpstreamArchiveUrl is required"
+$hasUpstreamArchive = ($UpstreamArchivePath -ne "") -or ($UpstreamArchiveUrl -ne "")
+if (($Kind -eq "llvm") -and (-not $hasUpstreamArchive)) {
+  throw "Either -UpstreamArchivePath or -UpstreamArchiveUrl is required for LLVM toolchain packaging"
 }
 
 if (-not $ToolchainVersion) {
@@ -662,12 +709,14 @@ if ($BackendProtocolVersion -le 0) {
     $BackendProtocolVersion = 1
   }
 }
-if (-not $UpstreamArchiveSha256) {
-  throw "-UpstreamArchiveSha256 is required for reproducible LLVM toolchain packaging"
+if ($hasUpstreamArchive -and (-not $UpstreamArchiveSha256)) {
+  throw "-UpstreamArchiveSha256 is required when packaging a toolchain from an upstream archive"
 }
 
 $hostTriple = Get-HostTriple
-$helperBinary = if ($IsWindows) { "fidan-llvm-helper.exe" } else { "fidan-llvm-helper" }
+$helperPackage = Get-HelperPackageName -Kind $Kind
+$helperBinary = Get-HelperBinaryName -Kind $Kind
+$execCommands = @(Get-ExecCommandRegistrations -Kind $Kind)
 
 $payloadDir = Join-Path $OutputRoot "payload"
 $artifactDir = Join-Path (Join-Path (Join-Path $payloadDir "toolchains/$Kind") $ToolchainVersion) $hostTriple
@@ -690,40 +739,52 @@ Initialize-CleanDirectory -Path $stageDir
 $upstreamName = if ($UpstreamArchivePath) {
   Split-Path -Leaf $UpstreamArchivePath
 }
-else {
+elseif ($UpstreamArchiveUrl) {
   Split-Path -Leaf ([Uri]$UpstreamArchiveUrl).AbsolutePath
 }
-if (-not $upstreamName) {
+if ($hasUpstreamArchive -and (-not $upstreamName)) {
   $upstreamName = "$Kind-upstream.tar.gz"
 }
-$localArchivePath = Join-Path $inputDir $upstreamName
+$localArchivePath = if ($hasUpstreamArchive) {
+  Join-Path $inputDir $upstreamName
+}
+else {
+  ""
+}
 
 try {
-  if ($UpstreamArchivePath) {
-    Copy-Item -LiteralPath $UpstreamArchivePath -Destination $localArchivePath
-  }
-  else {
-    Copy-ResourceToFile -SourceUrl $UpstreamArchiveUrl -Destination $localArchivePath
-  }
-
-  $actualSha = Get-Sha256 -Path $localArchivePath
-  if ($actualSha -ne $UpstreamArchiveSha256.ToLowerInvariant()) {
-    throw "SHA-256 mismatch for upstream archive (expected $UpstreamArchiveSha256, got $actualSha)"
-  }
-
-  Expand-AnyArchive -ArchivePath $localArchivePath -Destination $extractDir
-  Remove-Item -LiteralPath $localArchivePath -Force
-  $localArchivePath = ""
-
   $helperDir = Join-Path $stageDir "helper"
-  $llvmDir = Join-Path $stageDir "llvm"
   New-Item -ItemType Directory -Force -Path $helperDir | Out-Null
-  Move-ArchiveRootContents -ExtractRoot $extractDir -Destination $llvmDir
-  Copy-UpstreamLegalFiles -SourceRoot $llvmDir -StageDir $stageDir -Kind $Kind
+
+  $payloadRoot = $null
+  if ($hasUpstreamArchive) {
+    if ($UpstreamArchivePath) {
+      Copy-Item -LiteralPath $UpstreamArchivePath -Destination $localArchivePath
+    }
+    else {
+      Copy-ResourceToFile -SourceUrl $UpstreamArchiveUrl -Destination $localArchivePath
+    }
+
+    $actualSha = Get-Sha256 -Path $localArchivePath
+    if ($actualSha -ne $UpstreamArchiveSha256.ToLowerInvariant()) {
+      throw "SHA-256 mismatch for upstream archive (expected $UpstreamArchiveSha256, got $actualSha)"
+    }
+
+    Expand-AnyArchive -ArchivePath $localArchivePath -Destination $extractDir
+    Remove-Item -LiteralPath $localArchivePath -Force
+    $localArchivePath = ""
+
+    $payloadRoot = Join-Path $stageDir $Kind
+    Move-ArchiveRootContents -ExtractRoot $extractDir -Destination $payloadRoot
+    Copy-UpstreamLegalFiles -SourceRoot $payloadRoot -StageDir $stageDir -Kind $Kind
+  }
 
   if (-not $SkipBuild) {
     Invoke-HelperBuild `
-      -LlvmRoot $llvmDir `
+      -Kind $Kind `
+      -HelperPackage $helperPackage `
+      -HelperBinary $helperBinary `
+      -LlvmRoot $payloadRoot `
       -HelperCargoFeatures $HelperCargoFeatures `
       -LlvmSysPrefixEnvVar $LlvmSysPrefixEnvVar `
       -HelperAdditionalLibPaths $HelperAdditionalLibPaths
@@ -735,8 +796,8 @@ try {
   }
   Copy-Item -LiteralPath $helperPath -Destination (Join-Path $helperDir $helperBinary)
 
-  if ($Kind -eq "llvm") {
-    Remove-LlvmPayload -LlvmRoot $llvmDir
+  if (($Kind -eq "llvm") -and $payloadRoot) {
+    Remove-LlvmPayload -LlvmRoot $payloadRoot
   }
 
   $metadata = @{
@@ -748,6 +809,7 @@ try {
     supported_fidan_versions = $SupportedFidanVersions
     backend_protocol_version = $BackendProtocolVersion
     helper_relpath           = $helperRelPath
+    exec_commands            = $execCommands
   }
   $metadata | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $stageDir "metadata.json") -Encoding UTF8
 
@@ -777,6 +839,7 @@ $fragment = @{
       url                      = $releaseUrl
       sha256                   = $sha256
       helper_relpath           = $helperRelPath
+      exec_commands            = $execCommands
       supported_fidan_versions = $SupportedFidanVersions
       backend_protocol_version = $BackendProtocolVersion
     }

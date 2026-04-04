@@ -9,8 +9,10 @@ use fidan_driver::{
 };
 use std::path::PathBuf;
 
+mod ai_analysis;
 mod dal;
 mod distribution;
+mod exec;
 mod explain;
 mod fix;
 mod imports;
@@ -263,9 +265,9 @@ enum Command {
         /// Explain the last recorded diagnostic automatically
         #[arg(long)]
         last_error: bool,
-        /// Use an installed AI explainer instead of the deterministic explainer
-        #[arg(long)]
-        ai: bool,
+        /// Use the installed AI analysis toolchain. Optionally pass extra steering text.
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        ai: Option<String>,
     },
     /// Scaffold a new Fidan project in a new directory
     New {
@@ -294,6 +296,16 @@ enum Command {
         #[command(subcommand)]
         command: dal::DalCommand,
     },
+    /// Run a toolchain-provided external command namespace
+    Exec {
+        /// Registered external namespace, for example `ai`
+        namespace: Option<String>,
+        /// Arguments passed through to the external toolchain command
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    #[command(hide = true, name = "__ai-analysis")]
+    AiAnalysisInternal,
 }
 
 fn parse_emit(raw: &[String]) -> Result<Vec<EmitKind>> {
@@ -691,6 +703,8 @@ fn run_cli() -> Result<()> {
         Command::SelfManage { command } => self_cmd::run(command),
         Command::Toolchain { command } => toolchain::run(command),
         Command::Dal { command } => dal::run(command),
+        Command::Exec { namespace, args } => exec::run(namespace, args),
+        Command::AiAnalysisInternal => ai_analysis::handle_internal_request_from_stdio(),
     }
 }
 

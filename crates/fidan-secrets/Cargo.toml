@@ -1,0 +1,11 @@
+[package]
+name = "fidan-secrets"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+keyring = { workspace = true }

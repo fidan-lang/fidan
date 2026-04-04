@@ -1,6 +1,11 @@
 use crate::last_error;
 use anyhow::{Context, Result, bail};
+use fidan_driver::{
+    AI_ANALYSIS_HELPER_PROTOCOL_VERSION, AiAnalysisHelperCommand, AiAnalysisHelperRequest,
+    AiAnalysisHelperResponse, AiAnalysisHelperResult, AiStructuredExplanation,
+};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 pub(crate) struct ExplainArgs {
     pub target: Option<String>,
@@ -8,7 +13,7 @@ pub(crate) struct ExplainArgs {
     pub end_line: Option<usize>,
     pub diagnostic: Option<String>,
     pub last_error: bool,
-    pub ai: bool,
+    pub ai: Option<String>,
 }
 
 fn source_line_count(file: &PathBuf) -> Result<usize> {
@@ -154,7 +159,7 @@ pub(crate) fn run_explain_command(args: ExplainArgs) -> Result<()> {
     } = args;
 
     if diagnostic.is_some() {
-        if target.is_some() || line.is_some() || end_line.is_some() || ai || last_error {
+        if target.is_some() || line.is_some() || end_line.is_some() || ai.is_some() || last_error {
             bail!(
                 "`--diagnostic` cannot be combined with a file target, `--line`, `--end-line`, `--ai`, or `--last-error`"
             );
@@ -164,7 +169,7 @@ pub(crate) fn run_explain_command(args: ExplainArgs) -> Result<()> {
     }
 
     if last_error {
-        if target.is_some() || line.is_some() || end_line.is_some() || ai {
+        if target.is_some() || line.is_some() || end_line.is_some() || ai.is_some() {
             bail!(
                 "`--last-error` cannot be combined with a file target, `--line`, `--end-line`, or `--ai`"
             );
@@ -178,22 +183,16 @@ pub(crate) fn run_explain_command(args: ExplainArgs) -> Result<()> {
         return run_explain_diagnostic(&record.code);
     }
 
-    if ai {
-        bail!(
-            "`fidan explain --ai` is not wired yet. Use deterministic `fidan explain` for now, or install the AI explainer toolchain once it lands."
-        );
-    }
-
     let target = target.context(
         "expected a source file target, `--diagnostic CODE`, or `--last-error`\n\nexamples:\n  fidan explain app.fdn --line 42\n  fidan explain app.fdn:42-45\n  fidan explain --diagnostic E0101\n  fidan explain --last-error",
     )?;
 
-    let file = match parse_target_with_optional_range(&target) {
+    let (file, line, end_line) = match parse_target_with_optional_range(&target) {
         ParsedTarget::PathWithRange(file, alias_start, alias_end) => {
             if line.is_some() || end_line.is_some() {
                 bail!("`path:line-range` cannot be combined with `--line` or `--end-line`");
             }
-            return run_explain_line(file, alias_start, alias_end);
+            (file, Some(alias_start), Some(alias_end))
         }
         ParsedTarget::InvalidRangeSuffix => {
             bail!(
@@ -201,7 +200,7 @@ pub(crate) fn run_explain_command(args: ExplainArgs) -> Result<()> {
                 target
             );
         }
-        ParsedTarget::PlainPath(file) => file,
+        ParsedTarget::PlainPath(file) => (file, line, end_line),
     };
     let total_lines = source_line_count(&file)?;
     let line_start = line.unwrap_or(1);
@@ -212,7 +211,157 @@ pub(crate) fn run_explain_command(args: ExplainArgs) -> Result<()> {
             total_lines
         }
     });
+    if let Some(prompt) = ai {
+        let prompt = prompt.trim().to_string();
+        return run_explain_ai(
+            file,
+            line_start,
+            line_end,
+            if prompt.is_empty() {
+                None
+            } else {
+                Some(prompt.as_str())
+            },
+        );
+    }
     run_explain_line(file, line_start, line_end)
+}
+
+fn run_explain_ai(
+    file: PathBuf,
+    line_start: usize,
+    line_end: usize,
+    prompt: Option<&str>,
+) -> Result<()> {
+    let home = fidan_driver::resolve_fidan_home()?;
+    let toolchain = fidan_driver::install::installed_toolchains(&home, Some("ai-analysis"))?
+        .into_iter()
+        .find(|toolchain| {
+            toolchain.metadata.backend_protocol_version == AI_ANALYSIS_HELPER_PROTOCOL_VERSION
+        })
+        .context(
+            "AI analysis toolchain is not installed for this Fidan version — run `fidan toolchain add ai-analysis` first",
+        )?;
+
+    if !toolchain.helper_path.is_file() {
+        bail!(
+            "installed ai-analysis helper is missing at `{}` — reinstall with `fidan toolchain add ai-analysis --version {}`",
+            toolchain.helper_path.display(),
+            toolchain.metadata.toolchain_version
+        );
+    }
+
+    let fidan_path = std::env::current_exe()
+        .context("failed to resolve the running Fidan executable for ai-analysis")?;
+    let request = AiAnalysisHelperRequest {
+        protocol_version: AI_ANALYSIS_HELPER_PROTOCOL_VERSION,
+        command: AiAnalysisHelperCommand::Explain {
+            file,
+            line_start: Some(line_start),
+            line_end: Some(line_end),
+            prompt: prompt.map(ToOwned::to_owned),
+            fidan_path: Some(fidan_path),
+        },
+    };
+    let request_bytes =
+        serde_json::to_vec(&request).context("failed to serialize ai-analysis helper request")?;
+
+    let mut child = Command::new(&toolchain.helper_path)
+        .arg("analyze")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| {
+            format!(
+                "failed to launch ai-analysis helper `{}`",
+                toolchain.helper_path.display()
+            )
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write as _;
+        stdin
+            .write_all(&request_bytes)
+            .context("failed to send ai-analysis helper request")?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("failed while waiting for ai-analysis helper to finish")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        bail!(
+            "ai-analysis helper exited with status {}{}",
+            output.status,
+            if stderr.is_empty() {
+                String::new()
+            } else {
+                format!(": {stderr}")
+            }
+        );
+    }
+
+    let response: AiAnalysisHelperResponse = serde_json::from_slice(&output.stdout)
+        .context("failed to parse ai-analysis helper response")?;
+    if response.protocol_version != AI_ANALYSIS_HELPER_PROTOCOL_VERSION {
+        bail!(
+            "ai-analysis helper protocol mismatch (helper={}, cli={})",
+            response.protocol_version,
+            AI_ANALYSIS_HELPER_PROTOCOL_VERSION
+        );
+    }
+    if !response.success {
+        bail!(
+            "ai-analysis helper failed{}",
+            response
+                .error
+                .as_deref()
+                .map(|error| format!(": {error}"))
+                .unwrap_or_default()
+        );
+    }
+    let AiAnalysisHelperResult::Explain(explanation) = response
+        .result
+        .context("ai-analysis helper returned no result")?;
+    render_ai_explanation(&explanation);
+    Ok(())
+}
+
+fn render_ai_explanation(explanation: &AiStructuredExplanation) {
+    if explanation.provider.is_some() || explanation.model.is_some() {
+        println!(
+            "AI analysis{}{}",
+            explanation
+                .provider
+                .as_deref()
+                .map(|value| format!(" via {value}"))
+                .unwrap_or_default(),
+            explanation
+                .model
+                .as_deref()
+                .map(|value| format!(" ({value})"))
+                .unwrap_or_default()
+        );
+        println!();
+    }
+
+    fn print_section(title: &str, body: &str) {
+        println!("{title}");
+        println!("{body}");
+        println!();
+    }
+
+    print_section("summary", &explanation.summary);
+    print_section("input/output behavior", &explanation.input_output_behavior);
+    print_section("dependencies", &explanation.dependencies);
+    print_section("possible edge cases", &explanation.possible_edge_cases);
+    print_section(
+        "why a certain pattern is used",
+        &explanation.why_pattern_is_used,
+    );
+    print_section("related symbols", &explanation.related_symbols);
+    print_section("underlying behaviour", &explanation.underlying_behaviour);
 }
 
 fn run_explain_diagnostic(code: &str) -> Result<()> {

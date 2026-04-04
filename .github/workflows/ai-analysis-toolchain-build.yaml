@@ -1,0 +1,115 @@
+name: AI Analysis Toolchain Build
+
+on:
+  workflow_call:
+    inputs:
+      toolchain_version:
+        description: "Fidan toolchain package version (defaults to workspace version)"
+        required: false
+        default: ""
+        type: string
+      tool_version:
+        description: "AI analysis helper tool version (defaults to workspace version)"
+        required: false
+        default: ""
+        type: string
+      validate:
+        description: "Install the packaged toolchain into a workspace-local FIDAN_HOME and run smoke checks"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-ai-analysis-toolchain:
+    name: Build AI analysis toolchain (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            artifact_name: ai-analysis-toolchain-windows
+          - name: Linux
+            os: ubuntu-latest
+            artifact_name: ai-analysis-toolchain-linux
+          - name: macOS
+            os: macos-latest
+            artifact_name: ai-analysis-toolchain-macos
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libdbus-1-dev
+
+      - name: Resolve workspace version
+        id: version
+        shell: pwsh
+        run: |
+          $cargoToml = Get-Content "Cargo.toml" -Raw
+          $match = [regex]::Match($cargoToml, '(?ms)\[workspace\.package\].*?version\s*=\s*"([^"]+)"')
+          if (-not $match.Success) {
+            throw "Failed to determine workspace version from Cargo.toml"
+          }
+          $workspaceVersion = $match.Groups[1].Value
+          $toolVersion = "${{ inputs.tool_version }}"
+          if (-not $toolVersion) {
+            $toolVersion = $workspaceVersion
+          }
+          "workspace_version=$workspaceVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tool_version=$toolVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Package AI analysis toolchain artifact
+        shell: pwsh
+        run: |
+          ./scripts/package-toolchain.ps1 `
+            -Kind "ai-analysis" `
+            -ToolchainVersion "${{ inputs.toolchain_version }}" `
+            -ToolVersion "${{ steps.version.outputs.tool_version }}"
+
+      - name: Install packaged AI analysis toolchain into validation FIDAN_HOME
+        if: inputs.validate
+        shell: pwsh
+        run: |
+          $archive = Get-ChildItem "dist/release/payload/toolchains/ai-analysis" -Recurse -Filter "*.tar.gz" | Select-Object -First 1
+          if (-not $archive) {
+            throw "Packaged AI analysis archive not found under dist/release/payload/toolchains/ai-analysis"
+          }
+          $hostTriple = $archive.Directory.Name
+          $toolchainVersion = $archive.Directory.Parent.Name
+          $fidanHome = Join-Path $env:GITHUB_WORKSPACE ".fidan-home-validation"
+          $installRoot = Join-Path $fidanHome "toolchains/ai-analysis/$hostTriple/$toolchainVersion"
+          if (Test-Path -LiteralPath $installRoot) {
+            Remove-Item -LiteralPath $installRoot -Force -Recurse
+          }
+          New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+          tar -xzf $archive.FullName -C $installRoot
+          "FIDAN_HOME=$fidanHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Validate packaged AI analysis toolchain
+        if: inputs.validate
+        shell: pwsh
+        run: |
+          cargo run -q -p fidan-cli -- exec
+          cargo run -q -p fidan-cli -- exec ai help
+
+      - name: Upload AI analysis toolchain artifact bundle
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/release

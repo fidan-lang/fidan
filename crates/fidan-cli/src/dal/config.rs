@@ -1,5 +1,5 @@
-use anyhow::{Context, Result, bail};
-use keyring::Entry;
+use anyhow::Result;
+use fidan_secrets::{SecretSpec, clear_secret, resolve_secret, store_secret, verify_stored_secret};
 use std::env;
 
 pub const DEFAULT_REGISTRY: &str = "https://api.dal.fidan.dev";
@@ -9,12 +9,7 @@ const KEYCHAIN_SERVICE: &str = "fidan";
 const KEYCHAIN_ACCOUNT: &str = "dal_api_token";
 
 pub fn clear_token() -> Result<()> {
-    let entry = keychain_entry()?;
-    match entry.delete_credential() {
-        Ok(()) => Ok(()),
-        Err(err) if is_no_entry_error(&err) => Ok(()),
-        Err(err) => Err(err).context("failed to remove Dal API token from OS keychain"),
-    }
+    clear_secret(&token_spec())
 }
 
 pub fn resolve_registry(explicit: Option<&str>) -> Result<String> {
@@ -31,54 +26,26 @@ pub fn resolve_registry(explicit: Option<&str>) -> Result<String> {
 }
 
 pub fn resolve_token(explicit: Option<&str>) -> Result<Option<String>> {
-    if let Some(value) = explicit {
-        return Ok(Some(value.trim().to_string()));
-    }
-    if let Ok(value) = env::var(TOKEN_ENV)
-        && !value.trim().is_empty()
-    {
-        return Ok(Some(value.trim().to_string()));
-    }
-
-    load_token_from_keychain()
+    resolve_secret(&token_spec(), explicit)
 }
 
 pub fn store_token(token: &str) -> Result<()> {
-    keychain_entry()?
-        .set_password(token.trim())
-        .context("failed to store Dal API token in OS keychain")
+    store_secret(&token_spec(), token)
 }
 
 pub fn verify_stored_token(token: &str) -> Result<()> {
-    let expected = token.trim();
-    let stored = load_token_from_keychain()?
-        .context("Dal API token could not be read back from the OS keychain after login")?;
-
-    if stored.trim() != expected {
-        bail!("Dal API token round-trip verification failed after storing it in the OS keychain")
-    }
-
-    Ok(())
-}
-
-fn load_token_from_keychain() -> Result<Option<String>> {
-    let entry = keychain_entry()?;
-    match entry.get_password() {
-        Ok(token) => Ok(Some(token)),
-        Err(err) if is_no_entry_error(&err) => Ok(None),
-        Err(err) => Err(err).context("failed to read Dal API token from OS keychain"),
-    }
-}
-
-fn keychain_entry() -> Result<Entry> {
-    Entry::new(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
-        .context("failed to initialize OS keychain entry for Dal API token")
+    verify_stored_secret(&token_spec(), token)
 }
 
 fn normalize_registry(value: &str) -> String {
     value.trim().trim_end_matches('/').to_string()
 }
 
-fn is_no_entry_error(err: &keyring::Error) -> bool {
-    matches!(err, keyring::Error::NoEntry)
+fn token_spec() -> SecretSpec<'static> {
+    SecretSpec {
+        service: KEYCHAIN_SERVICE,
+        account: KEYCHAIN_ACCOUNT,
+        env_var: Some(TOKEN_ENV),
+        display_name: "Dal API token",
+    }
 }

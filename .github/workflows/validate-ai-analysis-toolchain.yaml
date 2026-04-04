@@ -1,0 +1,34 @@
+name: Validate AI Analysis Toolchain
+
+on:
+  workflow_dispatch:
+    inputs:
+      toolchain_version:
+        description: "Fidan toolchain package version (defaults to workspace version)"
+        required: false
+        type: string
+      tool_version:
+        description: "AI analysis helper tool version (defaults to workspace version)"
+        required: false
+        type: string
+  pull_request:
+    paths:
+      - ".github/workflows/ai-analysis-toolchain-build.yaml"
+      - ".github/workflows/validate-ai-analysis-toolchain.yaml"
+      - ".github/workflows/release-toolchain.yaml"
+      - "scripts/package-toolchain.ps1"
+      - "crates/fidan-ai-analysis-helper/**"
+      - "crates/fidan-cli/**"
+      - "crates/fidan-driver/**"
+      - "crates/fidan-secrets/**"
+      - "crates/fidan-runtime/**"
+      - "Cargo.toml"
+
+jobs:
+  validate:
+    name: Build and validate AI analysis toolchains
+    uses: ./.github/workflows/ai-analysis-toolchain-build.yaml
+    with:
+      toolchain_version: ${{ github.event.inputs.toolchain_version || '' }}
+      tool_version: ${{ github.event.inputs.tool_version || '' }}
+      validate: true
