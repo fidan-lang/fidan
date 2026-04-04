@@ -245,12 +245,14 @@ enum Command {
         dry_run: bool,
     },
     /// Print the description of a diagnostic code (e.g. `E0101`, `W2001`)
-    Explain {
+    #[command(name = "explain-diag")]
+    ExplainDiag {
         /// Diagnostic code
         code: String,
     },
     /// Explain what one or more source lines do (static analysis, offline, zero AI)
-    ExplainLine {
+    #[command(name = "explain")]
+    Explain {
         /// Path to the .fdn source file
         file: PathBuf,
         /// First line to explain (1-based)
@@ -650,11 +652,11 @@ fn run_cli() -> Result<()> {
             indent_width,
             max_line_len,
         } => pipeline::run_fmt(file, in_place, check, indent_width, max_line_len),
-        Command::Explain { code } => {
+        Command::ExplainDiag { code } => {
             explain::run_explain(&code);
             Ok(())
         }
-        Command::ExplainLine {
+        Command::Explain {
             file,
             line,
             end_line,

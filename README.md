@@ -80,7 +80,7 @@ Most languages make a trade-off: either **readable** (Python) or **fast** (C++/R
 | Built-in REPL | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Built-in LSP server | ✅ | ❌ (pylsp) | ✅ (tsserver) | ⚠️ | ⚠️ (rust-analyzer) |
 | Replay-based crash reproduction | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `explain-line` static analysis | ✅ | ❌ | ❌ | ❌ | ❌ |
+| `explain` line-level static analysis | ✅ | ❌ | ❌ | ❌ | ❌ |
 | First-class test blocks | ✅ | ❌ (unittest) | ❌ (jest) | ✅ | ✅ |
 | Hot reload (`--reload`) | ✅ | ❌ | ❌ | ❌ | ❌ |
 | String synonyms (`is`, `equals`, `and`, …) | ✅ | ❌ | ❌ | ❌ | ❌ |
@@ -714,8 +714,8 @@ fidan <COMMAND> [OPTIONS] [FILE]
 | `fidan profile <file>` | Run with profiling output |
 | `fidan repl` | Start the interactive REPL |
 | `fidan lsp` | Start the Language Server (used by editors) |
-| `fidan explain <code>` | Show detailed explanation of a diagnostic code |
-| `fidan explain-line <file> --line N` | Explain what line N does (static analysis) |
+| `fidan explain-diag <code>` | Show detailed explanation of a diagnostic code |
+| `fidan explain <file> --line N` | Explain what line N does (static analysis) |
 | `fidan new <name>` | Scaffold a new Fidan project |
 | `fidan new <name> --package` | Scaffold a Dal-ready package with `dal.toml` and `src/init.fdn` |
 | `fidan dal <command>` | Work with the Dal package registry |
@@ -828,11 +828,11 @@ R0001: division by zero at line 3
 
 The REPL supports multi-line input, continuation prompts (`...`), `:cancel` to abort a block, and `:type <expr>` to inspect inferred types.
 
-### `explain-line` — static analysis on demand
+### `explain` — static analysis on demand
 
 ```bash
-fidan explain-line app.fdn --line 42
-fidan explain-line app.fdn --line 10 --end-line 20
+fidan explain app.fdn --line 42
+fidan explain app.fdn --line 10 --end-line 20
 ```
 
 For each line in range, Fidan reports:
@@ -873,7 +873,7 @@ Diagnostic codes:
 | `R9xxx` | Runtime errors | `R9001` parallel task failed |
 
 ```bash
-fidan explain E0401    # print a full page of documentation for this code
+fidan explain-diag E0401    # print a full page of documentation for this code
 ```
 
 ---
@@ -956,8 +956,8 @@ npm run compile
 | `Fidan: Build File` | Build binary (debug or release) |
 | `Fidan: Run Tests in Current File` | Run `test {}` blocks |
 | `Fidan: Profile Current File` | Profile execution |
-| `Fidan: Explain Diagnostic Code` | Prompt for a code → `fidan explain` |
-| `Fidan: Explain Current Line(s)` | Selection-aware `explain-line` |
+| `Fidan: Explain Diagnostic Code` | Prompt for a code → `fidan explain-diag` |
+| `Fidan: Explain Current Line(s)` | Selection-aware `fidan explain` |
 | `Fidan: New Project` | Scaffold project with folder picker |
 | `Fidan: Open REPL` | Open the interactive REPL |
 | `Fidan: Restart Language Server` | Restart LSP |

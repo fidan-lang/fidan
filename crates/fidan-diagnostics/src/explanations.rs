@@ -243,7 +243,7 @@ documentation:
     use std.io.{read_file}    # OK
     use std.math.{sqrt}       # OK
 
-Note: `fidan explain E0108` lists valid exports for each stdlib module
+Note: `fidan explain-diag E0108` lists valid exports for each stdlib module
 if you need a quick reference.
 "#,
         ),

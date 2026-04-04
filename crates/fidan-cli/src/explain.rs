@@ -6,7 +6,7 @@ pub(crate) fn run_explain(code: &str) {
         Some(e) => e,
         None => {
             eprintln!("  unknown diagnostic code `{code}`");
-            eprintln!("  run `fidan explain` without arguments to list all codes");
+            eprintln!("  run `fidan explain-diag` without arguments to list all codes");
             return;
         }
     };
@@ -29,7 +29,7 @@ pub(crate) fn run_explain(code: &str) {
     }
 }
 
-// ── fidan explain-line ────────────────────────────────────────────────────────────────
+// ── fidan explain ───────────────────────────────────────────────────────────────────
 //
 // Static analysis report for one or more source lines.
 // Uses the AST + typeck `expr_types` map — fully offline, zero AI.

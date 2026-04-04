@@ -711,17 +711,17 @@ main()
 #[test]
 fn explain_line_parent_constructor_is_described_humanly() {
     let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
-        .arg("explain-line")
+        .arg("explain")
         .arg("test/examples/release_mega_1_0.fdn")
         .arg("--line")
         .arg("200")
         .current_dir(workspace_root())
         .output()
-        .expect("run fidan explain-line on parent constructor call");
+        .expect("run fidan explain on parent constructor call");
 
     assert!(
         output.status.success(),
-        "expected explain-line to succeed:\nstdout:\n{}\nstderr:\n{}",
+        "expected explain to succeed:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
