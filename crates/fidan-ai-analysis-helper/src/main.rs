@@ -179,6 +179,7 @@ fn handle_ai_exec(args: &[String]) -> Result<()> {
         "doctor" => run_ai_doctor(),
         "login" => run_ai_login(&args[1..]),
         "logout" => run_ai_logout(&args[1..]),
+        "configure" => run_ai_configure(&args[1..]),
         "help" | "--help" | "-h" => {
             print_ai_exec_usage();
             Ok(())
@@ -240,6 +241,173 @@ fn run_ai_login(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// Core logic of `configure --set key=value`, separated from file I/O for testability.
+///
+/// Mutates `table` in-place and returns the human-readable list of updated/removed key names.
+/// Guarantees that `schema_version` is present in `table` after the call.
+fn process_configure_sets(
+    table: &mut toml::Table,
+    sets: &[(String, String)],
+) -> Result<Vec<String>> {
+    let mut updated_keys: Vec<String> = Vec::new();
+    for (key, value) in sets {
+        let key = key.as_str();
+        let value = value.as_str();
+
+        let should_remove = matches!(
+            key,
+            "base_url" | "api_key_env" | "keyring_account" | "system_prompt"
+        ) && (value.is_empty() || value.eq_ignore_ascii_case("none"));
+
+        if should_remove {
+            table.remove(key);
+            updated_keys.push(format!("{key} (removed)"));
+            continue;
+        }
+
+        let toml_value = match key {
+            "provider" | "model" => {
+                if value.is_empty() {
+                    bail!(
+                        "`{key}` must not be empty — provide a value like `openai-compatible` or your model name"
+                    );
+                }
+                toml::Value::String(value.to_string())
+            }
+            "base_url" | "api_key_env" | "keyring_account" | "system_prompt" => {
+                toml::Value::String(value.to_string())
+            }
+            "timeout_secs" => {
+                let secs: u64 = value.parse().with_context(|| {
+                    format!("`timeout_secs` must be a positive integer, got `{value}`")
+                })?;
+                if secs == 0 {
+                    bail!("`timeout_secs` must be greater than 0");
+                }
+                toml::Value::Integer(secs as i64)
+            }
+            "replace_system_prompt" => {
+                let b = match value.to_lowercase().as_str() {
+                    "true" | "1" | "yes" | "on" => true,
+                    "false" | "0" | "no" | "off" => false,
+                    _ => bail!("`replace_system_prompt` must be `true` or `false`, got `{value}`"),
+                };
+                toml::Value::Boolean(b)
+            }
+            _ => bail!(
+                "unknown configuration key `{key}`\n\nValid keys: provider, model, base_url, api_key_env, keyring_account, timeout_secs, system_prompt, replace_system_prompt"
+            ),
+        };
+        table.insert(key.to_string(), toml_value);
+        updated_keys.push(key.to_string());
+    }
+
+    // Ensure schema_version is always present
+    if !table.contains_key("schema_version") {
+        table.insert("schema_version".to_string(), toml::Value::Integer(1));
+    }
+
+    Ok(updated_keys)
+}
+
+fn run_ai_configure(args: &[String]) -> Result<()> {
+    let mut sets: Vec<(String, String)> = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--set" => {
+                index += 1;
+                let pair = args
+                    .get(index)
+                    .context("`fidan exec ai configure` requires a value after `--set`")?;
+                let eq = pair.find('=').with_context(|| {
+                    format!("`--set` argument must be in `key=value` form, got `{pair}`")
+                })?;
+                sets.push((
+                    pair[..eq].trim().to_string(),
+                    pair[eq + 1..].trim().to_string(),
+                ));
+            }
+            other => bail!(
+                "unknown `fidan exec ai configure` option `{other}`\n\nUsage: fidan exec ai configure --set key=value"
+            ),
+        }
+        index += 1;
+    }
+
+    let path = config::resolve_config_path()?;
+
+    if sets.is_empty() {
+        // Show current config
+        if path.is_file() {
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read `{}`", path.display()))?;
+            println!("# ai-analysis config: {}", path.display());
+            println!();
+            print!("{text}");
+        } else {
+            println!("No ai-analysis configuration found.");
+            println!("Config path: {}", path.display());
+            println!();
+            println!("To configure, run:");
+            println!(
+                "  fidan exec ai configure --set provider=openai-compatible --set model=MODEL"
+            );
+            println!(
+                "  fidan exec ai configure --set base_url=http://localhost:11434/v1/chat/completions"
+            );
+            println!("  fidan exec ai login --api-key YOUR_API_KEY");
+        }
+        println!();
+        println!("Valid keys:");
+        println!("  provider             AI provider: \"openai-compatible\" or \"anthropic\"");
+        println!("  model                Model name (e.g., \"gpt-4.1-mini\", \"llama3.2\")");
+        println!("  base_url             Override endpoint URL (\"none\" or empty to remove)");
+        println!(
+            "  api_key_env          Environment variable to read API key from (\"none\" to remove)"
+        );
+        println!(
+            "  keyring_account      OS keychain account name for the API key (\"none\" to remove)"
+        );
+        println!("  timeout_secs         HTTP request timeout in seconds (default: 60)");
+        println!(
+            "  system_prompt        Extra instructions for the AI (\"none\" or empty to remove)"
+        );
+        println!("  replace_system_prompt  Replace built-in system prompt entirely (true/false)");
+        return Ok(());
+    }
+
+    // Load existing table or start with a minimal one
+    let mut table: toml::Table = if path.is_file() {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read `{}`", path.display()))?;
+        toml::from_str(&text)
+            .with_context(|| format!("failed to parse existing config at `{}`", path.display()))?
+    } else {
+        let mut t = toml::Table::new();
+        t.insert("schema_version".to_string(), toml::Value::Integer(1));
+        t
+    };
+
+    let updated_keys = process_configure_sets(&mut table, &sets)?;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory `{}`", parent.display()))?;
+    }
+    let text =
+        toml::to_string_pretty(&table).context("failed to serialize ai-analysis configuration")?;
+    std::fs::write(&path, &text)
+        .with_context(|| format!("failed to write config to `{}`", path.display()))?;
+
+    println!(
+        "Updated {} in `{}`.",
+        updated_keys.join(", "),
+        path.display()
+    );
+    Ok(())
+}
+
 fn run_ai_logout(args: &[String]) -> Result<()> {
     let mut keyring_account_override = None;
     let mut index = 0;
@@ -284,6 +452,7 @@ fn print_ai_exec_usage() {
     println!("fidan exec ai <subcommand>");
     println!();
     println!("Available subcommands:");
+    println!("- configure [--set key=value ...]  View or update the ai-analysis configuration");
     println!("- doctor");
     println!("- login --api-key <token> [--keyring-account <account>]");
     println!("- logout [--keyring-account <account>]");
@@ -345,7 +514,7 @@ replace_system_prompt: {replace_system_prompt}\n",
 
 #[cfg(test)]
 mod tests {
-    use super::{render_ai_doctor_report, select_keyring_account};
+    use super::{process_configure_sets, render_ai_doctor_report, select_keyring_account};
     use crate::config::Config;
     use std::path::Path;
 
@@ -412,5 +581,166 @@ mod tests {
             select_keyring_account(None, Some("   ")),
             "ai_analysis_api_key"
         );
+    }
+
+    // --- process_configure_sets ---
+
+    fn empty_table() -> toml::Table {
+        toml::Table::new()
+    }
+
+    fn sets(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn configure_sets_string_keys() {
+        let mut t = empty_table();
+        let updated = process_configure_sets(
+            &mut t,
+            &sets(&[("provider", "openai-compatible"), ("model", "llama3.2")]),
+        )
+        .unwrap();
+        assert_eq!(
+            t["provider"],
+            toml::Value::String("openai-compatible".into())
+        );
+        assert_eq!(t["model"], toml::Value::String("llama3.2".into()));
+        assert!(updated.contains(&"provider".to_string()));
+        assert!(updated.contains(&"model".to_string()));
+    }
+
+    #[test]
+    fn configure_sets_optional_string() {
+        let mut t = empty_table();
+        process_configure_sets(&mut t, &sets(&[("base_url", "http://localhost:11434")])).unwrap();
+        assert_eq!(
+            t["base_url"],
+            toml::Value::String("http://localhost:11434".into())
+        );
+    }
+
+    #[test]
+    fn configure_removes_optional_key_with_none_literal() {
+        let mut t = empty_table();
+        t.insert("base_url".to_string(), toml::Value::String("old".into()));
+        let updated = process_configure_sets(&mut t, &sets(&[("base_url", "none")])).unwrap();
+        assert!(!t.contains_key("base_url"));
+        assert!(updated.iter().any(|k| k.contains("removed")));
+    }
+
+    #[test]
+    fn configure_removes_optional_key_with_empty_value() {
+        let mut t = empty_table();
+        t.insert(
+            "system_prompt".to_string(),
+            toml::Value::String("old".into()),
+        );
+        process_configure_sets(&mut t, &sets(&[("system_prompt", "")])).unwrap();
+        assert!(!t.contains_key("system_prompt"));
+    }
+
+    #[test]
+    fn configure_parses_timeout_secs() {
+        let mut t = empty_table();
+        process_configure_sets(&mut t, &sets(&[("timeout_secs", "120")])).unwrap();
+        assert_eq!(t["timeout_secs"], toml::Value::Integer(120));
+    }
+
+    #[test]
+    fn configure_rejects_zero_timeout() {
+        let mut t = empty_table();
+        let err = process_configure_sets(&mut t, &sets(&[("timeout_secs", "0")])).unwrap_err();
+        assert!(err.to_string().contains("greater than 0"));
+    }
+
+    #[test]
+    fn configure_rejects_non_integer_timeout() {
+        let mut t = empty_table();
+        let err = process_configure_sets(&mut t, &sets(&[("timeout_secs", "fast")])).unwrap_err();
+        assert!(err.to_string().contains("positive integer"));
+    }
+
+    #[test]
+    fn configure_parses_boolean_replace_system_prompt() {
+        for (input, expected) in [
+            ("true", true),
+            ("false", false),
+            ("1", true),
+            ("off", false),
+            ("yes", true),
+        ] {
+            let mut t = empty_table();
+            process_configure_sets(&mut t, &sets(&[("replace_system_prompt", input)])).unwrap();
+            assert_eq!(
+                t["replace_system_prompt"],
+                toml::Value::Boolean(expected),
+                "input={input}"
+            );
+        }
+    }
+
+    #[test]
+    fn configure_rejects_invalid_boolean() {
+        let mut t = empty_table();
+        let err = process_configure_sets(&mut t, &sets(&[("replace_system_prompt", "maybe")]))
+            .unwrap_err();
+        assert!(err.to_string().contains("true` or `false"));
+    }
+
+    #[test]
+    fn configure_rejects_empty_provider() {
+        let mut t = empty_table();
+        let err = process_configure_sets(&mut t, &sets(&[("provider", "")])).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
+    }
+
+    #[test]
+    fn configure_rejects_unknown_key() {
+        let mut t = empty_table();
+        let err = process_configure_sets(&mut t, &sets(&[("typo_key", "val")])).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown configuration key"));
+        assert!(msg.contains("Valid keys:"));
+    }
+
+    #[test]
+    fn configure_adds_schema_version_when_missing() {
+        let mut t = empty_table();
+        process_configure_sets(&mut t, &sets(&[("provider", "openai-compatible")])).unwrap();
+        assert_eq!(t["schema_version"], toml::Value::Integer(1));
+    }
+
+    #[test]
+    fn configure_does_not_overwrite_existing_schema_version() {
+        let mut t = empty_table();
+        t.insert("schema_version".to_string(), toml::Value::Integer(1));
+        t.insert(
+            "provider".to_string(),
+            toml::Value::String("existing".into()),
+        );
+        process_configure_sets(&mut t, &sets(&[("model", "gpt-4.1-mini")])).unwrap();
+        assert_eq!(t["schema_version"], toml::Value::Integer(1));
+        assert_eq!(t["provider"], toml::Value::String("existing".into()));
+    }
+
+    #[test]
+    fn configure_preserves_unrelated_keys() {
+        let mut t = empty_table();
+        t.insert(
+            "provider".to_string(),
+            toml::Value::String("anthropic".into()),
+        );
+        t.insert(
+            "model".to_string(),
+            toml::Value::String("claude-3-5-sonnet".into()),
+        );
+        process_configure_sets(&mut t, &sets(&[("timeout_secs", "30")])).unwrap();
+        assert_eq!(t["provider"], toml::Value::String("anthropic".into()));
+        assert_eq!(t["model"], toml::Value::String("claude-3-5-sonnet".into()));
+        assert_eq!(t["timeout_secs"], toml::Value::Integer(30));
     }
 }

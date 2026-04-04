@@ -34,16 +34,14 @@ pub fn run_explain(
     context: &AiExplainContext,
     prompt: Option<&str>,
 ) -> Result<RenderedExplanation> {
-    let api_key = resolve_api_key(config)?.context(
-        "no ai-analysis API key is configured — set the configured env var or store the secret in the OS keychain",
-    )?;
+    let api_key = resolve_api_key(config)?;
     let system_prompt = build_system_prompt(config);
     let user_prompt = build_user_prompt(context, prompt);
     let raw = match config.provider.trim().to_ascii_lowercase().as_str() {
         "openai-compatible" | "openai" => {
-            call_openai_compatible(config, &api_key, &system_prompt, &user_prompt)?
+            call_openai_compatible(config, api_key.as_deref(), &system_prompt, &user_prompt)?
         }
-        "anthropic" => call_anthropic(config, &api_key, &system_prompt, &user_prompt)?,
+        "anthropic" => call_anthropic(config, api_key.as_deref(), &system_prompt, &user_prompt)?,
         other => bail!("unsupported ai-analysis provider `{other}`"),
     };
     let payload: ExplanationPayload =
@@ -63,7 +61,7 @@ pub fn run_explain(
 
 fn call_openai_compatible(
     config: &Config,
-    api_key: &str,
+    api_key: Option<&str>,
     system_prompt: &str,
     user_prompt: &str,
 ) -> Result<String> {
@@ -84,10 +82,11 @@ fn call_openai_compatible(
             { "role": "user", "content": user_prompt }
         ]
     });
-    let response: serde_json::Value = client
-        .post(url)
-        .bearer_auth(api_key)
-        .json(&body)
+    let mut builder = client.post(url).json(&body);
+    if let Some(key) = api_key {
+        builder = builder.bearer_auth(key);
+    }
+    let response: serde_json::Value = builder
         .send()
         .with_context(|| format!("failed to call `{url}`"))?
         .error_for_status()
@@ -100,7 +99,7 @@ fn call_openai_compatible(
 
 fn call_anthropic(
     config: &Config,
-    api_key: &str,
+    api_key: Option<&str>,
     system_prompt: &str,
     user_prompt: &str,
 ) -> Result<String> {
@@ -122,11 +121,14 @@ fn call_anthropic(
             { "role": "user", "content": user_prompt }
         ]
     });
-    let response: serde_json::Value = client
+    let mut builder = client
         .post(url)
-        .header("x-api-key", api_key)
         .header("anthropic-version", "2023-06-01")
-        .json(&body)
+        .json(&body);
+    if let Some(key) = api_key {
+        builder = builder.header("x-api-key", key);
+    }
+    let response: serde_json::Value = builder
         .send()
         .with_context(|| format!("failed to call `{url}`"))?
         .error_for_status()
