@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use fidan_diagnostics::Diagnostic;
 use fidan_diagnostics::{Severity, render_message_to_stderr};
 use std::path::PathBuf;
 
@@ -39,6 +40,9 @@ pub(crate) fn run_fix(file: PathBuf, dry_run: bool) -> Result<()> {
             {
                 edits.push((edit.span.start, edit.span.end, edit.replacement.clone()));
             }
+        }
+        if let Some(edit) = synthesize_grouped_import_edit(diag, &src) {
+            edits.push(edit);
         }
     }
 
@@ -89,4 +93,76 @@ pub(crate) fn run_fix(file: PathBuf, dry_run: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+fn synthesize_grouped_import_edit(diag: &Diagnostic, src: &str) -> Option<(u32, u32, String)> {
+    if !matches!(diag.code.as_str(), "W1005" | "W1007") {
+        return None;
+    }
+    if diag.suggestions.iter().any(|s| s.edit.is_some()) {
+        return None;
+    }
+
+    let import_name = extract_backticked_name(&diag.message)?;
+    let lo = diag.span.start as usize;
+    let hi = diag.span.end as usize;
+    let stmt = src.get(lo..hi)?;
+    let open = stmt.find('{')?;
+    let close = stmt.rfind('}')?;
+    if close <= open {
+        return None;
+    }
+
+    let prefix = &stmt[..open];
+    let suffix = &stmt[close + 1..];
+    let inner = &stmt[open + 1..close];
+    let members = parse_grouped_import_members(inner);
+    if members.is_empty() {
+        return None;
+    }
+
+    let remaining: Vec<&str> = members
+        .iter()
+        .copied()
+        .filter(|member| *member != import_name)
+        .collect();
+    if remaining.len() == members.len() {
+        return None;
+    }
+
+    if remaining.is_empty() {
+        let (line_lo, line_hi) = expand_statement_to_trailing_newline(src, lo, hi);
+        return Some((line_lo as u32, line_hi as u32, String::new()));
+    }
+
+    let replacement = format!("{}{{{}}}{}", prefix, remaining.join(", "), suffix);
+    Some((diag.span.start, diag.span.end, replacement))
+}
+
+fn extract_backticked_name(message: &str) -> Option<&str> {
+    let start = message.find('`')?;
+    let rest = &message[start + 1..];
+    let end = rest.find('`')?;
+    Some(&rest[..end])
+}
+
+fn parse_grouped_import_members(inner: &str) -> Vec<&str> {
+    inner
+        .split(',')
+        .map(str::trim)
+        .filter(|member| !member.is_empty())
+        .collect()
+}
+
+fn expand_statement_to_trailing_newline(src: &str, lo: usize, hi: usize) -> (usize, usize) {
+    let bytes = src.as_bytes();
+    let mut end = hi.min(bytes.len());
+    if end < bytes.len() {
+        if bytes[end] == b'\r' && end + 1 < bytes.len() && bytes[end + 1] == b'\n' {
+            end += 2;
+        } else if matches!(bytes[end], b'\n' | b'\r') {
+            end += 1;
+        }
+    }
+    (lo, end)
 }

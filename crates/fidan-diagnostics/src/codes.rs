@@ -202,6 +202,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "unreachable statement",
         category: "lint",
     },
+    DiagnosticCode {
+        code: "W1007",
+        title: "duplicate import",
+        category: "unused",
+    },
     // ── Warnings: style ───────────────────────────────────────────────────────
     DiagnosticCode {
         code: "W2001",

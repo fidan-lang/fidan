@@ -423,3 +423,202 @@ print(answer)
         "expected :reset to clear previously-defined bindings:\n{stderr}"
     );
 }
+
+#[test]
+fn fix_removes_standalone_unused_imports() {
+    let file = make_temp_program(
+        "fix_unused_import",
+        r#"use std.io
+
+action main {
+    print("ok")
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("fix")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan fix on unused import demo");
+
+    assert!(
+        output.status.success(),
+        "expected fidan fix to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let patched = std::fs::read_to_string(&file).expect("read patched file");
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        !patched.contains("use std.io"),
+        "expected unused import to be removed:\n{patched}"
+    );
+    assert!(
+        patched.contains("print(\"ok\")"),
+        "expected the rest of the program to remain intact:\n{patched}"
+    );
+}
+
+#[test]
+fn fix_removes_last_grouped_unused_import_by_deleting_statement() {
+    let file = make_temp_program(
+        "fix_grouped_unused_single",
+        r#"use std.math.{floor}
+
+action main {
+    print("ok")
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("fix")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan fix on grouped unused import demo");
+
+    assert!(
+        output.status.success(),
+        "expected fidan fix to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let patched = std::fs::read_to_string(&file).expect("read patched file");
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        !patched.contains("use std.math.{floor}"),
+        "expected lone grouped import statement to be removed:\n{patched}"
+    );
+    assert!(
+        patched.contains("print(\"ok\")"),
+        "expected the rest of the program to remain intact:\n{patched}"
+    );
+}
+
+#[test]
+fn fix_removes_grouped_unused_import_member_without_dropping_braces() {
+    let file = make_temp_program(
+        "fix_grouped_unused_member",
+        r#"use std.math.{sqrt, floor}
+
+action main {
+    print(sqrt(9.0))
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("fix")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan fix on grouped unused import member demo");
+
+    assert!(
+        output.status.success(),
+        "expected fidan fix to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let patched = std::fs::read_to_string(&file).expect("read patched file");
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        patched.contains("use std.math.{sqrt}"),
+        "expected grouped import braces to stay intact around the remaining import:\n{patched}"
+    );
+    assert!(
+        !patched.contains("floor"),
+        "expected only the unused grouped member to be removed:\n{patched}"
+    );
+}
+
+#[test]
+fn fix_removes_duplicate_imports() {
+    let file = make_temp_program(
+        "fix_duplicate_import",
+        r#"use std.math
+use std.math
+
+action main {
+    print(math.sqrt(9.0))
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("fix")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan fix on duplicate import demo");
+
+    assert!(
+        output.status.success(),
+        "expected fidan fix to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let patched = std::fs::read_to_string(&file).expect("read patched file");
+    std::fs::remove_file(&file).ok();
+
+    assert_eq!(
+        patched.matches("use std.math").count(),
+        1,
+        "expected the duplicate import to be removed:\n{patched}"
+    );
+}
+
+#[test]
+fn direct_stdlib_function_import_counts_as_used() {
+    let file = make_temp_program(
+        "direct_stdlib_import_used",
+        r#"use std.io.readFile
+
+action main {
+    print(readFile("demo.txt"))
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("check")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan check on direct stdlib import demo");
+
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        output.status.success(),
+        "expected direct stdlib import example to check cleanly:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("unused import `readFile`"),
+        "direct imported stdlib function should count as used when called:\n{stderr}"
+    );
+}

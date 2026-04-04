@@ -644,6 +644,9 @@ impl TypeChecker {
                         } else {
                             *path.last().unwrap()
                         };
+                        if self.report_duplicate_import_binding(binding_sym, *span, *grouped) {
+                            return;
+                        }
                         // Import-vs-declaration conflict check (E0109, Case B).
                         if let Some(prev) = self.table.lookup_current_scope(binding_sym)
                             && matches!(prev.kind, SymbolKind::Object | SymbolKind::Action)
@@ -703,6 +706,9 @@ impl TypeChecker {
                         // `use "./utils.fdn" as utils` → bind `utils` as Dynamic.
                         // Plain `use "./utils.fdn"` exposes everything flat — no binding.
                         if let Some(&a) = alias.as_ref() {
+                            if self.report_duplicate_import_binding(a, *span, false) {
+                                return;
+                            }
                             if let Some(prev) = self.table.lookup_current_scope(a)
                                 && matches!(prev.kind, SymbolKind::Object | SymbolKind::Action)
                                 && prev.span.file == span.file
@@ -739,6 +745,9 @@ impl TypeChecker {
                             }
                         }
                     } else {
+                        if self.report_duplicate_import_binding(binding_sym, *span, *grouped) {
+                            return;
+                        }
                         // Import-vs-declaration conflict check (E0109, Case B).
                         if let Some(prev) = self.table.lookup_current_scope(binding_sym)
                             && matches!(prev.kind, SymbolKind::Object | SymbolKind::Action)
@@ -1672,7 +1681,12 @@ impl TypeChecker {
             )
             .with_label(Label::primary(span, "imported here but never used"));
             if !grouped {
-                diag.add_suggestion(Suggestion::hint("remove unused import"));
+                diag.add_suggestion(Suggestion::fix(
+                    "remove unused import",
+                    span,
+                    "",
+                    fidan_diagnostics::Confidence::High,
+                ));
             } else {
                 diag.add_suggestion(Suggestion::hint(
                     "remove this member from the grouped import",
@@ -1680,6 +1694,47 @@ impl TypeChecker {
             }
             self.diags.push(diag);
         }
+    }
+
+    fn report_duplicate_import_binding(
+        &mut self,
+        binding_sym: Symbol,
+        span: Span,
+        grouped: bool,
+    ) -> bool {
+        let Some(prev) = self.table.lookup_current_scope(binding_sym) else {
+            return false;
+        };
+        if !self.import_syms.contains(&binding_sym) || prev.span.file != span.file {
+            return false;
+        }
+
+        use fidan_diagnostics::{Confidence, Label, Suggestion};
+
+        let name = self.interner.resolve(binding_sym).to_string();
+        let mut diag = Diagnostic::warning(
+            fidan_diagnostics::diag_code!("W1007"),
+            format!("duplicate import `{name}`"),
+            span,
+        )
+        .with_label(Label::secondary(prev.span, "first imported here"))
+        .with_label(Label::primary(span, "duplicate import here"));
+
+        if !grouped {
+            diag.add_suggestion(Suggestion::fix(
+                "remove duplicate import",
+                span,
+                "",
+                Confidence::High,
+            ));
+        } else {
+            diag.add_suggestion(Suggestion::hint(
+                "remove this member from the grouped import",
+            ));
+        }
+
+        self.diags.push(diag);
+        true
     }
 
     /// Emit E0103 if `target` resolves to an immutable (`const var`) symbol.
@@ -2246,6 +2301,9 @@ impl TypeChecker {
                 name,
                 span: callee_span,
             } => {
+                if self.table.lookup(name).is_some() {
+                    self.referenced_names.insert(name);
+                }
                 let name_str = self.interner.resolve(name).to_string();
                 // Built-in return types
                 match name_str.as_str() {

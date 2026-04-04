@@ -704,6 +704,29 @@ Fix: remove the dead statement or move it before the terminator:
 "#,
         ),
 
+        "W1007" => Some(
+            r#"A `use` statement binds a name that was already imported earlier in the
+same scope. The later import adds no new behavior and can be removed.
+
+Erroneous example:
+
+    use std.math.sqrt
+    use std.math.sqrt   # warning W1007: duplicate import
+
+Fix: remove the later duplicate import:
+
+    use std.math.sqrt
+
+This also applies to grouped imports:
+
+    use std.math.{sqrt, floor}
+    use std.math.sqrt
+
+Note: `fidan fix` can remove duplicate imports automatically when the
+duplicate binding is safe to rewrite.
+"#,
+        ),
+
         // ── Warnings: style ───────────────────────────────────────────────────
         "W2001" => Some(
             r#"The file passed to `fidan run` or `fidan build` does not end in `.fdn`.
