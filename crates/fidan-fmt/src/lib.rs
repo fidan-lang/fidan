@@ -439,6 +439,48 @@ var x=1 # tail
         let _ = check_formatted(src, &FormatOptions::default());
     }
 
+    #[test]
+    fn interpolation_expressions_reescape_nested_strings_and_indexes() {
+        let src = r#"action demo {
+    var sentence = "the quick brown fox"
+    var scores = {"Alice": 95}
+    print("contains quick: {sentence.contains(\"quick\")}")
+    print("Alice: {scores[\"Alice\"]}")
+    print("join: {[\"a\", \"b\"].join(\", \")}")
+}
+"#;
+        let formatted = fmt(src);
+        assert!(
+            formatted.contains(r#"print("contains quick: {sentence.contains(\"quick\")}")"#),
+            "formatted output should preserve escaped nested string literals:\n{formatted}"
+        );
+        assert!(
+            formatted.contains(r#"print("Alice: {scores[\"Alice\"]}")"#),
+            "formatted output should preserve escaped string index keys:\n{formatted}"
+        );
+        assert!(
+            formatted.contains(r#"print("join: {[\"a\", \"b\"].join(\", \")}")"#),
+            "formatted output should preserve escaped nested string arguments:\n{formatted}"
+        );
+        assert_idempotent(&formatted);
+    }
+
+    #[test]
+    fn interpolation_expression_preserves_deeply_nested_string_escapes() {
+        let src = r#"action demo {
+    print("Name: {\"{\\\"James\\\"} with occupation {\\\"Teacher\\\"}\"}")
+}
+"#;
+        let formatted = fmt(src);
+        assert!(
+            formatted.contains(
+                r#"print("Name: {\"{\\\"James\\\"} with occupation {\\\"Teacher\\\"}\"}")"#
+            ),
+            "formatted output should preserve deeply nested escaped strings inside interpolation:\n{formatted}"
+        );
+        assert_idempotent(&formatted);
+    }
+
     // ── Round-trip ────────────────────────────────────────────────────────
 
     /// Format `test/examples/test.fdn`, re-parse the result, and verify:
@@ -455,6 +497,7 @@ var x=1 # tail
         for rel_path in [
             "test/examples/check_val.fdn",
             "test/examples/async_demo.fdn",
+            "test/examples/comprehensive.fdn",
             "test/examples/concurrency_showcase.fdn",
             "test/examples/parallel_demo.fdn",
             "test/examples/enum_test.fdn",

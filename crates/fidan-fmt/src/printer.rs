@@ -52,6 +52,18 @@ impl<'a> Printer<'a> {
         self.interner.resolve(sym)
     }
 
+    /// Create a scratch printer that shares arena/interner/config/source state
+    /// but starts with no buffered output or pending comments.
+    pub fn scratch(&self) -> Self {
+        Self::new(
+            self.arena,
+            self.interner,
+            self.opts,
+            self.source,
+            Vec::new(),
+        )
+    }
+
     // ── Output primitives ──────────────────────────────────────────────────
 
     /// Write a string fragment at the current position.

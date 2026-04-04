@@ -204,7 +204,7 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
                     }
                     InterpPart::Expr(eid) => {
                         p.w("{");
-                        emit_expr(p, *eid);
+                        p.w(&render_interp_expr_fragment(p, *eid));
                         p.w("}");
                     }
                 }
@@ -525,6 +525,28 @@ pub fn escape_str_inner(s: &str) -> String {
             '"' => out.push_str("\\\""),
             '{' => out.push_str("\\{"),
             '}' => out.push_str("\\}"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn render_interp_expr_fragment(p: &Printer<'_>, id: ExprId) -> String {
+    let mut scratch = p.scratch();
+    emit_expr(&mut scratch, id);
+    let rendered = scratch.finish();
+    escape_interp_expr_fragment(rendered.trim_end_matches('\n'))
+}
+
+fn escape_interp_expr_fragment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
             c => out.push(c),
         }
     }

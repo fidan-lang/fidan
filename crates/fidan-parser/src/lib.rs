@@ -352,6 +352,40 @@ mod tests {
     }
 
     #[test]
+    fn string_interpolation_with_nested_string_literals_and_indexing() {
+        let (_, diags) = parse_src(
+            r#"var msg = "value {sentence.contains(\"quick\")} and {scores[\"Alice\"]}""#,
+        );
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn string_interpolation_with_braces_inside_nested_string_literal() {
+        let (_, diags) = parse_src(
+            r#"var msg = "Name: {\"{\\\"James\\\"} with occupation {\\\"Teacher\\\"}\"}""#,
+        );
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn string_interpolation_with_nested_dict_literal_expression() {
+        let (_, diags) = parse_src(r#"var msg = "answer: {{"a": 1}[\"a\"]}""#);
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
     fn raw_string_literal_stays_literal() {
         let (_, diags) = parse_src(r#"var msg = r"literal \n {name}""#);
         assert!(

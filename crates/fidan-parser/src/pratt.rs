@@ -15,6 +15,71 @@ fn unescape_interpolated_literal(s: &str) -> String {
         .collect()
 }
 
+fn is_ident_continue(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
+fn find_next_interp_open(raw: &str, from: usize) -> Option<usize> {
+    raw[from..]
+        .char_indices()
+        .find_map(|(offset, ch)| (ch == '{').then_some(from + offset))
+}
+
+fn scan_interp_fragment_end(raw: &str, open_idx: usize) -> Option<usize> {
+    #[derive(Clone, Copy)]
+    enum State {
+        Normal,
+        String,
+        RawString,
+    }
+
+    let mut depth = 1usize;
+    let mut state = State::Normal;
+    let mut iter = raw[open_idx + 1..].char_indices().peekable();
+
+    while let Some((offset, ch)) = iter.next() {
+        let idx = open_idx + 1 + offset;
+        match state {
+            State::Normal => match ch {
+                '"' => state = State::String,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(idx);
+                    }
+                }
+                'r' => {
+                    if let Some((_, next)) = iter.peek().copied()
+                        && next == '"'
+                    {
+                        let prev = raw[..idx].chars().next_back();
+                        if prev.is_none_or(|c| !is_ident_continue(c)) {
+                            iter.next(); // consume the opening quote
+                            state = State::RawString;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            State::String => match ch {
+                '\\' => {
+                    iter.next();
+                }
+                '"' => state = State::Normal,
+                _ => {}
+            },
+            State::RawString => {
+                if ch == '"' {
+                    state = State::Normal;
+                }
+            }
+        }
+    }
+
+    None
+}
+
 // ── Binding-power table (ascending precedence) ───────────────────────────────
 //
 //  0  ternary `value if condition else fallback`  (handled separately)
@@ -712,27 +777,31 @@ impl<'t> Parser<'t> {
             });
         }
         let mut parts = vec![];
-        let mut rest = raw.as_str();
+        let mut cursor = 0usize;
 
-        while let Some(brace) = rest.find('{') {
-            if brace > 0 {
+        while let Some(open) = find_next_interp_open(&raw, cursor) {
+            if open > cursor {
                 parts.push(InterpPart::Literal(unescape_interpolated_literal(
-                    &rest[..brace],
+                    &raw[cursor..open],
                 )));
             }
-            rest = &rest[brace + 1..];
-            if let Some(close) = rest.find('}') {
-                let inner = rest[..close].trim();
-                rest = &rest[close + 1..];
+            if let Some(close) = scan_interp_fragment_end(&raw, open) {
+                let inner = raw[open + 1..close].trim();
                 let expr = self.parse_interp_fragment(inner, span);
                 parts.push(InterpPart::Expr(expr));
+                cursor = close + 1;
             } else {
-                parts.push(InterpPart::Literal(unescape_interpolated_literal(rest)));
+                parts.push(InterpPart::Literal(unescape_interpolated_literal(
+                    &raw[open..],
+                )));
+                cursor = raw.len();
                 break;
             }
         }
-        if !rest.is_empty() {
-            parts.push(InterpPart::Literal(unescape_interpolated_literal(rest)));
+        if cursor < raw.len() {
+            parts.push(InterpPart::Literal(unescape_interpolated_literal(
+                &raw[cursor..],
+            )));
         }
         // Degenerate: only one literal part after stripping braces
         if parts.len() == 1
