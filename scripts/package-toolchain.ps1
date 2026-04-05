@@ -37,6 +37,17 @@ function Get-HelperPackageName {
   }
 }
 
+function Get-HelperVersion {
+  param([string]$Kind)
+  $packageName = Get-HelperPackageName -Kind $Kind
+  $cargoToml = Get-Content "crates/$packageName/Cargo.toml" -Raw
+  $match = [regex]::Match($cargoToml, '(?m)^version\s*=\s*"([^"]+)"')
+  if (-not $match.Success) {
+    throw "Failed to determine version from crates/$packageName/Cargo.toml"
+  }
+  return $match.Groups[1].Value
+}
+
 function Get-HelperBinaryName {
   param([string]$Kind)
 
@@ -696,7 +707,7 @@ if (($Kind -eq "llvm") -and (-not $hasUpstreamArchive)) {
 }
 
 if (-not $ToolchainVersion) {
-  $ToolchainVersion = Get-WorkspaceVersion
+  $ToolchainVersion = Get-HelperVersion -Kind $Kind
 }
 if (-not $SupportedFidanVersions) {
   $SupportedFidanVersions = "^$(Get-WorkspaceVersion)"

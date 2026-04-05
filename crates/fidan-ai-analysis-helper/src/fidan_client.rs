@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, bail};
 use fidan_driver::{
     AI_ANALYSIS_PROTOCOL_VERSION, AiAnalysisCommand, AiAnalysisRequest, AiAnalysisResponse,
-    AiAnalysisResult, AiExplainContext, resolve_install_root,
+    AiAnalysisResult, AiCallGraph, AiExplainContext, AiRuntimeTrace, AiTypeMap,
+    resolve_install_root,
 };
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -69,6 +70,56 @@ pub fn request_symbol_info(
     };
     serde_json::to_value(invoke(explicit_fidan, &request)?)
         .context("failed to serialize symbol info response")
+}
+
+// Phase D: these are available for MCP tool wiring when ready.
+#[allow(dead_code)]
+pub fn request_call_graph(explicit_fidan: Option<&Path>, file: &Path) -> Result<AiCallGraph> {
+    let request = AiAnalysisRequest {
+        protocol_version: AI_ANALYSIS_PROTOCOL_VERSION,
+        command: AiAnalysisCommand::CallGraph {
+            file: file.to_path_buf(),
+        },
+    };
+    match invoke(explicit_fidan, &request)? {
+        AiAnalysisResult::CallGraph(graph) => Ok(graph),
+        _ => bail!("fidan returned an unexpected ai-analysis result kind"),
+    }
+}
+
+#[allow(dead_code)]
+pub fn request_type_map(explicit_fidan: Option<&Path>, file: &Path) -> Result<AiTypeMap> {
+    let request = AiAnalysisRequest {
+        protocol_version: AI_ANALYSIS_PROTOCOL_VERSION,
+        command: AiAnalysisCommand::TypeMap {
+            file: file.to_path_buf(),
+        },
+    };
+    match invoke(explicit_fidan, &request)? {
+        AiAnalysisResult::TypeMap(map) => Ok(map),
+        _ => bail!("fidan returned an unexpected ai-analysis result kind"),
+    }
+}
+
+#[allow(dead_code)]
+pub fn request_runtime_trace(
+    explicit_fidan: Option<&Path>,
+    file: &Path,
+    line_start: Option<usize>,
+    line_end: Option<usize>,
+) -> Result<AiRuntimeTrace> {
+    let request = AiAnalysisRequest {
+        protocol_version: AI_ANALYSIS_PROTOCOL_VERSION,
+        command: AiAnalysisCommand::RuntimeTrace {
+            file: file.to_path_buf(),
+            line_start,
+            line_end,
+        },
+    };
+    match invoke(explicit_fidan, &request)? {
+        AiAnalysisResult::RuntimeTrace(trace) => Ok(trace),
+        _ => bail!("fidan returned an unexpected ai-analysis result kind"),
+    }
 }
 
 fn invoke(explicit_fidan: Option<&Path>, request: &AiAnalysisRequest) -> Result<AiAnalysisResult> {

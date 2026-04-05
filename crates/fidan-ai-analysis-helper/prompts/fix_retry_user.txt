@@ -1,0 +1,12 @@
+{{ORIGINAL_PROMPT}}
+
+Your previous response was invalid. Correct it and return a fresh JSON object.
+
+Validation error:
+{{VALIDATION_ERROR}}
+
+Return only corrected JSON.
+- Every `old_text` must be copied verbatim from the provided Source block. Never invent `old_text` that does not already exist in Source.
+- Do not repeat any hunk where `old_text` equals `new_text`.
+- If you need to insert lines, use the insertion-only hunk form: set `old_text` to "", set `new_text` to the inserted lines, and set `line_start` and `line_end` to the line to insert before.
+- Do not copy or paraphrase your previous invalid answer. Recompute the fix from the Source and diagnostics.

@@ -7,10 +7,12 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use fidan_driver::{
     AI_ANALYSIS_HELPER_PROTOCOL_VERSION, AiAnalysisHelperCommand, AiAnalysisHelperRequest,
-    AiAnalysisHelperResponse, AiAnalysisHelperResult, AiStructuredExplanation,
+    AiAnalysisHelperResponse, AiAnalysisHelperResult, AiFixResult, AiStructuredExplanation,
 };
+use reqwest::blocking::Client;
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Parser)]
 #[command(
@@ -158,6 +160,29 @@ fn handle_helper_request(command: AiAnalysisHelperCommand) -> Result<AiAnalysisH
                 underlying_behaviour: rendered.underlying_behaviour,
             }))
         }
+        AiAnalysisHelperCommand::Fix {
+            file,
+            source,
+            diagnostics,
+            mode,
+            prompt,
+        } => {
+            let config = config::load()?;
+            let fix_result = provider::run_fix(
+                &config,
+                &file,
+                &source,
+                &diagnostics,
+                mode,
+                prompt.as_deref(),
+            )?;
+            Ok(AiAnalysisHelperResult::Fix(AiFixResult {
+                summary: fix_result.summary,
+                hunks: fix_result.hunks,
+                model: fix_result.model,
+                provider: fix_result.provider,
+            }))
+        }
     }
 }
 
@@ -180,6 +205,7 @@ fn handle_ai_exec(args: &[String]) -> Result<()> {
         "login" => run_ai_login(&args[1..]),
         "logout" => run_ai_logout(&args[1..]),
         "configure" => run_ai_configure(&args[1..]),
+        "setup" => run_ai_setup(&args[1..]),
         "help" | "--help" | "-h" => {
             print_ai_exec_usage();
             Ok(())
@@ -435,6 +461,146 @@ fn run_ai_logout(args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn run_ai_setup(args: &[String]) -> Result<()> {
+    if !args.is_empty() {
+        bail!("`fidan exec ai setup` does not accept extra arguments");
+    }
+
+    let choice = prompt_menu(
+        "Choose ai-analysis setup",
+        &[
+            "OpenAI-compatible cloud API",
+            "Anthropic API",
+            "Auto-detect local Ollama or LM Studio",
+            "Custom OpenAI-compatible endpoint",
+        ],
+        3,
+    )?;
+
+    match choice {
+        1 => configure_openai_cloud(),
+        2 => configure_anthropic(),
+        3 => configure_local_auto_detect(),
+        4 => configure_custom_endpoint(),
+        _ => bail!("invalid setup option `{choice}`"),
+    }
+}
+
+fn configure_openai_cloud() -> Result<()> {
+    let model = prompt_required("OpenAI-compatible model name:")?;
+    let api_key = prompt_required("API key:")?;
+    run_ai_configure_sets(&[
+        ("provider", "openai-compatible"),
+        ("model", &model),
+        ("base_url", "none"),
+        ("api_key_env", "none"),
+        ("keyring_account", "none"),
+    ])?;
+    run_ai_login(&["--api-key".to_string(), api_key])
+}
+
+fn configure_anthropic() -> Result<()> {
+    let model = prompt_required("Anthropic model name:")?;
+    let api_key = prompt_required("Anthropic API key:")?;
+    run_ai_configure_sets(&[
+        ("provider", "anthropic"),
+        ("model", &model),
+        ("base_url", "none"),
+        ("api_key_env", "none"),
+        ("keyring_account", "none"),
+    ])?;
+    run_ai_login(&["--api-key".to_string(), api_key])
+}
+
+fn configure_local_auto_detect() -> Result<()> {
+    let detections = [
+        (
+            "Ollama",
+            "http://localhost:11434",
+            "http://localhost:11434/v1/chat/completions",
+            Some("llama3.2"),
+        ),
+        (
+            "LM Studio",
+            "http://localhost:1234",
+            "http://localhost:1234/v1/chat/completions",
+            None,
+        ),
+    ];
+
+    let mut selected = None;
+    for (name, probe_url, base_url, default_model) in detections {
+        if endpoint_reachable(probe_url)?
+            && prompt_yes_no(&format!("Detected {name} at {probe_url} — use it?"), true)?
+        {
+            selected = Some((base_url, default_model));
+            break;
+        }
+    }
+
+    let Some((base_url, default_model)) = selected else {
+        bail!(
+            "No supported local AI endpoint was selected — start Ollama or LM Studio, or choose the custom endpoint setup"
+        );
+    };
+
+    let model = prompt_required_with_default("Local model name:", default_model)?;
+    run_ai_configure_sets(&[
+        ("provider", "openai-compatible"),
+        ("model", &model),
+        ("base_url", base_url),
+        ("api_key_env", "FIDAN_AI_ANALYSIS_NO_API_KEY"),
+        ("keyring_account", "none"),
+    ])
+}
+
+fn configure_custom_endpoint() -> Result<()> {
+    let base_url = prompt_required("Custom base URL:")?;
+    let model = prompt_required("Model name:")?;
+    let api_key = prompt_required("API key:")?;
+    run_ai_configure_sets(&[
+        ("provider", "openai-compatible"),
+        ("model", &model),
+        ("base_url", &base_url),
+        ("api_key_env", "none"),
+        ("keyring_account", "none"),
+    ])?;
+    run_ai_login(&["--api-key".to_string(), api_key])
+}
+
+fn run_ai_configure_sets(pairs: &[(&str, &str)]) -> Result<()> {
+    let sets = pairs
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect::<Vec<_>>();
+    let path = config::resolve_config_path()?;
+    let mut table: toml::Table = if path.is_file() {
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read `{}`", path.display()))?;
+        toml::from_str(&text)
+            .with_context(|| format!("failed to parse existing config at `{}`", path.display()))?
+    } else {
+        let mut t = toml::Table::new();
+        t.insert("schema_version".to_string(), toml::Value::Integer(1));
+        t
+    };
+    let updated_keys = process_configure_sets(&mut table, &sets)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory `{}`", parent.display()))?;
+    }
+    let text =
+        toml::to_string_pretty(&table).context("failed to serialize ai-analysis configuration")?;
+    std::fs::write(&path, &text)
+        .with_context(|| format!("failed to write config to `{}`", path.display()))?;
+    println!(
+        "Updated {} in `{}`.",
+        updated_keys.join(", "),
+        path.display()
+    );
+    Ok(())
+}
+
 fn select_keyring_account(config: Option<&config::Config>, explicit: Option<&str>) -> String {
     explicit
         .map(str::trim)
@@ -456,7 +622,97 @@ fn print_ai_exec_usage() {
     println!("- doctor");
     println!("- login --api-key <token> [--keyring-account <account>]");
     println!("- logout [--keyring-account <account>]");
+    println!("- setup");
     println!("- mcp");
+}
+
+fn prompt_yes_no(prompt: &str, default: bool) -> Result<bool> {
+    let suffix = if default { "[Y/n]" } else { "[y/N]" };
+    eprint!("\x1b[1;33mconfirm\x1b[0m ");
+    print!("\x1b[1m{prompt}\x1b[0m \x1b[36m{suffix}\x1b[0m ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("failed to read response")?;
+    let trimmed = line.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Ok(default);
+    }
+    Ok(matches!(trimmed.as_str(), "y" | "yes"))
+}
+
+fn prompt_text(prompt: &str, default: Option<&str>) -> Result<String> {
+    let suffix = default
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!(" [default: {value}]"))
+        .unwrap_or_default();
+    print!("\x1b[1;36minput\x1b[0m \x1b[1m{prompt}\x1b[0m{suffix} ");
+    std::io::stdout().flush().ok();
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .context("failed to read input")?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Ok(default.unwrap_or_default().to_string());
+    }
+    Ok(trimmed.to_string())
+}
+
+fn prompt_menu(prompt: &str, options: &[&str], default: usize) -> Result<usize> {
+    eprintln!("\x1b[1;33mselect\x1b[0m {prompt}");
+    for (index, option) in options.iter().enumerate() {
+        eprintln!("  {}. {}", index + 1, option);
+    }
+
+    loop {
+        let answer = prompt_text("Choose an option by number:", Some(&default.to_string()))?;
+        let Ok(choice) = answer.parse::<usize>() else {
+            eprintln!("Please enter a number between 1 and {}.", options.len());
+            continue;
+        };
+        if (1..=options.len()).contains(&choice) {
+            return Ok(choice);
+        }
+        eprintln!("Please enter a number between 1 and {}.", options.len());
+    }
+}
+
+fn prompt_required(prompt: &str) -> Result<String> {
+    prompt_required_with_default(prompt, None)
+}
+
+fn prompt_required_with_default(prompt: &str, default: Option<&str>) -> Result<String> {
+    loop {
+        let value = prompt_text(prompt, default)?;
+        if !value.trim().is_empty() {
+            return Ok(value);
+        }
+        eprintln!("Value must not be empty.");
+    }
+}
+
+fn endpoint_reachable(base_url: &str) -> Result<bool> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .context("failed to build local AI endpoint probe client")?;
+    for candidate in [
+        base_url.to_string(),
+        format!("{}/v1/models", base_url.trim_end_matches('/')),
+        format!("{}/api/tags", base_url.trim_end_matches('/')),
+    ] {
+        if client
+            .get(&candidate)
+            .send()
+            .map(|response| response.status().is_success())
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn render_ai_doctor_report(

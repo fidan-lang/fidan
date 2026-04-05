@@ -1,6 +1,6 @@
 [package]
 name = "fidan-llvm-helper"
-version.workspace = true
+version = "1.0.4"
 edition.workspace = true
 license-file.workspace = true
 authors.workspace = true

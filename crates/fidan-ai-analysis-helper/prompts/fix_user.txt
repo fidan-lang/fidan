@@ -1,0 +1,8 @@
+File: {{FILE}}
+
+Diagnostics to fix (line, severity, code, message):
+{{DIAGNOSTICS}}
+
+Source:
+{{SOURCE}}
+{{ADDITIONAL_GUIDANCE}}Apply the minimal edits that resolve each listed diagnostic. Return the JSON fix payload.

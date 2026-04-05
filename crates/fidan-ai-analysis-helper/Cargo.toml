@@ -1,6 +1,6 @@
 [package]
 name = "fidan-ai-analysis-helper"
-version.workspace = true
+version = "1.0.4"
 edition.workspace = true
 license-file.workspace = true
 authors.workspace = true

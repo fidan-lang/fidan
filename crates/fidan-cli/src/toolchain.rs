@@ -6,9 +6,12 @@ use crate::prompts::prompt_yes_no;
 use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use fidan_diagnostics::{Severity, render_message_to_stderr};
-use fidan_driver::{ToolchainMetadata, progress::ProgressReporter, resolve_fidan_home};
+use fidan_driver::{
+    ResolvedToolchain, ToolchainMetadata, progress::ProgressReporter, resolve_fidan_home,
+};
 use std::fs;
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 
 #[derive(Subcommand)]
 pub(crate) enum ToolchainCommand {
@@ -44,6 +47,149 @@ pub(crate) fn run(command: ToolchainCommand) -> Result<()> {
             confirm,
         } => run_remove(&name, version.as_deref(), confirm),
     }
+}
+
+pub(crate) fn install_toolchain(name: &str, version: Option<&str>) -> Result<()> {
+    run_add(name, version)
+}
+
+pub(crate) fn ensure_ai_toolchain_installed() -> Result<ResolvedToolchain> {
+    let home = resolve_fidan_home()?;
+    let installed = fidan_driver::install::installed_toolchains(&home, Some("ai-analysis"))?;
+    if let Some(toolchain) = installed.iter().find(|toolchain| {
+        toolchain.metadata.backend_protocol_version
+            == fidan_driver::AI_ANALYSIS_HELPER_PROTOCOL_VERSION
+    }) {
+        return validate_toolchain("ai-analysis", toolchain.clone());
+    }
+
+    if !installed.is_empty() {
+        let found_protocols = installed
+            .iter()
+            .map(|toolchain| toolchain.metadata.backend_protocol_version.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let expected_protocol = fidan_driver::AI_ANALYSIS_HELPER_PROTOCOL_VERSION;
+        let prompt = format!(
+            "Installed AI analysis toolchain is incompatible (helper protocol {found_protocols}; expected {expected_protocol}). Update `ai-analysis` now?"
+        );
+        if !prompt_yes_no(&prompt, true)? {
+            bail!(
+                "AI analysis toolchain is installed but incompatible (expected helper protocol {expected_protocol}, found {found_protocols}) — run `fidan toolchain add ai-analysis` to update"
+            );
+        }
+
+        install_toolchain("ai-analysis", None)?;
+        let refreshed = fidan_driver::install::installed_toolchains(&home, Some("ai-analysis"))?;
+        let toolchain = refreshed
+            .into_iter()
+            .find(|toolchain| {
+                toolchain.metadata.backend_protocol_version
+                    == fidan_driver::AI_ANALYSIS_HELPER_PROTOCOL_VERSION
+            })
+            .with_context(|| {
+                format!(
+                    "ai-analysis install/update completed but no compatible toolchain was found afterward (expected helper protocol {expected_protocol})"
+                )
+            })?;
+        let toolchain = validate_toolchain("ai-analysis", toolchain)?;
+        run_installed_helper_command("ai-analysis", &toolchain, &["exec", "ai", "setup"])?;
+        return Ok(toolchain);
+    }
+
+    ensure_toolchain_installed(
+        "ai-analysis",
+        "AI analysis",
+        |home| {
+            Ok(
+                fidan_driver::install::installed_toolchains(home, Some("ai-analysis"))?
+                    .into_iter()
+                    .find(|toolchain| {
+                        toolchain.metadata.backend_protocol_version
+                            == fidan_driver::AI_ANALYSIS_HELPER_PROTOCOL_VERSION
+                    }),
+            )
+        },
+        Some(&["exec", "ai", "setup"]),
+    )
+}
+
+pub(crate) fn ensure_llvm_toolchain_installed() -> Result<ResolvedToolchain> {
+    ensure_toolchain_installed(
+        "llvm",
+        "LLVM backend",
+        |home| {
+            Ok(fidan_driver::install::installed_llvm_toolchains(home)?
+                .into_iter()
+                .next())
+        },
+        None,
+    )
+}
+
+fn ensure_toolchain_installed<F>(
+    kind: &str,
+    display_name: &str,
+    find_toolchain: F,
+    post_install_args: Option<&[&str]>,
+) -> Result<ResolvedToolchain>
+where
+    F: Fn(&std::path::Path) -> Result<Option<ResolvedToolchain>>,
+{
+    let home = resolve_fidan_home()?;
+    if let Some(toolchain) = find_toolchain(&home)? {
+        return validate_toolchain(kind, toolchain);
+    }
+
+    let prompt = format!(
+        "{display_name} toolchain is not installed for this Fidan version. Install `{kind}` now?"
+    );
+    if !prompt_yes_no(&prompt, true)? {
+        bail!(
+            "{display_name} toolchain is not installed for this Fidan version — run `fidan toolchain add {kind}` first"
+        );
+    }
+
+    install_toolchain(kind, None)?;
+    let toolchain = find_toolchain(&home)?.with_context(|| {
+        format!("{kind} install completed but no compatible toolchain was found afterward")
+    })?;
+    let toolchain = validate_toolchain(kind, toolchain)?;
+
+    if let Some(args) = post_install_args {
+        run_installed_helper_command(kind, &toolchain, args)?;
+    }
+
+    Ok(toolchain)
+}
+
+fn validate_toolchain(kind: &str, toolchain: ResolvedToolchain) -> Result<ResolvedToolchain> {
+    if !toolchain.helper_path.is_file() {
+        bail!(
+            "installed {kind} helper is missing at `{}` — reinstall with `fidan toolchain add {kind} --version {}`",
+            toolchain.helper_path.display(),
+            toolchain.metadata.toolchain_version
+        );
+    }
+    Ok(toolchain)
+}
+
+fn run_installed_helper_command(
+    kind: &str,
+    toolchain: &ResolvedToolchain,
+    args: &[&str],
+) -> Result<()> {
+    let status = Command::new(&toolchain.helper_path)
+        .args(args)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .with_context(|| format!("failed to run `{}`", toolchain.helper_path.display()))?;
+    if status.success() {
+        return Ok(());
+    }
+    bail!("{kind} setup command failed with status {status}")
 }
 
 fn run_available() -> Result<()> {
@@ -88,12 +234,34 @@ fn run_list() -> Result<()> {
 
     for toolchain in toolchains {
         let metadata = toolchain.metadata;
+        let compatibility_note = match metadata.kind.as_str() {
+            "ai-analysis"
+                if metadata.backend_protocol_version
+                    != fidan_driver::AI_ANALYSIS_HELPER_PROTOCOL_VERSION =>
+            {
+                format!(
+                    " [incompatible: cli expects helper protocol {}]",
+                    fidan_driver::AI_ANALYSIS_HELPER_PROTOCOL_VERSION
+                )
+            }
+            "llvm"
+                if metadata.backend_protocol_version
+                    != fidan_driver::LLVM_BACKEND_PROTOCOL_VERSION =>
+            {
+                format!(
+                    " [incompatible: cli expects helper protocol {}]",
+                    fidan_driver::LLVM_BACKEND_PROTOCOL_VERSION
+                )
+            }
+            _ => String::new(),
+        };
         println!(
-            "- {} {} (tool {}, helper protocol {})",
+            "- {} {} (tool {}, helper protocol {}){}",
             metadata.kind,
             metadata.toolchain_version,
             metadata.tool_version,
-            metadata.backend_protocol_version
+            metadata.backend_protocol_version,
+            compatibility_note
         );
     }
     Ok(())

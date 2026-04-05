@@ -13,9 +13,11 @@ mod session;
 pub use ai_analysis::{
     AI_ANALYSIS_HELPER_PROTOCOL_VERSION, AI_ANALYSIS_PROTOCOL_VERSION, AiAnalysisCommand,
     AiAnalysisHelperCommand, AiAnalysisHelperRequest, AiAnalysisHelperResponse,
-    AiAnalysisHelperResult, AiAnalysisRequest, AiAnalysisResponse, AiAnalysisResult, AiDependency,
-    AiDeterministicExplainLine, AiDiagnosticSummary, AiExplainContext, AiModuleOutline,
-    AiOutlineItem, AiProjectSummary, AiStructuredExplanation, AiSymbolInfo, AiSymbolRef,
+    AiAnalysisHelperResult, AiAnalysisRequest, AiAnalysisResponse, AiAnalysisResult, AiCallGraph,
+    AiCallNode, AiDependency, AiDeterministicExplainLine, AiDiagnosticSummary, AiExplainContext,
+    AiFixHunk, AiFixMode, AiFixResult, AiModuleOutline, AiOutlineItem, AiProjectSummary,
+    AiRuntimeTrace, AiStructuredExplanation, AiSymbolInfo, AiSymbolRef, AiTraceStep, AiTypeMap,
+    AiTypedBinding,
 };
 pub use frontend::{
     FrontendOutput, ImportFilter, ResolvedImport, UnresolvedImport, collect_file_import_paths,

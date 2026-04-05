@@ -1,0 +1,8 @@
+File: {{FILE}}
+
+Compiler diagnostics in the selected file (may be empty):
+{{DIAGNOSTICS}}
+
+Source:
+{{SOURCE}}
+{{ADDITIONAL_GUIDANCE}}Suggest only the minimal improvements that are concretely justified by the source. Return the JSON improvement payload.

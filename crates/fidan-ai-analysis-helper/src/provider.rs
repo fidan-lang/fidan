@@ -1,9 +1,13 @@
 use crate::config::{Config, resolve_api_key};
 use anyhow::{Context, Result, bail};
-use fidan_driver::AiExplainContext;
+use fidan_driver::{
+    AiCallNode, AiDiagnosticSummary, AiExplainContext, AiFixHunk, AiFixMode, AiFixResult,
+    AiRuntimeTrace, AiTypedBinding,
+};
 use reqwest::blocking::Client;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Map, Value, json};
+use std::path::Path;
 
 #[derive(Debug, Clone)]
 pub struct RenderedExplanation {
@@ -37,15 +41,12 @@ pub fn run_explain(
     let api_key = resolve_api_key(config)?;
     let system_prompt = build_system_prompt(config);
     let user_prompt = build_user_prompt(context, prompt);
-    let raw = match config.provider.trim().to_ascii_lowercase().as_str() {
-        "openai-compatible" | "openai" => {
-            call_openai_compatible(config, api_key.as_deref(), &system_prompt, &user_prompt)?
-        }
-        "anthropic" => call_anthropic(config, api_key.as_deref(), &system_prompt, &user_prompt)?,
-        other => bail!("unsupported ai-analysis provider `{other}`"),
-    };
-    let payload: ExplanationPayload =
-        parse_json_payload(&raw).context("model response was not valid ai-analysis JSON")?;
+    let payload = request_validated_explain_payload(
+        config,
+        api_key.as_deref(),
+        &system_prompt,
+        &user_prompt,
+    )?;
     Ok(RenderedExplanation {
         provider: config.provider.clone(),
         model: Some(config.model.clone()),
@@ -56,6 +57,410 @@ pub fn run_explain(
         why_pattern_is_used: payload.why_pattern_is_used,
         related_symbols: payload.related_symbols,
         underlying_behaviour: payload.underlying_behaviour,
+    })
+}
+
+pub fn run_fix(
+    config: &Config,
+    file: &Path,
+    source: &str,
+    diagnostics: &[AiDiagnosticSummary],
+    mode: AiFixMode,
+    prompt: Option<&str>,
+) -> Result<AiFixResult> {
+    let api_key = resolve_api_key(config)?;
+    let system_prompt = build_fix_system_prompt(config, mode);
+    let user_prompt = build_fix_user_prompt(file, source, diagnostics, mode, prompt);
+    let payload = request_validated_fix_payload(
+        config,
+        api_key.as_deref(),
+        &system_prompt,
+        &user_prompt,
+        source,
+        diagnostics,
+    )?;
+    Ok(AiFixResult {
+        summary: payload.summary,
+        hunks: payload.hunks,
+        model: Some(config.model.clone()),
+        provider: Some(config.provider.clone()),
+    })
+}
+
+fn request_validated_explain_payload(
+    config: &Config,
+    api_key: Option<&str>,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<ExplanationPayload> {
+    let raw = call_ai_provider(config, api_key, system_prompt, user_prompt)?;
+    let first_attempt = parse_json_payload(&raw)
+        .context("model response was not valid ai-analysis JSON")
+        .and_then(|payload| {
+            validate_explanation_payload(&payload)?;
+            Ok(payload)
+        });
+    match first_attempt {
+        Ok(payload) => Ok(payload),
+        Err(first_error) => {
+            let retry_prompt =
+                build_explain_retry_user_prompt(user_prompt, &first_error.to_string());
+            let retry_raw = call_ai_provider(config, api_key, system_prompt, &retry_prompt)?;
+            let retry_attempt = parse_json_payload(&retry_raw)
+                .context("model retry response was not valid ai-analysis JSON")
+                .and_then(|payload| {
+                    validate_explanation_payload(&payload)?;
+                    Ok(payload)
+                });
+            if let Err(retry_error) = retry_attempt {
+                let preview: String = retry_raw.chars().take(600).collect();
+                bail!(
+                    "model returned invalid ai-analysis payload even after retry: {}\nRetry response preview: {}",
+                    retry_error,
+                    preview
+                );
+            }
+            retry_attempt
+        }
+    }
+}
+
+fn request_validated_fix_payload(
+    config: &Config,
+    api_key: Option<&str>,
+    system_prompt: &str,
+    user_prompt: &str,
+    source: &str,
+    diagnostics: &[AiDiagnosticSummary],
+) -> Result<FixPayload> {
+    let raw = call_ai_provider(config, api_key, system_prompt, user_prompt)?;
+    let first_attempt = parse_fix_payload(&raw)
+        .context("model response was not valid fix JSON")
+        .and_then(|payload| {
+            validate_fix_payload(source, diagnostics, &payload)?;
+            Ok(payload)
+        });
+    match first_attempt {
+        Ok(payload) => Ok(payload),
+        Err(first_error) => {
+            let retry_prompt = build_fix_retry_user_prompt(user_prompt, &first_error.to_string());
+            let retry_raw = call_ai_provider(config, api_key, system_prompt, &retry_prompt)?;
+            let retry_attempt = parse_fix_payload(&retry_raw)
+                .context("model retry response was not valid fix JSON")
+                .and_then(|payload| {
+                    validate_fix_payload(source, diagnostics, &payload)?;
+                    Ok(payload)
+                });
+            if let Err(retry_error) = retry_attempt {
+                let preview: String = retry_raw.chars().take(600).collect();
+                bail!(
+                    "model returned invalid fix payload even after retry: {}\nRetry response preview: {}",
+                    retry_error,
+                    preview
+                );
+            }
+            retry_attempt
+        }
+    }
+}
+
+fn call_ai_provider(
+    config: &Config,
+    api_key: Option<&str>,
+    system_prompt: &str,
+    user_prompt: &str,
+) -> Result<String> {
+    match config.provider.trim().to_ascii_lowercase().as_str() {
+        "openai-compatible" | "openai" => {
+            call_openai_compatible(config, api_key, system_prompt, user_prompt)
+        }
+        "anthropic" => call_anthropic(config, api_key, system_prompt, user_prompt),
+        other => bail!("unsupported ai-analysis provider `{other}`"),
+    }
+}
+
+fn build_fix_system_prompt(config: &Config, mode: AiFixMode) -> String {
+    let custom = config
+        .system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let base = match mode {
+        AiFixMode::Diagnostics => include_str!("../prompts/fix_system.txt"),
+        AiFixMode::Improve => include_str!("../prompts/improve_system.txt"),
+    };
+    if config.replace_system_prompt {
+        return custom
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| base.to_string());
+    }
+    match custom {
+        Some(extra) => format!("{base}\n\nAdditional instructions:\n{extra}"),
+        None => base.to_string(),
+    }
+}
+
+fn build_fix_user_prompt(
+    file: &Path,
+    source: &str,
+    diagnostics: &[AiDiagnosticSummary],
+    mode: AiFixMode,
+    prompt: Option<&str>,
+) -> String {
+    if matches!(mode, AiFixMode::Improve) {
+        return render_prompt_template(
+            include_str!("../prompts/improve_user.txt"),
+            &[
+                ("{{FILE}}", file.display().to_string()),
+                ("{{SOURCE}}", source.to_string()),
+                (
+                    "{{DIAGNOSTICS}}",
+                    if diagnostics.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        diagnostics
+                            .iter()
+                            .map(|d| {
+                                format!(
+                                    "  line {}: {} {} — {}",
+                                    d.line, d.severity, d.code, d.message
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    },
+                ),
+                (
+                    "{{ADDITIONAL_GUIDANCE}}",
+                    prompt
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(|s| format!("\nRequested improvement focus: {s}\n\n"))
+                        .unwrap_or_default(),
+                ),
+            ],
+        );
+    }
+
+    let diag_list = if diagnostics.is_empty() {
+        "(none)".to_string()
+    } else {
+        diagnostics
+            .iter()
+            .map(|d| {
+                format!(
+                    "  line {}: {} {} — {}",
+                    d.line, d.severity, d.code, d.message
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let steering = prompt.map(str::trim).filter(|v| !v.is_empty());
+    render_prompt_template(
+        include_str!("../prompts/fix_user.txt"),
+        &[
+            ("{{FILE}}", file.display().to_string()),
+            ("{{DIAGNOSTICS}}", diag_list),
+            ("{{SOURCE}}", source.to_string()),
+            (
+                "{{ADDITIONAL_GUIDANCE}}",
+                steering
+                    .map(|s| format!("\nAdditional guidance from user: {s}\n\n"))
+                    .unwrap_or_default(),
+            ),
+        ],
+    )
+}
+
+fn build_explain_retry_user_prompt(original_prompt: &str, error: &str) -> String {
+    render_prompt_template(
+        include_str!("../prompts/explain_retry_user.txt"),
+        &[
+            ("{{ORIGINAL_PROMPT}}", original_prompt.to_string()),
+            ("{{VALIDATION_ERROR}}", error.to_string()),
+        ],
+    )
+}
+
+fn build_fix_retry_user_prompt(original_prompt: &str, error: &str) -> String {
+    render_prompt_template(
+        include_str!("../prompts/fix_retry_user.txt"),
+        &[
+            ("{{ORIGINAL_PROMPT}}", original_prompt.to_string()),
+            ("{{VALIDATION_ERROR}}", error.to_string()),
+        ],
+    )
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FixPayload {
+    summary: String,
+    hunks: Vec<AiFixHunk>,
+}
+
+fn validate_explanation_payload(payload: &ExplanationPayload) -> Result<()> {
+    let fields = [
+        ("summary", payload.summary.as_str()),
+        (
+            "input_output_behavior",
+            payload.input_output_behavior.as_str(),
+        ),
+        ("dependencies", payload.dependencies.as_str()),
+        ("possible_edge_cases", payload.possible_edge_cases.as_str()),
+        ("why_pattern_is_used", payload.why_pattern_is_used.as_str()),
+        ("related_symbols", payload.related_symbols.as_str()),
+        (
+            "underlying_behaviour",
+            payload.underlying_behaviour.as_str(),
+        ),
+    ];
+    let errors = fields
+        .iter()
+        .filter_map(|(name, value)| {
+            if value.trim().is_empty() {
+                Some(format!("field `{name}` must be a non-empty JSON string"))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!(errors.join("; "))
+    }
+}
+
+fn validate_fix_payload(
+    source: &str,
+    diagnostics: &[AiDiagnosticSummary],
+    payload: &FixPayload,
+) -> Result<()> {
+    let mut errors = Vec::new();
+    let mut real_hunk_count = 0usize;
+
+    for (index, hunk) in payload.hunks.iter().enumerate() {
+        let line_count = hunk.old_text.trim_end_matches('\n').lines().count();
+        if line_count == 0 {
+            let max_insert_line = source.lines().count() + 1;
+            if hunk.new_text.trim().is_empty() {
+                errors.push(format!(
+                    "hunk {} has empty old_text and empty new_text",
+                    index + 1
+                ));
+            } else if hunk.line_start == 0 || hunk.line_start > max_insert_line {
+                errors.push(format!(
+                    "hunk {} insertion line_start {} is out of range (expected 1..={})",
+                    index + 1,
+                    hunk.line_start,
+                    max_insert_line
+                ));
+            } else {
+                real_hunk_count += 1;
+            }
+            continue;
+        }
+
+        if hunk.old_text.trim() == hunk.new_text.trim() {
+            errors.push(format!(
+                "hunk {} is a no-op: old_text and new_text are identical",
+                index + 1
+            ));
+            continue;
+        }
+
+        let old_text_found_exactly = source.contains(&hunk.old_text);
+        let old_text_found_trimmed = consecutive_trimmed_block_matches(source, &hunk.old_text);
+        if !old_text_found_exactly && !old_text_found_trimmed {
+            errors.push(format!(
+                "hunk {} old_text does not appear in the provided source",
+                index + 1
+            ));
+            continue;
+        }
+
+        real_hunk_count += 1;
+    }
+
+    let summary_lower = payload.summary.to_ascii_lowercase();
+    let summary_claims_change = [
+        "add", "added", "insert", "inserted", "change", "changed", "update", "updated", "replace",
+        "replaced", "fix", "fixed", "resolve", "resolved", "remove", "removed", "delete",
+        "deleted",
+    ]
+    .iter()
+    .any(|token| summary_lower.contains(token));
+
+    if real_hunk_count == 0 && !payload.hunks.is_empty() {
+        errors.push(
+            "payload contains hunks but none of them make an actual source change".to_string(),
+        );
+    }
+    if real_hunk_count == 0 && !diagnostics.is_empty() && summary_claims_change {
+        errors.push(
+            "summary claims a source change but the payload contains no effective edit".to_string(),
+        );
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        bail!(errors.join("; "))
+    }
+}
+
+fn parse_fix_payload(raw: &str) -> Result<FixPayload> {
+    if let Ok(payload) = serde_json::from_str::<FixPayload>(raw) {
+        return Ok(normalize_fix_payload(payload));
+    }
+    if let Some(start) = raw.find("```json")
+        && let Some(end) = raw[start + 7..].find("```")
+    {
+        let body = &raw[start + 7..start + 7 + end];
+        let payload: FixPayload = serde_json::from_str(body.trim())
+            .context("failed to parse fenced JSON fix payload from model response")?;
+        return Ok(normalize_fix_payload(payload));
+    }
+    if let (Some(start), Some(end)) = (raw.find('{'), raw.rfind('}'))
+        && let Ok(payload) = serde_json::from_str::<FixPayload>(&raw[start..=end])
+    {
+        return Ok(normalize_fix_payload(payload));
+    }
+    let preview: String = raw.chars().take(300).collect();
+    let hint = if is_prose_response(raw) {
+        "model returned prose instead of JSON — use a model that follows JSON output instructions (e.g. GPT-4, Claude, Llama-3-8B+)"
+    } else {
+        "model returned malformed JSON — check the model or adjust your system_prompt"
+    };
+    bail!("{hint}.\nRaw response preview: {preview}")
+}
+
+fn normalize_fix_payload(mut payload: FixPayload) -> FixPayload {
+    payload
+        .hunks
+        .retain(|hunk| hunk.old_text.trim() != hunk.new_text.trim());
+    for hunk in &mut payload.hunks {
+        let line_count = hunk.old_text.trim_end_matches('\n').lines().count();
+        if line_count > 0 {
+            hunk.line_end = hunk.line_start + line_count - 1;
+        }
+    }
+    payload
+}
+
+fn consecutive_trimmed_block_matches(source: &str, old_text: &str) -> bool {
+    let expected_lines: Vec<&str> = old_text.trim_end_matches('\n').lines().collect();
+    if expected_lines.is_empty() {
+        return false;
+    }
+
+    let source_lines: Vec<&str> = source.lines().collect();
+    source_lines.windows(expected_lines.len()).any(|window| {
+        window
+            .iter()
+            .zip(expected_lines.iter())
+            .all(|(actual, expected)| actual.trim() == expected.trim())
     })
 }
 
@@ -114,7 +519,7 @@ fn call_anthropic(
         .context("failed to build ai-analysis HTTP client")?;
     let body = json!({
         "model": config.model,
-        "max_tokens": 1200,
+        "max_tokens": 4096,
         "temperature": 0.1,
         "system": system_prompt,
         "messages": [
@@ -238,80 +643,211 @@ fn build_user_prompt(context: &AiExplainContext, prompt: Option<&str>) -> String
         .collect::<Vec<_>>()
         .join("\n");
 
-    format!(
-        "{prompt_text}\n\nAnalysis contract:\n- Use the provided deterministic analysis, inferred types, reads/writes, risks, diagnostics, dependencies, and related symbols as primary evidence.\n- If you mention runtime behaviour, distinguish between behaviour guaranteed by the static code and behaviour that depends on called code or runtime values.\n- Do not claim that code executes, loops, returns, panics, or performs I/O unless the provided evidence supports that claim.\n- If a called symbol is not defined in the selected context, say that its downstream behaviour depends on that symbol.\n\nTarget file: {}\nTarget lines: {}-{}\nTotal file lines: {}\n\nSelected source:\n{}\n\nDeterministic analysis:\n{}\n\nModule outline:\n{}\n\nDependencies:\n{}\n\nRelated symbols:\n{}\n\nDiagnostics touching the selected range:\n{}\n",
-        context.file.display(),
-        context.line_start,
-        context.line_end,
-        context.total_lines,
-        context.selected_source,
-        if deterministic.is_empty() {
-            "(none)"
-        } else {
-            deterministic.as_str()
-        },
-        if module_outline.is_empty() {
-            "(none)"
-        } else {
-            module_outline.as_str()
-        },
-        if dependencies.is_empty() {
-            "(none)"
-        } else {
-            dependencies.as_str()
-        },
-        if related_symbols.is_empty() {
-            "(none)"
-        } else {
-            related_symbols.as_str()
-        },
-        if diagnostics.is_empty() {
-            "(none)"
-        } else {
-            diagnostics.as_str()
-        },
+    render_prompt_template(
+        include_str!("../prompts/explain_user.txt"),
+        &[
+            ("{{PROMPT_TEXT}}", prompt_text.to_string()),
+            ("{{TARGET_FILE}}", context.file.display().to_string()),
+            ("{{LINE_START}}", context.line_start.to_string()),
+            ("{{LINE_END}}", context.line_end.to_string()),
+            ("{{TOTAL_LINES}}", context.total_lines.to_string()),
+            ("{{SELECTED_SOURCE}}", context.selected_source.clone()),
+            (
+                "{{DETERMINISTIC}}",
+                if deterministic.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    deterministic
+                },
+            ),
+            (
+                "{{MODULE_OUTLINE}}",
+                if module_outline.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    module_outline
+                },
+            ),
+            (
+                "{{DEPENDENCIES}}",
+                if dependencies.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    dependencies
+                },
+            ),
+            (
+                "{{RELATED_SYMBOLS}}",
+                if related_symbols.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    related_symbols
+                },
+            ),
+            (
+                "{{DIAGNOSTICS}}",
+                if diagnostics.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    diagnostics
+                },
+            ),
+            ("{{CALL_GRAPH}}", render_call_graph(&context.call_graph)),
+            ("{{TYPE_MAP}}", render_type_map(&context.type_map)),
+            (
+                "{{RUNTIME_TRACE}}",
+                context
+                    .runtime_trace
+                    .as_ref()
+                    .map(render_runtime_trace)
+                    .unwrap_or_else(|| "(none)".to_string()),
+            ),
+        ],
     )
 }
 
-fn default_system_prompt() -> String {
-    r#"You are the Fidan AI analysis assistant.
+fn render_prompt_template(template: &str, replacements: &[(&str, String)]) -> String {
+    let mut rendered = template.to_string();
+    for (placeholder, value) in replacements {
+        rendered = rendered.replace(placeholder, value);
+    }
+    rendered
+}
 
-Your occupation:
-- You are a senior software engineer with deep experience in code comprehension and explanation, especially for Fidan code.
-- You have a strong pedagogical instinct and are skilled at breaking down complex technical concepts into clear, precise, and beginner-friendly explanations.
-- You have a deep understanding of Fidan, its patterns, and its ecosystem, and you are familiar with the common pitfalls and edge cases that arise in Fidan code.
-- You are a helpful, patient, and thorough explainer, and you take care to ensure that your explanations are accurate, grounded in the provided context, and accessible to a wide range of readers.
+fn normalize_explanation_payload(value: Value) -> Result<ExplanationPayload> {
+    let object = value
+        .as_object()
+        .context("model response did not contain a JSON object")?;
+    Ok(ExplanationPayload {
+        summary: explanation_field_to_string(object, "summary")?,
+        input_output_behavior: explanation_field_to_string(object, "input_output_behavior")?,
+        dependencies: explanation_field_to_string(object, "dependencies")?,
+        possible_edge_cases: explanation_field_to_string(object, "possible_edge_cases")?,
+        why_pattern_is_used: explanation_field_to_string(object, "why_pattern_is_used")?,
+        related_symbols: explanation_field_to_string(object, "related_symbols")?,
+        underlying_behaviour: explanation_field_to_string(object, "underlying_behaviour")?,
+    })
+}
 
-Your job:
-- Explain Fidan code clearly, accurately, and concretely.
-- Stay grounded in the provided source, deterministic analysis, inferred types, diagnostics, module outline, dependencies, and related symbols.
-- Treat the compiler-derived context as authoritative evidence.
-- Do not invent runtime facts, dependencies, or behavior that are not supported by the context.
-- Separate what is statically certain from what depends on other symbols, runtime inputs, or code not shown here.
-- Prefer precise beginner-friendly wording over vague expert jargon unless prompted otherwise.
+fn explanation_field_to_string(object: &Map<String, Value>, key: &str) -> Result<String> {
+    let value = object
+        .get(key)
+        .with_context(|| format!("missing required field `{key}`"))?;
+    stringify_explanation_value(value, key)
+}
 
-Output contract:
-- Return only valid JSON.
-- Do not wrap the JSON in Markdown fences.
-- Return exactly one JSON object.
-- Use these exact string fields and no others:
-  - summary
-  - input_output_behavior
-  - dependencies
-  - possible_edge_cases
-  - why_pattern_is_used
-  - related_symbols
-  - underlying_behaviour
-- Every field value must be a single JSON string.
-- Do not use arrays, objects, numbers, booleans, or null for any field.
+fn stringify_explanation_value(value: &Value, key: &str) -> Result<String> {
+    match value {
+        Value::String(text) => Ok(text.clone()),
+        Value::Number(number) => Ok(number.to_string()),
+        Value::Bool(boolean) => Ok(boolean.to_string()),
+        Value::Null => bail!("field `{key}` was null"),
+        Value::Array(values) => {
+            let parts = values
+                .iter()
+                .map(explanation_value_fragment)
+                .filter(|fragment| !fragment.trim().is_empty())
+                .collect::<Vec<_>>();
+            if parts.is_empty() {
+                bail!("field `{key}` was an empty array")
+            }
+            Ok(parts.join("\n"))
+        }
+        Value::Object(_) => serde_json::to_string_pretty(value)
+            .with_context(|| format!("failed to stringify field `{key}`")),
+    }
+}
 
-Quality bar:
-- Explain what the code actually does, not just its syntax shape.
-- Use inferred types, reads, writes, risks, diagnostics, and declarations when they help make the explanation more concrete.
-- Prefer call flow, data flow, side effects, error conditions, and symbol relationships over surface-level syntax commentary.
-- Mention uncertainty implicitly by staying within the evidence.
-- Keep the response structured, readable, and technically grounded."#
-        .to_string()
+fn explanation_value_fragment(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(boolean) => boolean.to_string(),
+        Value::Null => String::new(),
+        Value::Array(values) => values
+            .iter()
+            .map(explanation_value_fragment)
+            .filter(|fragment| !fragment.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Object(_) => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn render_call_graph(nodes: &[AiCallNode]) -> String {
+    if nodes.is_empty() {
+        return "(none)".to_string();
+    }
+    nodes
+        .iter()
+        .map(|node| {
+            let callees = if node.callees.is_empty() {
+                "(no calls)".to_string()
+            } else {
+                node.callees.join(", ")
+            };
+            let recursive_marker = if node.is_recursive {
+                " [recursive]"
+            } else {
+                ""
+            };
+            format!(
+                "line {}: {} → {}{}",
+                node.line, node.caller, callees, recursive_marker
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_type_map(bindings: &[AiTypedBinding]) -> String {
+    if bindings.is_empty() {
+        return "(none)".to_string();
+    }
+    bindings
+        .iter()
+        .map(|b| {
+            if b.line > 0 {
+                format!(
+                    "line {}: {} {} : {}",
+                    b.line, b.kind, b.name, b.inferred_type
+                )
+            } else {
+                format!("{} {} : {}", b.kind, b.name, b.inferred_type)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_runtime_trace(trace: &AiRuntimeTrace) -> String {
+    if trace.steps.is_empty() {
+        return "(no steps in selected range)".to_string();
+    }
+    let mut lines: Vec<String> = trace
+        .steps
+        .iter()
+        .map(|step| {
+            let line_part = step.line.map(|l| format!("line {l}: ")).unwrap_or_default();
+            let value_part = step
+                .value
+                .as_deref()
+                .map(|v| format!(" = {v}"))
+                .unwrap_or_default();
+            format!(
+                "[{}] {}{}{}",
+                step.kind, line_part, step.description, value_part
+            )
+        })
+        .collect();
+    if trace.truncated {
+        lines.push("(trace truncated at 250 steps)".to_string());
+    }
+    lines.join("\n")
+}
+
+fn default_system_prompt() -> &'static str {
+    include_str!("../prompts/explain_system.txt")
 }
 
 fn build_system_prompt(config: &Config) -> String {
@@ -323,7 +859,7 @@ fn build_system_prompt(config: &Config) -> String {
     if config.replace_system_prompt {
         return custom
             .map(ToOwned::to_owned)
-            .unwrap_or_else(default_system_prompt);
+            .unwrap_or_else(|| default_system_prompt().to_string());
     }
 
     match custom {
@@ -332,29 +868,56 @@ fn build_system_prompt(config: &Config) -> String {
             default_system_prompt(),
             custom
         ),
-        None => default_system_prompt(),
+        None => default_system_prompt().to_string(),
     }
+}
+
+fn is_prose_response(raw: &str) -> bool {
+    // If the trimmed content doesn't start with `{` or `[`, it's almost certainly prose.
+    let trimmed = raw.trim();
+    !trimmed.starts_with('{') && !trimmed.starts_with('[')
 }
 
 fn parse_json_payload(raw: &str) -> Result<ExplanationPayload> {
     if let Ok(payload) = serde_json::from_str::<ExplanationPayload>(raw) {
         return Ok(payload);
     }
+    if let Ok(value) = serde_json::from_str::<Value>(raw) {
+        return normalize_explanation_payload(value);
+    }
 
     if let Some(start) = raw.find("```json")
         && let Some(end) = raw[start + 7..].find("```")
     {
         let body = &raw[start + 7..start + 7 + end];
-        return serde_json::from_str(body.trim())
-            .context("failed to parse fenced JSON payload from model response");
+        if let Ok(payload) = serde_json::from_str::<ExplanationPayload>(body.trim()) {
+            return Ok(payload);
+        }
+        let value = serde_json::from_str::<Value>(body.trim())
+            .context("failed to parse fenced JSON payload from model response")?;
+        return normalize_explanation_payload(value)
+            .context("failed to normalize fenced JSON payload from model response");
     }
 
-    if let (Some(start), Some(end)) = (raw.find('{'), raw.rfind('}')) {
-        return serde_json::from_str(&raw[start..=end])
-            .context("failed to parse JSON object from model response");
+    if let (Some(start), Some(end)) = (raw.find('{'), raw.rfind('}'))
+        && let Ok(payload) = serde_json::from_str::<ExplanationPayload>(&raw[start..=end])
+    {
+        return Ok(payload);
+    }
+    if let (Some(start), Some(end)) = (raw.find('{'), raw.rfind('}'))
+        && let Ok(value) = serde_json::from_str::<Value>(&raw[start..=end])
+    {
+        return normalize_explanation_payload(value);
     }
 
-    bail!("response did not contain a parseable JSON object")
+    // Model returned prose or otherwise non-JSON content.
+    let preview: String = raw.chars().take(300).collect();
+    let hint = if is_prose_response(raw) {
+        "model returned prose instead of JSON — use a model that follows JSON output instructions (e.g. GPT-4, Claude, Llama-3-8B+)"
+    } else {
+        "model returned malformed JSON — check the model or adjust your system_prompt"
+    };
+    bail!("{hint}.\nRaw response preview: {preview}")
 }
 
 fn extract_openai_text(value: &serde_json::Value) -> Option<String> {
@@ -387,10 +950,13 @@ fn extract_anthropic_text(value: &serde_json::Value) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_system_prompt, build_user_prompt, parse_json_payload};
+    use super::{
+        FixPayload, build_system_prompt, build_user_prompt, normalize_fix_payload,
+        parse_json_payload, validate_explanation_payload, validate_fix_payload,
+    };
     use crate::config::Config;
     use fidan_driver::{
-        AiDependency, AiDeterministicExplainLine, AiDiagnosticSummary, AiExplainContext,
+        AiDependency, AiDeterministicExplainLine, AiDiagnosticSummary, AiExplainContext, AiFixHunk,
         AiOutlineItem, AiSymbolRef,
     };
     use std::path::PathBuf;
@@ -428,6 +994,42 @@ mod tests {
         let payload = parse_json_payload(&text).expect("parse embedded payload");
         assert_eq!(payload.input_output_behavior, "IO");
         assert_eq!(payload.possible_edge_cases, "Edges");
+    }
+
+    #[test]
+    fn parse_json_payload_normalizes_array_fields_to_strings() {
+        let payload = parse_json_payload(
+            r#"{
+  "summary": ["First line", "Second line"],
+  "input_output_behavior": "Reads input and prints output.",
+  "dependencies": ["std.io.print", "std.math"],
+  "possible_edge_cases": ["Empty input"],
+  "why_pattern_is_used": "Keeps the entry point explicit.",
+  "related_symbols": ["main", "helper"],
+  "underlying_behaviour": ["Calls helper()", "Prints the result"]
+}"#,
+        )
+        .expect("normalize array-valued explanation fields");
+
+        assert_eq!(payload.summary, "First line\nSecond line");
+        assert_eq!(payload.dependencies, "std.io.print\nstd.math");
+        assert_eq!(payload.related_symbols, "main\nhelper");
+    }
+
+    #[test]
+    fn validate_explanation_payload_rejects_empty_fields() {
+        let err = validate_explanation_payload(&super::ExplanationPayload {
+            summary: "Summary".to_string(),
+            input_output_behavior: String::new(),
+            dependencies: "Deps".to_string(),
+            possible_edge_cases: "Edges".to_string(),
+            why_pattern_is_used: "Why".to_string(),
+            related_symbols: "Symbols".to_string(),
+            underlying_behaviour: "Behaviour".to_string(),
+        })
+        .expect_err("empty explanation fields should be rejected");
+
+        assert!(err.to_string().contains("input_output_behavior"));
     }
 
     fn config_with_prompt(system_prompt: Option<&str>, replace_system_prompt: bool) -> Config {
@@ -510,6 +1112,9 @@ mod tests {
                     message: "possible bounds issue".to_string(),
                     line: 2,
                 }],
+                call_graph: vec![],
+                type_map: vec![],
+                runtime_trace: None,
             },
             Some("Explain for debugging."),
         );
@@ -522,5 +1127,157 @@ mod tests {
         assert!(prompt.contains("warning W1001 at line 2: possible bounds issue"));
         assert!(prompt.contains("list literal"));
         assert!(prompt.contains("distinguish between behaviour guaranteed by the static code"));
+    }
+
+    #[test]
+    fn validate_fix_payload_rejects_noop_hunks() {
+        let payload = FixPayload {
+            summary: "Added a compute action to resolve the undefined name error.".to_string(),
+            hunks: vec![AiFixHunk {
+                line_start: 3,
+                line_end: 3,
+                old_text: "    print(compute(result))".to_string(),
+                new_text: "    print(compute(result))".to_string(),
+                reason: "No change".to_string(),
+            }],
+        };
+
+        let err = validate_fix_payload(
+            "action main {\n    var result = greet(\"World\")\n    print(compute(result))\n}\n",
+            &[AiDiagnosticSummary {
+                severity: "error".to_string(),
+                code: "E0101".to_string(),
+                message: "undefined name `compute`".to_string(),
+                line: 3,
+            }],
+            &payload,
+        )
+        .expect_err("no-op payload should be rejected");
+
+        let message = err.to_string();
+        assert!(message.contains("no-op"));
+        assert!(message.contains("summary claims a source change"));
+    }
+
+    #[test]
+    fn validate_fix_payload_accepts_real_insert_style_edit() {
+        let payload = FixPayload {
+            summary: "Inserted a new line between two existing lines.".to_string(),
+            hunks: vec![AiFixHunk {
+                line_start: 2,
+                line_end: 3,
+                old_text: "    first()\n    second()".to_string(),
+                new_text: "    first()\n    inserted()\n    second()".to_string(),
+                reason: "E0101".to_string(),
+            }],
+        };
+
+        validate_fix_payload(
+            "action main {\n    first()\n    second()\n}\n",
+            &[AiDiagnosticSummary {
+                severity: "error".to_string(),
+                code: "E0101".to_string(),
+                message: "undefined name `inserted`".to_string(),
+                line: 2,
+            }],
+            &payload,
+        )
+        .expect("real edit payload should be accepted");
+    }
+
+    #[test]
+    fn validate_fix_payload_accepts_insertion_only_hunk() {
+        let payload = FixPayload {
+            summary: "Inserted a helper action before main.".to_string(),
+            hunks: vec![AiFixHunk {
+                line_start: 4,
+                line_end: 4,
+                old_text: String::new(),
+                new_text: "action helper returns integer {\n    return 1\n}".to_string(),
+                reason: "E0101".to_string(),
+            }],
+        };
+
+        validate_fix_payload(
+            "action main {\n    print(1)\n}\nmain()\n",
+            &[AiDiagnosticSummary {
+                severity: "error".to_string(),
+                code: "E0101".to_string(),
+                message: "undefined name `helper`".to_string(),
+                line: 4,
+            }],
+            &payload,
+        )
+        .expect("insertion-only payload should be accepted");
+    }
+
+    #[test]
+    fn validate_fix_payload_rejects_non_consecutive_trimmed_match() {
+        let payload = FixPayload {
+            summary: "Replaced a broken consecutive block.".to_string(),
+            hunks: vec![AiFixHunk {
+                line_start: 2,
+                line_end: 3,
+                old_text: "    alpha()\n    gamma()".to_string(),
+                new_text: "    alpha()\n    delta()".to_string(),
+                reason: "E0101".to_string(),
+            }],
+        };
+
+        let err = validate_fix_payload(
+            "action main {\n    alpha()\n    beta()\n    gamma()\n}\n",
+            &[AiDiagnosticSummary {
+                severity: "error".to_string(),
+                code: "E0101".to_string(),
+                message: "undefined name `delta`".to_string(),
+                line: 3,
+            }],
+            &payload,
+        )
+        .expect_err("non-consecutive trim-only matches should be rejected");
+
+        assert!(err.to_string().contains("old_text does not appear"));
+    }
+
+    #[test]
+    fn normalize_fix_payload_derives_line_end_from_old_text() {
+        let payload = normalize_fix_payload(FixPayload {
+            summary: "Added a helper action.".to_string(),
+            hunks: vec![AiFixHunk {
+                line_start: 13,
+                line_end: 13,
+                old_text: "    first()\n    second()\n    third()".to_string(),
+                new_text: "    first()\n    inserted()\n    second()\n    third()".to_string(),
+                reason: "E0101".to_string(),
+            }],
+        });
+
+        assert_eq!(payload.hunks[0].line_end, 15);
+    }
+
+    #[test]
+    fn normalize_fix_payload_drops_noop_hunks() {
+        let payload = normalize_fix_payload(FixPayload {
+            summary: "Mixed payload.".to_string(),
+            hunks: vec![
+                AiFixHunk {
+                    line_start: 10,
+                    line_end: 10,
+                    old_text: "    unchanged()".to_string(),
+                    new_text: "    unchanged()".to_string(),
+                    reason: "No change".to_string(),
+                },
+                AiFixHunk {
+                    line_start: 11,
+                    line_end: 11,
+                    old_text: "    old()".to_string(),
+                    new_text: "    new()".to_string(),
+                    reason: "E0101".to_string(),
+                },
+            ],
+        });
+
+        assert_eq!(payload.hunks.len(), 1);
+        assert_eq!(payload.hunks[0].old_text, "    old()");
     }
 }

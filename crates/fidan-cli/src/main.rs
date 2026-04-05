@@ -243,9 +243,21 @@ enum Command {
     Fix {
         /// Path to the .fdn source file
         file: PathBuf,
-        /// Print the proposed changes without writing to the file
+        /// Write changes to the file (default: print diff to stdout)
         #[arg(long)]
-        dry_run: bool,
+        in_place: bool,
+        /// Use the installed AI analysis toolchain to suggest additional fixes.
+        /// Optionally pass extra steering text (e.g. `--ai "prefer idiomatic style"`).
+        /// High-confidence deterministic fixes are always applied first.
+        #[arg(long, num_args = 0..=1, default_missing_value = "")]
+        ai: Option<String>,
+        /// Ask the AI to improve code even when diagnostics are already clean.
+        /// Optionally pass steering text (e.g. `--improve "refactor for readability"`).
+        #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with = "refactor")]
+        improve: Option<String>,
+        /// Alias for `--improve`.
+        #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with = "improve")]
+        refactor: Option<String>,
     },
     /// Explain source lines, a diagnostic code, or the last recorded error
     #[command(name = "explain")]
@@ -601,6 +613,9 @@ fn run_cli() -> Result<()> {
                 target_cpu: effective_target_cpu,
                 ..Default::default()
             };
+            if matches!(backend, fidan_driver::Backend::Llvm) {
+                let _ = toolchain::ensure_llvm_toolchain_installed()?;
+            }
             pipeline::run_pipeline(opts)
         }
         Command::Profile {
@@ -661,7 +676,13 @@ fn run_cli() -> Result<()> {
             };
             pipeline::run_pipeline(opts)
         }
-        Command::Fix { file, dry_run } => fix::run_fix(file, dry_run),
+        Command::Fix {
+            file,
+            in_place,
+            ai,
+            improve,
+            refactor,
+        } => fix::run_fix(file, in_place, ai, improve.or(refactor)),
         Command::Format {
             file,
             in_place,

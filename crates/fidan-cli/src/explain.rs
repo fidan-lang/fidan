@@ -234,15 +234,7 @@ fn run_explain_ai(
     line_end: usize,
     prompt: Option<&str>,
 ) -> Result<()> {
-    let home = fidan_driver::resolve_fidan_home()?;
-    let toolchain = fidan_driver::install::installed_toolchains(&home, Some("ai-analysis"))?
-        .into_iter()
-        .find(|toolchain| {
-            toolchain.metadata.backend_protocol_version == AI_ANALYSIS_HELPER_PROTOCOL_VERSION
-        })
-        .context(
-            "AI analysis toolchain is not installed for this Fidan version — run `fidan toolchain add ai-analysis` first",
-        )?;
+    let toolchain = crate::toolchain::ensure_ai_toolchain_installed()?;
 
     if !toolchain.helper_path.is_file() {
         bail!(
@@ -341,9 +333,12 @@ fn run_explain_ai(
                 .unwrap_or_default()
         );
     }
-    let AiAnalysisHelperResult::Explain(explanation) = response
+    let result = response
         .result
         .context("ai-analysis helper returned no result")?;
+    let AiAnalysisHelperResult::Explain(explanation) = result else {
+        bail!("ai-analysis helper returned an unexpected result kind for an explain request");
+    };
     render_ai_explanation(&explanation, &file_display, line_start, line_end);
     Ok(())
 }

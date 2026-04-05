@@ -1,0 +1,12 @@
+{{ORIGINAL_PROMPT}}
+
+Your previous response was invalid. Correct it and return a fresh JSON object.
+
+Validation error:
+{{VALIDATION_ERROR}}
+
+Return only corrected JSON.
+- Return exactly one JSON object.
+- Use exactly these fields: summary, input_output_behavior, dependencies, possible_edge_cases, why_pattern_is_used, related_symbols, underlying_behaviour.
+- Every field value must be a single JSON string. Do not use arrays, objects, booleans, numbers, or null for any field.
+- Recompute the response from the provided code and analysis context. Do not paraphrase or wrap your previous invalid answer.

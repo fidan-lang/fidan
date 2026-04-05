@@ -1,0 +1,38 @@
+{{PROMPT_TEXT}}
+
+Analysis contract:
+- Use the provided deterministic analysis, inferred types, reads/writes, risks, diagnostics, dependencies, and related symbols as primary evidence.
+- If you mention runtime behaviour, distinguish between behaviour guaranteed by the static code and behaviour that depends on called code or runtime values.
+- Do not claim that code executes, loops, returns, panics, or performs I/O unless the provided evidence supports that claim.
+- If a called symbol is not defined in the selected context, say that its downstream behaviour depends on that symbol.
+
+Target file: {{TARGET_FILE}}
+Target lines: {{LINE_START}}-{{LINE_END}}
+Total file lines: {{TOTAL_LINES}}
+
+Selected source:
+{{SELECTED_SOURCE}}
+
+Deterministic analysis:
+{{DETERMINISTIC}}
+
+Module outline:
+{{MODULE_OUTLINE}}
+
+Dependencies:
+{{DEPENDENCIES}}
+
+Related symbols:
+{{RELATED_SYMBOLS}}
+
+Diagnostics touching the selected range:
+{{DIAGNOSTICS}}
+
+Call graph (actions -> callees):
+{{CALL_GRAPH}}
+
+Type map (all bindings with inferred types):
+{{TYPE_MAP}}
+
+Static execution trace (selected range, in order):
+{{RUNTIME_TRACE}}
