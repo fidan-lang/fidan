@@ -88,6 +88,18 @@ function Get-LlvmBackendProtocolVersion {
   return [int]$match.Groups[1].Value
 }
 
+function Get-AiAnalysisBackendProtocolVersion {
+  $source = Get-Content "crates/fidan-driver/src/ai_analysis.rs" -Raw
+  $match = [regex]::Match(
+    $source,
+    'pub\s+const\s+AI_ANALYSIS_HELPER_PROTOCOL_VERSION\s*:\s*u32\s*=\s*(\d+)\s*;'
+  )
+  if (-not $match.Success) {
+    throw "Failed to determine AI analysis helper protocol version from crates/fidan-driver/src/ai_analysis.rs"
+  }
+  return [int]$match.Groups[1].Value
+}
+
 function Get-HostTriple {
   $osPart = if ($IsWindows) {
     "pc-windows-msvc"
@@ -715,6 +727,9 @@ if (-not $SupportedFidanVersions) {
 if ($BackendProtocolVersion -le 0) {
   if ($Kind -eq "llvm") {
     $BackendProtocolVersion = Get-LlvmBackendProtocolVersion
+  }
+  elseif ($Kind -eq "ai-analysis") {
+    $BackendProtocolVersion = Get-AiAnalysisBackendProtocolVersion
   }
   else {
     $BackendProtocolVersion = 1
