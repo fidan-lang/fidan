@@ -100,7 +100,7 @@ fn explain_context_response(file: &Path) -> String {
 
 fn write_config(path: &Path, base_url: &str) {
     let config = format!(
-        "schema_version = 1\nprovider = \"openai-compatible\"\nmodel = \"test-model\"\nbase_url = \"{base_url}\"\ntimeout_secs = 10\n"
+        "schema_version = 1\nprovider = \"openai-compatible\"\nmodel = \"test-model\"\nbase_url = \"{base_url}\"\napi_key_env = \"FIDAN_TEST_FAKE_API_KEY_SHOULD_NOT_EXIST\"\ntimeout_secs = 10\n"
     );
     std::fs::write(path, config).expect("write helper config");
 }
