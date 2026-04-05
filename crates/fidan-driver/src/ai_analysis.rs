@@ -235,6 +235,9 @@ pub enum AiAnalysisHelperCommand {
         source: String,
         /// Remaining diagnostics that could not be auto-fixed.
         diagnostics: Vec<AiDiagnosticSummary>,
+        /// Optional compiler-backed context derived from the patched source.
+        #[serde(default)]
+        explain_context: Box<Option<AiExplainContext>>,
         /// Whether the AI should resolve compiler diagnostics or perform general improvements.
         mode: AiFixMode,
         /// Optional steering prompt from the user.

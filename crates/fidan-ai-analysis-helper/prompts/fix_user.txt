@@ -3,6 +3,27 @@ File: {{FILE}}
 Diagnostics to fix (line, severity, code, message):
 {{DIAGNOSTICS}}
 
+Deterministic line analysis:
+{{DETERMINISTIC}}
+
+Module outline:
+{{MODULE_OUTLINE}}
+
+Dependencies:
+{{DEPENDENCIES}}
+
+Related symbols:
+{{RELATED_SYMBOLS}}
+
+Static call graph:
+{{CALL_GRAPH}}
+
+Inferred type map:
+{{TYPE_MAP}}
+
+Static execution trace:
+{{RUNTIME_TRACE}}
+
 Source:
 {{SOURCE}}
 {{ADDITIONAL_GUIDANCE}}Apply the minimal edits that resolve each listed diagnostic. Return the JSON fix payload.

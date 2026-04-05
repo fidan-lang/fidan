@@ -102,6 +102,10 @@ struct ParsedFile {
 
 fn parse_file(file: &Path) -> Result<ParsedFile> {
     let src = std::fs::read_to_string(file).with_context(|| format!("cannot read {:?}", file))?;
+    parse_source(file, src)
+}
+
+fn parse_source(file: &Path, src: String) -> Result<ParsedFile> {
     let interner = Arc::new(SymbolInterner::new());
     let source_map = Arc::new(SourceMap::new());
     let source_name = file.display().to_string();
@@ -131,6 +135,25 @@ pub(crate) fn analyze_explain_context(
     line_end: Option<usize>,
 ) -> Result<AiExplainContext> {
     let parsed = parse_file(file)?;
+    Ok(build_explain_context(parsed, file, line_start, line_end))
+}
+
+pub(crate) fn analyze_explain_context_from_source(
+    file: &Path,
+    source: &str,
+    line_start: Option<usize>,
+    line_end: Option<usize>,
+) -> Result<AiExplainContext> {
+    let parsed = parse_source(file, source.to_string())?;
+    Ok(build_explain_context(parsed, file, line_start, line_end))
+}
+
+fn build_explain_context(
+    parsed: ParsedFile,
+    file: &Path,
+    line_start: Option<usize>,
+    line_end: Option<usize>,
+) -> AiExplainContext {
     let total_lines = parsed.lines.len().max(1);
     let line_start = line_start.unwrap_or(1).max(1).min(total_lines);
     let line_end = line_end.unwrap_or_else(|| {
@@ -195,7 +218,7 @@ pub(crate) fn analyze_explain_context(
         })
         .collect();
 
-    Ok(AiExplainContext {
+    AiExplainContext {
         file: file.to_path_buf(),
         line_start,
         line_end,
@@ -209,7 +232,7 @@ pub(crate) fn analyze_explain_context(
         call_graph: build_call_graph(&parsed),
         type_map: build_type_map(&parsed),
         runtime_trace: Some(build_static_trace(&parsed, line_start, line_end)),
-    })
+    }
 }
 
 pub(crate) fn analyze_module_outline(file: &Path) -> Result<AiModuleOutline> {

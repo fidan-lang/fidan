@@ -354,6 +354,10 @@ fn invoke_ai_fix_helper(
             file: file.to_path_buf(),
             source: source.to_string(),
             diagnostics: diagnostics.to_vec(),
+            explain_context: Box::new(
+                crate::ai_analysis::analyze_explain_context_from_source(file, source, None, None)
+                    .ok(),
+            ),
             mode,
             prompt: prompt.map(ToOwned::to_owned),
         },

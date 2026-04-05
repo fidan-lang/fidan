@@ -65,12 +65,14 @@ pub fn run_fix(
     file: &Path,
     source: &str,
     diagnostics: &[AiDiagnosticSummary],
+    explain_context: Option<&AiExplainContext>,
     mode: AiFixMode,
     prompt: Option<&str>,
 ) -> Result<AiFixResult> {
     let api_key = resolve_api_key(config)?;
     let system_prompt = build_fix_system_prompt(config, mode);
-    let user_prompt = build_fix_user_prompt(file, source, diagnostics, mode, prompt);
+    let user_prompt =
+        build_fix_user_prompt(file, source, diagnostics, explain_context, mode, prompt);
     let payload = request_validated_fix_payload(
         config,
         api_key.as_deref(),
@@ -204,9 +206,11 @@ fn build_fix_user_prompt(
     file: &Path,
     source: &str,
     diagnostics: &[AiDiagnosticSummary],
+    explain_context: Option<&AiExplainContext>,
     mode: AiFixMode,
     prompt: Option<&str>,
 ) -> String {
+    let rendered_context = explain_context.map(render_explain_context_sections);
     if matches!(mode, AiFixMode::Improve) {
         return render_prompt_template(
             include_str!("../prompts/improve_user.txt"),
@@ -229,6 +233,69 @@ fn build_fix_user_prompt(
                             .collect::<Vec<_>>()
                             .join("\n")
                     },
+                ),
+                (
+                    "{{DETERMINISTIC}}",
+                    rendered_context
+                        .as_ref()
+                        .map(|ctx| ctx.deterministic.clone())
+                        .unwrap_or_else(|| {
+                            "(unavailable for the current source state)".to_string()
+                        }),
+                ),
+                (
+                    "{{MODULE_OUTLINE}}",
+                    rendered_context
+                        .as_ref()
+                        .map(|ctx| ctx.module_outline.clone())
+                        .unwrap_or_else(|| {
+                            "(unavailable for the current source state)".to_string()
+                        }),
+                ),
+                (
+                    "{{DEPENDENCIES}}",
+                    rendered_context
+                        .as_ref()
+                        .map(|ctx| ctx.dependencies.clone())
+                        .unwrap_or_else(|| {
+                            "(unavailable for the current source state)".to_string()
+                        }),
+                ),
+                (
+                    "{{RELATED_SYMBOLS}}",
+                    rendered_context
+                        .as_ref()
+                        .map(|ctx| ctx.related_symbols.clone())
+                        .unwrap_or_else(|| {
+                            "(unavailable for the current source state)".to_string()
+                        }),
+                ),
+                (
+                    "{{CALL_GRAPH}}",
+                    rendered_context
+                        .as_ref()
+                        .map(|ctx| ctx.call_graph.clone())
+                        .unwrap_or_else(|| {
+                            "(unavailable for the current source state)".to_string()
+                        }),
+                ),
+                (
+                    "{{TYPE_MAP}}",
+                    rendered_context
+                        .as_ref()
+                        .map(|ctx| ctx.type_map.clone())
+                        .unwrap_or_else(|| {
+                            "(unavailable for the current source state)".to_string()
+                        }),
+                ),
+                (
+                    "{{RUNTIME_TRACE}}",
+                    rendered_context
+                        .as_ref()
+                        .map(|ctx| ctx.runtime_trace.clone())
+                        .unwrap_or_else(|| {
+                            "(unavailable for the current source state)".to_string()
+                        }),
                 ),
                 (
                     "{{ADDITIONAL_GUIDANCE}}",
@@ -262,6 +329,55 @@ fn build_fix_user_prompt(
         &[
             ("{{FILE}}", file.display().to_string()),
             ("{{DIAGNOSTICS}}", diag_list),
+            (
+                "{{DETERMINISTIC}}",
+                rendered_context
+                    .as_ref()
+                    .map(|ctx| ctx.deterministic.clone())
+                    .unwrap_or_else(|| "(unavailable for the current source state)".to_string()),
+            ),
+            (
+                "{{MODULE_OUTLINE}}",
+                rendered_context
+                    .as_ref()
+                    .map(|ctx| ctx.module_outline.clone())
+                    .unwrap_or_else(|| "(unavailable for the current source state)".to_string()),
+            ),
+            (
+                "{{DEPENDENCIES}}",
+                rendered_context
+                    .as_ref()
+                    .map(|ctx| ctx.dependencies.clone())
+                    .unwrap_or_else(|| "(unavailable for the current source state)".to_string()),
+            ),
+            (
+                "{{RELATED_SYMBOLS}}",
+                rendered_context
+                    .as_ref()
+                    .map(|ctx| ctx.related_symbols.clone())
+                    .unwrap_or_else(|| "(unavailable for the current source state)".to_string()),
+            ),
+            (
+                "{{CALL_GRAPH}}",
+                rendered_context
+                    .as_ref()
+                    .map(|ctx| ctx.call_graph.clone())
+                    .unwrap_or_else(|| "(unavailable for the current source state)".to_string()),
+            ),
+            (
+                "{{TYPE_MAP}}",
+                rendered_context
+                    .as_ref()
+                    .map(|ctx| ctx.type_map.clone())
+                    .unwrap_or_else(|| "(unavailable for the current source state)".to_string()),
+            ),
+            (
+                "{{RUNTIME_TRACE}}",
+                rendered_context
+                    .as_ref()
+                    .map(|ctx| ctx.runtime_trace.clone())
+                    .unwrap_or_else(|| "(unavailable for the current source state)".to_string()),
+            ),
             ("{{SOURCE}}", source.to_string()),
             (
                 "{{ADDITIONAL_GUIDANCE}}",
@@ -551,6 +667,41 @@ fn build_user_prompt(context: &AiExplainContext, prompt: Option<&str>) -> String
         .unwrap_or(
             "Explain this code for a beginner while staying precise and technically grounded.",
         );
+    let rendered_context = render_explain_context_sections(context);
+
+    render_prompt_template(
+        include_str!("../prompts/explain_user.txt"),
+        &[
+            ("{{PROMPT_TEXT}}", prompt_text.to_string()),
+            ("{{TARGET_FILE}}", context.file.display().to_string()),
+            ("{{LINE_START}}", context.line_start.to_string()),
+            ("{{LINE_END}}", context.line_end.to_string()),
+            ("{{TOTAL_LINES}}", context.total_lines.to_string()),
+            ("{{SELECTED_SOURCE}}", context.selected_source.clone()),
+            ("{{DETERMINISTIC}}", rendered_context.deterministic),
+            ("{{MODULE_OUTLINE}}", rendered_context.module_outline),
+            ("{{DEPENDENCIES}}", rendered_context.dependencies),
+            ("{{RELATED_SYMBOLS}}", rendered_context.related_symbols),
+            ("{{DIAGNOSTICS}}", rendered_context.diagnostics),
+            ("{{CALL_GRAPH}}", rendered_context.call_graph),
+            ("{{TYPE_MAP}}", rendered_context.type_map),
+            ("{{RUNTIME_TRACE}}", rendered_context.runtime_trace),
+        ],
+    )
+}
+
+struct RenderedExplainContextSections {
+    deterministic: String,
+    module_outline: String,
+    dependencies: String,
+    related_symbols: String,
+    diagnostics: String,
+    call_graph: String,
+    type_map: String,
+    runtime_trace: String,
+}
+
+fn render_explain_context_sections(context: &AiExplainContext) -> RenderedExplainContextSections {
     let deterministic = context
         .deterministic_lines
         .iter()
@@ -643,67 +794,40 @@ fn build_user_prompt(context: &AiExplainContext, prompt: Option<&str>) -> String
         .collect::<Vec<_>>()
         .join("\n");
 
-    render_prompt_template(
-        include_str!("../prompts/explain_user.txt"),
-        &[
-            ("{{PROMPT_TEXT}}", prompt_text.to_string()),
-            ("{{TARGET_FILE}}", context.file.display().to_string()),
-            ("{{LINE_START}}", context.line_start.to_string()),
-            ("{{LINE_END}}", context.line_end.to_string()),
-            ("{{TOTAL_LINES}}", context.total_lines.to_string()),
-            ("{{SELECTED_SOURCE}}", context.selected_source.clone()),
-            (
-                "{{DETERMINISTIC}}",
-                if deterministic.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    deterministic
-                },
-            ),
-            (
-                "{{MODULE_OUTLINE}}",
-                if module_outline.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    module_outline
-                },
-            ),
-            (
-                "{{DEPENDENCIES}}",
-                if dependencies.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    dependencies
-                },
-            ),
-            (
-                "{{RELATED_SYMBOLS}}",
-                if related_symbols.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    related_symbols
-                },
-            ),
-            (
-                "{{DIAGNOSTICS}}",
-                if diagnostics.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    diagnostics
-                },
-            ),
-            ("{{CALL_GRAPH}}", render_call_graph(&context.call_graph)),
-            ("{{TYPE_MAP}}", render_type_map(&context.type_map)),
-            (
-                "{{RUNTIME_TRACE}}",
-                context
-                    .runtime_trace
-                    .as_ref()
-                    .map(render_runtime_trace)
-                    .unwrap_or_else(|| "(none)".to_string()),
-            ),
-        ],
-    )
+    RenderedExplainContextSections {
+        deterministic: if deterministic.is_empty() {
+            "(none)".to_string()
+        } else {
+            deterministic
+        },
+        module_outline: if module_outline.is_empty() {
+            "(none)".to_string()
+        } else {
+            module_outline
+        },
+        dependencies: if dependencies.is_empty() {
+            "(none)".to_string()
+        } else {
+            dependencies
+        },
+        related_symbols: if related_symbols.is_empty() {
+            "(none)".to_string()
+        } else {
+            related_symbols
+        },
+        diagnostics: if diagnostics.is_empty() {
+            "(none)".to_string()
+        } else {
+            diagnostics
+        },
+        call_graph: render_call_graph(&context.call_graph),
+        type_map: render_type_map(&context.type_map),
+        runtime_trace: context
+            .runtime_trace
+            .as_ref()
+            .map(render_runtime_trace)
+            .unwrap_or_else(|| "(none)".to_string()),
+    }
 }
 
 fn render_prompt_template(template: &str, replacements: &[(&str, String)]) -> String {
@@ -951,14 +1075,17 @@ fn extract_anthropic_text(value: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FixPayload, build_system_prompt, build_user_prompt, normalize_fix_payload,
-        parse_json_payload, validate_explanation_payload, validate_fix_payload,
+        FixPayload, build_fix_user_prompt, build_system_prompt, build_user_prompt,
+        normalize_fix_payload, parse_json_payload, validate_explanation_payload,
+        validate_fix_payload,
     };
     use crate::config::Config;
     use fidan_driver::{
-        AiDependency, AiDeterministicExplainLine, AiDiagnosticSummary, AiExplainContext, AiFixHunk,
-        AiOutlineItem, AiSymbolRef,
+        AiCallNode, AiDependency, AiDeterministicExplainLine, AiDiagnosticSummary,
+        AiExplainContext, AiFixHunk, AiFixMode, AiOutlineItem, AiRuntimeTrace, AiSymbolRef,
+        AiTraceStep, AiTypedBinding,
     };
+    use std::path::Path;
     use std::path::PathBuf;
 
     fn raw_payload() -> &'static str {
@@ -1127,6 +1254,95 @@ mod tests {
         assert!(prompt.contains("warning W1001 at line 2: possible bounds issue"));
         assert!(prompt.contains("list literal"));
         assert!(prompt.contains("distinguish between behaviour guaranteed by the static code"));
+    }
+
+    #[test]
+    fn build_fix_user_prompt_includes_compiler_backed_context() {
+        let prompt = build_fix_user_prompt(
+            Path::new("sample.fdn"),
+            "action main {\n    var total set values[0] + values[1]\n}\n",
+            &[AiDiagnosticSummary {
+                severity: "warning".to_string(),
+                code: "W1001".to_string(),
+                message: "possible bounds issue".to_string(),
+                line: 2,
+            }],
+            Some(&AiExplainContext {
+                file: PathBuf::from("sample.fdn"),
+                line_start: 1,
+                line_end: 3,
+                total_lines: 3,
+                selected_source: "action main {\n    var total set values[0] + values[1]\n}"
+                    .to_string(),
+                deterministic_lines: vec![AiDeterministicExplainLine {
+                    line: 2,
+                    source: "var total set values[0] + values[1]".to_string(),
+                    what_it_does: "adds two indexed values".to_string(),
+                    inferred_type: Some("integer".to_string()),
+                    reads: vec!["values".to_string()],
+                    writes: vec!["total".to_string()],
+                    risks: vec!["index out of bounds".to_string()],
+                }],
+                module_outline: vec![AiOutlineItem {
+                    kind: "action".to_string(),
+                    name: "main".to_string(),
+                    line: 1,
+                    detail: Some("0 parameter(s)".to_string()),
+                }],
+                dependencies: vec![AiDependency {
+                    path: "std.io.print".to_string(),
+                    alias: Some("print".to_string()),
+                    is_re_export: false,
+                }],
+                related_symbols: vec![AiSymbolRef {
+                    name: "values".to_string(),
+                    kind: "var".to_string(),
+                    file: PathBuf::from("sample.fdn"),
+                    line: 1,
+                    snippet: "var values set [1, 2]".to_string(),
+                    detail: Some("list literal".to_string()),
+                }],
+                diagnostics: vec![AiDiagnosticSummary {
+                    severity: "warning".to_string(),
+                    code: "W1001".to_string(),
+                    message: "possible bounds issue".to_string(),
+                    line: 2,
+                }],
+                call_graph: vec![AiCallNode {
+                    caller: "main".to_string(),
+                    callees: vec!["print".to_string()],
+                    line: 1,
+                    is_recursive: false,
+                }],
+                type_map: vec![AiTypedBinding {
+                    name: "total".to_string(),
+                    inferred_type: "integer".to_string(),
+                    line: 2,
+                    kind: "var".to_string(),
+                }],
+                runtime_trace: Some(AiRuntimeTrace {
+                    steps: vec![AiTraceStep {
+                        kind: "assign".to_string(),
+                        description: "compute total".to_string(),
+                        line: Some(2),
+                        value: None,
+                    }],
+                    truncated: false,
+                }),
+            }),
+            AiFixMode::Diagnostics,
+            Some("Prefer the narrowest safe fix."),
+        );
+
+        assert!(prompt.contains("Prefer the narrowest safe fix."));
+        assert!(prompt.contains("Deterministic line analysis:"));
+        assert!(prompt.contains("inferred_type: integer"));
+        assert!(prompt.contains("Static call graph:"));
+        assert!(prompt.contains("line 1: main → print"));
+        assert!(prompt.contains("Inferred type map:"));
+        assert!(prompt.contains("line 2: var total : integer"));
+        assert!(prompt.contains("Static execution trace:"));
+        assert!(prompt.contains("[assign] line 2: compute total"));
     }
 
     #[test]

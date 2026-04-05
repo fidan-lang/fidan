@@ -247,6 +247,7 @@ fn run_fix_suggestion(
         file,
         &source,
         &context.diagnostics,
+        Some(&context),
         fidan_driver::AiFixMode::Diagnostics,
         prompt,
     )

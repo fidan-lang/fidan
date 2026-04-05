@@ -164,6 +164,7 @@ fn handle_helper_request(command: AiAnalysisHelperCommand) -> Result<AiAnalysisH
             file,
             source,
             diagnostics,
+            explain_context,
             mode,
             prompt,
         } => {
@@ -173,6 +174,7 @@ fn handle_helper_request(command: AiAnalysisHelperCommand) -> Result<AiAnalysisH
                 &file,
                 &source,
                 &diagnostics,
+                explain_context.as_ref().as_ref(),
                 mode,
                 prompt.as_deref(),
             )?;

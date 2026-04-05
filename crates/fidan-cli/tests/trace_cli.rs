@@ -2087,6 +2087,7 @@ main()
     match request.command {
         fidan_driver::AiAnalysisHelperCommand::Fix {
             diagnostics,
+            explain_context,
             mode,
             prompt,
             ..
@@ -2099,6 +2100,22 @@ main()
             assert!(
                 prompt.is_none(),
                 "plain --improve should not inject extra prompt text"
+            );
+            let explain_context = explain_context.expect(
+                "improve mode should bundle compiler-backed explain context for the current source",
+            );
+            assert_eq!(explain_context.file, file);
+            assert!(
+                !explain_context.module_outline.is_empty(),
+                "expected module outline in explain context"
+            );
+            assert!(
+                !explain_context.call_graph.is_empty(),
+                "expected call graph in explain context"
+            );
+            assert!(
+                explain_context.runtime_trace.is_some(),
+                "expected runtime trace in explain context"
             );
         }
         fidan_driver::AiAnalysisHelperCommand::Explain { .. } => {
