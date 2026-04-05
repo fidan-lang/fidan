@@ -12,6 +12,32 @@ compiler releases.
 
 ---
 
+## [1.0.4] — 2026-04-05
+
+### Added
+- Nested block-scoped action declarations now work across parsing,
+  type-checking, lowering, the interpreter, Cranelift, and LLVM paths.
+- Decorators on nested local actions are now supported consistently.
+- Regression coverage for AI-assisted fixes now includes structural scope
+  repairs such as moving a nested helper or action into the correct scope.
+
+### Changed
+- `fidan fix --ai` now re-checks candidate AI edits against compiler state
+  before accepting them and can keep valid hunks from mixed-quality model
+  output while rejecting the rest.
+- Diagnostics-mode AI fix prompting now allows minimal structural supporting
+  edits outside the exact diagnostic line when required to fix the root cause.
+
+### Fixed
+- AI fix payload validation now rejects empty fix responses when compiler
+  errors still remain.
+- `fidan fix --ai` no longer accepts syntax-breaking hunks that worsen parser
+  or type-checker state.
+- AI helper integration tests on Linux no longer hang by probing desktop
+  keychain or secret-service providers during local-provider test runs.
+
+---
+
 ## [1.0.3] — 2026-04-04
 
 ### Added
