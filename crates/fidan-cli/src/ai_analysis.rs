@@ -925,6 +925,12 @@ fn collect_trace_from_stmt(
             line: Some(line),
             value: None,
         },
+        Stmt::ActionDecl { name, .. } => AiTraceStep {
+            kind: "assign".to_string(),
+            description: format!("declare nested action `{}`", parsed.interner.resolve(*name)),
+            line: Some(line),
+            value: None,
+        },
         Stmt::If { condition, .. } => AiTraceStep {
             kind: "branch".to_string(),
             description: format!(
@@ -1224,6 +1230,12 @@ fn summarize_action_like_body(
                 if let Some(value) = value {
                     collect_expr_outline_facts(*value, module, interner, &mut facts);
                 }
+            }
+            Stmt::ActionDecl { name, .. } => {
+                facts.insert(format!(
+                    "declares nested action `{}`",
+                    interner.resolve(*name)
+                ));
             }
             Stmt::If { condition, .. } => {
                 facts.insert("branches conditionally".to_string());
@@ -1783,6 +1795,20 @@ fn collect_stmt_line(
                 vec![],
                 collect_risks(*expr, &parsed.module),
             ),
+            Stmt::ActionDecl { name, body, .. } => (
+                format!(
+                    "declares nested action `{}`",
+                    parsed.interner.resolve(*name)
+                ),
+                Some("action".to_string()),
+                vec![],
+                vec![parsed.interner.resolve(*name).to_string()],
+                if body.is_empty() {
+                    vec![]
+                } else {
+                    vec!["nested action body may capture outer values".to_string()]
+                },
+            ),
             Stmt::Return { value, .. } => (
                 "returns from the current action".to_string(),
                 value
@@ -1989,6 +2015,7 @@ fn child_stmt_ids(stmt: &Stmt) -> Vec<fidan_ast::StmtId> {
             tasks.iter().flat_map(|task| task.body.clone()).collect()
         }
         Stmt::Check { arms, .. } => arms.iter().flat_map(|arm| arm.body.clone()).collect(),
+        Stmt::ActionDecl { body, .. } => body.clone(),
         _ => vec![],
     }
 }
@@ -1999,6 +2026,7 @@ fn stmt_span(stmt: &Stmt) -> fidan_source::Span {
         | Stmt::Destructure { span, .. }
         | Stmt::Assign { span, .. }
         | Stmt::Expr { span, .. }
+        | Stmt::ActionDecl { span, .. }
         | Stmt::Return { span, .. }
         | Stmt::Break { span }
         | Stmt::Continue { span }

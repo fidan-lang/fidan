@@ -344,6 +344,9 @@ impl<'a> Ctx<'a> {
                 HirExprKind::Lambda {
                     params: hir_params,
                     body: hir_body,
+                    return_ty: FidanType::Dynamic,
+                    precompile: false,
+                    extern_decl: None,
                 }
             }
         };
@@ -423,10 +426,14 @@ impl<'a> Ctx<'a> {
     // ── Statement lowering ────────────────────────────────────────────────────
 
     fn lower_stmts(&self, ids: &[StmtId]) -> Vec<HirStmt> {
-        ids.iter().map(|&id| self.lower_stmt(id)).collect()
+        let mut lowered = Vec::with_capacity(ids.len());
+        for &id in ids {
+            self.lower_stmt_into(id, &mut lowered);
+        }
+        lowered
     }
 
-    fn lower_stmt(&self, id: StmtId) -> HirStmt {
+    fn lower_stmt_into(&self, id: StmtId, out: &mut Vec<HirStmt>) {
         match self.arena.get_stmt(id).clone() {
             Stmt::VarDecl {
                 name,
@@ -435,16 +442,14 @@ impl<'a> Ctx<'a> {
                 is_const,
                 span,
             } => {
-                // The resolved type of a `var` declaration is the type of the
-                // initialiser expression, or FidanType::Nothing if no init.
                 let ty = init.map(|e| self.ty(e)).unwrap_or(FidanType::Nothing);
-                HirStmt::VarDecl {
+                out.push(HirStmt::VarDecl {
                     name,
                     ty,
                     init: init.map(|e| self.lower_expr(e)),
                     is_const,
                     span,
-                }
+                });
             }
 
             Stmt::Destructure {
@@ -453,38 +458,103 @@ impl<'a> Ctx<'a> {
                 span,
             } => {
                 let value_ty = self.ty(value);
-                // Each binding type is the corresponding element of the tuple.
                 let binding_tys = match &value_ty {
                     FidanType::Tuple(elems) => elems.clone(),
                     _ => vec![FidanType::Dynamic; bindings.len()],
                 };
-                HirStmt::Destructure {
+                out.push(HirStmt::Destructure {
                     bindings,
                     binding_tys,
                     value: self.lower_expr(value),
                     span,
-                }
+                });
             }
 
             Stmt::Assign {
                 target,
                 value,
                 span,
-            } => HirStmt::Assign {
+            } => out.push(HirStmt::Assign {
                 target: self.lower_expr(target),
                 value: self.lower_expr(value),
                 span,
-            },
+            }),
 
-            Stmt::Expr { expr, .. } => HirStmt::Expr(self.lower_expr(expr)),
+            Stmt::Expr { expr, .. } => out.push(HirStmt::Expr(self.lower_expr(expr))),
 
-            Stmt::Return { value, span } => HirStmt::Return {
+            Stmt::ActionDecl {
+                name,
+                params,
+                return_ty,
+                body,
+                decorators,
+                span,
+                ..
+            } => {
+                let precompile = decorators
+                    .iter()
+                    .any(|d| self.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
+                let extern_decl = lower_extern_decl(self.arena, &decorators, self.interner, name);
+
+                out.push(HirStmt::VarDecl {
+                    name,
+                    ty: FidanType::Function,
+                    init: Some(HirExpr {
+                        ty: FidanType::Function,
+                        span,
+                        kind: HirExprKind::Lambda {
+                            params: self.lower_params(&params, None),
+                            body: self.lower_stmts(&body),
+                            return_ty: return_ty
+                                .as_ref()
+                                .map(|ty| resolve_type_expr_simple(ty, self.interner))
+                                .unwrap_or(FidanType::Dynamic),
+                            precompile,
+                            extern_decl,
+                        },
+                    }),
+                    is_const: true,
+                    span,
+                });
+
+                for decorator in decorators.iter().filter(|decorator| {
+                    let decorator_name = self.interner.resolve(decorator.name);
+                    !BUILTIN_DECORATORS.contains(&decorator_name.as_ref())
+                }) {
+                    let mut args = Vec::with_capacity(decorator.args.len() + 1);
+                    args.push(HirArg {
+                        name: None,
+                        value: HirExpr {
+                            ty: FidanType::Function,
+                            span,
+                            kind: HirExprKind::Var(name),
+                        },
+                        span,
+                    });
+                    args.extend(decorator.args.iter().map(|arg| self.lower_arg(arg)));
+
+                    out.push(HirStmt::Expr(HirExpr {
+                        ty: FidanType::Dynamic,
+                        span: decorator.span,
+                        kind: HirExprKind::Call {
+                            callee: Box::new(HirExpr {
+                                ty: FidanType::Function,
+                                span: decorator.span,
+                                kind: HirExprKind::Var(decorator.name),
+                            }),
+                            args,
+                        },
+                    }));
+                }
+            }
+
+            Stmt::Return { value, span } => out.push(HirStmt::Return {
                 value: value.map(|e| self.lower_expr(e)),
                 span,
-            },
+            }),
 
-            Stmt::Break { span } => HirStmt::Break { span },
-            Stmt::Continue { span } => HirStmt::Continue { span },
+            Stmt::Break { span } => out.push(HirStmt::Break { span }),
+            Stmt::Continue { span } => out.push(HirStmt::Continue { span }),
 
             Stmt::If {
                 condition,
@@ -492,7 +562,7 @@ impl<'a> Ctx<'a> {
                 else_ifs,
                 else_body,
                 span,
-            } => HirStmt::If {
+            } => out.push(HirStmt::If {
                 condition: self.lower_expr(condition),
                 then_body: self.lower_stmts(&then_body),
                 else_ifs: else_ifs
@@ -505,13 +575,13 @@ impl<'a> Ctx<'a> {
                     .collect(),
                 else_body: else_body.map(|b| self.lower_stmts(&b)),
                 span,
-            },
+            }),
 
             Stmt::Check {
                 scrutinee,
                 arms,
                 span,
-            } => HirStmt::Check {
+            } => out.push(HirStmt::Check {
                 scrutinee: self.lower_expr(scrutinee),
                 arms: arms
                     .iter()
@@ -522,7 +592,7 @@ impl<'a> Ctx<'a> {
                     })
                     .collect(),
                 span,
-            },
+            }),
 
             Stmt::For {
                 binding,
@@ -530,30 +600,29 @@ impl<'a> Ctx<'a> {
                 body,
                 span,
             } => {
-                // Infer element type from the iterable.
                 let iter_ty = self.ty(iterable);
                 let binding_ty = match iter_ty {
                     FidanType::List(elem) => *elem,
                     _ => FidanType::Dynamic,
                 };
-                HirStmt::For {
+                out.push(HirStmt::For {
                     binding,
                     binding_ty,
                     iterable: self.lower_expr(iterable),
                     body: self.lower_stmts(&body),
                     span,
-                }
+                });
             }
 
             Stmt::While {
                 condition,
                 body,
                 span,
-            } => HirStmt::While {
+            } => out.push(HirStmt::While {
                 condition: self.lower_expr(condition),
                 body: self.lower_stmts(&body),
                 span,
-            },
+            }),
 
             Stmt::Attempt {
                 body,
@@ -561,7 +630,7 @@ impl<'a> Ctx<'a> {
                 otherwise,
                 finally,
                 span,
-            } => HirStmt::Attempt {
+            } => out.push(HirStmt::Attempt {
                 body: self.lower_stmts(&body),
                 catches: catches
                     .iter()
@@ -579,12 +648,7 @@ impl<'a> Ctx<'a> {
                 otherwise: otherwise.map(|b| self.lower_stmts(&b)),
                 finally: finally.map(|b| self.lower_stmts(&b)),
                 span,
-            },
-
-            Stmt::Panic { value, span } => HirStmt::Panic {
-                value: self.lower_expr(value),
-                span,
-            },
+            }),
 
             Stmt::ParallelFor {
                 binding,
@@ -597,20 +661,20 @@ impl<'a> Ctx<'a> {
                     FidanType::List(elem) => *elem,
                     _ => FidanType::Dynamic,
                 };
-                HirStmt::ParallelFor {
+                out.push(HirStmt::ParallelFor {
                     binding,
                     binding_ty,
                     iterable: self.lower_expr(iterable),
                     body: self.lower_stmts(&body),
                     span,
-                }
+                });
             }
 
             Stmt::ConcurrentBlock {
                 is_parallel,
                 tasks,
                 span,
-            } => HirStmt::ConcurrentBlock {
+            } => out.push(HirStmt::ConcurrentBlock {
                 is_parallel,
                 tasks: tasks
                     .iter()
@@ -621,9 +685,14 @@ impl<'a> Ctx<'a> {
                     })
                     .collect(),
                 span,
-            },
+            }),
 
-            Stmt::Error { span } => HirStmt::Error { span },
+            Stmt::Panic { value, span } => out.push(HirStmt::Panic {
+                value: self.lower_expr(value),
+                span,
+            }),
+
+            Stmt::Error { span } => out.push(HirStmt::Error { span }),
         }
     }
 
@@ -634,18 +703,10 @@ impl<'a> Ctx<'a> {
             .iter()
             .enumerate()
             .map(|(index, p)| {
-                // Resolve parameter type from typeck's type table (based on the
-                // current function's parameter order. Fall back to a local
-                // type-expression resolver if the info is missing or out of sync.
                 let ty = info
                     .and_then(|action| action.params.get(index))
                     .map(|pi| pi.ty.clone())
-                    .unwrap_or_else(|| {
-                        // Resolve from the type expression directly.
-                        // TypedModule doesn't directly expose a resolve_type_expr,
-                        // so we make a best-effort map from named types here.
-                        resolve_type_expr_simple(&p.ty, self.interner)
-                    });
+                    .unwrap_or_else(|| resolve_type_expr_simple(&p.ty, self.interner));
                 HirParam {
                     name: p.name,
                     ty,
@@ -979,14 +1040,14 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
 
             // Top-level control-flow statements (for, while, if, check, attempt, etc.)
             Item::Stmt(stmt_id) => {
-                init_stmts.push(ctx.lower_stmt(stmt_id));
+                ctx.lower_stmt_into(stmt_id, &mut init_stmts);
             }
 
             // Test blocks: lowered into named HirTestDecls, not into init_stmts.
             Item::TestDecl { name, body, span } => {
                 tests.push(HirTestDecl {
                     name,
-                    body: body.iter().map(|&s| ctx.lower_stmt(s)).collect(),
+                    body: ctx.lower_stmts(&body),
                     span,
                 });
             }

@@ -321,6 +321,46 @@ impl<'a> Printer<'a> {
                 );
             }
             Stmt::Expr { expr, .. } => println!("{p}expr  {}", self.expr_hint(*expr)),
+            Stmt::ActionDecl {
+                name,
+                params,
+                return_ty,
+                body,
+                is_parallel,
+                ..
+            } => {
+                let kw = if *is_parallel {
+                    "parallel action"
+                } else {
+                    "action"
+                };
+                let params_s = params
+                    .iter()
+                    .map(|param| {
+                        let certainty = if param.certain {
+                            "certain "
+                        } else if param.optional {
+                            "optional "
+                        } else {
+                            ""
+                        };
+                        format!(
+                            "{certainty}{}: {}",
+                            self.sym(param.name),
+                            self.ty(&param.ty)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let ret_s = return_ty
+                    .as_ref()
+                    .map(|ty| format!(" -> {}", self.ty(ty)))
+                    .unwrap_or_default();
+                println!("{p}{kw}  {}({params_s}){ret_s}", self.sym(*name));
+                for &stmt in body {
+                    self.print_stmt(stmt, depth + 1);
+                }
+            }
             Stmt::Return { value, .. } => {
                 let v = value
                     .map(|id| format!(" {}", self.expr_hint(id)))

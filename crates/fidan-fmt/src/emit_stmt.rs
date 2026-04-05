@@ -14,7 +14,9 @@ enum StmtGroup {
 
 fn stmt_group(stmt: &Stmt) -> StmtGroup {
     match stmt {
-        Stmt::VarDecl { .. } | Stmt::Destructure { .. } => StmtGroup::Declaration,
+        Stmt::VarDecl { .. } | Stmt::Destructure { .. } | Stmt::ActionDecl { .. } => {
+            StmtGroup::Declaration
+        }
         Stmt::If { .. }
         | Stmt::Check { .. }
         | Stmt::For { .. }
@@ -92,6 +94,52 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
         // ── Expression statement ──────────────────────────────────────────
         Stmt::Expr { expr, .. } => {
             emit_expr(p, expr);
+        }
+
+        Stmt::ActionDecl {
+            name,
+            params,
+            return_ty,
+            body,
+            is_parallel,
+            ..
+        } => {
+            if is_parallel {
+                p.w("parallel action ");
+            } else {
+                p.w("action ");
+            }
+            let n = p.sym_s(name);
+            p.w(&n);
+            if !params.is_empty() {
+                p.w(" with (");
+                for (i, param) in params.iter().enumerate() {
+                    if i > 0 {
+                        p.w(", ");
+                    }
+                    if param.certain {
+                        p.w("certain ");
+                    } else if param.optional {
+                        p.w("optional ");
+                    }
+                    let pn = p.sym_s(param.name);
+                    p.w(&pn);
+                    p.w(" oftype ");
+                    emit_type(p, &param.ty);
+                    if let Some(default) = param.default {
+                        p.w(" = ");
+                        emit_expr(p, default);
+                    }
+                }
+                p.w(")");
+            }
+            if let Some(ref ty) = return_ty {
+                p.w(" returns ");
+                emit_type(p, ty);
+            }
+            p.w(" {");
+            emit_block(p, &body, Some(stmt_span.end));
+            p.w("}");
         }
 
         // ── Control flow ──────────────────────────────────────────────────
@@ -327,6 +375,7 @@ fn stmt_span(stmt: &Stmt) -> Span {
         Stmt::Destructure { span, .. } => *span,
         Stmt::Assign { span, .. } => *span,
         Stmt::Expr { span, .. } => *span,
+        Stmt::ActionDecl { span, .. } => *span,
         Stmt::Return { span, .. } => *span,
         Stmt::Break { span } => *span,
         Stmt::Continue { span } => *span,

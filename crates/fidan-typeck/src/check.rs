@@ -74,6 +74,7 @@ struct ExternActionContext<'a> {
     body: &'a [StmtId],
     decorators: &'a [Decorator],
     is_parallel: bool,
+    has_receiver: bool,
     is_extension: bool,
     span: Span,
 }
@@ -105,6 +106,10 @@ pub struct TypeChecker {
     pub(crate) expr_types: FxHashMap<ExprId, FidanType>,
     /// Top-level action signatures (name → ActionInfo).  Populated during Pass 1.
     pub(crate) actions: FxHashMap<Symbol, ActionInfo>,
+    /// Lexically-scoped nested action signatures, one map per active scope.
+    local_actions: Vec<FxHashMap<Symbol, ActionInfo>>,
+    /// `@deprecated` markers for lexically-scoped nested actions.
+    local_deprecated_actions: Vec<rustc_hash::FxHashSet<Symbol>>,
     /// Set of action names decorated with `@deprecated`.
     /// Used by `infer_call` to emit W2005 at call sites.
     deprecated_actions: rustc_hash::FxHashSet<Symbol>,
@@ -140,6 +145,8 @@ impl TypeChecker {
             registering: false,
             expr_types: FxHashMap::default(),
             actions: FxHashMap::default(),
+            local_actions: vec![FxHashMap::default()],
+            local_deprecated_actions: vec![rustc_hash::FxHashSet::default()],
             deprecated_actions: rustc_hash::FxHashSet::default(),
             cross_module_field_accesses: vec![],
             cross_module_call_sites: vec![],
@@ -893,7 +900,7 @@ impl TypeChecker {
                     None => None,
                 };
 
-                self.table.push_scope(ScopeKind::Object);
+                self.push_scope(ScopeKind::Object);
                 self.inject_this_and_parent(obj_ty, parent_ty, module.file);
 
                 for &mid in methods {
@@ -901,7 +908,7 @@ impl TypeChecker {
                     self.check_item(&method, module);
                 }
 
-                self.table.pop_scope();
+                self.pop_scope();
                 self.this_ty = prev_this;
             }
 
@@ -925,6 +932,7 @@ impl TypeChecker {
                         body,
                         decorators,
                         is_parallel: *is_parallel,
+                        has_receiver: self.this_ty.is_some(),
                         is_extension: false,
                         span: *span,
                     },
@@ -982,6 +990,7 @@ impl TypeChecker {
                         body,
                         decorators,
                         is_parallel: *is_parallel,
+                        has_receiver: false,
                         is_extension: true,
                         span: *span,
                     },
@@ -1093,11 +1102,11 @@ impl TypeChecker {
             // Type-checked like a parameterless action body.  `assert` / `assert_eq`
             // are already registered as builtins so no special handling is needed.
             Item::TestDecl { body, .. } => {
-                self.table.push_scope(ScopeKind::Block);
+                self.push_scope(ScopeKind::Block);
                 for &sid in body {
                     self.check_stmt(sid, module);
                 }
-                self.table.pop_scope();
+                self.pop_scope();
             }
         }
     }
@@ -1123,7 +1132,7 @@ impl TypeChecker {
         // was written; otherwise any `return value` is accepted.
         let prev_ret = std::mem::replace(&mut self.current_return_ty, ret);
 
-        self.table.push_scope(ScopeKind::Action);
+        self.push_scope(ScopeKind::Action);
 
         // Inject `this` if needed (extension action or method with explicit this).
         if let Some(this_ty) = inject_this {
@@ -1183,7 +1192,7 @@ impl TypeChecker {
             );
         }
 
-        self.table.pop_scope();
+        self.pop_scope();
         self.current_return_ty = prev_ret;
     }
 
@@ -1290,6 +1299,84 @@ impl TypeChecker {
                 self.infer_expr(expr, module);
             }
 
+            Stmt::ActionDecl {
+                name,
+                params,
+                return_ty,
+                body,
+                decorators,
+                is_parallel,
+                span,
+                ..
+            } => {
+                if self.reject_reserved_builtin_binding(name, span) {
+                    return;
+                }
+
+                let info = self.build_action_info(&params, &return_ty, span);
+                if let Some(prev) = self.table.lookup_current_scope(name) {
+                    let n = self.interner.resolve(name).to_string();
+                    self.diags.push(
+                        Diagnostic::error(
+                            fidan_diagnostics::diag_code!("E0109"),
+                            format!(
+                                "action `{n}` conflicts with an existing binding in this scope"
+                            ),
+                            span,
+                        )
+                        .with_label(Label::secondary(prev.span, "first bound here")),
+                    );
+                    return;
+                }
+
+                let is_deprecated = decorators
+                    .iter()
+                    .any(|d| self.interner.resolve(d.name).as_ref() == "deprecated");
+
+                self.define_local_action(name, info, is_deprecated);
+                self.table.define(
+                    name,
+                    SymbolInfo {
+                        kind: SymbolKind::Action,
+                        ty: FidanType::Function,
+                        span,
+                        is_mutable: false,
+                        initialized: Initialized::Yes,
+                        const_value: None,
+                    },
+                );
+
+                self.check_decorators(&decorators, &params);
+                self.validate_extern_action(
+                    module,
+                    name,
+                    ExternActionContext {
+                        params: &params,
+                        body: &body,
+                        decorators: &decorators,
+                        is_parallel,
+                        has_receiver: false,
+                        is_extension: false,
+                        span,
+                    },
+                );
+                if self.has_marker_decorator(&decorators, "extern") {
+                    return;
+                }
+
+                self.check_action_body(
+                    ActionBody {
+                        params: &params,
+                        return_ty: &return_ty,
+                        body: &body,
+                        inject_this: None,
+                        implicit_return_ty: None,
+                        span,
+                    },
+                    module,
+                );
+            }
+
             Stmt::Return { value, span } => {
                 let ret = value
                     .map(|id| self.infer_expr(id, module))
@@ -1371,7 +1458,7 @@ impl TypeChecker {
                     FidanType::Unknown | FidanType::Error => FidanType::Unknown,
                     _ => FidanType::Dynamic,
                 };
-                self.table.push_scope(ScopeKind::Block);
+                self.push_scope(ScopeKind::Block);
                 if !self.reject_reserved_builtin_binding(binding, span) {
                     self.table.define(
                         binding,
@@ -1388,7 +1475,7 @@ impl TypeChecker {
                 for &s in &body {
                     self.check_stmt(s, module);
                 }
-                self.table.pop_scope();
+                self.pop_scope();
             }
 
             Stmt::While {
@@ -1410,7 +1497,7 @@ impl TypeChecker {
             } => {
                 self.check_block(&body, module);
                 for catch in &catches {
-                    self.table.push_scope(ScopeKind::Block);
+                    self.push_scope(ScopeKind::Block);
                     if let Some(binding) = catch.binding
                         && !self.reject_reserved_builtin_binding(binding, catch.span)
                     {
@@ -1430,7 +1517,7 @@ impl TypeChecker {
                     for &s in &catch.body {
                         self.check_stmt(s, module);
                     }
-                    self.table.pop_scope();
+                    self.pop_scope();
                 }
                 if let Some(b) = &otherwise {
                     self.check_block(b, module);
@@ -1463,7 +1550,7 @@ impl TypeChecker {
                     FidanType::Unknown | FidanType::Error => FidanType::Unknown,
                     _ => FidanType::Dynamic,
                 };
-                self.table.push_scope(ScopeKind::Block);
+                self.push_scope(ScopeKind::Block);
                 if !self.reject_reserved_builtin_binding(binding, span) {
                     self.table.define(
                         binding,
@@ -1480,7 +1567,7 @@ impl TypeChecker {
                 for &s in &body {
                     self.check_stmt(s, module);
                 }
-                self.table.pop_scope();
+                self.pop_scope();
             }
 
             Stmt::ConcurrentBlock { tasks, .. } => {
@@ -1504,18 +1591,18 @@ impl TypeChecker {
     }
 
     fn check_block(&mut self, stmts: &[StmtId], module: &Module) {
-        self.table.push_scope(ScopeKind::Block);
+        self.push_scope(ScopeKind::Block);
         self.check_statements_in_current_scope(stmts, module, false);
-        self.table.pop_scope();
+        self.pop_scope();
     }
 
     /// Like `check_block`, but suppresses `W2002` on the final statement when
     /// it is a bare expression — that expression is the *result value* of the
     /// check arm, not a discarded side-effect.
     fn check_arm_body(&mut self, stmts: &[StmtId], module: &Module) {
-        self.table.push_scope(ScopeKind::Block);
+        self.push_scope(ScopeKind::Block);
         self.check_statements_in_current_scope(stmts, module, true);
-        self.table.pop_scope();
+        self.pop_scope();
     }
 
     fn check_statements_in_current_scope(
@@ -2100,7 +2187,7 @@ impl TypeChecker {
                     FidanType::String | FidanType::Dynamic => FidanType::Dynamic,
                     _ => FidanType::Dynamic,
                 };
-                self.table.push_scope(ScopeKind::Block);
+                self.push_scope(ScopeKind::Block);
                 self.table.define(
                     binding,
                     SymbolInfo {
@@ -2116,7 +2203,7 @@ impl TypeChecker {
                 if let Some(f) = filter {
                     self.infer_expr(f, module);
                 }
-                self.table.pop_scope();
+                self.pop_scope();
                 FidanType::Dynamic
             }
             Expr::DictComp {
@@ -2133,7 +2220,7 @@ impl TypeChecker {
                     FidanType::String | FidanType::Dynamic => FidanType::Dynamic,
                     _ => FidanType::Dynamic,
                 };
-                self.table.push_scope(ScopeKind::Block);
+                self.push_scope(ScopeKind::Block);
                 self.table.define(
                     binding,
                     SymbolInfo {
@@ -2150,7 +2237,7 @@ impl TypeChecker {
                 if let Some(f) = filter {
                     self.infer_expr(f, module);
                 }
-                self.table.pop_scope();
+                self.pop_scope();
                 FidanType::Dynamic
             }
 
@@ -2379,11 +2466,11 @@ impl TypeChecker {
                     }
                     Some(_) => {
                         // User action — check that all non-optional params are provided.
-                        if let Some(info) = self.actions.get(&name).cloned() {
+                        if let Some(info) = self.lookup_action_info(name) {
                             self.check_params_provided(&info.params, args, span);
                         }
                         // Emit W2005 if the action is marked @deprecated.
-                        if self.deprecated_actions.contains(&name) {
+                        if self.is_action_deprecated(name) {
                             let n = self.interner.resolve(name).to_string();
                             self.emit_warning(
                                 fidan_diagnostics::diag_code!("W2005"),
@@ -2610,6 +2697,7 @@ impl TypeChecker {
             | Stmt::Destructure { span, .. }
             | Stmt::Assign { span, .. }
             | Stmt::Expr { span, .. }
+            | Stmt::ActionDecl { span, .. }
             | Stmt::Return { span, .. }
             | Stmt::Break { span }
             | Stmt::Continue { span }
@@ -3123,6 +3211,54 @@ impl TypeChecker {
 
     // ── Scope helpers ─────────────────────────────────────────────────────
 
+    fn push_scope(&mut self, kind: ScopeKind) {
+        self.table.push_scope(kind);
+        self.local_actions.push(FxHashMap::default());
+        self.local_deprecated_actions
+            .push(rustc_hash::FxHashSet::default());
+    }
+
+    fn pop_scope(&mut self) {
+        self.table.pop_scope();
+        if self.local_actions.len() > 1 {
+            self.local_actions.pop();
+        }
+        if self.local_deprecated_actions.len() > 1 {
+            self.local_deprecated_actions.pop();
+        }
+    }
+
+    fn define_local_action(&mut self, name: Symbol, info: ActionInfo, is_deprecated: bool) {
+        if let Some(scope) = self.local_actions.last_mut() {
+            scope.insert(name, info);
+        }
+        if is_deprecated && let Some(scope) = self.local_deprecated_actions.last_mut() {
+            scope.insert(name);
+        }
+    }
+
+    fn lookup_action_info(&self, name: Symbol) -> Option<ActionInfo> {
+        self.local_actions
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(&name).cloned())
+            .or_else(|| self.actions.get(&name).cloned())
+    }
+
+    fn is_action_deprecated(&self, name: Symbol) -> bool {
+        for (actions, deprecated) in self
+            .local_actions
+            .iter()
+            .zip(self.local_deprecated_actions.iter())
+            .rev()
+        {
+            if actions.contains_key(&name) {
+                return deprecated.contains(&name);
+            }
+        }
+        self.deprecated_actions.contains(&name)
+    }
+
     fn inject_this_and_parent(
         &mut self,
         this_ty: FidanType,
@@ -3337,10 +3473,10 @@ impl TypeChecker {
             return;
         };
 
-        if self.this_ty.is_some() || ctx.is_extension {
+        if ctx.has_receiver || ctx.is_extension {
             self.emit_error(
                 fidan_diagnostics::diag_code!("E0304"),
-                "@extern is only allowed on top-level actions",
+                "@extern is not allowed on receiver actions",
                 ctx.span,
             );
         }
@@ -3457,7 +3593,7 @@ impl TypeChecker {
 
             // ── Signature checks for user-defined decorators ──────────────
             // Clone the ActionInfo to avoid a simultaneous borrow on &self.
-            let info_opt = self.actions.get(&dec.name).cloned();
+            let info_opt = self.lookup_action_info(dec.name);
             if let Some(info) = info_opt {
                 // E0303 — first param must accept an `action` value.
                 if let Some(first) = info.params.first() {

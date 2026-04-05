@@ -1,4 +1,4 @@
-use crate::{ExprId, StmtId};
+use crate::{Decorator, ExprId, Param, StmtId};
 use fidan_lexer::Symbol;
 use fidan_source::Span;
 
@@ -28,6 +28,16 @@ pub enum Stmt {
     },
     Expr {
         expr: ExprId,
+        span: Span,
+    },
+    /// `action name with (...) returns T { ... }` inside a block scope.
+    ActionDecl {
+        name: Symbol,
+        params: Vec<Param>,
+        return_ty: Option<TypeExpr>,
+        body: Vec<StmtId>,
+        decorators: Vec<Decorator>,
+        is_parallel: bool,
         span: Span,
     },
     Return {

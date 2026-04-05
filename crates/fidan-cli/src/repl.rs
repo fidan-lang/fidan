@@ -114,6 +114,7 @@ fn stmt_span(stmt: &Stmt) -> Span {
         | Stmt::Destructure { span, .. }
         | Stmt::Assign { span, .. }
         | Stmt::Expr { span, .. }
+        | Stmt::ActionDecl { span, .. }
         | Stmt::Return { span, .. }
         | Stmt::Break { span }
         | Stmt::Continue { span }

@@ -1454,6 +1454,130 @@ assert_eq(add(), 10)
     );
 }
 
+#[test]
+fn nested_action_captures_outer_var_ok() {
+    assert!(
+        run_src(
+            r#"
+action outer with (certain base oftype integer) returns integer {
+    action add with (certain delta oftype integer) returns integer {
+        return base + delta
+    }
+    return add(5)
+}
+
+assert_eq(outer(7), 12)
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn nested_action_inside_nested_action_ok() {
+    assert!(
+        run_src(
+            r#"
+action outer with (certain seed oftype integer) returns integer {
+    action mid with (certain inc oftype integer) returns integer {
+        action inner with (certain extra oftype integer) returns integer {
+            return seed + inc + extra
+        }
+        return inner(3)
+    }
+    return mid(4)
+}
+
+assert_eq(outer(2), 9)
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn nested_action_custom_decorator_runs_at_declaration_time_ok() {
+    assert!(
+        run_src(
+            r#"
+var decorator_hits = 0
+
+action decorate with (target oftype dynamic, label oftype string) {
+    decorator_hits = decorator_hits + 1
+    assert_eq(type(target), "action")
+    assert_eq(label, "local")
+}
+
+action main {
+    @decorate("local")
+    action helper with (certain value oftype integer) returns integer {
+        return value + 1
+    }
+
+    assert_eq(decorator_hits, 1)
+    assert_eq(helper(4), 5)
+}
+
+main()
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn nested_action_precompile_runs_with_jit_ok() {
+    assert!(
+        run_src_with_threshold(
+            r#"
+var decorator_hits = 0
+
+action decorate with (target oftype dynamic, label oftype string) {
+    decorator_hits = decorator_hits + 1
+    assert_eq(type(target), "action")
+    assert_eq(label, "local")
+}
+
+action main {
+    @decorate("local")
+    @precompile
+    action square with (certain value oftype integer) returns integer {
+        return value * value
+    }
+
+    assert_eq(decorator_hits, 1)
+    assert_eq(square(7), 49)
+    assert_eq(square(8), 64)
+}
+
+main()
+"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn nested_extern_action_ok() {
+    register_extern_test_symbols();
+    assert!(
+        run_src(
+            r#"
+action main {
+    @extern("self", symbol = "fidan_test_native_add")
+    action nativeAdd with (a oftype integer, b oftype integer) returns integer
+
+    assert_eq(nativeAdd(20, 22), 42)
+}
+
+main()
+"#
+        )
+        .is_ok()
+    );
+}
+
 // ── Enum payloads / ADTs ──────────────────────────────────────────────────────
 
 #[test]

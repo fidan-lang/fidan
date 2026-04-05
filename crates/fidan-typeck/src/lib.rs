@@ -320,6 +320,58 @@ mod tests {
     }
 
     #[test]
+    fn nested_action_decorators_are_clean() {
+        assert!(
+            check_errors(
+                r#"action decorate with (target oftype dynamic, label oftype string) {
+            }
+
+            action main {
+                @precompile
+                @decorate("local")
+                action helper with (certain value oftype integer) returns integer {
+                    return value + 1
+                }
+
+                assert_eq(helper(4), 5)
+            }"#
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn nested_extern_action_is_clean() {
+        assert!(
+            check_errors(
+                r#"action main {
+                @extern("self", symbol = "native_add")
+                action nativeAdd with (a oftype integer, b oftype integer) returns integer
+            }"#
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn nested_deprecated_action_warns_at_call_site() {
+        let warnings = check_warning_codes(
+            r#"action main {
+                @deprecated
+                action old_helper returns integer {
+                    return 1
+                }
+
+                old_helper()
+            }"#,
+        );
+        assert!(
+            warnings.iter().any(|code| code == "W2005"),
+            "expected W2005, got {warnings:?}"
+        );
+    }
+
+    #[test]
     fn builtin_type_name_cannot_be_shadowed_by_var() {
         let errors = check_errors("const var integer -> integer set 1");
         assert!(

@@ -421,6 +421,9 @@ pub enum HirExprKind {
     Lambda {
         params: Vec<HirParam>,
         body: Vec<HirStmt>,
+        return_ty: FidanType,
+        precompile: bool,
+        extern_decl: Option<HirExternDecl>,
     },
 
     // ── Enum destructure pattern (used exclusively in `check` arm patterns) ──

@@ -1,0 +1,21 @@
+var decorator_hits = 0
+
+action decorate with (target oftype dynamic, label oftype string) {
+    decorator_hits = decorator_hits + 1
+    assert_eq(type(target), "action")
+    assert_eq(label, "local")
+}
+
+action main {
+    @decorate("local")
+    @precompile
+    action square with (certain value oftype integer) returns integer {
+        return value * value
+    }
+
+    assert_eq(decorator_hits, 1)
+    assert_eq(square(7), 49)
+    print("49")
+}
+
+main()

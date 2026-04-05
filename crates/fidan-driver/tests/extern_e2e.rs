@@ -222,6 +222,39 @@ print("ok")
     )
 }
 
+fn build_nested_action_decorator_source(fixture: &FixtureArtifacts) -> String {
+    let lib = as_fidan_string(&fixture.dylib_path);
+    let link = as_fidan_string(&fixture.link_input_path);
+    format!(
+        r#"var decorator_hits = 0
+
+action decorate with (target oftype dynamic, label oftype string) {{
+    decorator_hits = decorator_hits + 1
+    assert_eq(type(target), "action")
+    assert_eq(label, "local")
+}}
+
+action main {{
+    @decorate("local")
+    @precompile
+    action square with (certain value oftype integer) returns integer {{
+        return value * value
+    }}
+
+    @extern("{lib}", symbol = "fidan_fixture_native_add", link = "{link}")
+    action nativeAdd with (a oftype integer, b oftype integer) returns integer
+
+    assert_eq(decorator_hits, 1)
+    assert_eq(square(7), 49)
+    assert_eq(nativeAdd(20, 22), 42)
+    print("nested-ok")
+}}
+
+main()
+"#
+    )
+}
+
 fn compile_fixture_program(
     source: &str,
     backend: Backend,
@@ -339,6 +372,13 @@ fn extern_fixture_interpreter_dynamic_library_ok() {
 }
 
 #[test]
+fn nested_action_decorators_and_extern_interpreter_ok() {
+    let fixture = build_fixture_artifacts().clone();
+    let source = build_nested_action_decorator_source(&fixture);
+    run_interpreter_source(&source);
+}
+
+#[test]
 fn extern_fixture_cranelift_aot_ok() {
     let fixture = build_fixture_artifacts().clone();
     let source = build_test_source(&fixture);
@@ -347,6 +387,26 @@ fn extern_fixture_cranelift_aot_ok() {
         sandbox.join("extern_smoke.exe")
     } else {
         sandbox.join("extern_smoke")
+    };
+    compile_fixture_program(
+        &source,
+        Backend::Cranelift,
+        &output,
+        std::slice::from_ref(&fixture.runtime_dir),
+    );
+    run_compiled_binary(&output, &fixture.runtime_dir);
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn nested_action_decorators_and_extern_cranelift_aot_ok() {
+    let fixture = build_fixture_artifacts().clone();
+    let source = build_nested_action_decorator_source(&fixture);
+    let sandbox = temp_dir("fidan_nested_action_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("nested_action_smoke.exe")
+    } else {
+        sandbox.join("nested_action_smoke")
     };
     compile_fixture_program(
         &source,
@@ -414,6 +474,33 @@ fn extern_fixture_llvm_aot_ok() {
         sandbox.join("extern_smoke.exe")
     } else {
         sandbox.join("extern_smoke")
+    };
+    compile_fixture_program(
+        &source,
+        Backend::Llvm,
+        &output,
+        std::slice::from_ref(&fixture.runtime_dir),
+    );
+    run_compiled_binary(&output, &fixture.runtime_dir);
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn nested_action_decorators_and_extern_llvm_aot_ok() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM nested-action AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let fixture = build_fixture_artifacts().clone();
+    let source = build_nested_action_decorator_source(&fixture);
+    let sandbox = temp_dir("fidan_nested_action_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("nested_action_smoke.exe")
+    } else {
+        sandbox.join("nested_action_smoke")
     };
     compile_fixture_program(
         &source,

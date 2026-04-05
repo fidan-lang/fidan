@@ -1165,6 +1165,15 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
                     (d, ty_s)
                 }
             },
+            Stmt::ActionDecl { name, params, .. } => (
+                format!(
+                    "declares nested action `{}` with {} parameter{}",
+                    interner.resolve(*name),
+                    params.len(),
+                    if params.len() == 1 { "" } else { "s" }
+                ),
+                Some("action".to_string()),
+            ),
             Stmt::Return { value, .. } => {
                 let val_s = value
                     .map(|e| format!(" {}", describe_expr(e, module, interner, typed, 0)))
@@ -1308,6 +1317,7 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
             | Stmt::Destructure { span, .. }
             | Stmt::Assign { span, .. }
             | Stmt::Expr { span, .. }
+            | Stmt::ActionDecl { span, .. }
             | Stmt::Return { span, .. }
             | Stmt::Break { span }
             | Stmt::Continue { span }
@@ -1342,7 +1352,8 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
                 }
                 Stmt::For { body, .. }
                 | Stmt::ParallelFor { body, .. }
-                | Stmt::While { body, .. } => body.clone(),
+                | Stmt::While { body, .. }
+                | Stmt::ActionDecl { body, .. } => body.clone(),
                 Stmt::Attempt {
                     body,
                     catches,

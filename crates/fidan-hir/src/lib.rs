@@ -156,4 +156,75 @@ object Counter {
         );
         assert_eq!(hir.functions.len(), 2, "two functions");
     }
+
+    #[test]
+    fn nested_action_decorators_lower_to_lambda_metadata_and_runtime_calls() {
+        let (hir, interner) = lower(
+            r#"
+action decorate with (target oftype dynamic, label oftype string) {
+}
+
+action outer {
+    @precompile
+    @decorate("local")
+    action inner with (certain value oftype integer) returns integer {
+        return value + 1
+    }
+}
+"#,
+        );
+
+        let outer_name = interner.intern("outer");
+        let inner_name = interner.intern("inner");
+        let decorate_name = interner.intern("decorate");
+        let outer = hir
+            .functions
+            .iter()
+            .find(|function| function.name == outer_name)
+            .expect("outer function");
+
+        assert_eq!(
+            outer.body.len(),
+            2,
+            "nested declaration expands to decl + decorator call"
+        );
+
+        match &outer.body[0] {
+            HirStmt::VarDecl {
+                name,
+                init:
+                    Some(HirExpr {
+                        kind:
+                            HirExprKind::Lambda {
+                                precompile,
+                                extern_decl,
+                                ..
+                            },
+                        ..
+                    }),
+                ..
+            } => {
+                assert_eq!(*name, inner_name);
+                assert!(*precompile, "nested @precompile should be preserved");
+                assert!(extern_decl.is_none(), "no extern metadata expected");
+            }
+            other => panic!("expected nested action var decl, got {other:?}"),
+        }
+
+        match &outer.body[1] {
+            HirStmt::Expr(HirExpr {
+                kind: HirExprKind::Call { callee, args },
+                ..
+            }) => {
+                assert!(matches!(callee.kind, HirExprKind::Var(name) if name == decorate_name));
+                assert_eq!(
+                    args.len(),
+                    2,
+                    "decorator call should receive function + extra args"
+                );
+                assert!(matches!(args[0].value.kind, HirExprKind::Var(name) if name == inner_name));
+            }
+            other => panic!("expected decorator call expr, got {other:?}"),
+        }
+    }
 }

@@ -39,6 +39,7 @@ use crate::mir::{
 /// within that same call, single-threaded.
 struct PendingParallelFor {
     fn_id: FunctionId,
+    return_ty: MirTy,
     /// Per-iteration binding for `parallel for`; `None` for `concurrent { task {} }` bodies.
     binding: Option<(Symbol, MirTy)>,
     /// Outer-scope variables captured by the body: become extra params after the binding.
@@ -1113,14 +1114,23 @@ impl<'p> FnCtx<'p> {
             // Lift the lambda body into a fresh synthetic `MirFunction` and
             // emit a `MakeClosure` that bundles the function with any outer-
             // scope variables it references.
-            HirExprKind::Lambda { params, body } => {
+            HirExprKind::Lambda {
+                params,
+                body,
+                return_ty,
+                precompile,
+                extern_decl,
+            } => {
                 // 1. Pre-allocate a FunctionId for the lambda body.
                 let lambda_fn_id = FunctionId(self.prog.functions.len() as u32);
                 self.prog.functions.push(MirFunction::new(
                     lambda_fn_id,
                     self.lambda_sym,
-                    MirTy::Dynamic,
+                    fidan_ty_to_mir(return_ty),
                 ));
+                self.prog.functions.last_mut().unwrap().precompile = *precompile;
+                self.prog.functions.last_mut().unwrap().extern_decl =
+                    extern_decl.as_ref().map(hir_extern_to_mir);
 
                 // 2. Discover which outer-scope variables the body actually uses.
                 let used_in_body = collect_hir_used_vars(body);
@@ -1166,6 +1176,7 @@ impl<'p> FnCtx<'p> {
                     .borrow_mut()
                     .push_back(PendingParallelFor {
                         fn_id: lambda_fn_id,
+                        return_ty: fidan_ty_to_mir(return_ty),
                         binding: None,
                         env_params,
                         body_ptr: body.as_ptr(),
@@ -1745,6 +1756,7 @@ impl<'p> FnCtx<'p> {
                     .borrow_mut()
                     .push_back(PendingParallelFor {
                         fn_id: body_fn_id,
+                        return_ty: MirTy::Nothing,
                         binding: Some((*binding, fidan_ty_to_mir(binding_ty))),
                         env_params,
                         body_ptr: body.as_ptr(),
@@ -1802,6 +1814,7 @@ impl<'p> FnCtx<'p> {
                         .borrow_mut()
                         .push_back(PendingParallelFor {
                             fn_id: task_fn_id,
+                            return_ty: MirTy::Nothing,
                             binding: None, // no per-iteration binding for tasks
                             env_params,
                             body_ptr: task.body.as_ptr(),
@@ -3468,6 +3481,7 @@ pub fn lower_program(
                 // lives for the entire duration of lower_program.
                 let body: &[HirStmt] =
                     unsafe { std::slice::from_raw_parts(pf.body_ptr, pf.body_len) };
+                prog.function_mut(pf.fn_id).return_ty = pf.return_ty.clone();
                 let entry_bb = prog.function_mut(pf.fn_id).alloc_block();
                 let mut ctx = FnCtx {
                     prog,

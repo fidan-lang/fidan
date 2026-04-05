@@ -47,6 +47,17 @@ pub struct Parser<'t> {
     pending_top_level_items: Vec<ItemId>,
 }
 
+struct ParsedActionDecl {
+    name: Symbol,
+    extends: Option<Symbol>,
+    params: Vec<Param>,
+    return_ty: Option<TypeExpr>,
+    body: Vec<StmtId>,
+    decorators: Vec<Decorator>,
+    is_parallel: bool,
+    span: Span,
+}
+
 impl<'t> Parser<'t> {
     pub fn new(tokens: &'t [Token], file_id: FileId, interner: Arc<SymbolInterner>) -> Self {
         let sym_with = interner.intern("with");
@@ -772,13 +783,68 @@ impl<'t> Parser<'t> {
         is_parallel: bool,
         decorators: Vec<fidan_ast::Decorator>,
     ) -> ItemId {
+        let action = self.parse_action_decl_parts(is_parallel, decorators, true);
+        if let Some(extends) = action.extends {
+            self.module.arena.alloc_item(Item::ExtensionAction {
+                name: action.name,
+                extends,
+                params: action.params,
+                return_ty: action.return_ty,
+                body: action.body,
+                decorators: action.decorators,
+                is_parallel: action.is_parallel,
+                span: action.span,
+            })
+        } else {
+            self.module.arena.alloc_item(Item::ActionDecl {
+                name: action.name,
+                params: action.params,
+                return_ty: action.return_ty,
+                body: action.body,
+                decorators: action.decorators,
+                is_parallel: action.is_parallel,
+                span: action.span,
+            })
+        }
+    }
+
+    fn parse_local_action_decl_stmt(
+        &mut self,
+        is_parallel: bool,
+        decorators: Vec<fidan_ast::Decorator>,
+    ) -> StmtId {
+        let action = self.parse_action_decl_parts(is_parallel, decorators, false);
+        self.module.arena.alloc_stmt(Stmt::ActionDecl {
+            name: action.name,
+            params: action.params,
+            return_ty: action.return_ty,
+            body: action.body,
+            decorators: action.decorators,
+            is_parallel: action.is_parallel,
+            span: action.span,
+        })
+    }
+
+    fn parse_action_decl_parts(
+        &mut self,
+        is_parallel: bool,
+        decorators: Vec<fidan_ast::Decorator>,
+        allow_extends: bool,
+    ) -> ParsedActionDecl {
         let start = self.current_span().start;
         self.advance(); // eat `action`
         let name = self.expect_ident_sym("expected action name");
 
         // Optional `extends TypeName`
         let extends = if self.eat(&TokenKind::Extends) {
-            Some(self.expect_ident_sym("expected type name after `extends`"))
+            let extends = self.expect_ident_sym("expected type name after `extends`");
+            if !allow_extends {
+                self.error(
+                    "nested action declarations cannot use `extends`",
+                    self.current_span(),
+                );
+            }
+            Some(extends)
         } else {
             None
         };
@@ -811,27 +877,15 @@ impl<'t> Parser<'t> {
         };
         let end = self.current_span().end;
 
-        if let Some(ext) = extends {
-            self.module.arena.alloc_item(Item::ExtensionAction {
-                name,
-                extends: ext,
-                params,
-                return_ty,
-                body,
-                decorators,
-                is_parallel,
-                span: Span::new(self.module.file, start, end),
-            })
-        } else {
-            self.module.arena.alloc_item(Item::ActionDecl {
-                name,
-                params,
-                return_ty,
-                body,
-                decorators,
-                is_parallel,
-                span: Span::new(self.module.file, start, end),
-            })
+        ParsedActionDecl {
+            name,
+            extends,
+            params,
+            return_ty,
+            body,
+            decorators,
+            is_parallel,
+            span: Span::new(self.module.file, start, end),
         }
     }
 
@@ -1210,9 +1264,28 @@ impl<'t> Parser<'t> {
 
     pub fn parse_stmt(&mut self) -> Option<StmtId> {
         self.skip_terminators();
+        let decorators = self.parse_decorators();
+        self.skip_terminators();
+        if !decorators.is_empty() {
+            return match self.peek().clone() {
+                TokenKind::Action => Some(self.parse_local_action_decl_stmt(false, decorators)),
+                TokenKind::Parallel if matches!(self.peek_nth(1), TokenKind::Action) => {
+                    self.advance();
+                    Some(self.parse_local_action_decl_stmt(true, decorators))
+                }
+                _ => {
+                    self.error(
+                        "decorators in statement position may only be applied to nested action declarations",
+                        self.current_span(),
+                    );
+                    Some(self.error_stmt(self.current_span()))
+                }
+            };
+        }
         let s = match self.peek().clone() {
             TokenKind::Const => self.parse_var_decl_stmt(true),
             TokenKind::Var => self.parse_var_decl_stmt(false),
+            TokenKind::Action => self.parse_local_action_decl_stmt(false, vec![]),
             TokenKind::Return => self.parse_return_stmt(),
             TokenKind::Break => {
                 let sp = self.current_span();
@@ -1235,7 +1308,9 @@ impl<'t> Parser<'t> {
             TokenKind::Parallel => {
                 let span = self.current_span();
                 self.advance();
-                if matches!(self.peek(), TokenKind::For) {
+                if matches!(self.peek(), TokenKind::Action) {
+                    self.parse_local_action_decl_stmt(true, vec![])
+                } else if matches!(self.peek(), TokenKind::For) {
                     self.parse_parallel_for()
                 } else if matches!(self.peek(), TokenKind::LBrace) {
                     self.parse_task_block(true)

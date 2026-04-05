@@ -124,6 +124,23 @@ mod tests {
     }
 
     #[test]
+    fn nested_action_in_action_parses() {
+        let (_, diags) = parse_src(
+            r#"action outer {
+                action inner with (certain x oftype integer) returns integer {
+                    return x + 1
+                }
+                print(inner(2))
+            }"#,
+        );
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
     fn extern_action_without_body_parses() {
         let (_, diags) = parse_src(
             r#"@extern("self", symbol = "native_add")

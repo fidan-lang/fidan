@@ -728,6 +728,7 @@ fn stmt_span(stmt: &fidan_ast::Stmt) -> Span {
         fidan_ast::Stmt::Destructure { span, .. } => *span,
         fidan_ast::Stmt::Assign { span, .. } => *span,
         fidan_ast::Stmt::Expr { span, .. } => *span,
+        fidan_ast::Stmt::ActionDecl { span, .. } => *span,
         fidan_ast::Stmt::Return { span, .. } => *span,
         fidan_ast::Stmt::Break { span } => *span,
         fidan_ast::Stmt::Continue { span } => *span,
