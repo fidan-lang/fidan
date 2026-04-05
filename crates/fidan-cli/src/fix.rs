@@ -112,7 +112,8 @@ pub(crate) fn run_fix(
     }
 
     // 2. Re-run compiler on patched source to discover remaining diagnostics.
-    let remaining_diags = collect_remaining_diagnostics(&patched_src, &source_name)?;
+    let remaining_state = analyze_source_state(&patched_src, &source_name)?;
+    let remaining_diags = remaining_state.diagnostics.clone();
 
     if remaining_diags.is_empty() && edits.is_empty() && !improve_requested {
         render_message_to_stderr(Severity::Note, "", "no fixes needed");
@@ -120,6 +121,12 @@ pub(crate) fn run_fix(
     }
 
     // 3. If there are remaining diagnostics, call the AI helper.
+    let mode = if improve_requested {
+        AiFixMode::Improve
+    } else {
+        AiFixMode::Diagnostics
+    };
+
     let ai_result = if remaining_diags.is_empty() && !improve_requested {
         fidan_driver::AiFixResult {
             summary: String::new(),
@@ -128,11 +135,6 @@ pub(crate) fn run_fix(
             provider: None,
         }
     } else {
-        let mode = if improve_requested {
-            AiFixMode::Improve
-        } else {
-            AiFixMode::Diagnostics
-        };
         invoke_ai_fix_helper(
             &file,
             &patched_src,
@@ -144,9 +146,25 @@ pub(crate) fn run_fix(
 
     // 4. Apply AI hunks to the patched source to get the final source.
     // Always warn about mismatches regardless of --in-place, so the user knows a hunk was skipped.
-    let (final_src, applied_ai_hunks) =
-        apply_ai_hunks(patched_src.clone(), &ai_result.hunks, true)?;
+    let (final_src, applied_ai_hunks, rejected_ai_hunks) = select_validated_ai_hunks(
+        patched_src.clone(),
+        &source_name,
+        &ai_result.hunks,
+        &remaining_state,
+        mode,
+    )?;
     let ai_applied = applied_ai_hunks.len();
+
+    if rejected_ai_hunks > 0 {
+        render_message_to_stderr(
+            Severity::Note,
+            "",
+            &format!(
+                "rejected or skipped {} AI hunk(s) that did not preserve or improve compiler state",
+                rejected_ai_hunks
+            ),
+        );
+    }
 
     // 5. Output the result.
     if in_place {
@@ -287,10 +305,26 @@ fn print_ai_hunk_diff(hunk: &fidan_driver::AiFixHunk) {
     }
 }
 
-fn collect_remaining_diagnostics(
-    source: &str,
-    source_name: &str,
-) -> Result<Vec<fidan_driver::AiDiagnosticSummary>> {
+#[derive(Clone)]
+struct SourceDiagnosticState {
+    diagnostics: Vec<fidan_driver::AiDiagnosticSummary>,
+    lex_count: usize,
+    parse_count: usize,
+    type_count: usize,
+}
+
+impl SourceDiagnosticState {
+    fn score(&self) -> (usize, usize, usize, usize) {
+        (
+            self.lex_count,
+            self.parse_count,
+            self.type_count,
+            self.diagnostics.len(),
+        )
+    }
+}
+
+fn analyze_source_state(source: &str, source_name: &str) -> Result<SourceDiagnosticState> {
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
     use std::sync::Arc;
@@ -321,7 +355,77 @@ fn collect_remaining_diagnostics(
             line,
         });
     }
-    Ok(summaries)
+    Ok(SourceDiagnosticState {
+        diagnostics: summaries,
+        lex_count: lex_diags.len(),
+        parse_count: parse_diags.len(),
+        type_count: type_diags.len(),
+    })
+}
+
+fn candidate_preserves_or_improves_state(
+    candidate: &SourceDiagnosticState,
+    baseline: &SourceDiagnosticState,
+    mode: AiFixMode,
+) -> bool {
+    match mode {
+        AiFixMode::Diagnostics => candidate.score() < baseline.score(),
+        AiFixMode::Improve => candidate.score() <= baseline.score(),
+    }
+}
+
+fn select_validated_ai_hunks(
+    patched_src: String,
+    source_name: &str,
+    hunks: &[fidan_driver::AiFixHunk],
+    baseline_state: &SourceDiagnosticState,
+    mode: AiFixMode,
+) -> Result<(String, Vec<fidan_driver::AiFixHunk>, usize)> {
+    if hunks.is_empty() {
+        return Ok((patched_src, vec![], 0));
+    }
+
+    let (candidate_src, candidate_hunks) = apply_ai_hunks(patched_src.clone(), hunks, true)?;
+    if !candidate_hunks.is_empty() {
+        let candidate_state = analyze_source_state(&candidate_src, source_name)?;
+        if candidate_preserves_or_improves_state(&candidate_state, baseline_state, mode) {
+            let rejected = hunks.len().saturating_sub(candidate_hunks.len());
+            return Ok((candidate_src, candidate_hunks, rejected));
+        }
+    }
+
+    let mut current_src = patched_src;
+    let mut current_state = baseline_state.clone();
+    let mut accepted_hunks = Vec::new();
+    let mut rejected_hunks = 0usize;
+    let mut ordered_hunks = hunks.to_vec();
+    ordered_hunks.sort_by(|left, right| {
+        right
+            .line_start
+            .cmp(&left.line_start)
+            .then(right.line_end.cmp(&left.line_end))
+    });
+
+    for hunk in &ordered_hunks {
+        let (candidate_src, candidate_hunks) =
+            apply_ai_hunks(current_src.clone(), std::slice::from_ref(hunk), false)?;
+        if candidate_hunks.is_empty() {
+            rejected_hunks += 1;
+            continue;
+        }
+
+        let candidate_state = analyze_source_state(&candidate_src, source_name)?;
+        if candidate_preserves_or_improves_state(&candidate_state, &current_state, mode) {
+            current_src = candidate_src;
+            current_state = candidate_state;
+            accepted_hunks.extend(candidate_hunks);
+        } else {
+            rejected_hunks += 1;
+        }
+    }
+
+    accepted_hunks.sort_by_key(|hunk| hunk.line_start);
+    Ok((current_src, accepted_hunks, rejected_hunks))
 }
 
 fn invoke_ai_fix_helper(

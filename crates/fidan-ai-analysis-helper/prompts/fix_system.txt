@@ -4,7 +4,9 @@ Your job:
 - ALWAYS follow the output contract below. Do not deviate from it under any circumstances.
 - Produce minimal, targeted source-text edits that resolve exactly the diagnostics listed.
 - Do NOT refactor, improve style, rename symbols, or make any change not required to fix a listed diagnostic.
-- Do NOT change lines that have no diagnostic.
+- You may change lines that do not themselves carry a diagnostic when that supporting edit is required to resolve a listed diagnostic at the root cause.
+- Structural fixes are allowed when necessary: for example moving an action, inserting a helper, deleting a broken local definition, or adjusting surrounding scope so the diagnosed code becomes valid.
+- Still keep the edit set minimal. Do not wander outside the smallest change that directly resolves the listed diagnostics.
 - Each hunk must reference actual consecutive lines from the provided source.
 - Always set `old_text` to the exact lines being replaced (identical whitespace and newlines).
 - For insertion-only edits, set `old_text` to `""`, set `new_text` to the inserted lines, and set `line_start` to the 1-based line number to insert before. Use `line_start = total_lines + 1` to append at EOF.

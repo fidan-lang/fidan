@@ -456,6 +456,17 @@ fn validate_fix_payload(
     let mut errors = Vec::new();
     let mut real_hunk_count = 0usize;
 
+    if diagnostics
+        .iter()
+        .any(|diag| diag.severity.eq_ignore_ascii_case("error"))
+        && payload.hunks.is_empty()
+    {
+        errors.push(
+            "payload contains no fix hunks even though compiler errors still need to be resolved"
+                .to_string(),
+        );
+    }
+
     for (index, hunk) in payload.hunks.iter().enumerate() {
         let line_count = hunk.old_text.trim_end_matches('\n').lines().count();
         if line_count == 0 {
@@ -1075,8 +1086,8 @@ fn extract_anthropic_text(value: &serde_json::Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        FixPayload, build_fix_user_prompt, build_system_prompt, build_user_prompt,
-        normalize_fix_payload, parse_json_payload, validate_explanation_payload,
+        FixPayload, build_fix_system_prompt, build_fix_user_prompt, build_system_prompt,
+        build_user_prompt, normalize_fix_payload, parse_json_payload, validate_explanation_payload,
         validate_fix_payload,
     };
     use crate::config::Config;
@@ -1194,6 +1205,15 @@ mod tests {
         assert!(prompt.contains("Every field value must be a single JSON string."));
         assert!(prompt.contains("inferred types"));
         assert!(prompt.contains("diagnostics"));
+    }
+
+    #[test]
+    fn build_fix_system_prompt_allows_minimal_structural_supporting_edits() {
+        let prompt =
+            build_fix_system_prompt(&config_with_prompt(None, false), AiFixMode::Diagnostics);
+        assert!(prompt.contains("You may change lines that do not themselves carry a diagnostic"));
+        assert!(prompt.contains("Structural fixes are allowed when necessary"));
+        assert!(prompt.contains("keep the edit set minimal"));
     }
 
     #[test]
@@ -1373,6 +1393,28 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("no-op"));
         assert!(message.contains("summary claims a source change"));
+    }
+
+    #[test]
+    fn validate_fix_payload_rejects_empty_hunks_when_errors_remain() {
+        let payload = FixPayload {
+            summary: "No fixes needed.".to_string(),
+            hunks: vec![],
+        };
+
+        let err = validate_fix_payload(
+            "action main {\n    print(compute(result))\n}\n",
+            &[AiDiagnosticSummary {
+                severity: "error".to_string(),
+                code: "E0101".to_string(),
+                message: "undefined name `compute`".to_string(),
+                line: 2,
+            }],
+            &payload,
+        )
+        .expect_err("empty payload should be rejected while errors remain");
+
+        assert!(err.to_string().contains("contains no fix hunks"));
     }
 
     #[test]

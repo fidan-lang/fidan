@@ -1793,6 +1793,32 @@ main()
 "#
 }
 
+fn make_fix_ai_nested_scope_source() -> &'static str {
+    r#"var decorator_hits = 0
+
+action decorate with (target oftype dynamic, label oftype string) {
+    decorator_hits = decorator_hits + 1
+    assert_eq(type(target), "action")
+    assert_eq(label, "local")
+}
+
+action main {
+    @decorate("local")
+    @precompile
+    action square with (certain value oftype integer) returns integer {
+        return value * value
+    }
+
+    assert_eq(decorator_hits, 1)
+    assert_eq(square(7), 49)
+    print("49")
+}
+
+main()
+square(8)
+"#
+}
+
 fn make_fix_ai_helper_response(hunks: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "protocol_version": AI_ANALYSIS_HELPER_PROTOCOL_VERSION,
@@ -1919,6 +1945,140 @@ fn fix_ai_in_place_applies_hunk_to_file() {
     assert!(
         !patched.contains("completely_unknown_xyz"),
         "expected original undefined symbol to be replaced:\n{patched}"
+    );
+}
+
+#[test]
+fn fix_ai_in_place_rejects_syntax_breaking_hunks_and_keeps_valid_ones() {
+    let home = make_temp_dir("fix_ai_reject_bad_hunk_home");
+    let helper_src = make_temp_dir("fix_ai_reject_bad_hunk_helper");
+    let capture_path = helper_src.join("capture.json");
+
+    let response = make_fix_ai_helper_response(serde_json::json!([
+        {
+            "line_start": 2,
+            "line_end": 2,
+            "old_text": "    print(completely_unknown_xyz)",
+            "new_text": "    print(\"hello\")",
+            "reason": "E0101: completely_unknown_xyz is undefined"
+        },
+        {
+            "line_start": 1,
+            "line_end": 1,
+            "old_text": "action main {",
+            "new_text": "action main",
+            "reason": "Bad model edit that would break braces"
+        }
+    ]));
+    let helper_path = make_fake_ai_helper(&helper_src, &response.to_string(), &capture_path);
+    install_fake_ai_toolchain(&home, &helper_path);
+
+    let file = make_temp_program("fix_ai_reject_bad_hunk", make_fix_ai_source());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("fix")
+        .arg("--in-place")
+        .arg(&file)
+        .arg("--ai")
+        .env("FIDAN_HOME", &home)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan fix --in-place --ai with mixed hunks");
+
+    let patched = std::fs::read_to_string(&file).expect("read patched file");
+
+    std::fs::remove_file(&file).ok();
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&helper_src).ok();
+
+    assert!(
+        output.status.success(),
+        "expected mixed AI hunks to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        patched.contains("print(\"hello\")"),
+        "expected the valid AI hunk to be applied:\n{patched}"
+    );
+    assert!(
+        patched.contains("action main {"),
+        "expected the syntax-breaking hunk to be rejected:\n{patched}"
+    );
+    assert!(
+        !patched.contains("completely_unknown_xyz"),
+        "expected the undefined symbol to be resolved:\n{patched}"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("rejected or skipped 1 AI hunk"),
+        "expected rejection note for the bad AI hunk:\n{stderr}"
+    );
+}
+
+#[test]
+fn fix_ai_accepts_minimal_scope_fix_that_moves_nested_action_outside_main() {
+    let home = make_temp_dir("fix_ai_scope_move_home");
+    let helper_src = make_temp_dir("fix_ai_scope_move_helper");
+    let capture_path = helper_src.join("capture.json");
+
+    let response = make_fix_ai_helper_response(serde_json::json!([
+        {
+            "line_start": 9,
+            "line_end": 14,
+            "old_text": "action main {\n    @decorate(\"local\")\n    @precompile\n    action square with (certain value oftype integer) returns integer {\n        return value * value\n    }",
+            "new_text": "@decorate(\"local\")\n@precompile\naction square with (certain value oftype integer) returns integer {\n    return value * value\n}\n\naction main {",
+            "reason": "E0101: move `square` to top-level scope so both `main` and the trailing call can resolve it"
+        }
+    ]));
+    let helper_path = make_fake_ai_helper(&helper_src, &response.to_string(), &capture_path);
+    install_fake_ai_toolchain(&home, &helper_path);
+
+    let file = make_temp_program("fix_ai_scope_move", make_fix_ai_nested_scope_source());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("fix")
+        .arg("--in-place")
+        .arg(&file)
+        .arg("--ai")
+        .arg("move the square action definition outside of main")
+        .env("FIDAN_HOME", &home)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan fix --ai for nested scope move");
+
+    let patched = std::fs::read_to_string(&file).expect("read patched scope-fix file");
+    let check_output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("check")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("check patched scope-fix file");
+
+    std::fs::remove_file(&file).ok();
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&helper_src).ok();
+
+    assert!(
+        output.status.success(),
+        "expected scope move AI fix to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        check_output.status.success(),
+        "expected moved scope fix to pass compiler check:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&check_output.stdout),
+        String::from_utf8_lossy(&check_output.stderr)
+    );
+    assert!(
+        patched.contains("@decorate(\"local\")\n@precompile\naction square with (certain value oftype integer) returns integer {"),
+        "expected square to be moved to top-level scope:\n{patched}"
+    );
+    assert!(
+        patched.contains("main()\nsquare(8)"),
+        "expected trailing top-level square call to remain valid:\n{patched}"
     );
 }
 
