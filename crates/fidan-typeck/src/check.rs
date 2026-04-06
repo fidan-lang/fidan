@@ -69,6 +69,13 @@ struct ActionBody<'a> {
     span: Span,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct CallArgInfo {
+    name: Option<Symbol>,
+    value: ExprId,
+    span: Span,
+}
+
 struct ExternActionContext<'a> {
     params: &'a [Param],
     body: &'a [StmtId],
@@ -1975,9 +1982,16 @@ impl TypeChecker {
                 span,
             } => {
                 // Infer arg types first (for side effects / nested errors)
-                let args_clone: Vec<_> = args.iter().map(|a| (a.name, a.value)).collect();
-                for (_, val) in &args_clone {
-                    self.infer_expr(*val, module);
+                let args_clone: Vec<_> = args
+                    .iter()
+                    .map(|a| CallArgInfo {
+                        name: a.name,
+                        value: a.value,
+                        span: a.span,
+                    })
+                    .collect();
+                for arg in &args_clone {
+                    self.infer_expr(arg.value, module);
                 }
                 self.infer_call(callee, &args_clone, span, module)
             }
@@ -2386,7 +2400,7 @@ impl TypeChecker {
     fn infer_call(
         &mut self,
         callee_id: ExprId,
-        args: &[(Option<Symbol>, ExprId)],
+        args: &[CallArgInfo],
         span: Span,
         module: &Module,
     ) -> FidanType {
@@ -2413,7 +2427,7 @@ impl TypeChecker {
                     "WeakShared" => {
                         let inferred_args: Vec<FidanType> = args
                             .iter()
-                            .map(|(_, expr_id)| self.infer_expr(*expr_id, module))
+                            .map(|arg| self.infer_expr(arg.value, module))
                             .collect();
                         if inferred_args.is_empty() {
                             self.emit_error(
@@ -2461,13 +2475,13 @@ impl TypeChecker {
                 // Look up in symbol table: Object constructor, user action, or builtin.
                 match self.table.lookup(name).map(|i| i.kind) {
                     Some(SymbolKind::Object) => {
-                        self.check_required_params(name, args, span);
+                        self.check_required_params(name, args, span, module);
                         FidanType::Object(name)
                     }
                     Some(_) => {
-                        // User action — check that all non-optional params are provided.
+                        // User action — validate call arguments against the declared signature.
                         if let Some(info) = self.lookup_action_info(name) {
-                            self.check_params_provided(&info.params, args, span);
+                            self.check_call_arguments(&info.params, args, span, module);
                         }
                         // Emit W2005 if the action is marked @deprecated.
                         if self.is_action_deprecated(name) {
@@ -2523,9 +2537,9 @@ impl TypeChecker {
                             let mname = self.interner.resolve(field).to_string();
                             let arg_tys: Vec<String> = args
                                 .iter()
-                                .map(|(_, eid)| {
+                                .map(|arg| {
                                     self.expr_types
-                                        .get(eid)
+                                        .get(&arg.value)
                                         .map(|t| {
                                             t.display_name(&|s| {
                                                 self.interner.resolve(s).to_string()
@@ -2542,10 +2556,9 @@ impl TypeChecker {
                                     span,
                                 });
                         } else {
-                            // Method found locally — validate that all required
-                            // parameters were provided at this call site.
+                            // Method found locally — validate the full local signature.
                             if let Some(minfo) = self.find_method_info(&sym, field) {
-                                self.check_params_provided(&minfo.params, args, span);
+                                self.check_call_arguments(&minfo.params, args, span, module);
                             }
                         }
                         ret
@@ -2819,8 +2832,9 @@ impl TypeChecker {
     fn check_required_params(
         &mut self,
         obj_sym: Symbol,
-        args: &[(Option<Symbol>, ExprId)],
+        args: &[CallArgInfo],
         span: Span,
+        module: &Module,
     ) {
         let init_sym = self.interner.intern("initialize");
         let new_sym = self.interner.intern("new");
@@ -2831,21 +2845,26 @@ impl TypeChecker {
             .map(|m| m.params.clone());
 
         if let Some(params) = params {
-            self.check_params_provided(&params, args, span);
+            self.check_call_arguments(&params, args, span, module);
         }
     }
 
-    /// Core check: every non-optional param must be covered by a named or positional arg.
-    fn check_params_provided(
+    /// Validate a call site against a declared parameter list.
+    ///
+    /// This is the shared enforcement path used by user actions, local methods,
+    /// and object constructors so interpreter/JIT/AOT all see the same frontend rules.
+    fn check_call_arguments(
         &mut self,
         params: &[ParamInfo],
-        args: &[(Option<Symbol>, ExprId)],
+        args: &[CallArgInfo],
         span: Span,
+        module: &Module,
     ) {
         // Named args supplied at this call site.
         let named: std::collections::HashSet<Symbol> =
-            args.iter().filter_map(|(n, _)| *n).collect();
-        let positional_count = args.iter().filter(|(n, _)| n.is_none()).count();
+            args.iter().filter_map(|arg| arg.name).collect();
+        let positional: Vec<&CallArgInfo> = args.iter().filter(|arg| arg.name.is_none()).collect();
+        let positional_count = positional.len();
 
         // Count how many params will consume positional slots (those not covered
         // by a named arg at this call site).
@@ -2868,16 +2887,28 @@ impl TypeChecker {
         }
 
         // Walk params in declaration order, assigning positional slots to those
-        // not covered by a name.  Any non-optional param left uncovered is an error.
+        // not covered by a name. Any non-optional param left uncovered is an error.
         let mut pos_used = 0usize;
         for p in params {
-            if named.contains(&p.name) {
-                continue; // covered by a named arg
+            let bound_arg = args
+                .iter()
+                .find(|arg| arg.name == Some(p.name))
+                .copied()
+                .or_else(|| {
+                    if pos_used < positional_count {
+                        let arg = positional[pos_used];
+                        pos_used += 1;
+                        Some(*arg)
+                    } else {
+                        None
+                    }
+                });
+
+            if let Some(arg) = bound_arg {
+                self.check_bound_argument_compatibility(p, arg, module);
+                continue;
             }
-            if pos_used < positional_count {
-                pos_used += 1;
-                continue; // covered by the next positional arg
-            }
+
             // Not covered.
             if !p.optional {
                 let pname = self.interner.resolve(p.name).to_string();
@@ -2891,6 +2922,47 @@ impl TypeChecker {
                 self.emit_error(fidan_diagnostics::diag_code!("E0301"), msg, span);
             }
         }
+    }
+
+    fn check_bound_argument_compatibility(
+        &mut self,
+        param: &ParamInfo,
+        arg: CallArgInfo,
+        module: &Module,
+    ) {
+        let actual = self
+            .expr_types
+            .get(&arg.value)
+            .cloned()
+            .unwrap_or_else(|| self.infer_expr(arg.value, module));
+
+        if param.certain && self.expr_is_statically_nothing(arg.value, module) {
+            let pname = self.interner.resolve(param.name).to_string();
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0302"),
+                format!("certain parameter `{pname}` cannot receive `nothing`"),
+                arg.span,
+            );
+            return;
+        }
+
+        if !param.ty.is_assignable_from(&actual) {
+            let pname = self.interner.resolve(param.name).to_string();
+            let expected = self.ty_name(&param.ty);
+            let found = self.ty_name(&actual);
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0302"),
+                format!("argument `{pname}` expects type `{expected}`, found `{found}`"),
+                arg.span,
+            );
+        }
+    }
+
+    fn expr_is_statically_nothing(&self, expr_id: ExprId, module: &Module) -> bool {
+        matches!(
+            self.eval_const_value(expr_id, module),
+            Some(ConstValue::Nothing)
+        )
     }
 
     // ── Null-safety helpers (E0205) ───────────────────────────────────────

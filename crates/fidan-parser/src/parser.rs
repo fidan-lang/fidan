@@ -935,7 +935,22 @@ impl<'t> Parser<'t> {
                 _ => break,
             }
         }
+        self.validate_param_declaration_order(&params);
         params
+    }
+
+    fn validate_param_declaration_order(&mut self, params: &[Param]) {
+        let mut saw_optional_or_default = false;
+        for param in params {
+            let is_optional_or_default = param.optional || param.default.is_some();
+            if saw_optional_or_default && !is_optional_or_default {
+                self.error(
+                    "required parameters must come before optional or defaulted parameters",
+                    param.span,
+                );
+            }
+            saw_optional_or_default |= is_optional_or_default;
+        }
     }
 
     fn parse_single_param(&mut self) -> Param {
@@ -959,14 +974,21 @@ impl<'t> Parser<'t> {
             None
         };
         let end = self.current_span().end;
-        Param {
+        let param = Param {
             name,
             ty,
             certain,
             optional,
             default,
             span: Span::new(self.module.file, start, end),
+        };
+        if param.default.is_some() && !param.optional {
+            self.error(
+                "default parameter values require the `optional` keyword",
+                param.span,
+            );
         }
+        param
     }
 
     // ── Type expressions ──────────────────────────────────────────────────────

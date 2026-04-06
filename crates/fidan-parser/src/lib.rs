@@ -110,6 +110,37 @@ mod tests {
     }
 
     #[test]
+    fn param_default_requires_optional_keyword() {
+        let (_, diags) = parse_src(
+            r#"action greet with (name oftype string = "world") {
+                print(name)
+            }"#,
+        );
+        assert!(
+            errors(&diags)
+                .iter()
+                .any(|msg| msg.contains("default parameter values require the `optional` keyword")),
+            "expected default-without-optional error, got {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn required_params_cannot_follow_optional_or_defaulted_params() {
+        let (_, diags) = parse_src(
+            r#"action greet with (optional title oftype string = "Mx", certain name oftype string) {
+                print(title + name)
+            }"#,
+        );
+        assert!(
+            errors(&diags).iter().any(|msg| msg
+                .contains("required parameters must come before optional or defaulted parameters")),
+            "expected required-after-optional error, got {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
     fn parallel_action() {
         let (_, diags) = parse_src(
             r#"parallel action fetch returns string {

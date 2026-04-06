@@ -157,6 +157,94 @@ mod tests {
     }
 
     #[test]
+    fn explicit_nothing_passed_to_certain_param_is_error() {
+        let errors = check_errors(
+            r#"action approx_equal with (
+                certain a oftype float,
+                certain b oftype float,
+                optional rel_tol oftype float = 0.0000001,
+                optional abs_tol oftype float = 0.0001
+            ) returns boolean {
+                return true
+            }
+
+            approx_equal(nothing, nothing)"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("certain parameter `a` cannot receive `nothing`")),
+            "expected certain-param nothing error for `a`, got {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("certain parameter `b` cannot receive `nothing`")),
+            "expected certain-param nothing error for `b`, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn const_nothing_passed_to_certain_param_is_error() {
+        let errors = check_errors(
+            r#"action approx_equal with (certain a oftype float, certain b oftype float) returns boolean {
+                return true
+            }
+
+            const var x = nothing
+            approx_equal(x, x)"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("certain parameter `a` cannot receive `nothing`")),
+            "expected certain-param const-nothing error for `a`, got {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("certain parameter `b` cannot receive `nothing`")),
+            "expected certain-param const-nothing error for `b`, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn user_action_argument_type_mismatch_is_error() {
+        let errors = check_errors(
+            r#"action add with (certain a oftype integer, certain b oftype integer) returns integer {
+                return a + b
+            }
+
+            add("one", 2)"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("argument `a` expects type `integer`, found `string`")),
+            "expected user-action type mismatch, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn object_constructor_argument_type_mismatch_is_error() {
+        let errors = check_errors(
+            r#"object Point {
+                new with (certain x oftype integer, certain y oftype integer) {
+                    var z = x + y
+                }
+            }
+
+            var p = Point("bad", 2)"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("argument `x` expects type `integer`, found `string`")),
+            "expected constructor type mismatch, got {errors:?}"
+        );
+    }
+
+    #[test]
     fn if_otherwise_is_clean() {
         assert!(
             check_errors(

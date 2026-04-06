@@ -771,6 +771,45 @@ var argv = env.args()
     }
 
     #[test]
+    fn analyze_reports_certain_param_nothing_errors() {
+        let src = r#"action approx_equal with (
+    certain a oftype float,
+    certain b oftype float,
+    optional rel_tol oftype float = 0.0000001,
+    optional abs_tol oftype float = 0.0001,
+) returns boolean {
+    return true
+}
+
+const var x = nothing
+approx_equal(x, x)
+"#;
+
+        let result = analyze(src, "file:///certain_param_nothing.fdn");
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|diag| diag.severity == Some(DiagnosticSeverity::ERROR))
+            .collect();
+        assert!(
+            errors.iter().any(|diag| diag.code.as_ref().is_some_and(
+                |code| code == &tower_lsp::lsp_types::NumberOrString::String("E0302".into())
+            ) && diag
+                .message
+                .contains("certain parameter `a` cannot receive `nothing`")),
+            "expected LSP to surface certain-param `a` error, got {errors:#?}"
+        );
+        assert!(
+            errors.iter().any(|diag| diag.code.as_ref().is_some_and(
+                |code| code == &tower_lsp::lsp_types::NumberOrString::String("E0302".into())
+            ) && diag
+                .message
+                .contains("certain parameter `b` cannot receive `nothing`")),
+            "expected LSP to surface certain-param `b` error, got {errors:#?}"
+        );
+    }
+
+    #[test]
     fn unreachable_warning_is_tagged_unnecessary_for_editor_dimming() {
         let file = SourceFile::new(FileId(0), "<test>", "return 1\nprint(2)\n");
         let diag = FidanDiag::warning(
