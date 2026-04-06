@@ -83,6 +83,7 @@ pub fn compute(
     // position so that `ident(` can be coloured as TT_PARAMETER (red) rather
     // than TT_FUNCTION (blue) when the callee is an action-typed parameter.
     let mut param_syms = std::collections::HashSet::<Symbol>::new();
+    let mut import_namespace_syms = std::collections::HashSet::<Symbol>::new();
     for i in 0..n {
         let sym = match &meaningful[i].kind {
             TokenKind::Ident(s) => *s,
@@ -108,6 +109,62 @@ pub fn compute(
         let before_type_ann = matches!(next, Some(TokenKind::Oftype) | Some(TokenKind::Arrow));
         if after_param_prefix && before_type_ann {
             param_syms.insert(sym);
+        }
+    }
+
+    let mut idx = 0usize;
+    while idx < n {
+        if !matches!(meaningful[idx].kind, TokenKind::Use) {
+            idx += 1;
+            continue;
+        }
+
+        idx += 1;
+        let mut grouped = false;
+        let mut last_segment: Option<Symbol> = None;
+        let mut alias: Option<Symbol> = None;
+
+        while idx < n {
+            match &meaningful[idx].kind {
+                TokenKind::Ident(sym) => {
+                    last_segment = Some(*sym);
+                    idx += 1;
+                }
+                TokenKind::Dot | TokenKind::Comma => {
+                    idx += 1;
+                }
+                TokenKind::As => {
+                    if idx + 1 < n
+                        && let TokenKind::Ident(sym) = meaningful[idx + 1].kind
+                    {
+                        alias = Some(sym);
+                    }
+                    idx += 1;
+                }
+                TokenKind::LBrace => {
+                    grouped = true;
+                    break;
+                }
+                TokenKind::Newline | TokenKind::Semicolon | TokenKind::Eof => {
+                    break;
+                }
+                _ => {
+                    idx += 1;
+                }
+            }
+        }
+
+        if !grouped && let Some(bound) = alias.or(last_segment) {
+            import_namespace_syms.insert(bound);
+        }
+
+        while idx < n
+            && !matches!(
+                meaningful[idx].kind,
+                TokenKind::Newline | TokenKind::Semicolon | TokenKind::Eof
+            )
+        {
+            idx += 1;
         }
     }
 
@@ -180,6 +237,8 @@ pub fn compute(
             } else {
                 (TT_TYPE, 0)
             }
+        } else if import_namespace_syms.contains(&sym) && matches!(next, Some(TokenKind::Dot)) {
+            (TT_CLASS, 0)
         } else if param_syms.contains(&sym) && matches!(next, Some(TokenKind::LParen)) {
             // An action-typed parameter being invoked — keep the parameter
             // colour (red) instead of falling through to the blue function-call
@@ -341,4 +400,40 @@ fn classify(sym: &str, prev: Option<&TokenKind>, next: Option<&TokenKind>) -> (u
 
     // ── Everything else: treated as a variable usage ──────────────────────────
     (TT_VARIABLE, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fidan_lexer::Lexer;
+    use fidan_source::{FileId, SourceFile};
+    use std::sync::Arc;
+
+    fn semantic_token_types_for(src: &str) -> Vec<u32> {
+        let interner = Arc::new(SymbolInterner::new());
+        let file = SourceFile::new(FileId(0), "<semantic>", src);
+        let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        compute(&tokens, &file, &interner)
+            .into_iter()
+            .map(|token| token.token_type)
+            .collect()
+    }
+
+    #[test]
+    fn namespace_import_usage_keeps_class_coloring() {
+        let token_types = semantic_token_types_for("use std.math\nvar x = math.round(3.5)\n");
+        assert!(
+            token_types.iter().filter(|&&tt| tt == TT_CLASS).count() >= 2,
+            "expected namespace import declaration and usage to be class-colored: {token_types:?}"
+        );
+    }
+
+    #[test]
+    fn namespace_import_alias_usage_keeps_class_coloring() {
+        let token_types = semantic_token_types_for("use std.math as m\nvar x = m.round(3.5)\n");
+        assert!(
+            token_types.iter().filter(|&&tt| tt == TT_CLASS).count() >= 3,
+            "expected namespace alias declaration and usage to be class-colored: {token_types:?}"
+        );
+    }
 }
