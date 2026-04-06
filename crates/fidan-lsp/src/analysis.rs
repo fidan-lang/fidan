@@ -114,7 +114,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
         .collect();
 
     // ── Semantic tokens ───────────────────────────────────────────────────────
-    let semantic_tokens = semantic::compute(&tokens, &file, &interner);
+    let semantic_tokens = semantic::compute(&tokens, &file, &interner, &module, &symbol_table);
 
     AnalysisResult {
         diagnostics,

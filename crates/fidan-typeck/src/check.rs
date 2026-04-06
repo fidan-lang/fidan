@@ -868,6 +868,7 @@ impl TypeChecker {
             Item::ObjectDecl {
                 name,
                 parent,
+                fields,
                 methods,
                 span,
                 ..
@@ -906,6 +907,10 @@ impl TypeChecker {
                     Some(_) => Some(FidanType::Dynamic), // cross-module
                     None => None,
                 };
+
+                for field in fields {
+                    let _ = self.resolve_type_expr(&field.ty);
+                }
 
                 self.push_scope(ScopeKind::Object);
                 self.inject_this_and_parent(obj_ty, parent_ty, module.file);

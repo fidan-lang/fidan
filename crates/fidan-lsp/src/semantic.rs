@@ -5,16 +5,19 @@
 //!   0 = function   (action declarations and call sites)
 //!   1 = method     (method calls after `.`)
 //!   2 = class      (object declarations, type references, constructors)
-//!   3 = variable   (var/const declarations and general identifier usages)
-//!   4 = parameter  (action parameter declarations)
-//!   5 = property   (field accesses after `.`)
-//!   6 = type       (built-in type names after `oftype` / `->`)
-//!   7 = keyword    (word-alias synonym tokens: `also`, `sep`)
+//!   3 = enumMember (enum variants like `Direction.Up`)
+//!   4 = variable   (var/const declarations and general identifier usages)
+//!   5 = parameter  (action parameter declarations)
+//!   6 = property   (field accesses after `.`)
+//!   7 = type       (built-in type names after `oftype` / `->`)
+//!   8 = keyword    (word-alias synonym tokens: `also`, `sep`)
 //!
 //! Token modifiers (bitmask):
 //!   bit 0 = declaration
 //!   bit 1 = readonly
 
+use crate::symbols::{SymKind, SymbolTable};
+use fidan_ast::{Item, Module};
 use fidan_lexer::{Symbol, SymbolInterner, Token, TokenKind};
 use fidan_source::SourceFile;
 use tower_lsp::lsp_types::{
@@ -26,11 +29,12 @@ use tower_lsp::lsp_types::{
 pub const TT_FUNCTION: u32 = 0;
 pub const TT_METHOD: u32 = 1;
 pub const TT_CLASS: u32 = 2;
-pub const TT_VARIABLE: u32 = 3;
-pub const TT_PARAMETER: u32 = 4;
-pub const TT_PROPERTY: u32 = 5;
-pub const TT_TYPE: u32 = 6;
-pub const TT_KEYWORD: u32 = 7;
+pub const TT_ENUM_MEMBER: u32 = 3;
+pub const TT_VARIABLE: u32 = 4;
+pub const TT_PARAMETER: u32 = 5;
+pub const TT_PROPERTY: u32 = 6;
+pub const TT_TYPE: u32 = 7;
+pub const TT_KEYWORD: u32 = 8;
 
 pub const TM_DECLARATION: u32 = 1 << 0;
 pub const TM_READONLY: u32 = 1 << 1;
@@ -41,14 +45,15 @@ pub const TM_READONLY: u32 = 1 << 1;
 pub fn legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
         token_types: vec![
-            SemanticTokenType::FUNCTION,  // 0
-            SemanticTokenType::METHOD,    // 1
-            SemanticTokenType::CLASS,     // 2
-            SemanticTokenType::VARIABLE,  // 3
-            SemanticTokenType::PARAMETER, // 4
-            SemanticTokenType::PROPERTY,  // 5
-            SemanticTokenType::TYPE,      // 6
-            SemanticTokenType::KEYWORD,   // 7
+            SemanticTokenType::FUNCTION,    // 0
+            SemanticTokenType::METHOD,      // 1
+            SemanticTokenType::CLASS,       // 2
+            SemanticTokenType::ENUM_MEMBER, // 3
+            SemanticTokenType::VARIABLE,    // 4
+            SemanticTokenType::PARAMETER,   // 5
+            SemanticTokenType::PROPERTY,    // 6
+            SemanticTokenType::TYPE,        // 7
+            SemanticTokenType::KEYWORD,     // 8
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION, // bit 0
@@ -65,6 +70,8 @@ pub fn compute(
     tokens: &[Token],
     file: &SourceFile,
     interner: &SymbolInterner,
+    module: &Module,
+    symbol_table: &SymbolTable,
 ) -> Vec<SemanticToken> {
     // Only consider tokens that carry semantic meaning (skip whitespace noise).
     let meaningful: Vec<&Token> = tokens
@@ -78,6 +85,7 @@ pub fn compute(
         .collect();
 
     let n = meaningful.len();
+    let enum_variant_decl_starts = enum_variant_declaration_starts(module);
 
     // Pre-pass: collect the set of symbols that appear in parameter-declaration
     // position so that `ident(` can be coloured as TT_PARAMETER (red) rather
@@ -202,6 +210,16 @@ pub fn compute(
 
         let sym_str = interner.resolve(sym);
 
+        if enum_variant_decl_starts.contains(&tok.span.start) {
+            let (line1, col1) = file.line_col(tok.span.start);
+            let line = line1.saturating_sub(1);
+            let start = col1.saturating_sub(1);
+            let len = tok.span.end - tok.span.start;
+            raw.push((line, start, len, TT_ENUM_MEMBER, TM_DECLARATION));
+            prev_emitted_tt = Some(TT_ENUM_MEMBER);
+            continue;
+        }
+
         // Contextual keywords (`with`, `returns`, `then`) are kept as `Ident`
         // by the lexer but the TextMate grammar already colours them as
         // `keyword.other.modifier.fidan`.  Don't override that — skip them.
@@ -231,6 +249,22 @@ pub fn compute(
             }
         });
         let prev_ident_str: Option<&str> = prev_resolved.as_deref();
+        let visible_kind = symbol_table
+            .lookup_visible(tok.span.start, sym_str.as_ref())
+            .map(|entry| &entry.kind);
+        let qualified_kind = if matches!(prev, Some(TokenKind::Dot)) && idx >= 2 {
+            match (&meaningful[idx - 2].kind, &meaningful[idx - 1].kind) {
+                (TokenKind::Ident(parent), TokenKind::Dot) => {
+                    let parent_name = interner.resolve(*parent);
+                    symbol_table
+                        .get(&format!("{}.{}", parent_name, sym_str))
+                        .map(|entry| &entry.kind)
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
         let (tt, mods) = if prev_ident_str == Some("returns") {
             if sym_str.starts_with(|c: char| c.is_uppercase()) {
                 (TT_CLASS, 0)
@@ -244,13 +278,16 @@ pub fn compute(
             // colour (red) instead of falling through to the blue function-call
             // classification.  E.g. `fn()` inside `action register with (fn oftype action)`.
             (TT_PARAMETER, 0)
-        } else if matches!(prev, Some(TokenKind::Dot)) && prev_emitted_tt == Some(TT_CLASS) {
+        } else if matches!(prev, Some(TokenKind::Dot))
+            && prev_emitted_tt == Some(TT_CLASS)
+            && qualified_kind.is_none()
+        {
             // Qualified type path after `extends`: `extends module.Foo` or `extends a.b.Foo`.
             // The preceding identifier was classified as TT_CLASS (e.g. the namespace
             // `module` after `extends`), so keep the class color for the next segment too.
             (TT_CLASS, 0)
         } else {
-            classify(&sym_str, prev, next)
+            classify(&sym_str, prev, next, visible_kind, qualified_kind)
         };
         prev_emitted_tt = Some(tt);
 
@@ -294,7 +331,13 @@ pub fn compute(
 
 // ── Classification ────────────────────────────────────────────────────────────
 
-fn classify(sym: &str, prev: Option<&TokenKind>, next: Option<&TokenKind>) -> (u32, u32) {
+fn classify(
+    sym: &str,
+    prev: Option<&TokenKind>,
+    next: Option<&TokenKind>,
+    visible_kind: Option<&SymKind>,
+    qualified_kind: Option<&SymKind>,
+) -> (u32, u32) {
     // ── Declaration sites ─────────────────────────────────────────────────────
 
     // `var NAME` / `const NAME`
@@ -313,6 +356,11 @@ fn classify(sym: &str, prev: Option<&TokenKind>, next: Option<&TokenKind>) -> (u
 
     // `object NAME`
     if matches!(prev, Some(TokenKind::Object)) {
+        return (TT_CLASS, TM_DECLARATION);
+    }
+
+    // `enum NAME`
+    if matches!(prev, Some(TokenKind::Enum)) {
         return (TT_CLASS, TM_DECLARATION);
     }
 
@@ -381,8 +429,15 @@ fn classify(sym: &str, prev: Option<&TokenKind>, next: Option<&TokenKind>) -> (u
         return (TT_PARAMETER, TM_DECLARATION);
     }
 
+    if matches!(visible_kind, Some(SymKind::Object | SymKind::Enum)) {
+        return (TT_CLASS, 0);
+    }
+
     // ── Member access: `expr.IDENT` ──────────────────────────────────────────
     if matches!(prev, Some(TokenKind::Dot)) {
+        if matches!(qualified_kind, Some(SymKind::EnumVariant)) {
+            return (TT_ENUM_MEMBER, 0);
+        }
         if matches!(next, Some(TokenKind::LParen)) {
             return (TT_METHOD, 0);
         }
@@ -402,6 +457,20 @@ fn classify(sym: &str, prev: Option<&TokenKind>, next: Option<&TokenKind>) -> (u
     (TT_VARIABLE, 0)
 }
 
+fn enum_variant_declaration_starts(module: &Module) -> std::collections::HashSet<u32> {
+    module
+        .items
+        .iter()
+        .filter_map(|item_id| match module.arena.get_item(*item_id) {
+            Item::EnumDecl { variants, .. } => {
+                Some(variants.iter().map(|variant| variant.span.start))
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,7 +482,11 @@ mod tests {
         let interner = Arc::new(SymbolInterner::new());
         let file = SourceFile::new(FileId(0), "<semantic>", src);
         let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
-        compute(&tokens, &file, &interner)
+        let (module, diags) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+        assert!(diags.is_empty(), "parser diagnostics: {diags:#?}");
+        let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+        let symbol_table = crate::symbols::build(&module, &typed, &interner);
+        compute(&tokens, &file, &interner, &module, &symbol_table)
             .into_iter()
             .map(|token| token.token_type)
             .collect()
@@ -434,6 +507,39 @@ mod tests {
         assert!(
             token_types.iter().filter(|&&tt| tt == TT_CLASS).count() >= 3,
             "expected namespace alias declaration and usage to be class-colored: {token_types:?}"
+        );
+    }
+
+    #[test]
+    fn enum_declarations_and_variant_uses_are_class_colored() {
+        let token_types =
+            semantic_token_types_for("enum Direction { North }\nvar d = Direction.North\n");
+        assert!(
+            token_types.iter().filter(|&&tt| tt == TT_CLASS).count() >= 2,
+            "expected enum declaration and enum type path to be class-colored: {token_types:?}"
+        );
+        assert!(
+            token_types
+                .iter()
+                .filter(|&&tt| tt == TT_ENUM_MEMBER)
+                .count()
+                >= 2,
+            "expected enum declaration variant and usage to use enum-member coloring: {token_types:?}"
+        );
+    }
+
+    #[test]
+    fn object_type_stays_class_colored_while_field_stays_property_colored() {
+        let token_types = semantic_token_types_for(
+            "object MyObject { var richtung oftype Direction }\nMyObject.richtung\n",
+        );
+        assert!(
+            token_types.contains(&TT_CLASS),
+            "expected object type name to stay class-colored: {token_types:?}"
+        );
+        assert!(
+            token_types.contains(&TT_PROPERTY),
+            "expected object field member to stay property-colored: {token_types:?}"
         );
     }
 }

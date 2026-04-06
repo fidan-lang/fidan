@@ -830,23 +830,17 @@ impl LanguageServer for FidanLsp {
             } else {
                 None
             };
-            // Direct in-doc lookups: action-param scope first (prevents a
-            // same-named global from shadowing a parameter), then plain →
+            // Direct in-doc lookups: lexical scopes first, then plain →
             // qualified → type-resolved.
-            let scoped = doc
+            let in_doc = doc
                 .symbol_table
-                .action_param_scopes
-                .iter()
-                .find(|(s, _)| offset >= s.start && offset < s.end)
-                .and_then(|(_, params)| params.get(cur_name.as_str()));
-            let in_doc = scoped
-                .or_else(|| doc.symbol_table.get(cur_name.as_str()))
+                .lookup_visible(offset, cur_name.as_str())
                 .or_else(|| {
                     let pn = prev_name?;
                     if let Some(e) = doc.symbol_table.get(&format!("{}.{}", pn, cur_name)) {
                         return Some(e);
                     }
-                    if let Some(pe) = doc.symbol_table.get(pn)
+                    if let Some(pe) = doc.symbol_table.lookup_visible(offset, pn)
                         && let Some(ty) = &pe.ty_name
                     {
                         return doc.symbol_table.get(&format!("{}.{}", ty, cur_name));
@@ -874,7 +868,10 @@ impl LanguageServer for FidanLsp {
                     HoverLookup::ImportDoc(import_url.clone(), cur_name.clone())
                 } else {
                     // Type-resolved: prev is a variable with known type.
-                    let ty = doc.symbol_table.get(pn).and_then(|e| e.ty_name.clone());
+                    let ty = doc
+                        .symbol_table
+                        .lookup_visible(offset, pn)
+                        .and_then(|e| e.ty_name.clone());
                     match ty {
                         Some(t) => HoverLookup::CrossDoc(t, cur_name.clone()),
                         None => HoverLookup::NotFound,
@@ -981,18 +978,21 @@ impl LanguageServer for FidanLsp {
             } else {
                 None
             };
-            let in_doc = doc.symbol_table.get(cur_name.as_str()).or_else(|| {
-                let pn = prev_name?;
-                if let Some(e) = doc.symbol_table.get(&format!("{}.{}", pn, cur_name)) {
-                    return Some(e);
-                }
-                if let Some(pe) = doc.symbol_table.get(pn)
-                    && let Some(ty) = &pe.ty_name
-                {
-                    return doc.symbol_table.get(&format!("{}.{}", ty, cur_name));
-                }
-                None
-            });
+            let in_doc = doc
+                .symbol_table
+                .lookup_visible(offset, cur_name.as_str())
+                .or_else(|| {
+                    let pn = prev_name?;
+                    if let Some(e) = doc.symbol_table.get(&format!("{}.{}", pn, cur_name)) {
+                        return Some(e);
+                    }
+                    if let Some(pe) = doc.symbol_table.lookup_visible(offset, pn)
+                        && let Some(ty) = &pe.ty_name
+                    {
+                        return doc.symbol_table.get(&format!("{}.{}", ty, cur_name));
+                    }
+                    None
+                });
             // Fallback: resolve named call-arguments (e.g. `times` in `foo(times = 10)`).
             let named_arg =
                 find_named_arg_param(&doc.symbol_table, spans, hit_idx, cur_span, &doc.text);
@@ -1013,7 +1013,10 @@ impl LanguageServer for FidanLsp {
                 if let Some(import_url) = doc.imports.get(pn) {
                     DefinitionLookup::ImportDoc(import_url.clone(), cur_name.clone())
                 } else {
-                    let ty = doc.symbol_table.get(pn).and_then(|e| e.ty_name.clone());
+                    let ty = doc
+                        .symbol_table
+                        .lookup_visible(offset, pn)
+                        .and_then(|e| e.ty_name.clone());
                     match ty {
                         Some(t) => DefinitionLookup::CrossDoc(t, cur_name.clone()),
                         None => named_arg
@@ -1211,25 +1214,36 @@ impl LanguageServer for FidanLsp {
                 }
             } else {
                 // ── Dot-triggered receiver resolution ────────────────────────────
-                let dot_res: Option<DotResolution> = if trigger == Some(".") {
+                let dot_res: Option<DotResolution> = if cursor > 0
+                    && (trigger == Some(".") || src.get(cursor.saturating_sub(1)) == Some(&b'.'))
+                {
                     let dot_pos = (cursor as u32).saturating_sub(1);
-                    let recv = doc
-                        .identifier_spans
-                        .iter()
-                        .rev()
-                        .find(|(span, _)| span.end <= dot_pos)
-                        .map(|(_, name)| name.clone());
+                    let recv_chain =
+                        dotted_receiver_segments(&doc.identifier_spans, &doc.text, dot_pos);
 
-                    if let Some(rn) = recv {
-                        if let Some(url) = doc.imports.get(rn.as_str()) {
-                            Some(DotResolution::ModuleAlias(url.clone()))
-                        } else if let Some(mod_name) = doc.stdlib_imports.get(rn.as_str()) {
-                            Some(DotResolution::StdLibModule(mod_name.clone()))
+                    if let Some(first) = recv_chain.first() {
+                        if recv_chain.len() == 1 {
+                            if let Some(url) = doc.imports.get(first.as_str()) {
+                                Some(DotResolution::ModuleAlias(url.clone()))
+                            } else if let Some(mod_name) = doc.stdlib_imports.get(first.as_str()) {
+                                Some(DotResolution::StdLibModule(mod_name.clone()))
+                            } else {
+                                resolve_dotted_receiver_type_name(
+                                    &doc.symbol_table,
+                                    &doc.identifier_spans,
+                                    &doc.text,
+                                    dot_pos,
+                                )
+                                .map(DotResolution::TypeName)
+                            }
                         } else {
-                            doc.symbol_table
-                                .get(rn.as_str())
-                                .and_then(|e| e.ty_name.as_deref())
-                                .map(|ty| DotResolution::TypeName(ty.to_string()))
+                            resolve_dotted_receiver_type_name(
+                                &doc.symbol_table,
+                                &doc.identifier_spans,
+                                &doc.text,
+                                dot_pos,
+                            )
+                            .map(DotResolution::TypeName)
                         }
                     } else {
                         None
@@ -1249,40 +1263,8 @@ impl LanguageServer for FidanLsp {
                     }
                 } else {
                     // ── Standard (non-dot) symbol items ──────────────────────────────
-                    let local_items: Vec<CompletionItem> = doc
-                        .symbol_table
-                        .all()
-                        .filter(|(name, _)| !name.contains('.'))
-                        .map(|(name, entry)| {
-                            let kind = Some(match &entry.kind {
-                                SymKind::Action | SymKind::Method => CompletionItemKind::FUNCTION,
-                                SymKind::Object => CompletionItemKind::CLASS,
-                                SymKind::Variable { .. } => CompletionItemKind::VARIABLE,
-                                SymKind::Field => CompletionItemKind::FIELD,
-                            });
-                            let insert_text =
-                                if matches!(entry.kind, SymKind::Action | SymKind::Object)
-                                    && !entry.param_types.is_empty()
-                                {
-                                    Some(format!("{}($0)", name))
-                                } else {
-                                    None
-                                };
-                            CompletionItem {
-                                label: name.clone(),
-                                kind,
-                                insert_text_format: insert_text
-                                    .as_ref()
-                                    .map(|_| InsertTextFormat::SNIPPET),
-                                insert_text,
-                                documentation: Some(Documentation::MarkupContent(MarkupContent {
-                                    kind: MarkupKind::Markdown,
-                                    value: entry.detail.clone(),
-                                })),
-                                ..Default::default()
-                            }
-                        })
-                        .collect();
+                    let local_items =
+                        visible_symbol_completion_items(&doc.symbol_table, cursor as u32);
 
                     // ── Named-parameter detection ─────────────────────────────────────
                     // Walk backward to find if the cursor is inside a function call and
@@ -1320,23 +1302,28 @@ impl LanguageServer for FidanLsp {
                             .find(|(span, _)| span.end as usize <= open)
                     {
                         // Try direct lookup first, then dot-receiver-qualified.
-                        let entry_opt = doc.symbol_table.get(fn_name.as_str()).or_else(|| {
-                            let fn_start = fn_span.start as usize;
-                            if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
-                                let recv = doc
-                                    .identifier_spans
-                                    .iter()
-                                    .rev()
-                                    .find(|(span, _)| (span.end as usize) < fn_start)?;
-                                let ty = doc
-                                    .symbol_table
-                                    .get(recv.1.as_str())
-                                    .and_then(|e| e.ty_name.as_deref())?;
-                                doc.symbol_table.get(&format!("{}.{}", ty, fn_name))
-                            } else {
-                                None
-                            }
-                        });
+                        let entry_opt = doc
+                            .symbol_table
+                            .lookup_visible(fn_span.start, fn_name.as_str())
+                            .or_else(|| {
+                                let fn_start = fn_span.start as usize;
+                                if fn_start > 0
+                                    && src.get(fn_start.saturating_sub(1)) == Some(&b'.')
+                                {
+                                    let recv = doc
+                                        .identifier_spans
+                                        .iter()
+                                        .rev()
+                                        .find(|(span, _)| (span.end as usize) < fn_start)?;
+                                    let ty = doc
+                                        .symbol_table
+                                        .lookup_visible(fn_span.start, recv.1.as_str())
+                                        .and_then(|e| e.ty_name.as_deref())?;
+                                    doc.symbol_table.get(&format!("{}.{}", ty, fn_name))
+                                } else {
+                                    None
+                                }
+                            });
 
                         if let Some(entry) = entry_opt {
                             named_param_entries = entry.param_names.clone();
@@ -1352,7 +1339,7 @@ impl LanguageServer for FidanLsp {
                                     .find(|(span, _)| (span.end as usize) < fn_start)
                                 && let Some(ty) = doc
                                     .symbol_table
-                                    .get(recv_name.as_str())
+                                    .lookup_visible(fn_span.start, recv_name.as_str())
                                     .and_then(|e| e.ty_name.as_deref())
                                     .map(|s| s.to_string())
                             {
@@ -1563,15 +1550,17 @@ impl LanguageServer for FidanLsp {
                             let kind = Some(match &entry.kind {
                                 SymKind::Method => CompletionItemKind::METHOD,
                                 SymKind::Field => CompletionItemKind::FIELD,
+                                SymKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
                                 _ => CompletionItemKind::FIELD,
                             });
-                            let insert_text = if matches!(entry.kind, SymKind::Method)
-                                && !entry.param_types.is_empty()
-                            {
-                                Some(format!("{}($0)", member))
-                            } else {
-                                None
-                            };
+                            let insert_text =
+                                if matches!(entry.kind, SymKind::Method | SymKind::EnumVariant)
+                                    && !entry.param_types.is_empty()
+                                {
+                                    Some(format!("{}($0)", member))
+                                } else {
+                                    None
+                                };
                             CompletionItem {
                                 label: member,
                                 kind,
@@ -1597,6 +1586,8 @@ impl LanguageServer for FidanLsp {
                             let kind = Some(match &entry.kind {
                                 SymKind::Action | SymKind::Method => CompletionItemKind::FUNCTION,
                                 SymKind::Object => CompletionItemKind::CLASS,
+                                SymKind::Enum => CompletionItemKind::ENUM,
+                                SymKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
                                 SymKind::Variable { .. } => CompletionItemKind::VARIABLE,
                                 SymKind::Field => CompletionItemKind::FIELD,
                             });
@@ -1791,25 +1782,29 @@ impl LanguageServer for FidanLsp {
             }
 
             // Try local lookup: direct, then receiver-qualified ("TRex.roar").
-            let local_entry = doc.symbol_table.get(fn_name.as_str()).cloned().or_else(|| {
-                if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
-                    let recv = doc
-                        .identifier_spans
-                        .iter()
-                        .rev()
-                        .find(|(span, _)| (span.end as usize) < fn_start)?;
-                    let ty = doc
-                        .symbol_table
-                        .get(recv.1.as_str())
-                        .and_then(|e| e.ty_name.as_deref())?
-                        .to_string();
-                    doc.symbol_table
-                        .get(&format!("{}.{}", ty, fn_name))
-                        .cloned()
-                } else {
-                    None
-                }
-            });
+            let local_entry = doc
+                .symbol_table
+                .lookup_visible(fn_span.start, fn_name.as_str())
+                .cloned()
+                .or_else(|| {
+                    if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
+                        let recv = doc
+                            .identifier_spans
+                            .iter()
+                            .rev()
+                            .find(|(span, _)| (span.end as usize) < fn_start)?;
+                        let ty = doc
+                            .symbol_table
+                            .lookup_visible(fn_span.start, recv.1.as_str())
+                            .and_then(|e| e.ty_name.as_deref())?
+                            .to_string();
+                        doc.symbol_table
+                            .get(&format!("{}.{}", ty, fn_name))
+                            .cloned()
+                    } else {
+                        None
+                    }
+                });
 
             if let Some(entry) = local_entry {
                 if entry.param_types.is_empty() {
@@ -1995,21 +1990,23 @@ impl LanguageServer for FidanLsp {
 
         let mut symbols: Vec<DocumentSymbol> = Vec::new();
 
-        // Objects first — build them with their member children.
-        let mut object_names: Vec<String> = doc
+        // Objects and enums first — build them with their member / variant children.
+        let mut type_names: Vec<String> = doc
             .symbol_table
             .all()
-            .filter(|(name, entry)| !name.contains('.') && matches!(entry.kind, SymKind::Object))
+            .filter(|(name, entry)| {
+                !name.contains('.') && matches!(entry.kind, SymKind::Object | SymKind::Enum)
+            })
             .map(|(name, _)| name.clone())
             .collect();
-        object_names.sort();
+        type_names.sort();
 
-        for obj_name in &object_names {
-            let entry = match doc.symbol_table.get(obj_name) {
+        for type_name in &type_names {
+            let entry = match doc.symbol_table.get(type_name) {
                 Some(e) => e,
                 None => continue,
             };
-            let prefix = format!("{}.", obj_name);
+            let prefix = format!("{}.", type_name);
             let mut children: Vec<DocumentSymbol> = doc
                 .symbol_table
                 .all()
@@ -2019,6 +2016,7 @@ impl LanguageServer for FidanLsp {
                     let kind = match &child.kind {
                         SymKind::Method => SymbolKind::METHOD,
                         SymKind::Field => SymbolKind::FIELD,
+                        SymKind::EnumVariant => SymbolKind::ENUM_MEMBER,
                         _ => SymbolKind::FIELD,
                     };
                     #[allow(deprecated)]
@@ -2035,12 +2033,16 @@ impl LanguageServer for FidanLsp {
                 })
                 .collect();
             children.sort_by(|a, b| a.name.cmp(&b.name));
+            let kind = match &entry.kind {
+                SymKind::Enum => SymbolKind::ENUM,
+                _ => SymbolKind::CLASS,
+            };
 
             #[allow(deprecated)]
             symbols.push(DocumentSymbol {
-                name: obj_name.clone(),
+                name: type_name.clone(),
                 detail: None,
-                kind: SymbolKind::CLASS,
+                kind,
                 tags: None,
                 deprecated: None,
                 range: convert::span_to_range(&file, entry.span),
@@ -2614,7 +2616,7 @@ fn find_named_arg_param(
         }
 
         // 3a. Direct lookup — global action named `fn_name`.
-        if let Some(entry) = symbol_table.get(fn_name)
+        if let Some(entry) = symbol_table.lookup_visible(cur_span.start, fn_name)
             && let Some((_, span)) = entry.param_names.iter().find(|(n, _)| *n == param_name)
         {
             return Some(NamedArgLookup::InDoc(*span));
@@ -2626,7 +2628,7 @@ fn find_named_arg_param(
             // Resolve the concrete type of the receiver (or fall back to the name itself
             // for the case where the receiver IS the type, e.g. `TRex.new(...)`).
             let start_ty = symbol_table
-                .get(recv_name)
+                .lookup_visible(cur_span.start, recv_name)
                 .and_then(|e| e.ty_name.as_deref())
                 .unwrap_or(recv_name.as_str())
                 .to_string();
@@ -2661,6 +2663,114 @@ fn find_named_arg_param(
         break; // Only consider the nearest callee.
     }
     None
+}
+
+fn dotted_receiver_segments(
+    identifier_spans: &[(Span, String)],
+    text: &str,
+    dot_pos: u32,
+) -> Vec<String> {
+    let mut segments = Vec::new();
+    let Some(mut idx) = identifier_spans.iter().rposition(|(span, _)| {
+        span.end <= dot_pos && text.get(span.end as usize..dot_pos as usize) == Some("")
+    }) else {
+        return segments;
+    };
+
+    segments.push(identifier_spans[idx].1.clone());
+    let mut current_start = identifier_spans[idx].0.start;
+
+    while idx > 0 {
+        let prev = &identifier_spans[idx - 1];
+        if text.get(prev.0.end as usize..current_start as usize) == Some(".") {
+            segments.push(prev.1.clone());
+            current_start = prev.0.start;
+            idx -= 1;
+        } else {
+            break;
+        }
+    }
+
+    segments.reverse();
+    segments
+}
+
+fn resolve_dotted_receiver_type_name(
+    symbol_table: &crate::symbols::SymbolTable,
+    identifier_spans: &[(Span, String)],
+    text: &str,
+    dot_pos: u32,
+) -> Option<String> {
+    let segments = dotted_receiver_segments(identifier_spans, text, dot_pos);
+    let first = segments.first()?;
+    let mut current_type = {
+        let entry = symbol_table.lookup_visible(dot_pos, first.as_str())?;
+        match &entry.kind {
+            SymKind::Object | SymKind::Enum => first.clone(),
+            _ => entry.ty_name.clone()?,
+        }
+    };
+
+    for segment in segments.iter().skip(1) {
+        let entry = symbol_table.get(&format!("{}.{}", current_type, segment))?;
+        current_type = match &entry.kind {
+            SymKind::Object | SymKind::Enum => segment.clone(),
+            SymKind::EnumVariant => entry
+                .return_type
+                .clone()
+                .or_else(|| entry.ty_name.clone())?,
+            _ => entry.ty_name.clone()?,
+        };
+    }
+
+    Some(current_type)
+}
+
+fn completion_item_for_symbol(name: &str, entry: &SymbolEntry, sort_group: &str) -> CompletionItem {
+    let kind = Some(match &entry.kind {
+        SymKind::Action | SymKind::Method => CompletionItemKind::FUNCTION,
+        SymKind::Object => CompletionItemKind::CLASS,
+        SymKind::Enum => CompletionItemKind::ENUM,
+        SymKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
+        SymKind::Variable { .. } => CompletionItemKind::VARIABLE,
+        SymKind::Field => CompletionItemKind::FIELD,
+    });
+    let insert_text = if matches!(
+        entry.kind,
+        SymKind::Action | SymKind::Object | SymKind::EnumVariant
+    ) && !entry.param_types.is_empty()
+    {
+        Some(format!("{}($0)", name))
+    } else {
+        None
+    };
+    CompletionItem {
+        label: name.to_string(),
+        kind,
+        insert_text_format: insert_text.as_ref().map(|_| InsertTextFormat::SNIPPET),
+        insert_text,
+        documentation: Some(Documentation::MarkupContent(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value: entry.detail.clone(),
+        })),
+        sort_text: Some(format!("{}{}", sort_group, name)),
+        ..Default::default()
+    }
+}
+
+fn visible_symbol_completion_items(
+    symbol_table: &crate::symbols::SymbolTable,
+    cursor: u32,
+) -> Vec<CompletionItem> {
+    symbol_table
+        .visible_unqualified_at(cursor)
+        .into_iter()
+        .map(|(name, entry)| {
+            let is_scoped = symbol_table.is_lexical_visible(cursor, &name);
+            let sort_group = if is_scoped { "1" } else { "2" };
+            completion_item_for_symbol(&name, &entry, sort_group)
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2724,6 +2834,189 @@ mod tests {
         assert_eq!(decorator_name_at_offset(text, 5), Some("precompile"));
         assert_eq!(decorator_name_at_offset(text, 0), None);
         assert_eq!(decorator_name_at_offset(text, 16), None);
+    }
+
+    #[test]
+    fn completion_prefers_visible_local_symbols() {
+        let text = r#"var global_total = 1
+
+action outer {
+    var local_total = 2
+    action helper with (certain n oftype integer) returns integer {
+        return n + local_total
+    }
+    print(local_total)
+}
+"#;
+        let cursor = text.find("print(local_total)").expect("cursor marker") as u32;
+        let analysis = analysis::analyze(text, "file:///completion_locals.fdn");
+        let items = visible_symbol_completion_items(&analysis.symbol_table, cursor);
+        let labels: Vec<String> = items.iter().map(|item| item.label.clone()).collect();
+
+        assert!(labels.contains(&"local_total".to_string()));
+        assert!(labels.contains(&"helper".to_string()));
+        assert!(labels.contains(&"global_total".to_string()));
+        let local_index = labels
+            .iter()
+            .position(|label| label == "local_total")
+            .unwrap();
+        let global_index = labels
+            .iter()
+            .position(|label| label == "global_total")
+            .unwrap();
+        assert!(local_index < global_index);
+    }
+
+    #[test]
+    fn completion_hides_locals_before_their_declaration() {
+        let text = r#"action outer {
+    print("before")
+    var local_total = 2
+}
+"#;
+        let cursor = text.find("print").expect("cursor marker") as u32;
+        let analysis = analysis::analyze(text, "file:///completion_before_decl.fdn");
+        let items = visible_symbol_completion_items(&analysis.symbol_table, cursor);
+        let labels: Vec<String> = items.iter().map(|item| item.label.clone()).collect();
+
+        assert!(!labels.contains(&"local_total".to_string()));
+    }
+
+    #[test]
+    fn completion_does_not_leak_if_branch_locals() {
+        let text = r#"action outer with (certain flag oftype boolean) {
+    if flag {
+        var then_only = 1
+        print(then_only)
+    } otherwise {
+        var else_only = 2
+        print(else_only)
+    }
+}
+"#;
+        let then_cursor = text.find("print(then_only)").expect("then cursor") as u32;
+        let else_cursor = text.find("print(else_only)").expect("else cursor") as u32;
+        let analysis = analysis::analyze(text, "file:///completion_if_branches.fdn");
+
+        let then_labels: Vec<String> =
+            visible_symbol_completion_items(&analysis.symbol_table, then_cursor)
+                .into_iter()
+                .map(|item| item.label)
+                .collect();
+        assert!(then_labels.contains(&"then_only".to_string()));
+        assert!(!then_labels.contains(&"else_only".to_string()));
+
+        let else_labels: Vec<String> =
+            visible_symbol_completion_items(&analysis.symbol_table, else_cursor)
+                .into_iter()
+                .map(|item| item.label)
+                .collect();
+        assert!(else_labels.contains(&"else_only".to_string()));
+        assert!(!else_labels.contains(&"then_only".to_string()));
+    }
+
+    #[test]
+    fn completion_includes_object_and_enum_types() {
+        let text = r#"enum Direction {
+    North
+}
+
+object Worker {
+    action run returns dynamic {
+        return nothing
+    }
+}
+
+action main {
+    print("hi")
+}
+"#;
+        let cursor = text.find("print").expect("cursor marker") as u32;
+        let analysis = analysis::analyze(text, "file:///completion_types.fdn");
+        let items = visible_symbol_completion_items(&analysis.symbol_table, cursor);
+
+        let worker = items
+            .iter()
+            .find(|item| item.label == "Worker")
+            .expect("Worker completion");
+        assert_eq!(worker.kind, Some(CompletionItemKind::CLASS));
+
+        let direction = items
+            .iter()
+            .find(|item| item.label == "Direction")
+            .expect("Direction completion");
+        assert_eq!(direction.kind, Some(CompletionItemKind::ENUM));
+    }
+
+    #[test]
+    fn dot_receiver_type_name_supports_direct_types_and_recursive_fields() {
+        let text = r#"enum Direction {
+    North
+    South
+}
+
+object Compass {
+    var heading oftype Direction
+}
+
+object Holder {
+    var compass oftype Compass
+}
+
+Direction.
+Compass.
+Holder.compass.
+"#;
+        let analysis = analysis::analyze(text, "file:///receiver_types.fdn");
+        let direction_offset = text.find("Direction.").expect("Direction cursor") as u32;
+        let compass_offset = text.find("Compass.").expect("Compass cursor") as u32;
+        let holder_offset = text.find("Holder.compass.").expect("Holder cursor") as u32
+            + "Holder.compass".len() as u32;
+
+        assert_eq!(
+            resolve_dotted_receiver_type_name(
+                &analysis.symbol_table,
+                &analysis.identifier_spans,
+                text,
+                direction_offset + "Direction".len() as u32,
+            )
+            .as_deref(),
+            Some("Direction")
+        );
+        assert_eq!(
+            resolve_dotted_receiver_type_name(
+                &analysis.symbol_table,
+                &analysis.identifier_spans,
+                text,
+                compass_offset + "Compass".len() as u32,
+            )
+            .as_deref(),
+            Some("Compass")
+        );
+        assert_eq!(
+            resolve_dotted_receiver_type_name(
+                &analysis.symbol_table,
+                &analysis.identifier_spans,
+                text,
+                holder_offset,
+            )
+            .as_deref(),
+            Some("Compass")
+        );
+        assert_eq!(
+            analysis
+                .symbol_table
+                .get("Compass.heading")
+                .and_then(|entry| entry.ty_name.as_deref()),
+            Some("Direction")
+        );
+        assert_eq!(
+            analysis
+                .symbol_table
+                .get("Holder.compass")
+                .and_then(|entry| entry.ty_name.as_deref()),
+            Some("Compass")
+        );
     }
 
     #[test]

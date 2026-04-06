@@ -245,6 +245,21 @@ mod tests {
     }
 
     #[test]
+    fn object_field_with_unknown_type_is_error() {
+        let errors = check_errors(
+            r#"object Broken {
+                var value oftype MissingType
+            }"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("undefined type `MissingType`")),
+            "expected unknown object field type error, got {errors:?}"
+        );
+    }
+
+    #[test]
     fn if_otherwise_is_clean() {
         assert!(
             check_errors(
