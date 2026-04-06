@@ -173,10 +173,10 @@ action main {{
     assert_eq(defaultExternAdd(20, 22), 42)
     assert_eq(nativeAdd(20, 22), 42)
     assert_eq(sum3(10, 20, 12), 42)
-    assert_eq(mix4(7, 8.0, true, 9), 124)
+    var h = makeHandle()
+    assert_eq(mix4(7, 8.0, true, h), 156)
     assert_eq(sum6(2, 4, 6, 8, 10, 12), 42)
 
-    var h = makeHandle()
     h = incHandle(h)
     assert_eq(readHandle(h), 42)
     freeHandle(h)

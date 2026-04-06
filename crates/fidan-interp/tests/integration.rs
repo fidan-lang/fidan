@@ -536,6 +536,9 @@ fn extern_mixed_native_signatures_do_not_corrupt_param_types() {
             d oftype handle
         ) returns integer
 
+        @extern("self", symbol = "fidan_test_make_handle")
+        action makeHandle returns handle
+
         @extern("self", symbol = "fidan_test_sum6")
         action sum6 with (
             a oftype integer,
@@ -554,7 +557,8 @@ fn extern_mixed_native_signatures_do_not_corrupt_param_types() {
 
         assert_eq(nativeAdd(20, 22), 42)
         assert_eq(sum3(10, 20, 12), 42)
-        assert_eq(mix4(7, 8.0, true, 9), 124)
+        var h = makeHandle()
+        assert_eq(mix4(7, 8.0, true, h), 156)
         assert_eq(sum6(2, 4, 6, 8, 10, 12), 42)
         assert_eq(floatScale(2.5, 4.0), 10.0)
         assert_eq(negateBool(true), false)"#,
