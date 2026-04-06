@@ -12,6 +12,39 @@ compiler releases.
 
 ---
 
+## [1.0.5] — 2026-04-06
+
+### Added
+- `%=` compound assignment is now supported across parsing, formatting, and
+  execution paths, with regression coverage for interpreter and end-to-end
+  behavior.
+- LSP symbol indexing now tracks lexical scopes for locals, nested actions,
+  loops, methods, and tests, enabling smarter in-scope completion and lookup.
+- Enum and enum-variant symbols are now indexed consistently for completion,
+  document symbols, hover, and semantic token classification.
+- Toolchain packaging now records the AI-analysis backend protocol version so
+  packaged helper distributions can expose protocol compatibility.
+
+### Changed
+- VS Code / LSP completion now prefers currently visible local symbols over
+  globals and resolves chained receivers such as nested object-field member
+  access more accurately, including manual `Ctrl+Space` completion after `.`.
+- Semantic token classification now uses analyzed symbol information for enum
+  types, enum members, namespace imports, and import aliases instead of relying
+  only on lexical heuristics.
+
+### Fixed
+- Unknown object field types now emit proper diagnostics during type checking
+  instead of being silently accepted during object declaration analysis.
+- Enum members are now colored consistently both inside enum declarations and
+  at qualified usage sites such as `Direction.Up`.
+- Local-scope completions no longer leak branch-only symbols across sibling
+  blocks, and newly declared locals/actions are suggested reliably.
+- Action and constructor parameter validation coverage was tightened so invalid
+  argument and `certain`/`nothing` cases are exercised by regressions.
+
+---
+
 ## [1.0.4] — 2026-04-05
 
 ### Added
@@ -122,7 +155,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.4...HEAD
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.5...HEAD
+[1.0.5]: https://github.com/fidan-lang/fidan/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/fidan-lang/fidan/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/fidan-lang/fidan/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/fidan-lang/fidan/compare/v1.0.1...v1.0.2
