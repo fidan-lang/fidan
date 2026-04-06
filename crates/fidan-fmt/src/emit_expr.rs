@@ -27,7 +27,7 @@ fn binop_prec(op: BinOp) -> u8 {
 }
 
 /// Textual representation of a binary operator.
-fn binop_str(op: BinOp) -> &'static str {
+pub(crate) fn binop_str(op: BinOp) -> &'static str {
     match op {
         BinOp::Add => "+",
         BinOp::Sub => "-",
@@ -289,9 +289,14 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
             for arm in &arms {
                 p.nl();
                 emit_expr(p, arm.pattern);
-                p.w(" => {");
-                emit_inline_stmts_or_block(p, &arm.body);
-                p.w("}");
+                if let Some(stmt_id) = crate::emit_stmt::inlineable_check_stmt(p, &arm.body) {
+                    p.w(" => ");
+                    crate::emit_stmt::emit_stmt(p, stmt_id);
+                } else {
+                    p.w(" => {");
+                    emit_inline_stmts_or_block(p, &arm.body);
+                    p.w("}");
+                }
             }
             p.indent_out();
             p.nl();

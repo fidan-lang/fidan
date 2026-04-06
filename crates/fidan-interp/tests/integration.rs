@@ -237,6 +237,23 @@ fn build_mir(src: &str) -> (fidan_mir::MirProgram, Arc<SymbolInterner>) {
     (mir, interner)
 }
 
+fn percent_assign_source() -> &'static str {
+    r#"action fold_mod with (certain value oftype integer, certain divisor oftype integer) returns integer {
+    var local = value
+    local %= divisor
+    return local
+}
+
+var total = 20
+total %= 6
+assert_eq(total, 2)
+
+var values = [fold_mod(20, 7), fold_mod(15, 4), fold_mod(9, 5)]
+assert_eq(values[0], 6)
+assert_eq(values[1], 3)
+assert_eq(values[2], 4)"#
+}
+
 // ── Basic execution (Ok paths) ────────────────────────────────────────────────
 
 #[test]
@@ -252,6 +269,11 @@ fn var_integer_ok() {
 #[test]
 fn var_arithmetic_ok() {
     assert!(run_src("var r = 1 + 2 * 3").is_ok());
+}
+
+#[test]
+fn percent_compound_assign_ok() {
+    assert!(run_src(percent_assign_source()).is_ok());
 }
 
 #[test]
@@ -1252,6 +1274,11 @@ fn optional_defaults_remain_correct_with_jit_enabled() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn percent_compound_assign_ok_with_jit_enabled() {
+    assert!(run_src_with_threshold(percent_assign_source(), 1).is_ok());
 }
 
 #[test]

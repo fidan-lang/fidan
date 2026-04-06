@@ -467,6 +467,7 @@ impl<'t> Parser<'t> {
                     TokenKind::MinusEq => Some(BinOp::Sub),
                     TokenKind::StarEq => Some(BinOp::Mul),
                     TokenKind::SlashEq => Some(BinOp::Div),
+                    TokenKind::PercentEq => Some(BinOp::Rem),
                     _ => None,
                 };
                 if let Some(op) = compound_op {
@@ -1770,6 +1771,7 @@ impl<'t> Parser<'t> {
             TokenKind::MinusEq => Some(BinOp::Sub),
             TokenKind::StarEq => Some(BinOp::Mul),
             TokenKind::SlashEq => Some(BinOp::Div),
+            TokenKind::PercentEq => Some(BinOp::Rem),
             _ => None,
         };
         if let Some(op) = compound_op {

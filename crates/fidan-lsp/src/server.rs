@@ -11,7 +11,7 @@ use fidan_stdlib::{
     STDLIB_MODULES, member_doc as stdlib_member_doc,
     member_return_type as stdlib_member_return_type, module_info as stdlib_module_info,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tower_lsp::jsonrpc::Result as RpcResult;
 use tower_lsp::lsp_types::*;
@@ -453,46 +453,225 @@ impl FidanLsp {
             || matches!(actual, "dynamic" | "?")
     }
 
-    /// Build `TextEdit` deletions for every W1005 (unused import) diagnostic in `uri`.
+    /// Build `TextEdit`s for every W1005 (unused import) diagnostic in `uri`.
     fn build_remove_unused_imports_edits(&self, uri: &Url) -> Vec<TextEdit> {
         let doc = match self.store.get(uri) {
             Some(d) => d,
             None => return vec![],
         };
         let text = doc.text.clone();
-        let diags: Vec<_> = doc
-            .diagnostics
-            .iter()
-            .filter(|d| d.code == Some(NumberOrString::String("W1005".to_string())))
-            .cloned()
-            .collect();
+        let diags = doc.diagnostics.clone();
         drop(doc);
 
-        let mut edits = Vec::new();
-        let src_lines: Vec<&str> = text.lines().collect();
-        for diag in diags {
-            let line = diag.range.start.line as usize;
-            let delete_range = if line + 1 < src_lines.len() {
-                Range {
-                    start: Position {
-                        line: line as u32,
-                        character: 0,
+        build_remove_unused_imports_edits_for_text(uri.as_str(), &text, &diags)
+    }
+}
+
+fn build_remove_unused_imports_edits_for_text(
+    uri_str: &str,
+    text: &str,
+    diagnostics: &[Diagnostic],
+) -> Vec<TextEdit> {
+    #[derive(Default)]
+    struct GroupedImportPlan {
+        remove_unused: HashSet<String>,
+    }
+
+    let file = SourceFile::new(FileId(0), uri_str, text);
+    let mut edits = Vec::new();
+    let mut grouped_plans: HashMap<(u32, u32), GroupedImportPlan> = HashMap::new();
+    let mut fallback_delete_ranges = Vec::new();
+
+    for diag in diagnostics {
+        if diag.code != Some(NumberOrString::String("W1005".to_string())) {
+            continue;
+        }
+
+        let mut had_machine_edit = false;
+        if let Some(fixes) = diag.data.as_ref().and_then(|value| value.as_array()) {
+            for fix in fixes {
+                let start = fix["start"].as_u64().unwrap_or(0) as u32;
+                let end = fix["end"].as_u64().unwrap_or(0) as u32;
+                let replacement = fix["replacement"].as_str().unwrap_or("").to_string();
+                let range = convert::span_to_range(
+                    &file,
+                    Span {
+                        file: FileId(0),
+                        start,
+                        end,
                     },
-                    end: Position {
-                        line: line as u32 + 1,
-                        character: 0,
+                );
+                edits.push(TextEdit {
+                    range,
+                    new_text: replacement,
+                });
+                had_machine_edit = true;
+            }
+        }
+        if had_machine_edit {
+            continue;
+        }
+
+        let Some(name) = extract_backticked_name(&diag.message) else {
+            fallback_delete_ranges.push(diag.range);
+            continue;
+        };
+        let Some((start, end)) = range_to_offsets(text, &diag.range) else {
+            fallback_delete_ranges.push(diag.range);
+            continue;
+        };
+        grouped_plans
+            .entry((start as u32, end as u32))
+            .or_default()
+            .remove_unused
+            .insert(name.to_string());
+    }
+
+    for ((span_lo, span_hi), plan) in grouped_plans {
+        let lo = span_lo as usize;
+        let hi = span_hi as usize;
+        let Some(stmt) = text.get(lo..hi) else {
+            continue;
+        };
+        let Some(open) = stmt.find('{') else {
+            fallback_delete_ranges.push(Range {
+                start: convert::span_to_range(
+                    &file,
+                    Span {
+                        file: FileId(0),
+                        start: span_lo,
+                        end: span_lo,
                     },
-                }
-            } else {
-                diag.range
-            };
+                )
+                .start,
+                end: convert::span_to_range(
+                    &file,
+                    Span {
+                        file: FileId(0),
+                        start: span_hi,
+                        end: span_hi,
+                    },
+                )
+                .start,
+            });
+            continue;
+        };
+        let Some(close) = stmt.rfind('}') else {
+            continue;
+        };
+        if close <= open {
+            continue;
+        }
+
+        let prefix = &stmt[..open];
+        let suffix = &stmt[close + 1..];
+        let inner = &stmt[open + 1..close];
+        let members = parse_grouped_import_members(inner);
+        if members.is_empty() {
+            continue;
+        }
+
+        let remaining: Vec<&str> = members
+            .into_iter()
+            .filter(|member| !plan.remove_unused.contains(*member))
+            .collect();
+
+        if remaining.is_empty() {
+            let (line_lo, line_hi) = expand_statement_to_trailing_newline(text, lo, hi);
             edits.push(TextEdit {
-                range: delete_range,
+                range: convert::span_to_range(
+                    &file,
+                    Span {
+                        file: FileId(0),
+                        start: line_lo as u32,
+                        end: line_hi as u32,
+                    },
+                ),
                 new_text: String::new(),
             });
+            continue;
         }
-        edits
+
+        edits.push(TextEdit {
+            range: convert::span_to_range(
+                &file,
+                Span {
+                    file: FileId(0),
+                    start: span_lo,
+                    end: span_hi,
+                },
+            ),
+            new_text: format!("{}{{{}}}{}", prefix, remaining.join(", "), suffix),
+        });
     }
+
+    for range in fallback_delete_ranges {
+        edits.push(TextEdit {
+            range,
+            new_text: String::new(),
+        });
+    }
+
+    edits
+}
+
+fn extract_backticked_name(message: &str) -> Option<&str> {
+    let start = message.find('`')?;
+    let rest = &message[start + 1..];
+    let end = rest.find('`')?;
+    Some(&rest[..end])
+}
+
+fn parse_grouped_import_members(inner: &str) -> Vec<&str> {
+    inner
+        .split(',')
+        .map(str::trim)
+        .filter(|member| !member.is_empty())
+        .collect()
+}
+
+fn expand_statement_to_trailing_newline(text: &str, lo: usize, hi: usize) -> (usize, usize) {
+    let bytes = text.as_bytes();
+    let mut end = hi.min(bytes.len());
+    if end < bytes.len() {
+        if bytes[end] == b'\r' && end + 1 < bytes.len() && bytes[end + 1] == b'\n' {
+            end += 2;
+        } else if matches!(bytes[end], b'\n' | b'\r') {
+            end += 1;
+        }
+    }
+    (lo, end)
+}
+
+fn range_to_offsets(text: &str, range: &Range) -> Option<(usize, usize)> {
+    fn position_to_offset(text: &str, position: Position) -> Option<usize> {
+        let mut line = 0u32;
+        let mut offset = 0usize;
+        for segment in text.split_inclusive('\n') {
+            if line == position.line {
+                let line_text = segment.strip_suffix('\n').unwrap_or(segment);
+                let mut chars = line_text.chars();
+                let mut line_offset = 0usize;
+                for _ in 0..position.character {
+                    line_offset += chars.next()?.len_utf8();
+                }
+                return Some(offset + line_offset);
+            }
+            offset += segment.len();
+            line += 1;
+        }
+
+        if line == position.line && position.character == 0 {
+            return Some(text.len());
+        }
+
+        None
+    }
+
+    Some((
+        position_to_offset(text, range.start)?,
+        position_to_offset(text, range.end)?,
+    ))
 }
 
 // ── LanguageServer implementation ─────────────────────────────────────────────
@@ -2572,5 +2751,40 @@ mod tests {
         let env = stdlib_module_hover_markdown("env").expect("missing std.env hover doc");
         assert!(env.contains("use std.env"));
         assert!(env.contains("Environment variables"));
+    }
+
+    #[test]
+    fn organize_imports_rewrites_grouped_unused_member_instead_of_deleting_line() {
+        let text = "use std.parallel.{parallelMap, parallelFilter, parallelReduce, parallelForEach}\n\naction main {\n    print(parallelMap)\n}\n";
+        let diagnostics = vec![Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 79,
+                },
+            },
+            severity: Some(DiagnosticSeverity::INFORMATION),
+            code: Some(NumberOrString::String("W1005".to_string())),
+            source: Some("fidan".to_string()),
+            message: "unused import `parallelForEach`".to_string(),
+            related_information: None,
+            tags: None,
+            code_description: None,
+            data: None,
+        }];
+
+        let edits =
+            build_remove_unused_imports_edits_for_text("file:///demo.fdn", text, &diagnostics);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            edits[0].new_text,
+            "use std.parallel.{parallelMap, parallelFilter, parallelReduce}"
+        );
+        assert_eq!(edits[0].range.start.line, 0);
+        assert_eq!(edits[0].range.end.line, 0);
     }
 }

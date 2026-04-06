@@ -253,6 +253,28 @@ print("ok")
 "#
 }
 
+fn percent_assign_source() -> &'static str {
+    r#"action fold_mod with (certain value oftype integer, certain divisor oftype integer) returns integer {
+    var local = value
+    local %= divisor
+    return local
+}
+
+action main {
+    var total = 20
+    total %= 6
+    assert_eq(total, 2)
+
+    assert_eq(fold_mod(20, 7), 6)
+    assert_eq(fold_mod(15, 4), 3)
+    assert_eq(fold_mod(9, 5), 4)
+    print("ok")
+}
+
+main()
+"#
+}
+
 fn collections_helpers_source() -> &'static str {
     r#"use std.collections
 
@@ -809,6 +831,19 @@ fn scalar_conversions_cranelift_aot_round_trip_cleanly() {
 }
 
 #[test]
+fn percent_compound_assign_cranelift_aot_round_trip_cleanly() {
+    let sandbox = temp_dir("fidan_percent_assign_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("percent_assign_smoke.exe")
+    } else {
+        sandbox.join("percent_assign_smoke")
+    };
+    compile_program(percent_assign_source(), Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
 fn time_formatting_cranelift_aot_matches_stdlib_contract() {
     let sandbox = temp_dir("fidan_time_formatting_cranelift");
     let output = if cfg!(windows) {
@@ -837,6 +872,26 @@ fn default_args_llvm_aot_fill_missing_parameters() {
         sandbox.join("default_args_smoke")
     };
     compile_program(default_args_source(), Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn percent_compound_assign_llvm_aot_round_trip_cleanly() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM percent-assign AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_percent_assign_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("percent_assign_smoke.exe")
+    } else {
+        sandbox.join("percent_assign_smoke")
+    };
+    compile_program(percent_assign_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
     fs::remove_dir_all(&sandbox).ok();
 }

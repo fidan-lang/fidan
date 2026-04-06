@@ -1,7 +1,7 @@
 //! Top-level item emitter.
 
-use crate::emit_expr::{emit_expr, emit_type};
-use crate::emit_stmt::{emit_block, emit_stmt};
+use crate::emit_expr::{binop_str, emit_expr, emit_type};
+use crate::emit_stmt::{compound_assign_parts, emit_block, emit_stmt};
 use crate::printer::Printer;
 use fidan_ast::{Item, ItemId, Module, Param};
 use fidan_lexer::Symbol;
@@ -211,9 +211,17 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
 
         // ── Module-level assignment ───────────────────────────────────────
         Item::Assign { target, value, .. } => {
-            emit_expr(p, *target);
-            p.w(" = ");
-            emit_expr(p, *value);
+            if let Some((op, rhs)) = compound_assign_parts(p, *target, *value) {
+                emit_expr(p, *target);
+                p.w(" ");
+                p.w(binop_str(op));
+                p.w("= ");
+                emit_expr(p, rhs);
+            } else {
+                emit_expr(p, *target);
+                p.w(" = ");
+                emit_expr(p, *value);
+            }
         }
 
         // ── Module-level tuple destructure ────────────────────────────────

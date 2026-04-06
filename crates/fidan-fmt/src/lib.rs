@@ -6,7 +6,8 @@
 //! use fidan_fmt::{FormatOptions, format_source};
 //!
 //! let opts = FormatOptions::default();
-//! let formatted = format_source("var x=1\nvar y=2", &opts);
+//! let formatted = format_source("action main {\n    var total = 20\n\n    total %= 6\n}\n", &opts);
+//! assert_eq!(formatted, "action main {\n    var total = 20\n\n    total %= 6\n}\n");
 //! ```
 //!
 //! On the command line:
@@ -292,6 +293,34 @@ action demo with (optional name oftype dynamic = "\{literal\}") returns dynamic 
     #[test]
     fn enum_payloads_and_dynamic_types_round_trip() {
         let src = "enum Value {\n    Text(string)\n    Pair(integer, dynamic)\n}\n";
+        assert_eq!(fmt(src), src);
+        assert_idempotent(src);
+    }
+
+    #[test]
+    fn statement_compound_assign_is_preserved_as_compound_syntax() {
+        let src = "action main {\n    var total = 0\n\n    total += 1\n}\n";
+        assert_eq!(fmt(src), src);
+        assert_idempotent(src);
+    }
+
+    #[test]
+    fn statement_percent_assign_is_preserved_as_compound_syntax() {
+        let src = "action main {\n    var total = 20\n\n    total %= 6\n}\n";
+        assert_eq!(fmt(src), src);
+        assert_idempotent(src);
+    }
+
+    #[test]
+    fn top_level_percent_assign_is_preserved_as_compound_syntax() {
+        let src = "var total = 20\n\ntotal %= 6\n";
+        assert_eq!(fmt(src), src);
+        assert_idempotent(src);
+    }
+
+    #[test]
+    fn check_expression_single_line_arms_stay_braceless() {
+        let src = "action main returns string {\n    return check 2 {\n        1 => \"one\"\n        2 => \"two\"\n        _ => \"other\"\n    }\n}\n";
         assert_eq!(fmt(src), src);
         assert_idempotent(src);
     }

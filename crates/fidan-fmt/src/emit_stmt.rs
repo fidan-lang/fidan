@@ -1,8 +1,8 @@
 //! Statement emitter.
 
-use crate::emit_expr::{emit_expr, emit_type};
+use crate::emit_expr::{binop_str, emit_expr, emit_type};
 use crate::printer::Printer;
-use fidan_ast::{Stmt, StmtId};
+use fidan_ast::{BinOp, Expr, ExprId, Stmt, StmtId};
 use fidan_source::Span;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +31,35 @@ fn stmt_group(stmt: &Stmt) -> StmtGroup {
         | Stmt::Continue { .. }
         | Stmt::Panic { .. }
         | Stmt::Error { .. } => StmtGroup::Simple,
+    }
+}
+
+pub(crate) fn compound_assign_parts(
+    p: &Printer<'_>,
+    target: ExprId,
+    value: ExprId,
+) -> Option<(BinOp, ExprId)> {
+    match p.arena.get_expr(value) {
+        Expr::Binary { op, lhs, rhs, .. }
+            if *lhs == target
+                && matches!(
+                    op,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+                ) =>
+        {
+            Some((*op, *rhs))
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn inlineable_check_stmt(p: &Printer<'_>, stmts: &[StmtId]) -> Option<StmtId> {
+    if stmts.len() != 1 {
+        return None;
+    }
+    match p.arena.get_stmt(stmts[0]) {
+        Stmt::Expr { .. } => Some(stmts[0]),
+        _ => None,
     }
 }
 
@@ -86,9 +115,17 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
 
         // ── Assignment ────────────────────────────────────────────────────
         Stmt::Assign { target, value, .. } => {
-            emit_expr(p, target);
-            p.w(" = ");
-            emit_expr(p, value);
+            if let Some((op, rhs)) = compound_assign_parts(p, target, value) {
+                emit_expr(p, target);
+                p.w(" ");
+                p.w(binop_str(op));
+                p.w("= ");
+                emit_expr(p, rhs);
+            } else {
+                emit_expr(p, target);
+                p.w(" = ");
+                emit_expr(p, value);
+            }
         }
 
         // ── Expression statement ──────────────────────────────────────────
@@ -195,9 +232,14 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
                 p.emit_comments_before(arm.span.start);
                 p.nl();
                 emit_expr(p, arm.pattern);
-                p.w(" => {");
-                emit_block(p, &arm.body, Some(arm.span.end));
-                p.w("}");
+                if let Some(stmt_id) = inlineable_check_stmt(p, &arm.body) {
+                    p.w(" => ");
+                    emit_stmt(p, stmt_id);
+                } else {
+                    p.w(" => {");
+                    emit_block(p, &arm.body, Some(arm.span.end));
+                    p.w("}");
+                }
                 p.emit_trailing_comments_for(arm.span.end);
             }
             p.indent_out();

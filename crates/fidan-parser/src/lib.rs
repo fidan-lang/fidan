@@ -141,6 +141,58 @@ mod tests {
     }
 
     #[test]
+    fn percent_compound_assign_desugars_without_errors() {
+        let (module, diags) = parse_src(
+            r#"action main {
+                var value = 20
+                value %= 6
+            }"#,
+        );
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+
+        let item = module.items[0];
+        let action_body = match module.arena.get_item(item) {
+            fidan_ast::Item::ActionDecl { body, .. } => body,
+            other => panic!("expected action decl, got {other:?}"),
+        };
+        let assign_stmt = match module.arena.get_stmt(action_body[1]) {
+            fidan_ast::Stmt::Assign { value, .. } => value,
+            other => panic!("expected desugared assign stmt, got {other:?}"),
+        };
+        match module.arena.get_expr(*assign_stmt) {
+            fidan_ast::Expr::Binary { op, .. } => assert_eq!(*op, fidan_ast::BinOp::Rem),
+            other => panic!("expected remainder binary expr, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn percent_compound_assign_desugars_at_module_scope_without_errors() {
+        let (module, diags) = parse_src(
+            r#"var value = 20
+            value %= 6"#,
+        );
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+
+        let assign_item = module.items[1];
+        let assign_expr = match module.arena.get_item(assign_item) {
+            fidan_ast::Item::Assign { value, .. } => value,
+            other => panic!("expected desugared assign item, got {other:?}"),
+        };
+        match module.arena.get_expr(*assign_expr) {
+            fidan_ast::Expr::Binary { op, .. } => assert_eq!(*op, fidan_ast::BinOp::Rem),
+            other => panic!("expected remainder binary expr, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parallel_action() {
         let (_, diags) = parse_src(
             r#"parallel action fetch returns string {
