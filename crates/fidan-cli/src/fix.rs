@@ -808,16 +808,12 @@ fn synthesize_grouped_import_edits(diags: &[Diagnostic], src: &str) -> Vec<(u32,
             continue;
         }
 
-        let mut seen_counts: HashMap<&str, usize> = HashMap::new();
         let mut remaining = Vec::new();
         for member in members {
             if plan.remove_unused.contains(member) {
                 continue;
             }
-            let seen = seen_counts.entry(member).or_insert(0);
-            *seen += 1;
-            if *seen > 1
-                && let Some(removals_left) = plan.duplicate_removals.get_mut(member)
+            if let Some(removals_left) = plan.duplicate_removals.get_mut(member)
                 && *removals_left > 0
             {
                 *removals_left -= 1;

@@ -353,6 +353,13 @@ var x=1 # tail
         assert_idempotent(src);
     }
 
+    #[test]
+    fn nested_action_decorators_are_preserved() {
+        let src = "action outer {\n    @deprecated\n    action inner {\n        print(\"hi\")\n    }\n}\n";
+        assert_eq!(fmt(src), src);
+        assert_idempotent(src);
+    }
+
     // ── Use imports ───────────────────────────────────────────────────────
 
     #[test]

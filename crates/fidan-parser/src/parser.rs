@@ -290,12 +290,13 @@ impl<'t> Parser<'t> {
             TokenKind::Object => Some(self.parse_object_decl()),
             TokenKind::Enum => Some(self.parse_enum_decl()),
             TokenKind::Action => Some(self.parse_action_decl(false, decs)),
-            TokenKind::Use => Some(self.parse_use_decl(false)),
+            TokenKind::Use => Some(self.parse_use_decl(false, self.current_span().start)),
             TokenKind::Test => Some(self.parse_test_decl()),
             TokenKind::Export => {
+                let start = self.current_span().start;
                 self.advance(); // eat `export`
                 if matches!(self.peek(), TokenKind::Use) {
-                    Some(self.parse_use_decl(true))
+                    Some(self.parse_use_decl(true, start))
                 } else {
                     let span = self.current_span();
                     self.error("expected `use` after `export`", span);
@@ -1149,8 +1150,7 @@ impl<'t> Parser<'t> {
         })
     }
 
-    fn parse_use_decl(&mut self, re_export: bool) -> ItemId {
-        let start = self.current_span().start;
+    fn parse_use_decl(&mut self, re_export: bool, start: u32) -> ItemId {
         self.advance(); // eat `use` / `export use`
 
         // File-path import: `use "some/path"` or `export use "some/path"`
@@ -1161,12 +1161,12 @@ impl<'t> Parser<'t> {
         };
         if let Some(raw) = file_path {
             self.advance(); // eat the string literal
-            let end = self.current_span().end;
             let alias = if self.eat(&TokenKind::As) {
                 Some(self.expect_ident_sym("expected alias"))
             } else {
                 None
             };
+            let end = self.current_span().end;
             self.skip_one_terminator();
             let sym = self.interner.intern(&raw);
             return self.module.arena.alloc_item(Item::Use {
@@ -1208,10 +1208,9 @@ impl<'t> Parser<'t> {
             path.push(self.expect_import_segment("expected path segment"));
         }
 
-        let end = self.current_span().end;
-        self.skip_one_terminator();
-
         if let Some(names) = grouped_names {
+            let end = self.current_span().end;
+            self.skip_one_terminator();
             // Emit one Use item per grouped name while preserving source order.
             // `parse_module` pushes the returned first item, then drains
             // `pending_top_level_items` to append the remaining members.
@@ -1248,6 +1247,8 @@ impl<'t> Parser<'t> {
             } else {
                 None
             };
+            let end = self.current_span().end;
+            self.skip_one_terminator();
             self.module.arena.alloc_item(Item::Use {
                 path,
                 alias,

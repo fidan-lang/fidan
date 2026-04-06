@@ -86,6 +86,20 @@ struct ExternActionContext<'a> {
     span: Span,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ImportBinding {
+    sym: Symbol,
+    span: Span,
+    grouped: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SeenImport {
+    span: Span,
+    grouped: bool,
+    re_export: bool,
+}
+
 // ── TypeChecker ───────────────────────────────────────────────────────────────
 
 pub struct TypeChecker {
@@ -126,12 +140,13 @@ pub struct TypeChecker {
     /// Method call sites where the method lives in a cross-module parent.
     /// The LSP validates argument types against the cross-document signature.
     pub cross_module_call_sites: Vec<crate::CrossModuleCallSite>,
-    /// Import bindings registered during Pass 1: (bound_symbol, item_span, is_grouped).
+    /// Non-export import bindings registered during Pass 1.
     /// Checked after Pass 2 to detect unused imports.
-    import_bindings: Vec<(Symbol, Span, bool)>,
-    /// Set of all symbols bound by import statements — kept in sync with
-    /// `import_bindings` for O(1) "was this symbol imported?" checks.
+    import_bindings: Vec<ImportBinding>,
+    /// Set of all symbols bound by import statements, including `export use`.
     import_syms: rustc_hash::FxHashSet<Symbol>,
+    /// First kept import for each bound symbol in the current module.
+    seen_imports: FxHashMap<Symbol, SeenImport>,
     /// Every symbol that was successfully resolved by an `Expr::Ident` node.
     /// Used to determine which import bindings are unreferenced.
     referenced_names: rustc_hash::FxHashSet<Symbol>,
@@ -159,6 +174,7 @@ impl TypeChecker {
             cross_module_call_sites: vec![],
             import_bindings: vec![],
             import_syms: rustc_hash::FxHashSet::default(),
+            seen_imports: FxHashMap::default(),
             referenced_names: rustc_hash::FxHashSet::default(),
         };
         tc.register_builtins();
@@ -295,6 +311,7 @@ impl TypeChecker {
         self.deprecated_actions.clear();
         self.import_bindings.clear();
         self.import_syms.clear();
+        self.seen_imports.clear();
         self.referenced_names.clear();
 
         // Pass 1: register every top-level declaration so forward references work.
@@ -450,7 +467,7 @@ impl TypeChecker {
                     );
                 } else if let Some(prev) = self.table.lookup_current_scope(*name) {
                     let n = self.interner.resolve(*name).to_string();
-                    let is_import = self.import_syms.contains(name);
+                    let is_import = self.seen_imports.contains_key(name);
                     let note = if is_import {
                         "imported here — use an alias: `use ... as other_name`"
                     } else {
@@ -506,7 +523,7 @@ impl TypeChecker {
                     );
                 } else if let Some(prev) = self.table.lookup_current_scope(*name) {
                     let n = self.interner.resolve(*name).to_string();
-                    let is_import = self.import_syms.contains(name);
+                    let is_import = self.seen_imports.contains_key(name);
                     let note = if is_import {
                         "imported here — use an alias: `use ... as other_name`"
                     } else {
@@ -658,7 +675,12 @@ impl TypeChecker {
                         } else {
                             *path.last().unwrap()
                         };
-                        if self.report_duplicate_import_binding(binding_sym, *span, *grouped) {
+                        if self.report_duplicate_import_binding(
+                            binding_sym,
+                            *span,
+                            *grouped,
+                            *re_export,
+                        ) {
                             return;
                         }
                         // Import-vs-declaration conflict check (E0109, Case B).
@@ -692,10 +714,7 @@ impl TypeChecker {
                                 const_value: None,
                             },
                         );
-                        if !re_export && !self.is_repl {
-                            self.import_bindings.push((binding_sym, *span, *grouped));
-                            self.import_syms.insert(binding_sym);
-                        }
+                        self.record_import_binding(binding_sym, *span, *grouped, *re_export);
                     }
                 } else if !path.is_empty() && path.first() != Some(&std_sym) {
                     // User module import: `use mymod` / `use mymod.sub` /
@@ -720,7 +739,7 @@ impl TypeChecker {
                         // `use "./utils.fdn" as utils` → bind `utils` as Dynamic.
                         // Plain `use "./utils.fdn"` exposes everything flat — no binding.
                         if let Some(&a) = alias.as_ref() {
-                            if self.report_duplicate_import_binding(a, *span, false) {
+                            if self.report_duplicate_import_binding(a, *span, false, *re_export) {
                                 return;
                             }
                             if let Some(prev) = self.table.lookup_current_scope(a)
@@ -753,13 +772,15 @@ impl TypeChecker {
                                     const_value: None,
                                 },
                             );
-                            if !re_export && !self.is_repl {
-                                self.import_bindings.push((a, *span, false));
-                                self.import_syms.insert(a);
-                            }
+                            self.record_import_binding(a, *span, false, *re_export);
                         }
                     } else {
-                        if self.report_duplicate_import_binding(binding_sym, *span, *grouped) {
+                        if self.report_duplicate_import_binding(
+                            binding_sym,
+                            *span,
+                            *grouped,
+                            *re_export,
+                        ) {
                             return;
                         }
                         // Import-vs-declaration conflict check (E0109, Case B).
@@ -793,10 +814,7 @@ impl TypeChecker {
                                 const_value: None,
                             },
                         );
-                        if !re_export && !self.is_repl {
-                            self.import_bindings.push((binding_sym, *span, *grouped));
-                            self.import_syms.insert(binding_sym);
-                        }
+                        self.record_import_binding(binding_sym, *span, *grouped, *re_export);
                     }
                 }
             }
@@ -826,7 +844,7 @@ impl TypeChecker {
                     );
                 } else if let Some(prev) = self.table.lookup_current_scope(*name) {
                     let n = self.interner.resolve(*name).to_string();
-                    let is_import = self.import_syms.contains(name);
+                    let is_import = self.seen_imports.contains_key(name);
                     let note = if is_import {
                         "imported here — use an alias: `use ... as other_name`"
                     } else {
@@ -1768,7 +1786,7 @@ impl TypeChecker {
         use fidan_diagnostics::{Label, Suggestion};
         // Drain import_bindings so we don't need to clone referenced_names.
         let bindings = std::mem::take(&mut self.import_bindings);
-        for (sym, span, grouped) in bindings {
+        for ImportBinding { sym, span, grouped } in bindings {
             if self.referenced_names.contains(&sym) {
                 continue;
             }
@@ -1800,29 +1818,47 @@ impl TypeChecker {
         binding_sym: Symbol,
         span: Span,
         grouped: bool,
+        re_export: bool,
     ) -> bool {
-        let Some(prev) = self.table.lookup_current_scope(binding_sym) else {
+        let Some(prev_import) = self.seen_imports.get(&binding_sym).copied() else {
             return false;
         };
-        if !self.import_syms.contains(&binding_sym) || prev.span.file != span.file {
+        if prev_import.span.file != span.file {
             return false;
         }
 
         use fidan_diagnostics::{Confidence, Label, Suggestion};
 
         let name = self.interner.resolve(binding_sym).to_string();
+        let keep_current = re_export && !prev_import.re_export;
+        let target_span = if keep_current { prev_import.span } else { span };
+        let target_grouped = if keep_current {
+            prev_import.grouped
+        } else {
+            grouped
+        };
         let mut diag = Diagnostic::warning(
             fidan_diagnostics::diag_code!("W1007"),
             format!("duplicate import `{name}`"),
-            span,
+            target_span,
         )
-        .with_label(Label::secondary(prev.span, "first imported here"))
-        .with_label(Label::primary(span, "duplicate import here"));
+        .with_label(Label::secondary(prev_import.span, "first imported here"));
 
-        if !grouped {
+        if keep_current {
+            diag = diag
+                .with_label(Label::primary(
+                    prev_import.span,
+                    "duplicate plain import here",
+                ))
+                .with_label(Label::secondary(span, "keep the exported import here"));
+        } else {
+            diag = diag.with_label(Label::primary(span, "duplicate import here"));
+        }
+
+        if !target_grouped {
             diag.add_suggestion(Suggestion::fix(
                 "remove duplicate import",
-                span,
+                target_span,
                 "",
                 Confidence::High,
             ));
@@ -1833,7 +1869,41 @@ impl TypeChecker {
         }
 
         self.diags.push(diag);
+
+        if keep_current {
+            self.import_bindings.retain(|binding| {
+                !(binding.sym == binding_sym
+                    && binding.span == prev_import.span
+                    && binding.grouped == prev_import.grouped)
+            });
+            self.seen_imports.insert(
+                binding_sym,
+                SeenImport {
+                    span,
+                    grouped,
+                    re_export,
+                },
+            );
+            return false;
+        }
+
         true
+    }
+
+    fn record_import_binding(&mut self, sym: Symbol, span: Span, grouped: bool, re_export: bool) {
+        self.import_syms.insert(sym);
+        self.seen_imports.insert(
+            sym,
+            SeenImport {
+                span,
+                grouped,
+                re_export,
+            },
+        );
+        if !re_export && !self.is_repl {
+            self.import_bindings
+                .push(ImportBinding { sym, span, grouped });
+        }
     }
 
     /// Emit E0103 if `target` resolves to an immutable (`const var`) symbol.

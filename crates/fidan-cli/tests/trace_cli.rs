@@ -776,6 +776,52 @@ main()
 }
 
 #[test]
+fn fix_removes_unused_aliased_import_without_leaving_alias_text() {
+    let file = make_temp_program(
+        "fix_unused_alias_import",
+        r#"use std.math as math
+
+action main {
+    print("ok")
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("fix")
+        .arg("--in-place")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan fix on aliased unused import demo");
+
+    assert!(
+        output.status.success(),
+        "expected fidan fix to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let patched = std::fs::read_to_string(&file).expect("read patched file");
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        !patched.contains("use std.math as math"),
+        "expected aliased unused import to be removed:\n{patched}"
+    );
+    assert!(
+        !patched.lines().any(|line| line.trim() == "math"),
+        "expected no dangling alias token after removing the import:\n{patched}"
+    );
+    assert!(
+        patched.contains("print(\"ok\")"),
+        "expected the rest of the program to remain intact:\n{patched}"
+    );
+}
+
+#[test]
 fn fix_removes_grouped_unused_import_member_without_dropping_braces() {
     let file = make_temp_program(
         "fix_grouped_unused_member",
@@ -977,6 +1023,101 @@ main()
         patched.matches("sqrt").count(),
         2,
         "expected one import and one call-site `sqrt` to remain:\n{patched}"
+    );
+}
+
+#[test]
+fn fix_removes_cross_style_duplicate_import_member() {
+    let file = make_temp_program(
+        "fix_cross_style_duplicate_import",
+        r#"use std.io.print
+use std.io.{print, readFile}
+
+action main {
+    print(readFile("demo.txt"))
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("fix")
+        .arg("--in-place")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan fix on cross-style duplicate import demo");
+
+    assert!(
+        output.status.success(),
+        "expected fidan fix to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let patched = std::fs::read_to_string(&file).expect("read patched file");
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        patched.contains("use std.io.print"),
+        "expected the direct import to remain:\n{patched}"
+    );
+    assert!(
+        patched.contains("use std.io.{readFile}"),
+        "expected only the grouped duplicate member to be removed:\n{patched}"
+    );
+    assert!(
+        !patched.contains("use std.io.{print, readFile}"),
+        "expected grouped duplicate member to be rewritten away:\n{patched}"
+    );
+}
+
+#[test]
+fn fix_prefers_export_import_over_plain_duplicate() {
+    let file = make_temp_program(
+        "fix_export_duplicate_import",
+        r#"use std.io.print
+export use std.io.print
+
+action main {
+    print("ok")
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("fix")
+        .arg("--in-place")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan fix on export-priority duplicate import demo");
+
+    assert!(
+        output.status.success(),
+        "expected fidan fix to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let patched = std::fs::read_to_string(&file).expect("read patched file");
+    std::fs::remove_file(&file).ok();
+
+    let import_lines: Vec<&str> = patched
+        .lines()
+        .filter(|line| line.starts_with("use ") || line.starts_with("export use "))
+        .collect();
+    assert_eq!(
+        import_lines,
+        vec!["export use std.io.print"],
+        "expected the exported import to win over the plain duplicate:\n{patched}"
+    );
+    assert!(
+        !patched.lines().any(|line| line.trim() == "export"),
+        "expected no dangling `export` token after fixing duplicates:\n{patched}"
     );
 }
 

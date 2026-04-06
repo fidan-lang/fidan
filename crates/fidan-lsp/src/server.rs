@@ -4,7 +4,7 @@ use crate::{
     analysis, convert, document::Document, semantic, store::DocumentStore, symbols::SymKind,
     symbols::SymbolEntry,
 };
-use fidan_config::{BUILTIN_FUNCTIONS, builtin_info, decorator_info};
+use fidan_config::{BUILTIN_FUNCTIONS, decorator_info, editor_symbol_info};
 use fidan_fmt::{FormatOptions, format_source, load_format_options_for_path};
 use fidan_source::{FileId, SourceFile, Span};
 use fidan_stdlib::{
@@ -46,6 +46,7 @@ const COMPLETION_KEYWORDS: &[&str] = &[
     "optional",
     "dynamic",
     "flexible",
+    "handle",
     "parallel",
     "concurrent",
     "task",
@@ -101,7 +102,7 @@ fn decorator_hover_markdown(name: &str) -> Option<String> {
 }
 
 fn builtin_hover_markdown(name: &str) -> Option<String> {
-    let info = builtin_info(name)?;
+    let info = editor_symbol_info(name)?;
     Some(format!("```fidan\n{}\n```\n\n{}", info.signature, info.doc))
 }
 
@@ -453,7 +454,7 @@ impl FidanLsp {
             || matches!(actual, "dynamic" | "?")
     }
 
-    /// Build `TextEdit`s for every W1005 (unused import) diagnostic in `uri`.
+    /// Build `TextEdit`s for organize-imports diagnostics in `uri`.
     fn build_remove_unused_imports_edits(&self, uri: &Url) -> Vec<TextEdit> {
         let doc = match self.store.get(uri) {
             Some(d) => d,
@@ -475,6 +476,7 @@ fn build_remove_unused_imports_edits_for_text(
     #[derive(Default)]
     struct GroupedImportPlan {
         remove_unused: HashSet<String>,
+        duplicate_removals: HashMap<String, usize>,
     }
 
     let file = SourceFile::new(FileId(0), uri_str, text);
@@ -483,7 +485,10 @@ fn build_remove_unused_imports_edits_for_text(
     let mut fallback_delete_ranges = Vec::new();
 
     for diag in diagnostics {
-        if diag.code != Some(NumberOrString::String("W1005".to_string())) {
+        let Some(NumberOrString::String(code)) = diag.code.as_ref() else {
+            continue;
+        };
+        if !matches!(code.as_str(), "W1005" | "W1007") {
             continue;
         }
 
@@ -520,11 +525,19 @@ fn build_remove_unused_imports_edits_for_text(
             fallback_delete_ranges.push(diag.range);
             continue;
         };
-        grouped_plans
-            .entry((start as u32, end as u32))
-            .or_default()
-            .remove_unused
-            .insert(name.to_string());
+        grouped_plans.entry((start as u32, end as u32)).or_default();
+        let plan = grouped_plans
+            .get_mut(&(start as u32, end as u32))
+            .expect("grouped import plan inserted above");
+        match code.as_str() {
+            "W1005" => {
+                plan.remove_unused.insert(name.to_string());
+            }
+            "W1007" => {
+                *plan.duplicate_removals.entry(name.to_string()).or_insert(0) += 1;
+            }
+            _ => {}
+        }
     }
 
     for ((span_lo, span_hi), plan) in grouped_plans {
@@ -571,10 +584,20 @@ fn build_remove_unused_imports_edits_for_text(
             continue;
         }
 
-        let remaining: Vec<&str> = members
-            .into_iter()
-            .filter(|member| !plan.remove_unused.contains(*member))
-            .collect();
+        let mut plan = plan;
+        let mut remaining = Vec::new();
+        for member in members {
+            if plan.remove_unused.contains(member) {
+                continue;
+            }
+            if let Some(removals_left) = plan.duplicate_removals.get_mut(member)
+                && *removals_left > 0
+            {
+                *removals_left -= 1;
+                continue;
+            }
+            remaining.push(member);
+        }
 
         if remaining.is_empty() {
             let (line_lo, line_hi) = expand_statement_to_trailing_newline(text, lo, hi);
@@ -2229,7 +2252,7 @@ impl LanguageServer for FidanLsp {
             }
         }
 
-        // ── source.organizeImports: delete all unused-import spans ──────────────
+        // ── source.organizeImports: remove unused and duplicate imports ─────────
         let only = params.context.only.as_deref().unwrap_or(&[]);
         let wants_organize = only.is_empty()
             || only
@@ -2241,7 +2264,7 @@ impl LanguageServer for FidanLsp {
                 let mut changes = std::collections::HashMap::new();
                 changes.insert(uri.clone(), all_edits);
                 actions.push(CodeActionOrCommand::CodeAction(CodeAction {
-                    title: "Remove unused imports".to_string(),
+                    title: "Organize imports".to_string(),
                     kind: Some(CodeActionKind::SOURCE_ORGANIZE_IMPORTS),
                     diagnostics: None,
                     edit: Some(WorkspaceEdit {
@@ -2805,6 +2828,7 @@ mod tests {
         assert!(COMPLETION_KEYWORDS.contains(&"concurrent"));
         assert!(COMPLETION_KEYWORDS.contains(&"parallel"));
         assert!(COMPLETION_KEYWORDS.contains(&"enum"));
+        assert!(COMPLETION_KEYWORDS.contains(&"handle"));
     }
 
     #[test]
@@ -3026,6 +3050,10 @@ Holder.compass.
 
         let integer = builtin_hover_markdown("integer").expect("missing integer hover doc");
         assert!(integer.contains("integer(value) -> integer"));
+
+        let handle = builtin_hover_markdown("handle").expect("missing handle hover doc");
+        assert!(handle.contains("```fidan\nhandle\n```"));
+        assert!(handle.contains("Opaque native handle type"));
     }
 
     #[test]
@@ -3079,5 +3107,37 @@ Holder.compass.
         );
         assert_eq!(edits[0].range.start.line, 0);
         assert_eq!(edits[0].range.end.line, 0);
+    }
+
+    #[test]
+    fn organize_imports_rewrites_grouped_duplicate_member_against_direct_import() {
+        let text = "use std.io.print\nuse std.io.{print, readFile}\n\naction main {\n    print(readFile(\"demo.txt\"))\n}\n";
+        let diagnostics = vec![Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 1,
+                    character: 0,
+                },
+                end: Position {
+                    line: 1,
+                    character: 28,
+                },
+            },
+            severity: Some(DiagnosticSeverity::WARNING),
+            code: Some(NumberOrString::String("W1007".to_string())),
+            source: Some("fidan".to_string()),
+            message: "duplicate import `print`".to_string(),
+            related_information: None,
+            tags: None,
+            code_description: None,
+            data: None,
+        }];
+
+        let edits =
+            build_remove_unused_imports_edits_for_text("file:///demo.fdn", text, &diagnostics);
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].new_text, "use std.io.{readFile}");
+        assert_eq!(edits[0].range.start.line, 1);
+        assert_eq!(edits[0].range.end.line, 1);
     }
 }

@@ -136,6 +136,12 @@ pub const LANGUAGE_BUILTINS: &[BuiltinInfo] = &[
     },
 ];
 
+pub const LANGUAGE_TYPE_NAMES: &[BuiltinInfo] = &[BuiltinInfo {
+    name: "handle",
+    signature: "handle",
+    doc: "Opaque native handle type used for extern interop and low-level OS or library handles.",
+}];
+
 /// Canonical decorator metadata used by editor/tooling surfaces.
 ///
 /// `reserved_only = true` means the spelling is reserved for future use but is
@@ -176,11 +182,24 @@ pub fn builtin_info(name: &str) -> Option<&'static BuiltinInfo> {
     LANGUAGE_BUILTINS.iter().find(|info| info.name == name)
 }
 
+pub fn type_name_info(name: &str) -> Option<&'static BuiltinInfo> {
+    LANGUAGE_TYPE_NAMES.iter().find(|info| info.name == name)
+}
+
+pub fn editor_symbol_info(name: &str) -> Option<&'static BuiltinInfo> {
+    builtin_info(name).or_else(|| type_name_info(name))
+}
+
+pub fn is_type_like_name(name: &str) -> bool {
+    type_name_info(name).is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BUILTIN_BINDINGS, BUILTIN_DECORATORS, BUILTIN_FUNCTIONS, BUILTIN_VALUE_MODULE,
-        LANGUAGE_BUILTINS, LANGUAGE_DECORATORS, builtin_info, decorator_info,
+        LANGUAGE_BUILTINS, LANGUAGE_DECORATORS, LANGUAGE_TYPE_NAMES, builtin_info, decorator_info,
+        editor_symbol_info, type_name_info,
     };
 
     #[test]
@@ -204,6 +223,21 @@ mod tests {
             );
         }
         assert_eq!(LANGUAGE_BUILTINS.len(), BUILTIN_BINDINGS.len());
+    }
+
+    #[test]
+    fn builtin_type_names_are_documented() {
+        for builtin in LANGUAGE_TYPE_NAMES {
+            assert_eq!(
+                type_name_info(builtin.name).map(|info| info.name),
+                Some(builtin.name)
+            );
+            assert_eq!(
+                editor_symbol_info(builtin.name).map(|info| info.name),
+                Some(builtin.name)
+            );
+            assert!(!builtin.doc.is_empty());
+        }
     }
 
     #[test]

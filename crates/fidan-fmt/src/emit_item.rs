@@ -3,7 +3,7 @@
 use crate::emit_expr::{binop_str, emit_expr, emit_type};
 use crate::emit_stmt::{compound_assign_parts, emit_block, emit_stmt};
 use crate::printer::Printer;
-use fidan_ast::{Item, ItemId, Module, Param};
+use fidan_ast::{Decorator, Item, ItemId, Module, Param};
 use fidan_lexer::Symbol;
 use fidan_source::Span;
 
@@ -11,6 +11,30 @@ fn has_extern_decorator(p: &Printer<'_>, decorators: &[fidan_ast::Decorator]) ->
     decorators
         .iter()
         .any(|decorator| p.sym_s(decorator.name).as_ref() == "extern")
+}
+
+pub(crate) fn emit_decorators(p: &mut Printer<'_>, decorators: &[Decorator]) {
+    for dec in decorators {
+        p.w("@");
+        let dn = p.sym_s(dec.name);
+        p.w(&dn);
+        if !dec.args.is_empty() {
+            p.w("(");
+            for (i, arg) in dec.args.iter().enumerate() {
+                if i > 0 {
+                    p.w(", ");
+                }
+                if let Some(name) = arg.name {
+                    let n = p.sym_s(name);
+                    p.w(&n);
+                    p.w(" = ");
+                }
+                emit_expr(p, arg.value);
+            }
+            p.w(")");
+        }
+        p.nl();
+    }
 }
 
 // ── Top-level module ──────────────────────────────────────────────────────────
@@ -382,28 +406,7 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
             is_parallel,
             span,
         } => {
-            // Decorators
-            for dec in decorators {
-                p.w("@");
-                let dn = p.sym_s(dec.name);
-                p.w(&dn);
-                if !dec.args.is_empty() {
-                    p.w("(");
-                    for (i, arg) in dec.args.iter().enumerate() {
-                        if i > 0 {
-                            p.w(", ");
-                        }
-                        if let Some(name) = arg.name {
-                            let n = p.sym_s(name);
-                            p.w(&n);
-                            p.w(" = ");
-                        }
-                        emit_expr(p, arg.value);
-                    }
-                    p.w(")");
-                }
-                p.nl();
-            }
+            emit_decorators(p, decorators);
 
             // `parallel action` vs `action` vs `new`
             let name_str = p.sym_s(*name);
@@ -452,27 +455,7 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
             is_parallel,
             span,
         } => {
-            for dec in decorators {
-                p.w("@");
-                let dn = p.sym_s(dec.name);
-                p.w(&dn);
-                if !dec.args.is_empty() {
-                    p.w("(");
-                    for (i, arg) in dec.args.iter().enumerate() {
-                        if i > 0 {
-                            p.w(", ");
-                        }
-                        if let Some(name) = arg.name {
-                            let n = p.sym_s(name);
-                            p.w(&n);
-                            p.w(" = ");
-                        }
-                        emit_expr(p, arg.value);
-                    }
-                    p.w(")");
-                }
-                p.nl();
-            }
+            emit_decorators(p, decorators);
 
             if *is_parallel {
                 p.w("parallel action ");

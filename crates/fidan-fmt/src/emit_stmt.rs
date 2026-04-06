@@ -1,6 +1,7 @@
 //! Statement emitter.
 
 use crate::emit_expr::{binop_str, emit_expr, emit_type};
+use crate::emit_item::emit_decorators;
 use crate::printer::Printer;
 use fidan_ast::{BinOp, Expr, ExprId, Stmt, StmtId};
 use fidan_source::Span;
@@ -138,9 +139,11 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
             params,
             return_ty,
             body,
+            decorators,
             is_parallel,
             ..
         } => {
+            emit_decorators(p, &decorators);
             if is_parallel {
                 p.w("parallel action ");
             } else {

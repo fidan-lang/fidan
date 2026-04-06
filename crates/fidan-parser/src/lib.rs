@@ -224,6 +224,50 @@ mod tests {
     }
 
     #[test]
+    fn aliased_use_span_covers_the_alias_text() {
+        let src = "use std.math as math\n";
+        let (module, diags) = parse_src(src);
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+
+        let item = module.items[0];
+        let span = match module.arena.get_item(item) {
+            fidan_ast::Item::Use { span, .. } => *span,
+            other => panic!("expected use item, got {other:?}"),
+        };
+
+        assert_eq!(
+            src[span.start as usize..span.end as usize].trim_end(),
+            "use std.math as math"
+        );
+    }
+
+    #[test]
+    fn exported_use_span_covers_the_export_keyword() {
+        let src = "export use std.io.print\n";
+        let (module, diags) = parse_src(src);
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+
+        let item = module.items[0];
+        let span = match module.arena.get_item(item) {
+            fidan_ast::Item::Use { span, .. } => *span,
+            other => panic!("expected use item, got {other:?}"),
+        };
+
+        assert_eq!(
+            src[span.start as usize..span.end as usize].trim_end(),
+            "export use std.io.print"
+        );
+    }
+
+    #[test]
     fn extern_action_without_body_parses() {
         let (_, diags) = parse_src(
             r#"@extern("self", symbol = "native_add")

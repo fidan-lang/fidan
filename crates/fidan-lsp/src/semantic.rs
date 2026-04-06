@@ -18,6 +18,7 @@
 
 use crate::symbols::{SymKind, SymbolTable};
 use fidan_ast::{Item, Module};
+use fidan_config::is_type_like_name;
 use fidan_lexer::{Symbol, SymbolInterner, Token, TokenKind};
 use fidan_source::SourceFile;
 use tower_lsp::lsp_types::{
@@ -411,6 +412,9 @@ fn classify(
         if sym.starts_with(|c: char| c.is_uppercase()) {
             return (TT_CLASS, 0);
         }
+        if is_type_like_name(sym) {
+            return (TT_TYPE, 0);
+        }
         return (TT_TYPE, 0);
     }
 
@@ -540,6 +544,28 @@ mod tests {
         assert!(
             token_types.contains(&TT_PROPERTY),
             "expected object field member to stay property-colored: {token_types:?}"
+        );
+    }
+
+    #[test]
+    fn handle_type_references_are_type_colored() {
+        let token_types = semantic_token_types_for(
+            "action native returns handle {\n    var raw oftype handle\n    return raw\n}\n",
+        );
+        assert!(
+            token_types.iter().filter(|&&tt| tt == TT_TYPE).count() >= 2,
+            "expected handle return/type references to use type coloring: {token_types:?}"
+        );
+    }
+
+    #[test]
+    fn handle_param_types_are_type_colored() {
+        let token_types = semantic_token_types_for(
+            "action cppFreeHandle with (certain h oftype handle) returns nothing {\n    return nothing\n}\n",
+        );
+        assert!(
+            token_types.iter().filter(|&&tt| tt == TT_TYPE).count() >= 1,
+            "expected handle parameter type references to use type coloring: {token_types:?}"
         );
     }
 }
