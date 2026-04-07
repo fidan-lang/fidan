@@ -80,6 +80,16 @@ prefer 'fidan self install' and 'fidan self use'.
 EOF
 }
 
+RED='\033[31m'
+NC='\033[0m' # No Color
+
+fail() {
+  message="$1"
+  printf "\n${RED}[X] Installation failed:${NC}\n" >&2
+  printf "${RED}%s${NC}\n" "$message" >&2
+  exit 1
+}
+
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --version)
@@ -108,8 +118,7 @@ while [ "$#" -gt 0 ]; do
       exit 0
       ;;
     *)
-      echo "unknown argument: $1" >&2
-      exit 1
+      fail "unknown argument: $1"
       ;;
   esac
 done
@@ -118,16 +127,14 @@ show_banner
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
-    echo "required command not found: $1" >&2
-    exit 1
+    fail "required command not found: $1"
   }
 }
 
 need_cmd tar
 choose_downloader
 if [ -z "$DOWNLOADER" ]; then
-  echo "curl or wget is required for the bootstrap script" >&2
-  exit 1
+  fail "curl or wget is required for the bootstrap script"
 fi
 
 resolve_install_root() {
@@ -169,8 +176,7 @@ host_triple() {
     x86_64|amd64) arch_part="x86_64" ;;
     arm64|aarch64) arch_part="aarch64" ;;
     *)
-      echo "unsupported architecture: $arch" >&2
-      exit 1
+      fail "unsupported architecture: $arch"
       ;;
   esac
 
@@ -178,8 +184,7 @@ host_triple() {
     Darwin) os_part="apple-darwin" ;;
     Linux) os_part="unknown-linux-gnu" ;;
     *)
-      echo "unsupported operating system: $os" >&2
-      exit 1
+      fail "unsupported operating system: $os"
       ;;
   esac
 
@@ -200,8 +205,7 @@ sha256_of() {
     openssl dgst -sha256 "$path" | awk '{print $NF}'
     return
   fi
-  echo "sha256sum, shasum, or openssl is required for the bootstrap script" >&2
-  exit 1
+  fail "sha256sum, shasum, or openssl is required for the bootstrap script"
 }
 
 json_string_field() {
@@ -234,14 +238,12 @@ read_release_field() {
   manifest_json="$(tr -d '\r\n' < "$manifest_path")"
   schema_version="$(printf '%s\n' "$manifest_json" | sed -n 's/.*"schema_version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
   if [ -z "$schema_version" ] || [ "$schema_version" = "0" ]; then
-    echo "distribution manifest has invalid schema_version 0" >&2
-    exit 1
+    fail "distribution manifest has invalid schema_version 0"
   fi
 
   release_block="$(printf '%s\n' "$manifest_json" | sed -n 's/.*"fidan_versions"[[:space:]]*:[[:space:]]*\[\(.*\)\][[:space:]]*,[[:space:]]*"toolchains".*/\1/p')"
   if [ -z "$release_block" ]; then
-    echo "distribution manifest does not contain any fidan_versions" >&2
-    exit 1
+    fail "distribution manifest does not contain any fidan_versions"
   fi
 
   normalized_objects="$(printf '%s\n' "$release_block" | sed 's/}[[:space:]]*,[[:space:]]*{/}\
@@ -295,13 +297,11 @@ read_release_field() {
   IFS="$old_ifs"
 
   if [ "$host_match_count" -eq 0 ]; then
-    echo "no Fidan releases are available for host '$current_host'" >&2
-    exit 1
+    fail "no Fidan releases are available for host '$current_host'"
   fi
 
   if [ -z "$selected_version" ]; then
-    echo "Fidan version '$requested_version' is not available for '$current_host'" >&2
-    exit 1
+    fail "Fidan version '$requested_version' is not available for '$current_host'"
   fi
 
   printf '%s\n%s\n%s\n%s\n' "$selected_version" "$selected_url" "$selected_sha" "$selected_binary_relpath"
@@ -395,18 +395,51 @@ ensure_path() {
     return
   fi
 
-  profile="$HOME/.profile"
+  os_name="$(uname -s)"
+  path_line="case \":\$PATH:\" in *\":$current_dir:\"*) ;; *) export PATH=\"$current_dir:\$PATH\" ;; esac"
+  profile_targets=""
+
   case "${SHELL:-}" in
-    */zsh) profile="$HOME/.zprofile" ;;
-    */bash) profile="$HOME/.bash_profile" ;;
+    */zsh)
+      profile_targets="$HOME/.zshrc"
+      if [ "$os_name" = "Darwin" ] || [ -f "$HOME/.zprofile" ]; then
+        profile_targets="$profile_targets
+$HOME/.zprofile"
+      fi
+      ;;
+    */bash)
+      profile_targets="$HOME/.bashrc
+$HOME/.profile"
+      if [ "$os_name" = "Darwin" ] || [ -f "$HOME/.bash_profile" ]; then
+        profile_targets="$profile_targets
+$HOME/.bash_profile"
+      fi
+      ;;
+    *)
+      profile_targets="$HOME/.profile"
+      ;;
   esac
 
-  mkdir -p "$(dirname "$profile")"
-  touch "$profile"
-  path_line="export PATH=\"$current_dir:\$PATH\""
-  if ! grep -F "$current_dir" "$profile" >/dev/null 2>&1; then
-    printf '\n%s\n' "$path_line" >>"$profile"
-    echo "Added $current_dir to PATH in $profile. Open a new shell to pick it up."
+  added_files=""
+  old_ifs="$IFS"
+  IFS='
+'
+  for profile in $profile_targets; do
+    mkdir -p "$(dirname "$profile")"
+    touch "$profile"
+    if ! grep -F "$current_dir" "$profile" >/dev/null 2>&1; then
+      printf '\n%s\n' "$path_line" >>"$profile"
+      if [ -z "$added_files" ]; then
+        added_files="$profile"
+      else
+        added_files="$added_files, $profile"
+      fi
+    fi
+  done
+  IFS="$old_ifs"
+
+  if [ -n "$added_files" ]; then
+    echo "Added $current_dir to PATH in $added_files. Open a new shell to pick it up."
   fi
 }
 
@@ -424,8 +457,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [ "$ALLOW_EXISTING_INSTALL" -ne 1 ] && has_existing_install "$INSTALL_ROOT_RESOLVED"; then
-  echo "An existing self-managed Fidan installation was detected at '$INSTALL_ROOT_RESOLVED'. Use 'fidan self install' or re-run bootstrap with --allow-existing-install if you really want to install into the same root." >&2
-  exit 1
+  fail "An existing self-managed Fidan installation was detected at '$INSTALL_ROOT_RESOLVED'. Use 'fidan self install' or re-run bootstrap with --allow-existing-install if you really want to install into the same root."
 fi
 
 echo "Fetching manifest from $MANIFEST_URL"
@@ -443,8 +475,7 @@ FINAL_DIR="$VERSIONS_DIR/$RELEASE_VERSION"
 CURRENT_LINK="$INSTALL_ROOT_RESOLVED/current"
 
 if [ -e "$FINAL_DIR" ]; then
-  echo "Fidan version '$RELEASE_VERSION' is already installed at '$FINAL_DIR'" >&2
-  exit 1
+  fail "Fidan version '$RELEASE_VERSION' is already installed at '$FINAL_DIR'"
 fi
 
 mkdir -p "$VERSIONS_DIR" "$METADATA_DIR"
@@ -457,8 +488,7 @@ echo "Downloading Fidan $RELEASE_VERSION for $HOST_TRIPLE"
 download_to "$ARCHIVE_URL" "$ARCHIVE_PATH"
 ACTUAL_SHA="$(sha256_of "$ARCHIVE_PATH" | tr '[:upper:]' '[:lower:]')"
 if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
-  echo "SHA-256 mismatch for '$ARCHIVE_URL' (expected $EXPECTED_SHA, got $ACTUAL_SHA)" >&2
-  exit 1
+  fail "SHA-256 mismatch for '$ARCHIVE_URL' (expected $EXPECTED_SHA, got $ACTUAL_SHA)"
 fi
 
 tar -xzf "$ARCHIVE_PATH" -C "$EXTRACT_DIR"
@@ -467,13 +497,11 @@ CANDIDATE_ROOT="$EXTRACT_DIR"
 if [ ! -e "$CANDIDATE_ROOT/$BINARY_RELPATH" ]; then
   set -- "$EXTRACT_DIR"/*
   if [ "$#" -ne 1 ] || [ ! -d "$1" ]; then
-    echo "Downloaded archive does not contain '$BINARY_RELPATH' at the root or inside a single top-level directory" >&2
-    exit 1
+    fail "Downloaded archive does not contain '$BINARY_RELPATH' at the root or inside a single top-level directory"
   fi
   CANDIDATE_ROOT="$1"
   if [ ! -e "$CANDIDATE_ROOT/$BINARY_RELPATH" ]; then
-    echo "Downloaded archive does not contain the expected file '$BINARY_RELPATH'" >&2
-    exit 1
+    fail "Downloaded archive does not contain the expected file '$BINARY_RELPATH'"
   fi
 fi
 
