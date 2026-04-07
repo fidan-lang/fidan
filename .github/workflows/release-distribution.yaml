@@ -207,8 +207,8 @@ jobs:
             ## Installation
 
             Bootstrap installers:
-            - Windows PowerShell: `./scripts/bootstrap.ps1`
-            - POSIX shell: `./scripts/bootstrap.sh`
+            - Windows PowerShell: `iwr https://fidan.dev/install.ps1 -UseBasicParsing | iex`
+            - POSIX shell: `curl -fsSL https://fidan.dev/install.sh | sh`
 
             Direct downloads:
             - Release tarballs are attached to this GitHub Release.
