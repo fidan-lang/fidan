@@ -7,7 +7,7 @@ MANIFEST_URL="${FIDAN_DIST_MANIFEST:-https://releases.fidan.dev/manifest.json}"
 INSTALL_ROOT=""
 SKIP_PATH_UPDATE=0
 ALLOW_EXISTING_INSTALL=0
-BANNER_URL="https://raw.githubusercontent.com/fidan-lang/fidan/refs/heads/main/assets/github/banner.txt"
+BANNER_URL="https://raw.githubusercontent.com/fidan-lang/fidan/main/assets/github/banner.txt"
 DOWNLOADER=""
 
 choose_downloader() {

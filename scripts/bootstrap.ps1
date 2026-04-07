@@ -8,7 +8,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$BannerUrl = "https://raw.githubusercontent.com/fidan-lang/fidan/refs/heads/main/assets/github/banner.txt"
+$BannerUrl = "https://raw.githubusercontent.com/fidan-lang/fidan/main/assets/github/banner.txt"
 $script:BannerTextCache = $null
 
 function Get-BannerText {
