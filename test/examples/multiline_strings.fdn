@@ -1,0 +1,33 @@
+action hot_square with (certain value oftype integer) returns integer {
+  return value * value
+}
+
+action main {
+  var huge = "
+This is a huge paragraph to showcase multiline strings.
+It should be possible to write a string that spans multiple lines without needing to escape the newlines.
+This is especially useful for writing long texts, such as documentation or error messages, without having to worry about escaping characters.
+
+Multiline strings feature:
+- They can span multiple lines without needing to escape newlines.
+- They preserve the formatting of the text, including indentation and line breaks.
+
+And:
+- They can be used to write long texts, such as documentation or error messages, without having to worry about escaping characters.
+"
+  var plain = "First line\nSecond line\nThird line"
+  var raw = "alpha\n\{value\}\nomega"
+  var name = "Ada"
+  var interp = "Hello,\n{name}!\nDone."
+
+  assert_eq(huge, "\nThis is a huge paragraph to showcase multiline strings.\nIt should be possible to write a string that spans multiple lines without needing to escape the newlines.\nThis is especially useful for writing long texts, such as documentation or error messages, without having to worry about escaping characters.\n\nMultiline strings feature:\n- They can span multiple lines without needing to escape newlines.\n- They preserve the formatting of the text, including indentation and line breaks.\n\nAnd:\n- They can be used to write long texts, such as documentation or error messages, without having to worry about escaping characters.\n")
+  assert_eq(plain, "First line\nSecond line\nThird line")
+  assert_eq(raw, "alpha\n\{value\}\nomega")
+  assert_eq(interp, "Hello,\nAda!\nDone.")
+  assert_eq(hot_square(5), 25)
+  assert_eq(hot_square(6), 36)
+  assert_eq(hot_square(7), 49)
+  print("ok")
+}
+
+main()

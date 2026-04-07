@@ -254,6 +254,10 @@ assert_eq(values[1], 3)
 assert_eq(values[2], 4)"#
 }
 
+fn multiline_string_source() -> &'static str {
+    include_str!("../../../test/examples/multiline_strings.fdn")
+}
+
 // ── Basic execution (Ok paths) ────────────────────────────────────────────────
 
 #[test]
@@ -305,6 +309,18 @@ var value = "Ada"
 assert_eq(r"literal \n {value}", "literal \\n \{value\}")
 "#,
     );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn multiline_strings_round_trip_in_interpreter() {
+    let result = run_src(multiline_string_source());
+    assert!(result.is_ok());
+}
+
+#[test]
+fn multiline_strings_round_trip_with_jit_enabled() {
+    let result = run_src_with_threshold(multiline_string_source(), 1);
     assert!(result.is_ok());
 }
 

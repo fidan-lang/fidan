@@ -341,6 +341,10 @@ print("ok")
 "#
 }
 
+fn multiline_string_source() -> &'static str {
+    include_str!("../../../test/examples/multiline_strings.fdn")
+}
+
 fn repeated_assert_source() -> &'static str {
     r#"use std.io
 use std.time
@@ -1004,6 +1008,39 @@ fn raw_string_llvm_aot_stays_literal() {
         sandbox.join("raw_string_smoke")
     };
     compile_program(raw_string_source(), Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn multiline_strings_cranelift_aot_round_trip_cleanly() {
+    let sandbox = temp_dir("fidan_multiline_strings_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("multiline_strings_smoke.exe")
+    } else {
+        sandbox.join("multiline_strings_smoke")
+    };
+    compile_program(multiline_string_source(), Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn multiline_strings_llvm_aot_round_trip_cleanly() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM multiline-string AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_multiline_strings_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("multiline_strings_smoke.exe")
+    } else {
+        sandbox.join("multiline_strings_smoke")
+    };
+    compile_program(multiline_string_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
     fs::remove_dir_all(&sandbox).ok();
 }

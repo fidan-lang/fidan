@@ -617,6 +617,44 @@ var x=1 # tail
         assert_idempotent(&formatted);
     }
 
+    #[test]
+    fn multiline_string_stays_multiline_when_inline_form_exceeds_max_line_len() {
+        let src = "var text = \"First line\nSecond line\nThird line\"\n";
+        let formatted = fmt_with_max_line_len(src, 24);
+        assert_eq!(formatted, src);
+        assert_idempotent(&formatted);
+    }
+
+    #[test]
+    fn multiline_string_collapses_when_inline_form_fits_max_line_len() {
+        let src = "var text = \"First line\nSecond line\nThird line\"\n";
+        let formatted = fmt_with_max_line_len(src, 120);
+        assert_eq!(
+            formatted,
+            "var text = \"First line\\nSecond line\\nThird line\"\n"
+        );
+        assert_idempotent(&formatted);
+    }
+
+    #[test]
+    fn multiline_interpolation_stays_multiline_when_inline_form_exceeds_max_line_len() {
+        let src = "var name = \"Ada\"\nvar greeting = \"Hello,\n{name}!\nDone.\"\n";
+        let formatted = fmt_with_max_line_len(src, 28);
+        assert_eq!(formatted, src);
+        assert_idempotent(&formatted);
+    }
+
+    #[test]
+    fn multiline_interpolation_collapses_when_inline_form_fits_max_line_len() {
+        let src = "var name = \"Ada\"\nvar greeting = \"Hello,\n{name}!\nDone.\"\n";
+        let formatted = fmt_with_max_line_len(src, 120);
+        assert_eq!(
+            formatted,
+            "var name = \"Ada\"\nvar greeting = \"Hello,\\n{name}!\\nDone.\"\n"
+        );
+        assert_idempotent(&formatted);
+    }
+
     // ── Round-trip ────────────────────────────────────────────────────────
 
     /// Format `test/examples/test.fdn`, re-parse the result, and verify:

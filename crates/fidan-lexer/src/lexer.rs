@@ -232,7 +232,7 @@ impl<'src> Lexer<'src> {
                         None => break,
                     }
                 }
-                Some(c) => s.push(c),
+                Some(c) => self.push_normalized_string_char(&mut s, c),
             }
         }
         let kind = if terminated {
@@ -266,10 +266,21 @@ impl<'src> Lexer<'src> {
                     break;
                 }
                 Some('"') => break,
-                Some(c) => s.push(c),
+                Some(c) => self.push_normalized_string_char(&mut s, c),
             }
         }
         self.emit(TokenKind::LitRawString(s), start)
+    }
+
+    fn push_normalized_string_char(&mut self, out: &mut String, ch: char) {
+        if ch == '\r' {
+            if self.peek() == Some('\n') {
+                self.advance();
+            }
+            out.push('\n');
+            return;
+        }
+        out.push(ch);
     }
 
     fn lex_number(&mut self, start: u32) -> Token {
@@ -527,11 +538,41 @@ mod tests {
     }
 
     #[test]
+    fn test_multiline_string() {
+        let tokens = lex("\"hello\nworld\"");
+        assert_eq!(tokens[0], TokenKind::LitString("hello\nworld".to_string()));
+    }
+
+    #[test]
+    fn test_multiline_string_normalizes_crlf_to_lf() {
+        let tokens = lex("\"hello\r\nworld\"");
+        assert_eq!(tokens[0], TokenKind::LitString("hello\nworld".to_string()));
+    }
+
+    #[test]
     fn test_raw_string() {
         let tokens = lex("r\"literal \\\\n {name} kept raw\"");
         assert_eq!(
             tokens[0],
             TokenKind::LitRawString("literal \\\\n {name} kept raw".to_string())
+        );
+    }
+
+    #[test]
+    fn test_multiline_raw_string() {
+        let tokens = lex("r\"alpha\nbeta\"");
+        assert_eq!(
+            tokens[0],
+            TokenKind::LitRawString("alpha\nbeta".to_string())
+        );
+    }
+
+    #[test]
+    fn test_multiline_raw_string_normalizes_crlf_to_lf() {
+        let tokens = lex("r\"alpha\r\nbeta\"");
+        assert_eq!(
+            tokens[0],
+            TokenKind::LitRawString("alpha\nbeta".to_string())
         );
     }
 

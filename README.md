@@ -236,6 +236,31 @@ var pi oftype float = 3.14159     # explicit type + value
 
 Type inference is full and bidirectional. Explicit `oftype` annotations are optional but always respected.
 
+Multi-line strings are supported directly in both normal and raw string literals. Normal strings still process escapes and interpolation; raw strings preserve the body verbatim.
+
+```fidan
+var plain = "First line
+Second line
+Third line"
+
+var raw = r"alpha
+{value}
+omega"
+
+var name = "Ada"
+var interp = "Hello,
+{name}!
+Done."
+```
+
+For a runnable smoke example, use [test/examples/multiline_strings.fdn](test/examples/multiline_strings.fdn):
+
+```bash
+fidan run test/examples/multiline_strings.fdn
+fidan build --backend cranelift test/examples/multiline_strings.fdn
+fidan build --backend llvm test/examples/multiline_strings.fdn
+```
+
 ---
 
 ### Actions (functions)

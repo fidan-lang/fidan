@@ -134,7 +134,12 @@ fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: Layo
             p.w(&s);
         }
         Expr::StrLit { value, .. } => {
-            p.w(&escape_str(&value));
+            let rendered = if should_preserve_multiline_string(p, &value) {
+                escape_str_multiline(&value)
+            } else {
+                escape_str(&value)
+            };
+            p.w(&rendered);
         }
         Expr::BoolLit { value, .. } => {
             p.w(if value { "true" } else { "false" });
@@ -246,21 +251,12 @@ fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: Layo
 
         // ── String interpolation ───────────────────────────────────────────
         Expr::StringInterp { parts, .. } => {
-            p.w("\"");
-            for part in &parts {
-                match part {
-                    InterpPart::Literal(s) => {
-                        // Re-escape the literal chunk (it was unescaped by the lexer).
-                        p.w(&escape_str_inner(s));
-                    }
-                    InterpPart::Expr(eid) => {
-                        p.w("{");
-                        p.w(&render_interp_expr_fragment(p, *eid));
-                        p.w("}");
-                    }
-                }
-            }
-            p.w("\"");
+            let rendered = if should_preserve_multiline_interp(p, &parts) {
+                render_string_interp(p, &parts, true)
+            } else {
+                render_string_interp(p, &parts, false)
+            };
+            p.w(&rendered);
         }
 
         // ── Spawn / await ─────────────────────────────────────────────────
@@ -820,9 +816,17 @@ fn render_tuple_inline(p: &Printer<'_>, elements: &[ExprId]) -> String {
 /// Escape a raw string value back into a Fidan `"..."` literal.
 /// The returned string includes the surrounding double-quotes.
 fn escape_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
+    wrap_string_literal(&escape_str_inner(s))
+}
+
+fn escape_str_multiline(s: &str) -> String {
+    wrap_string_literal(&escape_str_inner_multiline(s))
+}
+
+fn wrap_string_literal(contents: &str) -> String {
+    let mut out = String::with_capacity(contents.len() + 2);
     out.push('"');
-    out.push_str(&escape_str_inner(s));
+    out.push_str(contents);
     out.push('"');
     out
 }
@@ -830,9 +834,18 @@ fn escape_str(s: &str) -> String {
 /// Escape a string fragment without surrounding quotes.
 /// Used by both `StrLit` and the literal parts of `StringInterp`.
 pub fn escape_str_inner(s: &str) -> String {
+    escape_str_inner_with_newlines(s, false)
+}
+
+fn escape_str_inner_multiline(s: &str) -> String {
+    escape_str_inner_with_newlines(s, true)
+}
+
+fn escape_str_inner_with_newlines(s: &str, preserve_newlines: bool) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
+            '\n' if preserve_newlines => out.push('\n'),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
@@ -844,6 +857,39 @@ pub fn escape_str_inner(s: &str) -> String {
         }
     }
     out
+}
+
+fn render_string_interp(p: &Printer<'_>, parts: &[InterpPart], preserve_newlines: bool) -> String {
+    let mut out = String::from("\"");
+    for part in parts {
+        match part {
+            InterpPart::Literal(s) => {
+                if preserve_newlines {
+                    out.push_str(&escape_str_inner_multiline(s));
+                } else {
+                    out.push_str(&escape_str_inner(s));
+                }
+            }
+            InterpPart::Expr(eid) => {
+                out.push('{');
+                out.push_str(&render_interp_expr_fragment(p, *eid));
+                out.push('}');
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn should_preserve_multiline_string(p: &Printer<'_>, value: &str) -> bool {
+    value.contains('\n') && p.current_line_len() + escape_str(value).len() > p.opts.max_line_len
+}
+
+fn should_preserve_multiline_interp(p: &Printer<'_>, parts: &[InterpPart]) -> bool {
+    parts
+        .iter()
+        .any(|part| matches!(part, InterpPart::Literal(s) if s.contains('\n')))
+        && p.current_line_len() + render_string_interp(p, parts, false).len() > p.opts.max_line_len
 }
 
 fn render_interp_expr_fragment(p: &Printer<'_>, id: ExprId) -> String {

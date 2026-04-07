@@ -661,7 +661,7 @@ fn estimated_expr_len(p: &Printer<'_>, expr: fidan_ast::ExprId) -> usize {
                 format!("{value}").len()
             }
         }
-        fidan_ast::Expr::StrLit { value, .. } => value.len() + 2,
+        fidan_ast::Expr::StrLit { value, .. } => escape_string_lit(value).len(),
         fidan_ast::Expr::BoolLit { value, .. } => {
             if *value {
                 4
