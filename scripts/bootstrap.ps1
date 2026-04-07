@@ -66,15 +66,6 @@ function Show-Usage {
   Write-Host "prefer 'fidan self install' and 'fidan self use'."
 }
 
-function Exit-InstallFailure {
-  param([string]$Message)
-
-  Write-Host ""
-  Write-Host "Installation failed:" -ForegroundColor Red
-  Write-Host $Message -ForegroundColor Red
-  exit 1
-}
-
 function Test-ExistingInstall {
   param([string]$InstallRootPath)
 
@@ -108,7 +99,10 @@ Show-Banner
 
 if ($Help) {
   Show-Usage
-  exit 0
+  if ($PSCommandPath) {
+    exit 0
+  }
+  return
 }
 
 function Resolve-InstallRoot {
@@ -441,5 +435,12 @@ try {
 }
 catch {
   $message = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
-  Exit-InstallFailure -Message $message
+  Write-Host ""
+  Write-Host "Installation failed:" -ForegroundColor Red
+  Write-Host $message -ForegroundColor Red
+  if ($PSCommandPath) {
+    exit 1
+  }
+  $global:LASTEXITCODE = 1
+  return
 }
