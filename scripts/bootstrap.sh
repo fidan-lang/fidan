@@ -457,7 +457,8 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 if [ "$ALLOW_EXISTING_INSTALL" -ne 1 ] && has_existing_install "$INSTALL_ROOT_RESOLVED"; then
-  fail "An existing self-managed Fidan installation was detected at '$INSTALL_ROOT_RESOLVED'. Use 'fidan self install' or re-run bootstrap with --allow-existing-install if you really want to install into the same root."
+  fail "An existing self-managed Fidan installation was detected at '$INSTALL_ROOT_RESOLVED'.
+Use 'fidan self install' or re-run bootstrap with --allow-existing-install if you really want to install into the same root."
 fi
 
 echo "Fetching manifest from $MANIFEST_URL"
