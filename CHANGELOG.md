@@ -12,6 +12,51 @@ compiler releases.
 
 ---
 
+## [1.0.6] — 2026-04-07
+
+### Added
+- Multi-line normal and raw string literals are now documented and covered by
+  end-to-end regressions across the interpreter, Cranelift JIT, Cranelift AOT,
+  and LLVM AOT, including a shared runnable smoke fixture.
+- New diagnostic `E0308` now reports attempts to call non-callable values such
+  as literals, `nothing`, and built-in return values with a dedicated error code
+  and explanation.
+- Formatter regression coverage now includes configurable line-wrapping for
+  long expressions, collections, and multiline string literals based on
+  `max_line_len`.
+- LSP analysis now records richer typed member-access and import-resolution
+  metadata, enabling better hover and navigation across aliased, exported,
+  grouped, direct, and wildcard imports.
+
+### Changed
+- `fidan fmt` now makes line-wrapping decisions using the configured
+  `max_line_len`, including preserving large multiline strings when collapsing
+  them would create unreadable escaped one-line output.
+- Receiver method metadata is now centralized and shared across the type
+  checker, runtime, and stdlib, keeping string/list/dict/`Shared`/`WeakShared`
+  method behavior and diagnostics aligned.
+- Import analysis and document refresh in the LSP now distinguish namespace,
+  direct, and wildcard imports for both file imports and user-module imports.
+- Type checking and editor analysis now model enum variants, constructors, and
+  receiver members more consistently, improving downstream hover, completion,
+  and go-to-definition behavior.
+
+### Fixed
+- String literals now normalize source line endings inside multiline string
+  bodies so values are stable across LF and CRLF checkouts on all supported
+  execution backends.
+- Calling non-callable values now emits proper type-checker diagnostics instead
+  of falling through to confusing call-site behavior.
+- Invalid receiver method calls on built-in and shared container types now
+  report clearer, more specific errors.
+- Go-to-definition, hover, semantic token classification, and import-aware LSP
+  lookups now resolve aliased/exported imports, wildcard imports, and imported
+  enum/class symbols more reliably.
+- Constructor calls, parent-constructor calls, and enum unit-variant access are
+  now preserved correctly through type checking and editor navigation paths.
+
+---
+
 ## [1.0.5] — 2026-04-06
 
 ### Added
@@ -155,7 +200,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.5...HEAD
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.6...HEAD
+[1.0.6]: https://github.com/fidan-lang/fidan/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/fidan-lang/fidan/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/fidan-lang/fidan/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/fidan-lang/fidan/compare/v1.0.2...v1.0.3
