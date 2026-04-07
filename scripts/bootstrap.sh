@@ -6,6 +6,79 @@ VERSION="latest"
 MANIFEST_URL="${FIDAN_DIST_MANIFEST:-https://releases.fidan.dev/manifest.json}"
 INSTALL_ROOT=""
 SKIP_PATH_UPDATE=0
+ALLOW_EXISTING_INSTALL=0
+BANNER_URL="https://raw.githubusercontent.com/fidan-lang/fidan/refs/heads/main/assets/github/banner.txt"
+DOWNLOADER=""
+
+choose_downloader() {
+  if command -v curl >/dev/null 2>&1; then
+    DOWNLOADER="curl"
+    return
+  fi
+  if command -v wget >/dev/null 2>&1; then
+    DOWNLOADER="wget"
+    return
+  fi
+  DOWNLOADER=""
+}
+
+download_to() {
+  url="$1"
+  dest="$2"
+  if [ "$DOWNLOADER" = "curl" ]; then
+    curl -fsSL "$url" -o "$dest"
+  else
+    wget -qO "$dest" "$url"
+  fi
+}
+
+download_text() {
+  url="$1"
+  if [ "$DOWNLOADER" = "curl" ]; then
+    curl -fsSL "$url"
+  else
+    wget -qO- "$url"
+  fi
+}
+
+show_banner() {
+  printf '\n'
+
+  script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+  local_banner_path="$script_dir/../assets/github/banner.txt"
+  if [ -f "$local_banner_path" ]; then
+    cat "$local_banner_path"
+    printf '\n'
+    return
+  fi
+
+  choose_downloader
+  if [ -n "$DOWNLOADER" ]; then
+    if banner_text="$(download_text "$BANNER_URL" 2>/dev/null)" && [ -n "$banner_text" ]; then
+      printf '%s\n\n' "$banner_text"
+      return
+    fi
+  fi
+
+  printf 'FIDAN\n\n'
+}
+
+show_usage() {
+  cat <<'EOF'
+Fidan bootstrap installer
+
+Options:
+  --version <version>          Install a specific released version (default: latest)
+  --manifest-url <url>         Override the distribution manifest URL
+  --install-root <path>        Override the self-managed install root
+  --skip-path-update           Do not modify the shell profile PATH entry
+  --allow-existing-install     Permit bootstrapping into an existing Fidan install root
+  --help                       Show this help text
+
+Bootstrap is intended for first install. If Fidan is already installed,
+prefer 'fidan self install' and 'fidan self use'.
+EOF
+}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -25,12 +98,23 @@ while [ "$#" -gt 0 ]; do
       SKIP_PATH_UPDATE=1
       shift
       ;;
+    --allow-existing-install)
+      ALLOW_EXISTING_INSTALL=1
+      shift
+      ;;
+    --help)
+      show_banner
+      show_usage
+      exit 0
+      ;;
     *)
       echo "unknown argument: $1" >&2
       exit 1
       ;;
   esac
 done
+
+show_banner
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -39,22 +123,9 @@ need_cmd() {
   }
 }
 
-PYTHON_BIN=""
-if command -v python3 >/dev/null 2>&1; then
-  PYTHON_BIN="python3"
-elif command -v python >/dev/null 2>&1; then
-  PYTHON_BIN="python"
-else
-  echo "python3 or python is required for the bootstrap script" >&2
-  exit 1
-fi
-
 need_cmd tar
-if command -v curl >/dev/null 2>&1; then
-  DOWNLOADER="curl"
-elif command -v wget >/dev/null 2>&1; then
-  DOWNLOADER="wget"
-else
+choose_downloader
+if [ -z "$DOWNLOADER" ]; then
   echo "curl or wget is required for the bootstrap script" >&2
   exit 1
 fi
@@ -77,6 +148,17 @@ resolve_install_root() {
       fi
       ;;
   esac
+}
+
+has_existing_install() {
+  root="$1"
+  [ -e "$root/current" ] && return 0
+  [ -e "$root/metadata/installs.json" ] && return 0
+  [ -e "$root/metadata/active-version.json" ] && return 0
+  if [ -d "$root/versions" ] && find "$root/versions" -mindepth 1 -maxdepth 1 -type d | grep -q .; then
+    return 0
+  fi
+  return 1
 }
 
 host_triple() {
@@ -104,16 +186,6 @@ host_triple() {
   printf '%s-%s\n' "$arch_part" "$os_part"
 }
 
-download_to() {
-  url="$1"
-  dest="$2"
-  if [ "$DOWNLOADER" = "curl" ]; then
-    curl -fsSL "$url" -o "$dest"
-  else
-    wget -qO "$dest" "$url"
-  fi
-}
-
 sha256_of() {
   path="$1"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -124,116 +196,197 @@ sha256_of() {
     shasum -a 256 "$path" | awk '{print $1}'
     return
   fi
-  "$PYTHON_BIN" - "$path" <<'PY'
-import hashlib, pathlib, sys
-path = pathlib.Path(sys.argv[1])
-print(hashlib.sha256(path.read_bytes()).hexdigest())
-PY
+  if command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$path" | awk '{print $NF}'
+    return
+  fi
+  echo "sha256sum, shasum, or openssl is required for the bootstrap script" >&2
+  exit 1
+}
+
+json_string_field() {
+  object="$1"
+  field="$2"
+  printf '%s\n' "$object" | sed -n "s/.*\"$field\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p"
+}
+
+version_sort_key() {
+  version="$1"
+  prerelease_rank=1
+  case "$version" in
+    *-*|*+*) prerelease_rank=0 ;;
+  esac
+
+  base_version="${version%%[-+]*}"
+  old_ifs="$IFS"
+  IFS='.'
+  set -- $base_version
+  IFS="$old_ifs"
+
+  printf '%08d.%08d.%08d.%08d.%d.%s\n' "${1:-0}" "${2:-0}" "${3:-0}" "${4:-0}" "$prerelease_rank" "$version"
 }
 
 read_release_field() {
   manifest_path="$1"
   requested_version="$2"
   current_host="$3"
-  "$PYTHON_BIN" - "$manifest_path" "$requested_version" "$current_host" <<'PY'
-import json
-import pathlib
-import sys
 
-manifest_path = pathlib.Path(sys.argv[1])
-requested = sys.argv[2]
-host = sys.argv[3]
-manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-if manifest.get("schema_version", 0) == 0:
-    raise SystemExit("distribution manifest has invalid schema_version 0")
+  manifest_json="$(tr -d '\r\n' < "$manifest_path")"
+  schema_version="$(printf '%s\n' "$manifest_json" | sed -n 's/.*"schema_version"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+  if [ -z "$schema_version" ] || [ "$schema_version" = "0" ]; then
+    echo "distribution manifest has invalid schema_version 0" >&2
+    exit 1
+  fi
 
-releases = [r for r in manifest.get("fidan_versions", []) if r.get("host_triple") == host]
-if not releases:
-    raise SystemExit(f"no Fidan releases are available for host '{host}'")
+  release_block="$(printf '%s\n' "$manifest_json" | sed -n 's/.*"fidan_versions"[[:space:]]*:[[:space:]]*\[\(.*\)\][[:space:]]*,[[:space:]]*"toolchains".*/\1/p')"
+  if [ -z "$release_block" ]; then
+    echo "distribution manifest does not contain any fidan_versions" >&2
+    exit 1
+  fi
 
-def parse_version_tuple(version):
-    parts = []
-    for item in version.split("."):
-        digits = ""
-        for ch in item:
-            if ch.isdigit():
-                digits += ch
-            else:
-                break
-        parts.append(int(digits or "0"))
-    return tuple(parts)
+  normalized_objects="$(printf '%s\n' "$release_block" | sed 's/}[[:space:]]*,[[:space:]]*{/}\
+{/g')"
 
-def is_prerelease(version):
-    return "-" in version or "+" in version
+  old_ifs="$IFS"
+  IFS='
+'
+  set -f
 
-def sort_key(release):
-    version = release.get("version", "")
-    return (
-        parse_version_tuple(version),
-        0 if is_prerelease(version) else 1,
-        version,
-    )
+  host_match_count=0
+  selected_version=""
+  selected_url=""
+  selected_sha=""
+  selected_binary_relpath=""
+  selected_key=""
 
-releases.sort(key=sort_key, reverse=True)
-if requested != "latest":
-    matches = [r for r in releases if r.get("version") == requested]
-    if not matches:
-        raise SystemExit(f"Fidan version '{requested}' is not available for '{host}'")
-    release = matches[0]
-else:
-    release = releases[0]
+  for object in $normalized_objects; do
+    host_value="$(json_string_field "$object" "host_triple")"
+    [ "$host_value" = "$current_host" ] || continue
+    host_match_count=$((host_match_count + 1))
 
-binary_relpath = release.get("binary_relpath")
-if not binary_relpath:
-    binary_relpath = "fidan.exe" if sys.platform.startswith("win") else "fidan"
+    version_value="$(json_string_field "$object" "version")"
+    url_value="$(json_string_field "$object" "url")"
+    sha_value="$(json_string_field "$object" "sha256")"
+    binary_value="$(json_string_field "$object" "binary_relpath")"
+    [ -n "$binary_value" ] || binary_value="fidan"
 
-print(release["version"])
-print(release["url"])
-print(release["sha256"])
-print(binary_relpath)
-PY
+    if [ "$requested_version" != "latest" ]; then
+      if [ "$version_value" = "$requested_version" ]; then
+        selected_version="$version_value"
+        selected_url="$url_value"
+        selected_sha="$sha_value"
+        selected_binary_relpath="$binary_value"
+        break
+      fi
+      continue
+    fi
+
+    candidate_key="$(version_sort_key "$version_value")"
+    if [ -z "$selected_key" ] || [ "$candidate_key" \> "$selected_key" ]; then
+      selected_key="$candidate_key"
+      selected_version="$version_value"
+      selected_url="$url_value"
+      selected_sha="$sha_value"
+      selected_binary_relpath="$binary_value"
+    fi
+  done
+
+  set +f
+  IFS="$old_ifs"
+
+  if [ "$host_match_count" -eq 0 ]; then
+    echo "no Fidan releases are available for host '$current_host'" >&2
+    exit 1
+  fi
+
+  if [ -z "$selected_version" ]; then
+    echo "Fidan version '$requested_version' is not available for '$current_host'" >&2
+    exit 1
+  fi
+
+  printf '%s\n%s\n%s\n%s\n' "$selected_version" "$selected_url" "$selected_sha" "$selected_binary_relpath"
+}
+
+path_mtime_secs() {
+  path="$1"
+  if stat -c %Y "$path" >/dev/null 2>&1; then
+    stat -c %Y "$path"
+    return
+  fi
+  if stat -f %m "$path" >/dev/null 2>&1; then
+    stat -f %m "$path"
+    return
+  fi
+  date +%s
+}
+
+write_installs_metadata() {
+  installs_path="$1"
+  versions_dir="$2"
+  now="$3"
+  temp_path="$installs_path.tmp"
+
+  {
+    printf '{\n'
+    printf '  "schema_version": 1,\n'
+    printf '  "installs": [\n'
+
+    first_entry=1
+    if [ -d "$versions_dir" ]; then
+      for version_dir in "$versions_dir"/*; do
+        [ -d "$version_dir" ] || continue
+        version_name="${version_dir##*/}"
+        installed_at="$(path_mtime_secs "$version_dir")"
+        if [ "$first_entry" -eq 0 ]; then
+          printf ',\n'
+        fi
+        first_entry=0
+        printf '    {\n'
+        printf '      "version": "%s",\n' "$version_name"
+        printf '      "installed_at_secs": %s\n' "$installed_at"
+        printf '    }'
+      done
+    fi
+
+    printf '\n  ],\n'
+    printf '  "updated_at_secs": %s\n' "$now"
+    printf '}\n'
+  } > "$temp_path"
+
+  mv "$temp_path" "$installs_path"
+}
+
+write_active_metadata() {
+  active_path="$1"
+  version="$2"
+  now="$3"
+  temp_path="$active_path.tmp"
+
+  {
+    printf '{\n'
+    printf '  "schema_version": 1,\n'
+    printf '  "active_version": "%s",\n' "$version"
+    printf '  "updated_at_secs": %s\n' "$now"
+    printf '}\n'
+  } > "$temp_path"
+
+  mv "$temp_path" "$active_path"
 }
 
 update_metadata() {
   metadata_dir="$1"
-  version="$2"
-  make_active="$3"
-  mkdir -p "$metadata_dir"
+  versions_dir="$2"
+  version="$3"
+  make_active="$4"
   now="$(date +%s)"
   installs_path="$metadata_dir/installs.json"
   active_path="$metadata_dir/active-version.json"
-  "$PYTHON_BIN" - "$installs_path" "$active_path" "$version" "$now" "$make_active" <<'PY'
-import json
-import pathlib
-import sys
 
-installs_path = pathlib.Path(sys.argv[1])
-active_path = pathlib.Path(sys.argv[2])
-version = sys.argv[3]
-now = int(sys.argv[4])
-make_active = sys.argv[5] == "1"
-
-if installs_path.exists():
-    installs = json.loads(installs_path.read_text(encoding="utf-8"))
-else:
-    installs = {"schema_version": 1, "installs": [], "updated_at_secs": now}
-
-if not any(entry.get("version") == version for entry in installs.get("installs", [])):
-    installs.setdefault("installs", []).append(
-        {"version": version, "installed_at_secs": now}
-    )
-installs["schema_version"] = 1
-installs["updated_at_secs"] = now
-installs_path.write_text(json.dumps(installs, indent=2) + "\n", encoding="utf-8")
-
-if make_active or not active_path.exists():
-    active = {
-        "schema_version": 1,
-        "active_version": version,
-        "updated_at_secs": now,
-    }
-    active_path.write_text(json.dumps(active, indent=2) + "\n", encoding="utf-8")
-PY
+  mkdir -p "$metadata_dir"
+  write_installs_metadata "$installs_path" "$versions_dir" "$now"
+  if [ "$make_active" = "1" ] || [ ! -e "$active_path" ]; then
+    write_active_metadata "$active_path" "$version" "$now"
+  fi
 }
 
 ensure_path() {
@@ -270,13 +423,18 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+if [ "$ALLOW_EXISTING_INSTALL" -ne 1 ] && has_existing_install "$INSTALL_ROOT_RESOLVED"; then
+  echo "An existing self-managed Fidan installation was detected at '$INSTALL_ROOT_RESOLVED'. Use 'fidan self install' or re-run bootstrap with --allow-existing-install if you really want to install into the same root." >&2
+  exit 1
+fi
+
 echo "Fetching manifest from $MANIFEST_URL"
 download_to "$MANIFEST_URL" "$MANIFEST_PATH"
 
 RELEASE_INFO="$(read_release_field "$MANIFEST_PATH" "$VERSION" "$HOST_TRIPLE")"
 RELEASE_VERSION="$(printf '%s\n' "$RELEASE_INFO" | sed -n '1p')"
 ARCHIVE_URL="$(printf '%s\n' "$RELEASE_INFO" | sed -n '2p')"
-EXPECTED_SHA="$(printf '%s\n' "$RELEASE_INFO" | sed -n '3p')"
+EXPECTED_SHA="$(printf '%s\n' "$RELEASE_INFO" | sed -n '3p' | tr '[:upper:]' '[:lower:]')"
 BINARY_RELPATH="$(printf '%s\n' "$RELEASE_INFO" | sed -n '4p')"
 
 VERSIONS_DIR="$INSTALL_ROOT_RESOLVED/versions"
@@ -297,8 +455,8 @@ fi
 
 echo "Downloading Fidan $RELEASE_VERSION for $HOST_TRIPLE"
 download_to "$ARCHIVE_URL" "$ARCHIVE_PATH"
-ACTUAL_SHA="$(sha256_of "$ARCHIVE_PATH")"
-if [ "$ACTUAL_SHA" != "$(printf '%s' "$EXPECTED_SHA" | tr '[:upper:]' '[:lower:]')" ]; then
+ACTUAL_SHA="$(sha256_of "$ARCHIVE_PATH" | tr '[:upper:]' '[:lower:]')"
+if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
   echo "SHA-256 mismatch for '$ARCHIVE_URL' (expected $EXPECTED_SHA, got $ACTUAL_SHA)" >&2
   exit 1
 fi
@@ -320,7 +478,7 @@ if [ ! -e "$CANDIDATE_ROOT/$BINARY_RELPATH" ]; then
 fi
 
 mv "$CANDIDATE_ROOT" "$FINAL_DIR"
-update_metadata "$METADATA_DIR" "$RELEASE_VERSION" "$FIRST_INSTALL"
+update_metadata "$METADATA_DIR" "$VERSIONS_DIR" "$RELEASE_VERSION" "$FIRST_INSTALL"
 if [ "$FIRST_INSTALL" -eq 1 ]; then
   ln -sfn "$FINAL_DIR" "$CURRENT_LINK"
   ensure_path "$CURRENT_LINK"

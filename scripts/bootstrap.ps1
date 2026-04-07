@@ -2,10 +2,105 @@ param(
   [string]$Version = "latest",
   [string]$ManifestUrl = "",
   [string]$InstallRoot = "",
-  [switch]$SkipPathUpdate
+  [switch]$SkipPathUpdate,
+  [switch]$AllowExistingInstall,
+  [switch]$Help
 )
 
 $ErrorActionPreference = "Stop"
+$BannerUrl = "https://raw.githubusercontent.com/fidan-lang/fidan/refs/heads/main/assets/github/banner.txt"
+$script:BannerTextCache = $null
+
+function Get-BannerText {
+  if ($null -ne $script:BannerTextCache) {
+    return $script:BannerTextCache
+  }
+
+  $localBannerPath = $null
+  if ($PSScriptRoot) {
+    $localBannerPath = Join-Path (Split-Path -Parent $PSScriptRoot) "assets/github/banner.txt"
+  }
+
+  if ($localBannerPath -and (Test-Path -LiteralPath $localBannerPath)) {
+    $script:BannerTextCache = Get-Content -LiteralPath $localBannerPath -Raw
+    return $script:BannerTextCache
+  }
+
+  try {
+    $script:BannerTextCache = (Invoke-WebRequest -Uri $BannerUrl).Content
+    return $script:BannerTextCache
+  }
+  catch {
+    $script:BannerTextCache = "FIDAN`n"
+    return $script:BannerTextCache
+  }
+}
+
+function Show-Banner {
+  $bannerText = Get-BannerText
+  $trimmedBanner = $bannerText.TrimEnd("`r", "`n")
+  Write-Host ""
+  if ($trimmedBanner) {
+    foreach ($line in ($trimmedBanner -split "`r?`n")) {
+      Write-Host $line
+    }
+  }
+  else {
+    Write-Host "FIDAN"
+  }
+  Write-Host ""
+}
+
+function Show-Usage {
+  Write-Host "Fidan bootstrap installer"
+  Write-Host ""
+  Write-Host "Options:"
+  Write-Host "  -Version <version>             Install a specific released version (default: latest)"
+  Write-Host "  -ManifestUrl <url>             Override the distribution manifest URL"
+  Write-Host "  -InstallRoot <path>            Override the self-managed install root"
+  Write-Host "  -SkipPathUpdate                Do not modify the user PATH"
+  Write-Host "  -AllowExistingInstall          Permit bootstrapping into an existing Fidan install root"
+  Write-Host "  -Help                          Show this help text"
+  Write-Host ""
+  Write-Host "Bootstrap is intended for first install. If Fidan is already installed,"
+  Write-Host "prefer 'fidan self install' and 'fidan self use'."
+}
+
+function Test-ExistingInstall {
+  param([string]$InstallRootPath)
+
+  $versionsDir = Join-Path $InstallRootPath "versions"
+  $metadataDir = Join-Path $InstallRootPath "metadata"
+  $currentDir = Join-Path $InstallRootPath "current"
+
+  if (Test-Path -LiteralPath $currentDir) {
+    return $true
+  }
+
+  if (Test-Path -LiteralPath (Join-Path $metadataDir "installs.json")) {
+    return $true
+  }
+
+  if (Test-Path -LiteralPath (Join-Path $metadataDir "active-version.json")) {
+    return $true
+  }
+
+  if (Test-Path -LiteralPath $versionsDir) {
+    $installedVersions = @(Get-ChildItem -LiteralPath $versionsDir -Directory -ErrorAction SilentlyContinue)
+    if ($installedVersions.Count -gt 0) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
+Show-Banner
+
+if ($Help) {
+  Show-Usage
+  exit 0
+}
 
 function Resolve-InstallRoot {
   param([string]$Explicit)
@@ -252,6 +347,10 @@ function Add-PathEntry {
 $manifestUrl = Get-ManifestUrl -Explicit $ManifestUrl
 $installRootResolved = ConvertTo-CanonicalPath (Resolve-InstallRoot -Explicit $InstallRoot)
 $hostTriple = Resolve-HostTriple
+
+if ((-not $AllowExistingInstall) -and (Test-ExistingInstall -InstallRootPath $installRootResolved)) {
+  throw "An existing self-managed Fidan installation was detected at '$installRootResolved'. Use 'fidan self install' or re-run bootstrap with -AllowExistingInstall if you really want to install into the same root."
+}
 
 Write-Host "Fetching manifest from $manifestUrl"
 $manifestText = Read-TextResource -Url $manifestUrl
