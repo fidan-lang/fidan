@@ -353,7 +353,7 @@ try {
   $hostTriple = Resolve-HostTriple
 
   if ((-not $AllowExistingInstall) -and (Test-ExistingInstall -InstallRootPath $installRootResolved)) {
-    throw "An existing self-managed Fidan installation was detected at '$installRootResolved'. Use 'fidan self install' or re-run bootstrap with -AllowExistingInstall if you really want to install into the same root."
+    throw "An existing self-managed Fidan installation was detected at '$installRootResolved'.`nUse 'fidan self install' or re-run bootstrap with -AllowExistingInstall if you really want to install into the same root."
   }
 
   Write-Host "Fetching manifest from $manifestUrl"
@@ -436,7 +436,7 @@ try {
 catch {
   $message = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
   Write-Host ""
-  Write-Host "Installation failed:" -ForegroundColor Red
+  Write-Host "[X] Installation failed:" -ForegroundColor Red
   Write-Host $message -ForegroundColor Red
   if ($PSCommandPath) {
     exit 1
