@@ -76,6 +76,16 @@ mod tests {
         format_source(src, &FormatOptions::default())
     }
 
+    fn fmt_with_max_line_len(src: &str, max_line_len: usize) -> String {
+        format_source(
+            src,
+            &FormatOptions {
+                max_line_len,
+                ..FormatOptions::default()
+            },
+        )
+    }
+
     fn workspace_root() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -351,6 +361,89 @@ var x=1 # tail
         let out = fmt(src);
         assert_eq!(out, src);
         assert_idempotent(src);
+    }
+
+    #[test]
+    fn long_chain_assignment_wraps_using_max_line_len() {
+        let src = "action demo {\n    var result = source.reallyLongMethod(alpha, beta, gamma).next().finalize(delta, epsilon)\n}\n";
+        let expected = "action demo {\n    var result = source\n        .reallyLongMethod(\n            alpha,\n            beta,\n            gamma,\n        )\n        .next()\n        .finalize(delta, epsilon)\n}\n";
+        let formatted = fmt_with_max_line_len(src, 40);
+        assert_eq!(formatted, expected);
+        assert_eq!(fmt_with_max_line_len(&formatted, 40), expected);
+    }
+
+    #[test]
+    fn long_return_call_wraps_using_max_line_len() {
+        let src = "action demo returns dynamic {\n    return compute.reallyLongMethod(alpha, beta, gamma).finish()\n}\n";
+        let formatted = fmt_with_max_line_len(src, 36);
+        assert!(formatted.contains("return compute\n        .reallyLongMethod("));
+        assert!(formatted.contains("            alpha,"));
+        assert!(formatted.contains("        .finish()"));
+        assert_eq!(fmt_with_max_line_len(&formatted, 36), formatted);
+    }
+
+    #[test]
+    fn multiline_chain_flattens_when_max_line_len_is_large() {
+        let src = "var result =\n    \"df\"\n        .filter(\"revenue\" > 1000)\n        .group_by(\"country\")\n        .agg([\"revenue\".as(\"total_revenue\"), \"orders\".as(\"avg_orders\")])\n        .sort(\"total_revenue\", true)\n";
+        let expected = "var result = \"df\".filter(\"revenue\" > 1000).group_by(\"country\").agg([\"revenue\".as(\"total_revenue\"), \"orders\".as(\"avg_orders\")]).sort(\"total_revenue\", true)\n";
+        assert_eq!(fmt_with_max_line_len(src, 10_000), expected);
+    }
+
+    #[test]
+    fn wrapped_chain_keeps_root_after_equals_when_it_fits() {
+        let src = "var result = \"df\".filter(\"revenue\" > 1000).group_by(\"country\").agg([\"revenue\".as(\"total_revenue\"), \"orders\".as(\"avg_orders\")]).sort(\"total_revenue\", true)\n";
+        let expected = "var result = \"df\"\n    .filter(\"revenue\" > 1000)\n    .group_by(\"country\")\n    .agg([\"revenue\".as(\"total_revenue\"), \"orders\".as(\"avg_orders\")])\n    .sort(\"total_revenue\", true)\n";
+        assert_eq!(fmt_with_max_line_len(src, 100), expected);
+    }
+
+    #[test]
+    fn multiline_call_args_flatten_when_max_line_len_is_large() {
+        let src = "var value = process(\n    alpha,\n    beta,\n    gamma,\n)\n";
+        let expected = "var value = process(alpha, beta, gamma)\n";
+        assert_eq!(fmt_with_max_line_len(src, 10_000), expected);
+    }
+
+    #[test]
+    fn multiline_list_flattens_when_max_line_len_is_large() {
+        let src = "var values = [\n    alpha,\n    beta,\n    gamma,\n]\n";
+        let expected = "var values = [alpha, beta, gamma]\n";
+        assert_eq!(fmt_with_max_line_len(src, 10_000), expected);
+    }
+
+    #[test]
+    fn long_list_wraps_when_max_line_len_is_small() {
+        let src = "var values = [alpha, beta, gamma, delta, epsilon]\n";
+        let expected =
+            "var values = [\n    alpha,\n    beta,\n    gamma,\n    delta,\n    epsilon,\n]\n";
+        let formatted = fmt_with_max_line_len(src, 28);
+        assert_eq!(formatted, expected);
+        assert_eq!(fmt_with_max_line_len(&formatted, 28), expected);
+    }
+
+    #[test]
+    fn long_dict_wraps_when_max_line_len_is_small() {
+        let src = "var lookup = {alpha_key: first_value, beta_key: second_value}\n";
+        let expected =
+            "var lookup = {\n    alpha_key: first_value,\n    beta_key: second_value,\n}\n";
+        let formatted = fmt_with_max_line_len(src, 34);
+        assert_eq!(formatted, expected);
+        assert_eq!(fmt_with_max_line_len(&formatted, 34), expected);
+    }
+
+    #[test]
+    fn long_tuple_wraps_when_max_line_len_is_small() {
+        let src = "var pair = (alpha_value, beta_value, gamma_value)\n";
+        let expected = "var pair = (\n    alpha_value,\n    beta_value,\n    gamma_value,\n)\n";
+        let formatted = fmt_with_max_line_len(src, 24);
+        assert_eq!(formatted, expected);
+        assert_eq!(fmt_with_max_line_len(&formatted, 24), expected);
+    }
+
+    #[test]
+    fn multiline_params_flatten_when_max_line_len_is_large() {
+        let src = "action greet with (\n    certain first oftype string,\n    certain last oftype string,\n) returns string {\n    return first + last\n}\n";
+        let expected = "action greet with (certain first oftype string, certain last oftype string) returns string {\n    return first + last\n}\n";
+        assert_eq!(fmt_with_max_line_len(src, 10_000), expected);
     }
 
     #[test]

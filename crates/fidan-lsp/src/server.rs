@@ -12,7 +12,7 @@ use fidan_stdlib::{
     member_return_type as stdlib_member_return_type, module_info as stdlib_module_info,
 };
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use tower_lsp::jsonrpc::Result as RpcResult;
 use tower_lsp::lsp_types::*;
 use tower_lsp::{Client, LanguageServer};
@@ -72,6 +72,74 @@ const COMPLETION_KEYWORDS: &[&str] = &[
     "parent",
     "new",
 ];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct EditorFormatDefaults {
+    indent_width: usize,
+    max_line_len: usize,
+}
+
+impl Default for EditorFormatDefaults {
+    fn default() -> Self {
+        let opts = FormatOptions::default();
+        Self {
+            indent_width: opts.indent_width,
+            max_line_len: opts.max_line_len,
+        }
+    }
+}
+
+fn editor_format_defaults_from_init(params: &InitializeParams) -> EditorFormatDefaults {
+    let defaults = EditorFormatDefaults::default();
+    let Some(options) = params.initialization_options.as_ref() else {
+        return defaults;
+    };
+
+    let indent_width = json_usize(options, &["indentWidth", "indent_width"])
+        .filter(|value| *value > 0)
+        .unwrap_or(defaults.indent_width);
+    let max_line_len = json_usize(options, &["maxLineLen", "max_line_len"])
+        .filter(|value| *value > 0)
+        .unwrap_or(defaults.max_line_len);
+
+    EditorFormatDefaults {
+        indent_width,
+        max_line_len,
+    }
+}
+
+fn json_usize(value: &serde_json::Value, keys: &[&str]) -> Option<usize> {
+    for key in keys {
+        let Some(raw) = value.get(*key) else {
+            continue;
+        };
+        if let Some(n) = raw.as_u64() {
+            return usize::try_from(n).ok();
+        }
+        if let Some(n) = raw.as_i64()
+            && n > 0
+        {
+            return usize::try_from(n as u64).ok();
+        }
+    }
+    None
+}
+
+fn fallback_format_options(
+    request: &FormattingOptions,
+    defaults: EditorFormatDefaults,
+) -> FormatOptions {
+    let indent_width = match request.tab_size {
+        value if value > 0 => value as usize,
+        _ => defaults.indent_width,
+    };
+
+    FormatOptions {
+        indent_width,
+        max_line_len: defaults.max_line_len,
+        ..Default::default()
+    }
+}
 
 fn stdlib_members(mod_name: &str) -> &'static [&'static str] {
     stdlib_module_info(mod_name)
@@ -193,6 +261,7 @@ enum NamedArgLookup {
 pub struct FidanLsp {
     client: Client,
     store: Arc<DocumentStore>,
+    editor_format_defaults: Arc<RwLock<EditorFormatDefaults>>,
 }
 
 impl FidanLsp {
@@ -200,6 +269,7 @@ impl FidanLsp {
         Self {
             client,
             store: Arc::new(DocumentStore::new()),
+            editor_format_defaults: Arc::new(RwLock::new(EditorFormatDefaults::default())),
         }
     }
 
@@ -703,7 +773,11 @@ fn range_to_offsets(text: &str, range: &Range) -> Option<(usize, usize)> {
 impl LanguageServer for FidanLsp {
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
-    async fn initialize(&self, _params: InitializeParams) -> RpcResult<InitializeResult> {
+    async fn initialize(&self, params: InitializeParams) -> RpcResult<InitializeResult> {
+        if let Ok(mut defaults) = self.editor_format_defaults.write() {
+            *defaults = editor_format_defaults_from_init(&params);
+        }
+
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
@@ -2329,13 +2403,16 @@ impl LanguageServer for FidanLsp {
         let text = doc.text.clone();
         drop(doc);
 
+        let editor_defaults = self
+            .editor_format_defaults
+            .read()
+            .map(|guard| *guard)
+            .unwrap_or_default();
+
         let opts = match uri.to_file_path() {
             Ok(path) => match load_format_options_for_path(Some(&path)) {
                 Ok(Some(opts)) => opts,
-                Ok(None) => FormatOptions {
-                    indent_width: params.options.tab_size as usize,
-                    ..Default::default()
-                },
+                Ok(None) => fallback_format_options(&params.options, editor_defaults),
                 Err(err) => {
                     self.client
                         .log_message(
@@ -2343,16 +2420,10 @@ impl LanguageServer for FidanLsp {
                             format!("ignored .fidanfmt for {}: {err}", path.display()),
                         )
                         .await;
-                    FormatOptions {
-                        indent_width: params.options.tab_size as usize,
-                        ..Default::default()
-                    }
+                    fallback_format_options(&params.options, editor_defaults)
                 }
             },
-            Err(_) => FormatOptions {
-                indent_width: params.options.tab_size as usize,
-                ..Default::default()
-            },
+            Err(_) => fallback_format_options(&params.options, editor_defaults),
         };
 
         let formatted = format_source(&text, &opts);
@@ -2799,6 +2870,7 @@ fn visible_symbol_completion_items(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn stdlib_completion_surface_tracks_runtime_modules() {
@@ -3054,6 +3126,45 @@ Holder.compass.
         let handle = builtin_hover_markdown("handle").expect("missing handle hover doc");
         assert!(handle.contains("```fidan\nhandle\n```"));
         assert!(handle.contains("Opaque native handle type"));
+    }
+
+    #[test]
+    fn editor_format_defaults_are_loaded_from_initialize_options() {
+        let params = InitializeParams {
+            initialization_options: Some(json!({
+                "indentWidth": 2,
+                "maxLineLen": 72,
+            })),
+            ..InitializeParams::default()
+        };
+
+        assert_eq!(
+            editor_format_defaults_from_init(&params),
+            EditorFormatDefaults {
+                indent_width: 2,
+                max_line_len: 72,
+            }
+        );
+    }
+
+    #[test]
+    fn fallback_format_options_use_editor_max_line_len() {
+        let defaults = EditorFormatDefaults {
+            indent_width: 4,
+            max_line_len: 68,
+        };
+        let request = FormattingOptions {
+            tab_size: 2,
+            insert_spaces: true,
+            properties: Default::default(),
+            trim_trailing_whitespace: None,
+            insert_final_newline: None,
+            trim_final_newlines: None,
+        };
+
+        let opts = fallback_format_options(&request, defaults);
+        assert_eq!(opts.indent_width, 2);
+        assert_eq!(opts.max_line_len, 68);
     }
 
     #[test]

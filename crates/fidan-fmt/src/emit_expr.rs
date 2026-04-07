@@ -1,11 +1,24 @@
 //! Expression emitter.
 //!
-//! All expression rendering is done inline (no line-wrapping in this version).
-//! Operator precedence is properly tracked so redundant parentheses are
-//! never emitted and necessary ones are never omitted.
+//! Operator precedence is properly tracked so redundant parentheses are never
+//! emitted and necessary ones are never omitted. Long call and member chains are
+//! wrapped when they exceed the configured soft line-length limit.
 
 use crate::printer::Printer;
 use fidan_ast::{Arg, BinOp, Expr, ExprId, InterpPart, Param, StmtId, TypeExpr, UnOp};
+
+#[derive(Clone)]
+enum ChainSegment {
+    Field(fidan_lexer::Symbol),
+    Index(ExprId),
+    Call(Vec<Arg>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LayoutMode {
+    Normal,
+    InlineOnly,
+}
 
 // ── Precedence ────────────────────────────────────────────────────────────────
 
@@ -65,11 +78,45 @@ fn unop_str(op: UnOp) -> &'static str {
 
 /// Emit an expression at precedence level 0 (outermost — never adds parens).
 pub fn emit_expr(p: &mut Printer<'_>, id: ExprId) {
-    emit_expr_prec(p, id, 0);
+    emit_expr_prec_mode(p, id, 0, LayoutMode::Normal);
+}
+
+/// Emit an expression, wrapping long call/member chains when needed.
+pub fn emit_expr_maybe_wrapped(p: &mut Printer<'_>, id: ExprId) {
+    if should_wrap_expr(p, id) {
+        emit_wrapped_expr(p, id);
+    } else {
+        emit_expr(p, id);
+    }
+}
+
+/// Emit an expression after a prefix such as `var value = ` or `return `.
+/// When the expression would overflow the soft line-length limit, it is moved
+/// to a continuation line one indent level deeper.
+pub fn emit_expr_after_prefix(p: &mut Printer<'_>, id: ExprId) {
+    if should_wrap_expr(p, id) {
+        if let Some((root, segments)) = decompose_chain_expr(p, id)
+            && root_fits_after_prefix(p, root)
+        {
+            emit_expr_prec(p, root, 15);
+            emit_wrapped_chain_segments(p, &segments);
+        } else {
+            p.indent_in();
+            p.nl();
+            emit_wrapped_expr(p, id);
+            p.indent_out();
+        }
+    } else {
+        emit_expr(p, id);
+    }
 }
 
 /// Emit an expression, parenthesising it if its own precedence is below `min_prec`.
 pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
+    emit_expr_prec_mode(p, id, min_prec, LayoutMode::Normal);
+}
+
+fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: LayoutMode) {
     let expr = p.arena.get_expr(id).clone();
     match expr {
         // ── Literals ──────────────────────────────────────────────────────
@@ -117,11 +164,11 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
                 BinOp::Pow => prec,
                 _ => prec + 1,
             };
-            emit_expr_prec(p, lhs, prec);
+            emit_expr_prec_mode(p, lhs, prec, mode);
             p.w(" ");
             p.w(binop_str(op));
             p.w(" ");
-            emit_expr_prec(p, rhs, rhs_min);
+            emit_expr_prec_mode(p, rhs, rhs_min, mode);
             if needs_parens {
                 p.w(")");
             }
@@ -135,7 +182,7 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
                 p.w("(");
             }
             p.w(unop_str(op));
-            emit_expr_prec(p, operand, 14);
+            emit_expr_prec_mode(p, operand, 14, mode);
             if needs_parens {
                 p.w(")");
             }
@@ -149,9 +196,9 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
             if needs_parens {
                 p.w("(");
             }
-            emit_expr_prec(p, lhs, prec);
+            emit_expr_prec_mode(p, lhs, prec, mode);
             p.w(" ?? ");
-            emit_expr_prec(p, rhs, prec + 1);
+            emit_expr_prec_mode(p, rhs, prec + 1, mode);
             if needs_parens {
                 p.w(")");
             }
@@ -159,38 +206,42 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
 
         // ── Postfix: call, field, index ────────────────────────────────────
         Expr::Call { callee, args, .. } => {
-            emit_expr_prec(p, callee, 15);
+            emit_expr_prec_mode(p, callee, 15, mode);
             p.w("(");
-            emit_arg_list(p, &args);
+            if mode == LayoutMode::Normal && should_break_arg_list(p, &args) {
+                emit_multiline_arg_list_mode(p, &args, mode);
+            } else {
+                emit_arg_list_mode(p, &args, mode);
+            }
             p.w(")");
         }
         Expr::Field { object, field, .. } => {
-            emit_expr_prec(p, object, 15);
+            emit_expr_prec_mode(p, object, 15, mode);
             p.w(".");
             let s = p.sym_s(field);
             p.w(&s);
         }
         Expr::Index { object, index, .. } => {
-            emit_expr_prec(p, object, 15);
+            emit_expr_prec_mode(p, object, 15, mode);
             p.w("[");
-            emit_expr(p, index);
+            emit_expr_prec_mode(p, index, 0, mode);
             p.w("]");
         }
 
         // ── Assignment (expression form) ───────────────────────────────────
         Expr::Assign { target, value, .. } => {
-            emit_expr_prec(p, target, 15);
+            emit_expr_prec_mode(p, target, 15, mode);
             p.w(" = ");
-            emit_expr(p, value);
+            emit_expr_prec_mode(p, value, 0, mode);
         }
         Expr::CompoundAssign {
             op, target, value, ..
         } => {
-            emit_expr_prec(p, target, 15);
+            emit_expr_prec_mode(p, target, 15, mode);
             p.w(" ");
             p.w(binop_str(op));
             p.w("= ");
-            emit_expr(p, value);
+            emit_expr_prec_mode(p, value, 0, mode);
         }
 
         // ── String interpolation ───────────────────────────────────────────
@@ -215,11 +266,11 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
         // ── Spawn / await ─────────────────────────────────────────────────
         Expr::Spawn { expr, .. } => {
             p.w("spawn ");
-            emit_expr_prec(p, expr, 13);
+            emit_expr_prec_mode(p, expr, 13, mode);
         }
         Expr::Await { expr, .. } => {
             p.w("await ");
-            emit_expr_prec(p, expr, 13);
+            emit_expr_prec_mode(p, expr, 13, mode);
         }
 
         // ── Ternary ──────────────────────────────────────────────────────
@@ -234,11 +285,11 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
             if needs_parens {
                 p.w("(");
             }
-            emit_expr_prec(p, then_val, 1);
+            emit_expr_prec_mode(p, then_val, 1, mode);
             p.w(" if ");
-            emit_expr_prec(p, condition, 1);
+            emit_expr_prec_mode(p, condition, 1, mode);
             p.w(" else ");
-            emit_expr_prec(p, else_val, 1);
+            emit_expr_prec_mode(p, else_val, 1, mode);
             if needs_parens {
                 p.w(")");
             }
@@ -246,36 +297,13 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
 
         // ── Collection literals ───────────────────────────────────────────
         Expr::List { elements, .. } => {
-            p.w("[");
-            for (i, &eid) in elements.iter().enumerate() {
-                if i > 0 {
-                    p.w(", ");
-                }
-                emit_expr(p, eid);
-            }
-            p.w("]");
+            emit_list_expr(p, &elements, mode);
         }
         Expr::Dict { entries, .. } => {
-            p.w("{");
-            for (i, (k, v)) in entries.iter().enumerate() {
-                if i > 0 {
-                    p.w(", ");
-                }
-                emit_expr(p, *k);
-                p.w(": ");
-                emit_expr(p, *v);
-            }
-            p.w("}");
+            emit_dict_expr(p, &entries, mode);
         }
         Expr::Tuple { elements, .. } => {
-            p.w("(");
-            for (i, &eid) in elements.iter().enumerate() {
-                if i > 0 {
-                    p.w(", ");
-                }
-                emit_expr(p, eid);
-            }
-            p.w(")");
+            emit_tuple_expr(p, &elements, mode);
         }
 
         // ── Check expression ─────────────────────────────────────────────
@@ -283,12 +311,12 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
             scrutinee, arms, ..
         } => {
             p.w("check ");
-            emit_expr(p, scrutinee);
+            emit_expr_prec_mode(p, scrutinee, 0, mode);
             p.w(" {");
             p.indent_in();
             for arm in &arms {
                 p.nl();
-                emit_expr(p, arm.pattern);
+                emit_expr_prec_mode(p, arm.pattern, 0, mode);
                 if let Some(stmt_id) = crate::emit_stmt::inlineable_check_stmt(p, &arm.body) {
                     p.w(" => ");
                     crate::emit_stmt::emit_stmt(p, stmt_id);
@@ -312,18 +340,18 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
             step,
             ..
         } => {
-            emit_expr_prec(p, target, 15);
+            emit_expr_prec_mode(p, target, 15, mode);
             p.w("[");
             if let Some(s) = start {
-                emit_expr(p, s);
+                emit_expr_prec_mode(p, s, 0, mode);
             }
             p.w(if inclusive { "..." } else { ".." });
             if let Some(e) = end {
-                emit_expr(p, e);
+                emit_expr_prec_mode(p, e, 0, mode);
             }
             if let Some(st) = step {
                 p.w(" step ");
-                emit_expr(p, st);
+                emit_expr_prec_mode(p, st, 0, mode);
             }
             p.w("]");
         }
@@ -337,15 +365,15 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
             ..
         } => {
             p.w("[");
-            emit_expr(p, element);
+            emit_expr_prec_mode(p, element, 0, mode);
             p.w(" for ");
             let b = p.sym_s(binding);
             p.w(&b);
             p.w(" in ");
-            emit_expr(p, iterable);
+            emit_expr_prec_mode(p, iterable, 0, mode);
             if let Some(f) = filter {
                 p.w(" if ");
-                emit_expr(p, f);
+                emit_expr_prec_mode(p, f, 0, mode);
             }
             p.w("]");
         }
@@ -360,17 +388,17 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
             ..
         } => {
             p.w("{");
-            emit_expr(p, key);
+            emit_expr_prec_mode(p, key, 0, mode);
             p.w(": ");
-            emit_expr(p, value);
+            emit_expr_prec_mode(p, value, 0, mode);
             p.w(" for ");
             let b = p.sym_s(binding);
             p.w(&b);
             p.w(" in ");
-            emit_expr(p, iterable);
+            emit_expr_prec_mode(p, iterable, 0, mode);
             if let Some(f) = filter {
                 p.w(" if ");
-                emit_expr(p, f);
+                emit_expr_prec_mode(p, f, 0, mode);
             }
             p.w("}");
         }
@@ -390,7 +418,7 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
             p.w("action");
             if !params.is_empty() {
                 p.w(" with (");
-                emit_params(p, &params);
+                emit_params_mode(p, &params, mode);
                 p.w(")");
             }
             if let Some(rt) = return_ty {
@@ -407,6 +435,10 @@ pub fn emit_expr_prec(p: &mut Printer<'_>, id: ExprId, min_prec: u8) {
 // ── Argument list ─────────────────────────────────────────────────────────────
 
 pub fn emit_arg_list(p: &mut Printer<'_>, args: &[Arg]) {
+    emit_arg_list_mode(p, args, LayoutMode::Normal);
+}
+
+fn emit_arg_list_mode(p: &mut Printer<'_>, args: &[Arg], mode: LayoutMode) {
     for (i, arg) in args.iter().enumerate() {
         if i > 0 {
             p.w(", ");
@@ -416,7 +448,7 @@ pub fn emit_arg_list(p: &mut Printer<'_>, args: &[Arg]) {
             p.w(&n);
             p.w(" = ");
         }
-        emit_expr(p, arg.value);
+        emit_expr_prec_mode(p, arg.value, 0, mode);
     }
 }
 
@@ -473,7 +505,7 @@ fn emit_inline_stmts_or_block(p: &mut Printer<'_>, stmts: &[fidan_ast::StmtId]) 
     }
 }
 
-fn emit_params(p: &mut Printer<'_>, params: &[Param]) {
+fn emit_params_mode(p: &mut Printer<'_>, params: &[Param], mode: LayoutMode) {
     for (i, param) in params.iter().enumerate() {
         if i > 0 {
             p.w(", ");
@@ -489,7 +521,7 @@ fn emit_params(p: &mut Printer<'_>, params: &[Param]) {
         emit_type(p, &param.ty);
         if let Some(default) = param.default {
             p.w(" = ");
-            emit_expr(p, default);
+            emit_expr_prec_mode(p, default, 0, mode);
         }
     }
 }
@@ -505,6 +537,284 @@ fn emit_lambda_block(p: &mut Printer<'_>, stmts: &[StmtId]) {
     }
     p.indent_out();
     p.nl();
+}
+
+fn should_wrap_expr(p: &Printer<'_>, id: ExprId) -> bool {
+    can_wrap_expr(p, id) && inline_expr_overflows(p, id)
+}
+
+fn can_wrap_expr(p: &Printer<'_>, id: ExprId) -> bool {
+    decompose_chain_expr(p, id).is_some()
+}
+
+fn inline_expr_overflows(p: &Printer<'_>, id: ExprId) -> bool {
+    p.current_line_len() + render_expr_fragment(p, id, 0).len() > p.opts.max_line_len
+}
+
+fn emit_list_expr(p: &mut Printer<'_>, elements: &[ExprId], mode: LayoutMode) {
+    if mode == LayoutMode::Normal && should_break_list_expr(p, elements) {
+        emit_multiline_list_expr(p, elements);
+        return;
+    }
+
+    p.w("[");
+    for (i, &eid) in elements.iter().enumerate() {
+        if i > 0 {
+            p.w(", ");
+        }
+        emit_expr_prec_mode(p, eid, 0, mode);
+    }
+    p.w("]");
+}
+
+fn emit_multiline_list_expr(p: &mut Printer<'_>, elements: &[ExprId]) {
+    p.w("[");
+    if !elements.is_empty() {
+        p.indent_in();
+        for (i, &eid) in elements.iter().enumerate() {
+            p.nl();
+            emit_expr_maybe_wrapped(p, eid);
+            if i + 1 < elements.len() || p.opts.trailing_comma {
+                p.w(",");
+            }
+        }
+        p.indent_out();
+        p.nl();
+    }
+    p.w("]");
+}
+
+fn emit_dict_expr(p: &mut Printer<'_>, entries: &[(ExprId, ExprId)], mode: LayoutMode) {
+    if mode == LayoutMode::Normal && should_break_dict_expr(p, entries) {
+        emit_multiline_dict_expr(p, entries);
+        return;
+    }
+
+    p.w("{");
+    for (i, (k, v)) in entries.iter().enumerate() {
+        if i > 0 {
+            p.w(", ");
+        }
+        emit_expr_prec_mode(p, *k, 0, mode);
+        p.w(": ");
+        emit_expr_prec_mode(p, *v, 0, mode);
+    }
+    p.w("}");
+}
+
+fn emit_multiline_dict_expr(p: &mut Printer<'_>, entries: &[(ExprId, ExprId)]) {
+    p.w("{");
+    if !entries.is_empty() {
+        p.indent_in();
+        for (i, (key, value)) in entries.iter().enumerate() {
+            p.nl();
+            emit_expr_maybe_wrapped(p, *key);
+            p.w(": ");
+            emit_expr_after_prefix(p, *value);
+            if i + 1 < entries.len() || p.opts.trailing_comma {
+                p.w(",");
+            }
+        }
+        p.indent_out();
+        p.nl();
+    }
+    p.w("}");
+}
+
+fn emit_tuple_expr(p: &mut Printer<'_>, elements: &[ExprId], mode: LayoutMode) {
+    if mode == LayoutMode::Normal && should_break_tuple_expr(p, elements) {
+        emit_multiline_tuple_expr(p, elements);
+        return;
+    }
+
+    p.w("(");
+    for (i, &eid) in elements.iter().enumerate() {
+        if i > 0 {
+            p.w(", ");
+        }
+        emit_expr_prec_mode(p, eid, 0, mode);
+    }
+    p.w(")");
+}
+
+fn emit_multiline_tuple_expr(p: &mut Printer<'_>, elements: &[ExprId]) {
+    p.w("(");
+    if !elements.is_empty() {
+        p.indent_in();
+        for (i, &eid) in elements.iter().enumerate() {
+            p.nl();
+            emit_expr_maybe_wrapped(p, eid);
+            if i + 1 < elements.len() || p.opts.trailing_comma {
+                p.w(",");
+            }
+        }
+        p.indent_out();
+        p.nl();
+    }
+    p.w(")");
+}
+
+fn should_break_list_expr(p: &Printer<'_>, elements: &[ExprId]) -> bool {
+    p.current_line_len() + render_list_inline(p, elements).len() > p.opts.max_line_len
+}
+
+fn should_break_dict_expr(p: &Printer<'_>, entries: &[(ExprId, ExprId)]) -> bool {
+    p.current_line_len() + render_dict_inline(p, entries).len() > p.opts.max_line_len
+}
+
+fn should_break_tuple_expr(p: &Printer<'_>, elements: &[ExprId]) -> bool {
+    p.current_line_len() + render_tuple_inline(p, elements).len() > p.opts.max_line_len
+}
+
+fn emit_wrapped_expr(p: &mut Printer<'_>, id: ExprId) {
+    if let Some((root, segments)) = decompose_chain_expr(p, id) {
+        emit_wrapped_chain_expr(p, root, &segments);
+    } else {
+        emit_expr(p, id);
+    }
+}
+
+fn decompose_chain_expr(p: &Printer<'_>, id: ExprId) -> Option<(ExprId, Vec<ChainSegment>)> {
+    let mut segments = Vec::new();
+    let root = collect_chain_segments(p, id, &mut segments);
+    if segments.is_empty() {
+        None
+    } else {
+        Some((root, segments))
+    }
+}
+
+fn collect_chain_segments(p: &Printer<'_>, id: ExprId, segments: &mut Vec<ChainSegment>) -> ExprId {
+    match p.arena.get_expr(id) {
+        Expr::Field { object, field, .. } => {
+            let root = collect_chain_segments(p, *object, segments);
+            segments.push(ChainSegment::Field(*field));
+            root
+        }
+        Expr::Index { object, index, .. } => {
+            let root = collect_chain_segments(p, *object, segments);
+            segments.push(ChainSegment::Index(*index));
+            root
+        }
+        Expr::Call { callee, args, .. } => {
+            let root = collect_chain_segments(p, *callee, segments);
+            segments.push(ChainSegment::Call(args.clone()));
+            root
+        }
+        _ => id,
+    }
+}
+
+fn emit_wrapped_chain_expr(p: &mut Printer<'_>, root: ExprId, segments: &[ChainSegment]) {
+    emit_expr_prec(p, root, 15);
+    emit_wrapped_chain_segments(p, segments);
+}
+
+fn emit_wrapped_chain_segments(p: &mut Printer<'_>, segments: &[ChainSegment]) {
+    p.indent_in();
+    for segment in segments {
+        match segment {
+            ChainSegment::Field(field) => {
+                let field_text = format!(".{}", p.sym_s(*field));
+                p.nl();
+                p.w(&field_text);
+            }
+            ChainSegment::Index(index) => {
+                p.nl();
+                p.w("[");
+                emit_expr_maybe_wrapped(p, *index);
+                p.w("]");
+            }
+            ChainSegment::Call(args) => {
+                p.w("(");
+                if should_break_arg_list(p, args) {
+                    emit_multiline_arg_list(p, args);
+                } else {
+                    emit_arg_list(p, args);
+                }
+                p.w(")");
+            }
+        }
+    }
+    p.indent_out();
+}
+
+fn root_fits_after_prefix(p: &Printer<'_>, root: ExprId) -> bool {
+    p.current_line_len() + render_expr_fragment(p, root, 15).len() <= p.opts.max_line_len
+}
+
+fn should_break_arg_list(p: &Printer<'_>, args: &[Arg]) -> bool {
+    if args.is_empty() {
+        return false;
+    }
+
+    p.current_line_len() + render_arg_list_inline(p, args).len() > p.opts.max_line_len
+}
+
+fn emit_multiline_arg_list(p: &mut Printer<'_>, args: &[Arg]) {
+    emit_multiline_arg_list_mode(p, args, LayoutMode::Normal);
+}
+
+fn emit_multiline_arg_list_mode(p: &mut Printer<'_>, args: &[Arg], mode: LayoutMode) {
+    if args.is_empty() {
+        return;
+    }
+
+    p.indent_in();
+    for (i, arg) in args.iter().enumerate() {
+        p.nl();
+        if let Some(name) = arg.name {
+            let n = p.sym_s(name);
+            p.w(&n);
+            p.w(" = ");
+            if mode == LayoutMode::Normal {
+                emit_expr_after_prefix(p, arg.value);
+            } else {
+                emit_expr_prec_mode(p, arg.value, 0, mode);
+            }
+        } else {
+            if mode == LayoutMode::Normal {
+                emit_expr_maybe_wrapped(p, arg.value);
+            } else {
+                emit_expr_prec_mode(p, arg.value, 0, mode);
+            }
+        }
+        if i + 1 < args.len() || p.opts.trailing_comma {
+            p.w(",");
+        }
+    }
+    p.indent_out();
+    p.nl();
+}
+
+fn render_expr_fragment(p: &Printer<'_>, id: ExprId, min_prec: u8) -> String {
+    let mut scratch = p.scratch();
+    emit_expr_prec_mode(&mut scratch, id, min_prec, LayoutMode::InlineOnly);
+    scratch.into_string()
+}
+
+fn render_arg_list_inline(p: &Printer<'_>, args: &[Arg]) -> String {
+    let mut scratch = p.scratch();
+    emit_arg_list_mode(&mut scratch, args, LayoutMode::InlineOnly);
+    scratch.into_string()
+}
+
+fn render_list_inline(p: &Printer<'_>, elements: &[ExprId]) -> String {
+    let mut scratch = p.scratch();
+    emit_list_expr(&mut scratch, elements, LayoutMode::InlineOnly);
+    scratch.into_string()
+}
+
+fn render_dict_inline(p: &Printer<'_>, entries: &[(ExprId, ExprId)]) -> String {
+    let mut scratch = p.scratch();
+    emit_dict_expr(&mut scratch, entries, LayoutMode::InlineOnly);
+    scratch.into_string()
+}
+
+fn render_tuple_inline(p: &Printer<'_>, elements: &[ExprId]) -> String {
+    let mut scratch = p.scratch();
+    emit_tuple_expr(&mut scratch, elements, LayoutMode::InlineOnly);
+    scratch.into_string()
 }
 
 /// Escape a raw string value back into a Fidan `"..."` literal.

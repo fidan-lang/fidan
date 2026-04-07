@@ -4,7 +4,7 @@ use crate::comments::{FmtComment, normalize_comment_lines};
 use crate::config::FormatOptions;
 use fidan_ast::AstArena;
 use fidan_lexer::{Symbol, SymbolInterner};
-use fidan_source::{SourceFile, Span};
+use fidan_source::SourceFile;
 use std::sync::Arc;
 
 /// Accumulates formatted text with indentation and blank-line management.
@@ -86,8 +86,16 @@ impl<'a> Printer<'a> {
         self.out.is_empty()
     }
 
-    pub fn source_slice(&self, span: Span) -> &str {
-        &self.source.src[span.start as usize..span.end as usize]
+    pub fn current_line_len(&self) -> usize {
+        if self.at_sol {
+            return self.indent;
+        }
+
+        self.out.rsplit('\n').next().map(str::len).unwrap_or(0)
+    }
+
+    pub fn into_string(self) -> String {
+        self.out
     }
 
     /// End the current line (write `\n`).

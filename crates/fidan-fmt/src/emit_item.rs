@@ -1,6 +1,8 @@
 //! Top-level item emitter.
 
-use crate::emit_expr::{binop_str, emit_expr, emit_type};
+use crate::emit_expr::{
+    binop_str, emit_expr, emit_expr_after_prefix, emit_expr_maybe_wrapped, emit_type,
+};
 use crate::emit_stmt::{compound_assign_parts, emit_block, emit_stmt};
 use crate::printer::Printer;
 use fidan_ast::{Decorator, Item, ItemId, Module, Param};
@@ -224,13 +226,13 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
             }
             if let Some(eid) = init {
                 p.w(" = ");
-                emit_expr(p, *eid);
+                emit_expr_after_prefix(p, *eid);
             }
         }
 
         // ── Module-level expression statement ────────────────────────────
         Item::ExprStmt(eid) => {
-            emit_expr(p, *eid);
+            emit_expr_maybe_wrapped(p, *eid);
         }
 
         // ── Module-level assignment ───────────────────────────────────────
@@ -240,11 +242,11 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
                 p.w(" ");
                 p.w(binop_str(op));
                 p.w("= ");
-                emit_expr(p, rhs);
+                emit_expr_after_prefix(p, rhs);
             } else {
                 emit_expr(p, *target);
                 p.w(" = ");
-                emit_expr(p, *value);
+                emit_expr_after_prefix(p, *value);
             }
         }
 
@@ -261,7 +263,7 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
                 p.w(&s);
             }
             p.w(") = ");
-            emit_expr(p, *value);
+            emit_expr_after_prefix(p, *value);
         }
 
         // ── Use / export use ─────────────────────────────────────────────
@@ -367,7 +369,7 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
                     emit_type(p, &field.ty);
                     if let Some(default) = field.default {
                         p.w(" = ");
-                        emit_expr(p, default);
+                        emit_expr_after_prefix(p, default);
                     }
                     p.emit_trailing_comments_for(field.span.end);
                 }
@@ -548,7 +550,7 @@ fn emit_params(p: &mut Printer<'_>, params: &[Param]) {
 
         if let Some(default) = param.default {
             p.w(" = ");
-            emit_expr(p, default);
+            emit_expr_after_prefix(p, default);
         }
     }
 }
@@ -589,7 +591,7 @@ fn emit_single_param(p: &mut Printer<'_>, param: &Param) {
 
     if let Some(default) = param.default {
         p.w(" = ");
-        emit_expr(p, default);
+        emit_expr_after_prefix(p, default);
     }
 }
 
@@ -598,20 +600,8 @@ fn should_break_params(p: &Printer<'_>, params: &[Param], prefix_len: usize) -> 
         return false;
     }
 
-    if let Some(span) = params_span(params)
-        && p.source_slice(span).contains('\n')
-    {
-        return true;
-    }
-
     let estimated = prefix_len + 2 + estimated_param_list_len(p, params);
     estimated > p.opts.max_line_len
-}
-
-fn params_span(params: &[Param]) -> Option<Span> {
-    let first = params.first()?;
-    let last = params.last()?;
-    Some(first.span.merge(last.span))
 }
 
 fn estimated_param_list_len(p: &Printer<'_>, params: &[Param]) -> usize {

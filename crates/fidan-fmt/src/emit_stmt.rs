@@ -1,6 +1,8 @@
 //! Statement emitter.
 
-use crate::emit_expr::{binop_str, emit_expr, emit_type};
+use crate::emit_expr::{
+    binop_str, emit_expr, emit_expr_after_prefix, emit_expr_maybe_wrapped, emit_type,
+};
 use crate::emit_item::emit_decorators;
 use crate::printer::Printer;
 use fidan_ast::{BinOp, Expr, ExprId, Stmt, StmtId};
@@ -94,7 +96,7 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
             }
             if let Some(eid) = init {
                 p.w(" = ");
-                emit_expr(p, eid);
+                emit_expr_after_prefix(p, eid);
             }
         }
 
@@ -111,7 +113,7 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
                 p.w(&s);
             }
             p.w(") = ");
-            emit_expr(p, value);
+            emit_expr_after_prefix(p, value);
         }
 
         // ── Assignment ────────────────────────────────────────────────────
@@ -121,17 +123,17 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
                 p.w(" ");
                 p.w(binop_str(op));
                 p.w("= ");
-                emit_expr(p, rhs);
+                emit_expr_after_prefix(p, rhs);
             } else {
                 emit_expr(p, target);
                 p.w(" = ");
-                emit_expr(p, value);
+                emit_expr_after_prefix(p, value);
             }
         }
 
         // ── Expression statement ──────────────────────────────────────────
         Stmt::Expr { expr, .. } => {
-            emit_expr(p, expr);
+            emit_expr_maybe_wrapped(p, expr);
         }
 
         Stmt::ActionDecl {
@@ -168,7 +170,7 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
                     emit_type(p, &param.ty);
                     if let Some(default) = param.default {
                         p.w(" = ");
-                        emit_expr(p, default);
+                        emit_expr_after_prefix(p, default);
                     }
                 }
                 p.w(")");
@@ -186,7 +188,7 @@ pub fn emit_stmt(p: &mut Printer<'_>, id: StmtId) {
         Stmt::Return { value, .. } => {
             if let Some(v) = value {
                 p.w("return ");
-                emit_expr(p, v);
+                emit_expr_maybe_wrapped(p, v);
             } else {
                 p.w("return");
             }
