@@ -245,6 +245,65 @@ mod tests {
     }
 
     #[test]
+    fn parent_constructor_calls_remain_valid() {
+        let errors = check_errors(
+            r#"object Animal {
+                var species oftype string
+
+                new with (certain species oftype string) {
+                    this.species = species
+                }
+            }
+
+            object Dog extends Animal {
+                new with (certain name oftype string) {
+                    parent("Dog")
+                }
+            }
+
+            var dog = Dog("Fido")"#,
+        );
+        assert!(
+            errors.is_empty(),
+            "expected parent constructor call to remain valid, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_constructor_new_call_remains_valid() {
+        let errors = check_errors(
+            r#"object Dog {
+                new with (certain name oftype string) {
+                    print(name)
+                }
+            }
+
+            var dog = Dog.new("Fido")"#,
+        );
+        assert!(
+            errors.is_empty(),
+            "expected explicit constructor call to remain valid, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn enum_unit_variants_remain_accessible_via_type_path() {
+        let errors = check_errors(
+            r#"enum Direction {
+                North
+                South
+            }
+
+            var direction = Direction.North
+            var same = direction == Direction.South"#,
+        );
+        assert!(
+            errors.is_empty(),
+            "expected enum unit variants to remain accessible, got {errors:?}"
+        );
+    }
+
+    #[test]
     fn object_field_with_unknown_type_is_error() {
         let errors = check_errors(
             r#"object Broken {

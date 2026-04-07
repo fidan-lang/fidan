@@ -32,6 +32,19 @@ pub struct MemberAccessSite {
     pub member_name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileImport {
+    pub path: String,
+    pub alias: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserModuleImport {
+    pub path: Vec<String>,
+    pub alias: Option<String>,
+    pub grouped: bool,
+}
+
 /// Output of a single analysis run.
 pub struct AnalysisResult {
     pub diagnostics: Vec<lsp::Diagnostic>,
@@ -40,9 +53,12 @@ pub struct AnalysisResult {
     pub identifier_spans: Vec<(Span, String)>,
     /// Per-document symbol table built from declarations. Used for hover / completion.
     pub symbol_table: symbols::SymbolTable,
-    /// File-path imports declared in this document: `(alias_name, file_path_string)`.
-    /// E.g. `use "test.fdn" as module` → `("module", "test.fdn")`.
-    pub imports: Vec<(String, String)>,
+    /// File-path imports declared in this document.
+    /// `alias = None` means `use "file.fdn"` wildcard/flat import semantics.
+    /// `alias = Some(name)` means `use "file.fdn" as name` namespace import semantics.
+    pub imports: Vec<FileImport>,
+    /// Non-stdlib user-module imports declared in this document.
+    pub user_module_imports: Vec<UserModuleImport>,
     /// Stdlib imports: `(alias_name, module_name)`.
     /// E.g. `use std.io` → `("io", "io")`; `use std.math as m` → `("m", "math")`.
     pub stdlib_imports: Vec<(String, String)>,
@@ -98,6 +114,9 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     // ── File-path import extraction ─────────────────────────────────────
     let imports = extract_imports(&module, &interner);
 
+    // ── User-module import extraction ───────────────────────────────────
+    let user_module_imports = extract_user_module_imports(&module, &interner);
+
     // ── Stdlib import extraction (`use std.<module>`) ────────────────────
     let stdlib_imports = extract_stdlib_imports(&module, &interner);
 
@@ -133,6 +152,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
         identifier_spans,
         symbol_table,
         imports,
+        user_module_imports,
         stdlib_imports,
         cross_module_field_accesses,
         cross_module_call_sites,
@@ -143,8 +163,8 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     }
 }
 
-/// Extract `(alias, file_path)` pairs from `use "file.fdn" as alias` items.
-fn extract_imports(module: &Module, interner: &SymbolInterner) -> Vec<(String, String)> {
+/// Extract file-path imports, preserving wildcard-vs-alias semantics.
+fn extract_imports(module: &Module, interner: &SymbolInterner) -> Vec<FileImport> {
     module
         .items
         .iter()
@@ -162,16 +182,54 @@ fn extract_imports(module: &Module, interner: &SymbolInterner) -> Vec<(String, S
                 if !is_file {
                     return None;
                 }
-                let alias_str = alias
-                    .map(|a| interner.resolve(a).to_string())
-                    .unwrap_or_else(|| {
-                        std::path::Path::new(&path_str)
-                            .file_stem()
-                            .and_then(|s| s.to_str())
-                            .unwrap_or(&path_str)
-                            .to_string()
-                    });
-                Some((alias_str, path_str))
+                Some(FileImport {
+                    path: path_str,
+                    alias: alias.map(|a| interner.resolve(a).to_string()),
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Extract non-stdlib user-module imports (`use mymod`, `use mymod.{name}`),
+/// preserving whether they bind a namespace or a direct imported symbol.
+fn extract_user_module_imports(
+    module: &Module,
+    interner: &SymbolInterner,
+) -> Vec<UserModuleImport> {
+    module
+        .items
+        .iter()
+        .filter_map(|&iid| {
+            if let Item::Use {
+                path,
+                alias,
+                grouped,
+                ..
+            } = module.arena.get_item(iid)
+            {
+                if path.is_empty() {
+                    return None;
+                }
+                let first = interner.resolve(path[0]);
+                let is_stdlib = first.as_ref() == "std";
+                let is_file = first.starts_with("./")
+                    || first.starts_with("../")
+                    || first.starts_with('/')
+                    || first.ends_with(".fdn");
+                if is_stdlib || is_file {
+                    return None;
+                }
+                Some(UserModuleImport {
+                    path: path
+                        .iter()
+                        .map(|sym| interner.resolve(*sym).to_string())
+                        .collect(),
+                    alias: alias.map(|a| interner.resolve(a).to_string()),
+                    grouped: *grouped,
+                })
             } else {
                 None
             }
@@ -1562,6 +1620,58 @@ var argv = env.args()
     }
 
     #[test]
+    fn analyze_preserves_file_import_modes() {
+        let src = r#"use "./utils.fdn"
+use "./utils_lib.fdn" as lib
+"#;
+
+        let result = analyze(src, "file:///import_modes.fdn");
+        assert_eq!(
+            result.imports,
+            vec![
+                FileImport {
+                    path: "./utils.fdn".to_string(),
+                    alias: None,
+                },
+                FileImport {
+                    path: "./utils_lib.fdn".to_string(),
+                    alias: Some("lib".to_string()),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn analyze_preserves_user_module_import_modes() {
+        let src = r#"use utils_lib
+use utils_flat.{sub_ints}
+use nested.tools as tools
+"#;
+
+        let result = analyze(src, "file:///user_import_modes.fdn");
+        assert_eq!(
+            result.user_module_imports,
+            vec![
+                UserModuleImport {
+                    path: vec!["utils_lib".to_string()],
+                    alias: None,
+                    grouped: false,
+                },
+                UserModuleImport {
+                    path: vec!["utils_flat".to_string(), "sub_ints".to_string()],
+                    alias: None,
+                    grouped: true,
+                },
+                UserModuleImport {
+                    path: vec!["nested".to_string(), "tools".to_string()],
+                    alias: Some("tools".to_string()),
+                    grouped: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn analyze_collects_typed_member_access_sites_for_builtin_receivers() {
         let src = r#"var parts = "hello".split()"#;
 
@@ -1663,9 +1773,14 @@ approx_equal(x, x)
             "test/examples/check_val.fdn",
             "test/examples/async_demo.fdn",
             "test/examples/concurrency_showcase.fdn",
+            "test/examples/comprehensive.fdn",
+            "test/examples/enum_test.fdn",
             "test/examples/parallel_demo.fdn",
+            "test/examples/release_mega_1_0.fdn",
+            "test/examples/test.fdn",
             "test/examples/trace_demo.fdn",
             "test/examples/spawn_method_test.fdn",
+            "test/syntax.fdn",
         ] {
             assert_file_analyzes_without_errors(rel_path);
         }

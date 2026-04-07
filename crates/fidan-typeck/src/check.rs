@@ -2552,6 +2552,36 @@ impl TypeChecker {
 
     fn resolve_field(&mut self, ty: &FidanType, field: Symbol, span: Span) -> FidanType {
         match ty {
+            FidanType::Enum(sym) => {
+                let sym = *sym;
+                if let Some(arity) = self.enum_variant_arity(sym, field) {
+                    if arity == 0 {
+                        return FidanType::Enum(sym);
+                    }
+                    return FidanType::Function;
+                }
+                self.emit_unknown_member_error(
+                    &FidanType::Enum(sym),
+                    field,
+                    span,
+                    "field or method",
+                );
+                FidanType::Error
+            }
+            FidanType::ClassType(sym) => {
+                let sym = *sym;
+                let new_sym = self.interner.intern("new");
+                if field == new_sym {
+                    return FidanType::Function;
+                }
+                self.emit_unknown_member_error(
+                    &FidanType::ClassType(sym),
+                    field,
+                    span,
+                    "field or method",
+                );
+                FidanType::Error
+            }
             FidanType::Object(sym) => {
                 let sym = *sym;
                 // If the root object is not locally known, record the access
@@ -2760,6 +2790,45 @@ impl TypeChecker {
             Expr::Field { object, field, .. } => {
                 let recv = self.infer_expr(object, module);
                 match recv {
+                    FidanType::Enum(sym) => {
+                        let Some(arity) = self.enum_variant_arity(sym, field) else {
+                            self.emit_unknown_member_error(
+                                &FidanType::Enum(sym),
+                                field,
+                                span,
+                                "method",
+                            );
+                            return FidanType::Error;
+                        };
+                        if args.len() != arity {
+                            self.emit_error(
+                                fidan_diagnostics::diag_code!("E0305"),
+                                format!(
+                                    "expected {} argument{}, got {}",
+                                    arity,
+                                    if arity == 1 { "" } else { "s" },
+                                    args.len()
+                                ),
+                                span,
+                            );
+                        }
+                        FidanType::Enum(sym)
+                    }
+                    FidanType::ClassType(sym) => {
+                        let new_sym = self.interner.intern("new");
+                        if field == new_sym {
+                            self.check_required_params(sym, args, span, module);
+                            FidanType::Object(sym)
+                        } else {
+                            self.emit_unknown_member_error(
+                                &FidanType::ClassType(sym),
+                                field,
+                                span,
+                                "method",
+                            );
+                            FidanType::Error
+                        }
+                    }
                     FidanType::Object(sym) => {
                         let object_type = FidanType::Object(sym);
                         if let Some(field_ty) = self.resolve_object_field_only(sym, field) {
@@ -2816,6 +2885,22 @@ impl TypeChecker {
                         }
                     }
                 }
+            }
+
+            Expr::Parent { span: callee_span } => {
+                let Some(FidanType::Object(sym)) = self.this_ty.clone() else {
+                    let callee_ty = self.infer_expr(callee_id, module);
+                    self.emit_not_callable_error(&callee_ty, span);
+                    return FidanType::Error;
+                };
+                let Some(parent_sym) = self.objects.get(&sym).and_then(|o| o.parent) else {
+                    let callee_ty = self.infer_expr(callee_id, module);
+                    self.emit_not_callable_error(&callee_ty, span);
+                    return FidanType::Error;
+                };
+                let _ = callee_span;
+                self.check_required_params(parent_sym, args, span, module);
+                FidanType::Object(parent_sym)
             }
 
             _ => {
@@ -2880,6 +2965,14 @@ impl TypeChecker {
                 None => return false,
             }
         }
+    }
+
+    fn enum_variant_arity(&self, enum_sym: Symbol, variant: Symbol) -> Option<usize> {
+        self.enums.get(&enum_sym).and_then(|info| {
+            info.variants
+                .iter()
+                .find_map(|(name, arity)| (*name == variant).then_some(*arity))
+        })
     }
 
     /// Walk the local object inheritance chain of `obj_sym` to find the [`ActionInfo`] for

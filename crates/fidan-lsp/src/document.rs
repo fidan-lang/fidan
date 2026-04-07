@@ -23,8 +23,12 @@ pub struct Document {
     pub symbol_table: SymbolTable,
     /// Every identifier token's span + resolved name, used for position lookup.
     pub identifier_spans: Vec<(Span, String)>,
-    /// Namespace alias → absolute file URL for `use "file.fdn" as alias` imports.
+    /// Namespace alias → absolute file URL for imports that bind a module namespace.
     pub imports: HashMap<String, Url>,
+    /// Flat imported symbol → (absolute file URL, exported symbol name).
+    pub direct_imports: HashMap<String, (Url, String)>,
+    /// Ordered wildcard file imports from `use "file.fdn"` declarations.
+    pub wildcard_imports: Vec<Url>,
     /// Stdlib module alias → canonical module name. E.g. `use std.io` → `"io" → "io"`;
     /// `use std.math as m` → `"m" → "math"`.
     pub stdlib_imports: HashMap<String, String>,

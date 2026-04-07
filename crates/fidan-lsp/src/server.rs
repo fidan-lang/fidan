@@ -12,6 +12,7 @@ use fidan_stdlib::{
     member_return_type as stdlib_member_return_type, module_info as stdlib_module_info,
 };
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use tower_lsp::jsonrpc::Result as RpcResult;
 use tower_lsp::lsp_types::*;
@@ -274,28 +275,18 @@ impl FidanLsp {
     }
 
     /// Re-analyse `text`, update the document store and push diagnostics to
-    /// the editor.  Also proactively loads any `use "file.fdn" as alias`
-    /// imports that are not yet in the store.
+    /// the editor.  Also proactively loads file imports that are not yet in
+    /// the store.
     async fn refresh(&self, uri: &Url, version: i32, text: &str) {
         let result = analysis::analyze(text, uri.as_str());
 
-        // Compute absolute URLs for every file-path import in this document.
+        // Compute absolute URLs for every import in this document.
         let current_path = uri.to_file_path().ok();
-        let import_urls: HashMap<String, Url> = result
-            .imports
-            .iter()
-            .filter_map(|(alias, rel_path)| {
-                let abs = if rel_path.starts_with('/') || rel_path.contains(':') {
-                    std::path::PathBuf::from(rel_path)
-                } else if let Some(parent) = current_path.as_ref().and_then(|p| p.parent()) {
-                    parent.join(rel_path)
-                } else {
-                    return None;
-                };
-                let url = Url::from_file_path(&abs).ok()?;
-                Some((alias.clone(), url))
-            })
-            .collect();
+        let resolved_imports = resolve_document_imports(
+            current_path.as_deref(),
+            &result.imports,
+            &result.user_module_imports,
+        );
 
         let stdlib_import_map: HashMap<String, String> =
             result.stdlib_imports.into_iter().collect();
@@ -309,7 +300,9 @@ impl FidanLsp {
                 semantic_tokens: result.semantic_tokens,
                 symbol_table: result.symbol_table,
                 identifier_spans: result.identifier_spans,
-                imports: import_urls.clone(),
+                imports: resolved_imports.namespace_imports.clone(),
+                direct_imports: resolved_imports.direct_imports.clone(),
+                wildcard_imports: resolved_imports.wildcard_imports.clone(),
                 stdlib_imports: stdlib_import_map,
                 inlay_hint_sites: result.inlay_hint_sites,
                 member_access_sites: result.member_access_sites,
@@ -321,7 +314,14 @@ impl FidanLsp {
         // in the editor.  Files that are actively open in the editor (version ≥ 0)
         // are managed through their own did-open / did-change notifications and
         // must NOT be overwritten with the on-disk version here.
-        for import_url in import_urls.values() {
+        let mut seen_imports = HashSet::new();
+        for import_url in resolved_imports
+            .namespace_imports
+            .values()
+            .chain(resolved_imports.direct_imports.values().map(|(url, _)| url))
+            .chain(resolved_imports.wildcard_imports.iter())
+            .filter(|url| seen_imports.insert((**url).clone()))
+        {
             let skip = self
                 .store
                 .get(import_url)
@@ -334,6 +334,12 @@ impl FidanLsp {
                 && let Ok(file_text) = std::fs::read_to_string(&path)
             {
                 let r = analysis::analyze(&file_text, import_url.as_str());
+                let background_path = path;
+                let background_imports = resolve_document_imports(
+                    Some(&background_path),
+                    &r.imports,
+                    &r.user_module_imports,
+                );
                 self.store.insert(
                     import_url.clone(),
                     Document {
@@ -343,7 +349,9 @@ impl FidanLsp {
                         semantic_tokens: r.semantic_tokens,
                         symbol_table: r.symbol_table,
                         identifier_spans: r.identifier_spans,
-                        imports: HashMap::new(),
+                        imports: background_imports.namespace_imports,
+                        direct_imports: background_imports.direct_imports,
+                        wildcard_imports: background_imports.wildcard_imports,
                         stdlib_imports: HashMap::new(),
                         inlay_hint_sites: vec![], // not shown for background docs
                         member_access_sites: r.member_access_sites,
@@ -382,6 +390,11 @@ impl FidanLsp {
         );
         let mut all_diags = result.diagnostics;
         all_diags.extend(extra);
+        all_diags = filter_wildcard_import_undefined_diagnostics(
+            &self.store,
+            &resolved_imports.wildcard_imports,
+            all_diags,
+        );
         self.client
             .publish_diagnostics(uri.clone(), all_diags, Some(version))
             .await;
@@ -538,6 +551,259 @@ impl FidanLsp {
 
         build_remove_unused_imports_edits_for_text(uri.as_str(), &text, &diags)
     }
+}
+
+struct ResolvedImports {
+    namespace_imports: HashMap<String, Url>,
+    direct_imports: HashMap<String, (Url, String)>,
+    wildcard_imports: Vec<Url>,
+}
+
+fn resolve_document_imports(
+    current_path: Option<&Path>,
+    file_imports: &[analysis::FileImport],
+    user_module_imports: &[analysis::UserModuleImport],
+) -> ResolvedImports {
+    let mut namespace_imports = HashMap::new();
+    let mut direct_imports = HashMap::new();
+    let mut wildcard_imports = Vec::new();
+
+    for import in file_imports {
+        let Some(url) = resolve_file_import_url(current_path, &import.path) else {
+            continue;
+        };
+        if let Some(alias) = &import.alias {
+            namespace_imports.insert(alias.clone(), url);
+        } else {
+            wildcard_imports.push(url);
+        }
+    }
+
+    for import in user_module_imports {
+        let Some(url) = resolve_user_module_import_url(current_path, &import.path, import.grouped)
+        else {
+            continue;
+        };
+        if import.grouped {
+            let Some(target) = import.path.last().cloned() else {
+                continue;
+            };
+            direct_imports.insert(target.clone(), (url, target));
+        } else {
+            let Some(binding) = import.alias.clone().or_else(|| import.path.last().cloned()) else {
+                continue;
+            };
+            namespace_imports.insert(binding, url);
+        }
+    }
+
+    ResolvedImports {
+        namespace_imports,
+        direct_imports,
+        wildcard_imports,
+    }
+}
+
+fn resolve_file_import_url(current_path: Option<&Path>, rel_path: &str) -> Option<Url> {
+    let abs = if rel_path.starts_with('/') || rel_path.contains(':') {
+        std::path::PathBuf::from(rel_path)
+    } else if let Some(parent) = current_path.and_then(|path| path.parent()) {
+        parent.join(rel_path)
+    } else {
+        return None;
+    };
+    Url::from_file_path(&abs).ok()
+}
+
+fn resolve_user_module_import_url(
+    current_path: Option<&Path>,
+    segments: &[String],
+    grouped: bool,
+) -> Option<Url> {
+    let parent = current_path.and_then(|path| path.parent())?;
+
+    let mut full_path = parent.to_path_buf();
+    for segment in segments {
+        full_path.push(segment);
+    }
+    full_path.set_extension("fdn");
+
+    if grouped || segments.len() <= 1 {
+        if grouped && segments.len() > 1 {
+            let mut prefix_path = parent.to_path_buf();
+            for segment in &segments[..segments.len() - 1] {
+                prefix_path.push(segment);
+            }
+            prefix_path.set_extension("fdn");
+            return Url::from_file_path(&prefix_path).ok();
+        }
+        return Url::from_file_path(&full_path).ok();
+    }
+
+    if full_path.exists() {
+        return Url::from_file_path(&full_path).ok();
+    }
+
+    let mut prefix_path = parent.to_path_buf();
+    for segment in &segments[..segments.len() - 1] {
+        prefix_path.push(segment);
+    }
+    prefix_path.set_extension("fdn");
+    Url::from_file_path(&prefix_path).ok()
+}
+
+fn load_background_document(store: &DocumentStore, url: &Url) -> Option<()> {
+    if store.get(url).is_some() {
+        return Some(());
+    }
+
+    let path = url.to_file_path().ok()?;
+    let file_text = std::fs::read_to_string(&path).ok()?;
+    let analysis = analysis::analyze(&file_text, url.as_str());
+    let resolved_imports = resolve_document_imports(
+        Some(&path),
+        &analysis.imports,
+        &analysis.user_module_imports,
+    );
+    store.insert(
+        url.clone(),
+        Document {
+            version: -1,
+            text: file_text,
+            diagnostics: vec![],
+            semantic_tokens: analysis.semantic_tokens,
+            symbol_table: analysis.symbol_table,
+            identifier_spans: analysis.identifier_spans,
+            imports: resolved_imports.namespace_imports,
+            direct_imports: resolved_imports.direct_imports,
+            wildcard_imports: resolved_imports.wildcard_imports,
+            stdlib_imports: HashMap::new(),
+            inlay_hint_sites: vec![],
+            member_access_sites: analysis.member_access_sites,
+        },
+    );
+    Some(())
+}
+
+fn import_doc_entry(store: &DocumentStore, url: &Url, name: &str) -> Option<SymbolEntry> {
+    load_background_document(store, url)?;
+    let doc = store.get(url)?;
+    doc.symbol_table.get(name).cloned()
+}
+
+enum ImportBindingDefinition {
+    OpenFile(Url),
+    ImportDoc(Url, String),
+}
+
+fn span_starts_import_statement(text: &str, span: Span) -> bool {
+    let start = span.start as usize;
+    let line_start = text[..start.min(text.len())]
+        .rfind('\n')
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let line = text[line_start..].lines().next().unwrap_or("").trim_start();
+    line.starts_with("use ") || line.starts_with("export use ")
+}
+
+fn import_binding_definition(
+    text: &str,
+    span: Span,
+    name: &str,
+    imports: &HashMap<String, Url>,
+    direct_imports: &HashMap<String, (Url, String)>,
+) -> Option<ImportBindingDefinition> {
+    if !span_starts_import_statement(text, span) {
+        return None;
+    }
+    if let Some(url) = imports.get(name) {
+        return Some(ImportBindingDefinition::OpenFile(url.clone()));
+    }
+    if let Some((url, import_name)) = direct_imports.get(name) {
+        return Some(ImportBindingDefinition::ImportDoc(
+            url.clone(),
+            import_name.clone(),
+        ));
+    }
+    None
+}
+
+fn import_path_url_at_offset(text: &str, uri: &Url, offset: usize) -> Option<Url> {
+    let current_path = uri.to_file_path().ok();
+    let line_start = text[..offset.min(text.len())]
+        .rfind('\n')
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let line_end = text[offset.min(text.len())..]
+        .find('\n')
+        .map(|idx| offset.min(text.len()) + idx)
+        .unwrap_or(text.len());
+    let line = &text[line_start..line_end];
+    let trimmed = line.trim_start();
+    if !(trimmed.starts_with("use ") || trimmed.starts_with("export use ")) {
+        return None;
+    }
+    let indent = line.len().saturating_sub(trimmed.len());
+    let quote_start_rel = trimmed.find('"')?;
+    let quote_start = line_start + indent + quote_start_rel;
+    let after_quote = &trimmed[quote_start_rel + 1..];
+    let quote_end_rel = after_quote.find('"')?;
+    let quote_end = quote_start + 1 + quote_end_rel;
+    if offset <= quote_start || offset > quote_end {
+        return None;
+    }
+    resolve_file_import_url(current_path.as_deref(), &text[quote_start + 1..quote_end])
+}
+
+fn wildcard_import_entry(
+    store: &DocumentStore,
+    wildcard_imports: &[Url],
+    name: &str,
+) -> Option<(Url, SymbolEntry)> {
+    for url in wildcard_imports {
+        if let Some(entry) = import_doc_entry(store, url, name) {
+            return Some((url.clone(), entry));
+        }
+    }
+    None
+}
+
+fn wildcard_import_completion_items(
+    store: &DocumentStore,
+    wildcard_imports: &[Url],
+) -> Vec<CompletionItem> {
+    let mut seen = HashSet::new();
+    let mut items = Vec::new();
+    for url in wildcard_imports {
+        for (name, entry) in store.get_doc_top_level(url) {
+            if seen.insert(name.clone()) {
+                items.push(completion_item_for_symbol(&name, &entry, "3"));
+            }
+        }
+    }
+    items
+}
+
+fn filter_wildcard_import_undefined_diagnostics(
+    store: &DocumentStore,
+    wildcard_imports: &[Url],
+    diags: Vec<Diagnostic>,
+) -> Vec<Diagnostic> {
+    diags
+        .into_iter()
+        .filter(|diag| {
+            let Some(NumberOrString::String(code)) = diag.code.as_ref() else {
+                return true;
+            };
+            if code != "E0101" {
+                return true;
+            }
+            let Some(name) = extract_backticked_name(&diag.message) else {
+                return true;
+            };
+            wildcard_import_entry(store, wildcard_imports, name).is_none()
+        })
+        .collect()
 }
 
 fn build_remove_unused_imports_edits_for_text(
@@ -889,6 +1155,7 @@ impl LanguageServer for FidanLsp {
             Found(String),            // detail string, ready to return
             CrossDoc(String, String), // (type_name, member_name) to search across docs
             ImportDoc(Url, String),   // (import_file_url, symbol_name) — for `module.Type`
+            WildcardImport(Vec<Url>, String),
             NotFound,
         }
 
@@ -921,7 +1188,11 @@ impl LanguageServer for FidanLsp {
             let (cur_span, cur_name) = &spans[hit_idx];
             let prev_name: Option<&str> = if hit_idx > 0 {
                 let (prev_span, prev_name) = &spans[hit_idx - 1];
-                if cur_span.start == prev_span.end + 1 {
+                if doc
+                    .text
+                    .get(prev_span.end as usize..cur_span.start as usize)
+                    == Some(".")
+                {
                     Some(prev_name.as_str())
                 } else {
                     None
@@ -1004,6 +1275,8 @@ impl LanguageServer for FidanLsp {
                     Some(detail) => HoverLookup::Found(detail),
                     None => HoverLookup::NotFound,
                 }
+            } else if !doc.wildcard_imports.is_empty() {
+                HoverLookup::WildcardImport(doc.wildcard_imports.clone(), cur_name.clone())
             } else {
                 HoverLookup::NotFound
             }
@@ -1026,6 +1299,12 @@ impl LanguageServer for FidanLsp {
                         Some(e) => e.detail.clone(),
                         None => return Ok(None),
                     },
+                    None => return Ok(None),
+                }
+            }
+            HoverLookup::WildcardImport(urls, name) => {
+                match wildcard_import_entry(&self.store, &urls, &name) {
+                    Some((_, entry)) => entry.detail,
                     None => return Ok(None),
                 }
             }
@@ -1058,7 +1337,8 @@ impl LanguageServer for FidanLsp {
             CrossDoc(String, String),                 // (type_name, member_name)
             CrossDocNamedArg(String, String, String), // (recv_ty, method_name, param_name)
             ImportDoc(Url, String), // (import_file_url, symbol_name) — for `module.Type`
-            OpenFile(Url),          // open the imported file at line 0 (alias goto-def)
+            WildcardImport(Vec<Url>, String),
+            OpenFile(Url), // open the imported file at line 0 (alias goto-def)
             NotFound,
         }
 
@@ -1069,80 +1349,115 @@ impl LanguageServer for FidanLsp {
             };
             let file = SourceFile::new(FileId(0), uri.as_str(), doc.text.as_str());
             let offset = lsp_pos_to_offset(&file, pos);
-            let spans = &doc.identifier_spans;
-            let hit_idx = match spans
-                .iter()
-                .position(|(s, _)| offset >= s.start && offset < s.end)
+            if let Some(import_url) =
+                import_path_url_at_offset(doc.text.as_str(), uri, offset as usize)
             {
-                Some(i) => i,
-                None => return Ok(None),
-            };
-            let (cur_span, cur_name) = &spans[hit_idx];
-            let prev_name: Option<&str> = if hit_idx > 0 {
-                let (prev_span, prev_name) = &spans[hit_idx - 1];
-                if cur_span.start == prev_span.end + 1 {
-                    Some(prev_name.as_str())
-                } else {
-                    None
-                }
+                (DefinitionLookup::OpenFile(import_url), file)
             } else {
-                None
-            };
-            let in_doc = doc
-                .symbol_table
-                .lookup_visible(offset, cur_name.as_str())
-                .or_else(|| {
-                    let pn = prev_name?;
-                    if let Some(e) = doc.symbol_table.get(&format!("{}.{}", pn, cur_name)) {
-                        return Some(e);
-                    }
-                    if let Some(pe) = doc.symbol_table.lookup_visible(offset, pn)
-                        && let Some(ty) = &pe.ty_name
+                let spans = &doc.identifier_spans;
+                let hit_idx = match spans
+                    .iter()
+                    .position(|(s, _)| offset >= s.start && offset < s.end)
+                {
+                    Some(i) => i,
+                    None => return Ok(None),
+                };
+                let (cur_span, cur_name) = &spans[hit_idx];
+                let prev_name: Option<&str> = if hit_idx > 0 {
+                    let (prev_span, prev_name) = &spans[hit_idx - 1];
+                    if doc
+                        .text
+                        .get(prev_span.end as usize..cur_span.start as usize)
+                        == Some(".")
                     {
-                        return doc.symbol_table.get(&format!("{}.{}", ty, cur_name));
+                        Some(prev_name.as_str())
+                    } else {
+                        None
                     }
-                    None
-                });
-            // Fallback: resolve named call-arguments (e.g. `times` in `foo(times = 10)`).
-            let named_arg =
-                find_named_arg_param(&doc.symbol_table, spans, hit_idx, cur_span, &doc.text);
-            let named_to_lookup = |l: NamedArgLookup| -> DefinitionLookup {
-                match l {
-                    NamedArgLookup::InDoc(span) => DefinitionLookup::Found(span),
-                    NamedArgLookup::CrossModule {
-                        recv_ty,
-                        method_name,
-                        param_name,
-                    } => DefinitionLookup::CrossDocNamedArg(recv_ty, method_name, param_name),
-                }
-            };
-            let p1 = if let Some(e) = in_doc {
-                DefinitionLookup::Found(e.span)
-            } else if let Some(pn) = prev_name {
-                // `module.Type` — prev is a namespace alias for an imported file.
-                if let Some(import_url) = doc.imports.get(pn) {
-                    DefinitionLookup::ImportDoc(import_url.clone(), cur_name.clone())
                 } else {
-                    let ty = doc
-                        .symbol_table
-                        .lookup_visible(offset, pn)
-                        .and_then(|e| e.ty_name.clone());
-                    match ty {
-                        Some(t) => DefinitionLookup::CrossDoc(t, cur_name.clone()),
-                        None => named_arg
-                            .map(named_to_lookup)
-                            .unwrap_or(DefinitionLookup::NotFound),
+                    None
+                };
+                let in_doc = doc
+                    .symbol_table
+                    .lookup_visible(offset, cur_name.as_str())
+                    .or_else(|| {
+                        let pn = prev_name?;
+                        if let Some(e) = doc.symbol_table.get(&format!("{}.{}", pn, cur_name)) {
+                            return Some(e);
+                        }
+                        if let Some(pe) = doc.symbol_table.lookup_visible(offset, pn)
+                            && let Some(ty) = &pe.ty_name
+                        {
+                            return doc.symbol_table.get(&format!("{}.{}", ty, cur_name));
+                        }
+                        None
+                    });
+                // Fallback: resolve named call-arguments (e.g. `times` in `foo(times = 10)`).
+                let named_arg =
+                    find_named_arg_param(&doc.symbol_table, spans, hit_idx, cur_span, &doc.text);
+                let named_to_lookup = |l: NamedArgLookup| -> DefinitionLookup {
+                    match l {
+                        NamedArgLookup::InDoc(span) => DefinitionLookup::Found(span),
+                        NamedArgLookup::CrossModule {
+                            recv_ty,
+                            method_name,
+                            param_name,
+                        } => DefinitionLookup::CrossDocNamedArg(recv_ty, method_name, param_name),
                     }
-                }
-            } else if let Some(import_url) = doc.imports.get(cur_name.as_str()) {
-                // Cursor is on a module alias itself — open the imported file.
-                DefinitionLookup::OpenFile(import_url.clone())
-            } else {
-                named_arg
-                    .map(named_to_lookup)
-                    .unwrap_or(DefinitionLookup::NotFound)
-            };
-            (p1, file) // `doc` dropped here
+                };
+                let p1 = if let Some(e) = in_doc {
+                    match import_binding_definition(
+                        &doc.text,
+                        e.span,
+                        cur_name.as_str(),
+                        &doc.imports,
+                        &doc.direct_imports,
+                    ) {
+                        Some(ImportBindingDefinition::OpenFile(url)) => {
+                            DefinitionLookup::OpenFile(url)
+                        }
+                        Some(ImportBindingDefinition::ImportDoc(url, name)) => {
+                            DefinitionLookup::ImportDoc(url, name)
+                        }
+                        None => DefinitionLookup::Found(e.span),
+                    }
+                } else if let Some(pn) = prev_name {
+                    // `module.Type` — prev is a namespace alias for an imported file.
+                    if let Some(import_url) = doc.imports.get(pn) {
+                        DefinitionLookup::ImportDoc(import_url.clone(), cur_name.clone())
+                    } else {
+                        let ty = doc
+                            .symbol_table
+                            .lookup_visible(offset, pn)
+                            .and_then(|e| e.ty_name.clone());
+                        match ty {
+                            Some(t) => DefinitionLookup::CrossDoc(t, cur_name.clone()),
+                            None => named_arg
+                                .map(named_to_lookup)
+                                .unwrap_or(DefinitionLookup::NotFound),
+                        }
+                    }
+                } else if let Some(import_url) = doc.imports.get(cur_name.as_str()) {
+                    // Cursor is on a module alias itself — open the imported file.
+                    DefinitionLookup::OpenFile(import_url.clone())
+                } else if let Some((import_url, import_name)) =
+                    doc.direct_imports.get(cur_name.as_str())
+                {
+                    DefinitionLookup::ImportDoc(import_url.clone(), import_name.clone())
+                } else {
+                    named_arg.map(named_to_lookup).unwrap_or_else(|| {
+                        if doc.wildcard_imports.is_empty() {
+                            DefinitionLookup::NotFound
+                        } else {
+                            DefinitionLookup::WildcardImport(
+                                doc.wildcard_imports.clone(),
+                                cur_name.clone(),
+                            )
+                        }
+                    })
+                };
+                (p1, file) // `doc` dropped here
+            }
         };
 
         // Phase 2: resolve span + source URI (may require cross-doc lookup).
@@ -1167,18 +1482,17 @@ impl LanguageServer for FidanLsp {
                 }
             }
             DefinitionLookup::ImportDoc(url, name) => {
-                let span = {
-                    let d = match self.store.get(&url) {
-                        Some(d) => d,
-                        None => return Ok(None),
-                    };
-                    match d.symbol_table.get(&name) {
-                        Some(e) => e.span,
-                        None => return Ok(None),
-                    }
-                    // `d` dropped here
+                let span = match import_doc_entry(&self.store, &url, &name) {
+                    Some(entry) => entry.span,
+                    None => return Ok(None),
                 };
                 (url, span)
+            }
+            DefinitionLookup::WildcardImport(urls, name) => {
+                match wildcard_import_entry(&self.store, &urls, &name) {
+                    Some((src_uri, entry)) => (src_uri, entry.span),
+                    None => return Ok(None),
+                }
             }
             DefinitionLookup::OpenFile(url) => (url, Span::default()),
             DefinitionLookup::NotFound => return Ok(None),
@@ -1231,6 +1545,8 @@ impl LanguageServer for FidanLsp {
             dot_res: Option<DotResolution>,
             /// Declared symbols (non-dot completion path).
             local_items: Vec<CompletionItem>,
+            /// Wildcard-imported file URLs available for unqualified lookup.
+            wildcard_imports: Vec<Url>,
             /// Named parameter entries found locally for the enclosing call.
             named_param_entries: Vec<(String, Span)>,
             /// When named params live in an imported doc: (recv_ty, method_name).
@@ -1318,6 +1634,7 @@ impl LanguageServer for FidanLsp {
                 CompletionSeed {
                     dot_res: None,
                     local_items: vec![],
+                    wildcard_imports: doc.wildcard_imports.clone(),
                     named_param_entries: vec![],
                     named_param_cross: None,
                     import_ctx,
@@ -1372,6 +1689,7 @@ impl LanguageServer for FidanLsp {
                     CompletionSeed {
                         dot_res,
                         local_items: vec![],
+                        wildcard_imports: doc.wildcard_imports.clone(),
                         named_param_entries: vec![],
                         named_param_cross: None,
                         import_ctx: None,
@@ -1466,6 +1784,7 @@ impl LanguageServer for FidanLsp {
                     CompletionSeed {
                         dot_res,
                         local_items,
+                        wildcard_imports: doc.wildcard_imports.clone(),
                         named_param_entries,
                         named_param_cross,
                         import_ctx: None,
@@ -1775,6 +2094,14 @@ impl LanguageServer for FidanLsp {
         // at the top), then declared symbols, then keywords, then builtins.
         let mut items = named_param_items;
         items.extend(completion_seed.local_items);
+
+        let existing_labels: HashSet<String> =
+            items.iter().map(|item| item.label.clone()).collect();
+        items.extend(
+            wildcard_import_completion_items(&self.store, &completion_seed.wildcard_imports)
+                .into_iter()
+                .filter(|item| !existing_labels.contains(&item.label)),
+        );
 
         // Language keywords.
         for &kw in COMPLETION_KEYWORDS {
@@ -2943,6 +3270,46 @@ fn visible_symbol_completion_items(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use tower_lsp::{LanguageServer, LspService};
+
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf()
+    }
+
+    fn path_url(path: &Path) -> Url {
+        Url::from_file_path(path).expect("file url")
+    }
+
+    fn import_test_path(rel_path: &str) -> PathBuf {
+        workspace_root()
+            .join("test/examples/import_test")
+            .join(rel_path)
+    }
+
+    fn background_doc(uri: &Url, text: &str) -> Document {
+        let analysis = analysis::analyze(text, uri.as_str());
+        Document {
+            version: -1,
+            text: text.to_string(),
+            diagnostics: vec![],
+            semantic_tokens: analysis.semantic_tokens,
+            symbol_table: analysis.symbol_table,
+            identifier_spans: analysis.identifier_spans,
+            imports: HashMap::new(),
+            direct_imports: HashMap::new(),
+            wildcard_imports: vec![],
+            stdlib_imports: HashMap::new(),
+            inlay_hint_sites: vec![],
+            member_access_sites: analysis.member_access_sites,
+        }
+    }
 
     #[test]
     fn stdlib_completion_surface_tracks_runtime_modules() {
@@ -2973,6 +3340,216 @@ mod tests {
         assert!(COMPLETION_KEYWORDS.contains(&"parallel"));
         assert!(COMPLETION_KEYWORDS.contains(&"enum"));
         assert!(COMPLETION_KEYWORDS.contains(&"handle"));
+    }
+
+    #[test]
+    fn wildcard_import_helpers_resolve_symbols_and_filter_false_undefined_names() {
+        let store = DocumentStore::new();
+        let import_uri = Url::parse("file:///utils.fdn").expect("import uri");
+        let import_text = r#"const var PI = 3.14159
+
+action greet with (certain name oftype string) returns string {
+    return name
+}
+"#;
+        store.insert(import_uri.clone(), background_doc(&import_uri, import_text));
+
+        let wildcard_imports = vec![import_uri.clone()];
+        let (_, entry) = wildcard_import_entry(&store, &wildcard_imports, "greet")
+            .expect("wildcard import should resolve greet");
+        assert!(entry.detail.contains("greet"));
+
+        let labels: Vec<String> = wildcard_import_completion_items(&store, &wildcard_imports)
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert!(labels.contains(&"greet".to_string()));
+        assert!(labels.contains(&"PI".to_string()));
+
+        let filtered = filter_wildcard_import_undefined_diagnostics(
+            &store,
+            &wildcard_imports,
+            vec![
+                Diagnostic {
+                    code: Some(NumberOrString::String("E0101".into())),
+                    message: "undefined name `greet`".into(),
+                    ..Default::default()
+                },
+                Diagnostic {
+                    code: Some(NumberOrString::String("E0101".into())),
+                    message: "undefined name `missing`".into(),
+                    ..Default::default()
+                },
+            ],
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].message, "undefined name `missing`");
+    }
+
+    #[test]
+    fn wildcard_import_entry_loads_imported_docs_on_demand() {
+        let store = DocumentStore::new();
+        let import_uri = path_url(&import_test_path("utils.fdn"));
+
+        let (resolved_uri, entry) =
+            wildcard_import_entry(&store, std::slice::from_ref(&import_uri), "greet")
+                .expect("wildcard import should resolve after lazy load");
+
+        assert_eq!(resolved_uri, import_uri);
+        assert!(entry.detail.contains("greet"));
+    }
+
+    #[test]
+    fn import_binding_definition_redirects_namespace_and_direct_imports() {
+        let namespace_uri = Url::parse("file:///utils_lib.fdn").expect("namespace uri");
+        let direct_uri = Url::parse("file:///utils_flat.fdn").expect("direct uri");
+        let span = Span::new(FileId(0), 0, 13);
+
+        let namespace = import_binding_definition(
+            "use utils_lib\nprint(utils_lib.add_ints(1, 2))\n",
+            span,
+            "utils_lib",
+            &HashMap::from([("utils_lib".to_string(), namespace_uri.clone())]),
+            &HashMap::new(),
+        );
+        assert!(matches!(
+            namespace,
+            Some(ImportBindingDefinition::OpenFile(url)) if url == namespace_uri
+        ));
+
+        let direct = import_binding_definition(
+            "use utils_flat.{sub_ints}\nprint(sub_ints(1, 2))\n",
+            span,
+            "sub_ints",
+            &HashMap::new(),
+            &HashMap::from([(
+                "sub_ints".to_string(),
+                (direct_uri.clone(), "sub_ints".to_string()),
+            )]),
+        );
+        assert!(matches!(
+            direct,
+            Some(ImportBindingDefinition::ImportDoc(url, name))
+                if url == direct_uri && name == "sub_ints"
+        ));
+    }
+
+    #[test]
+    fn resolve_document_imports_tracks_user_module_namespaces_and_direct_bindings() {
+        let current_path = import_test_path("import_test.fdn");
+        let analysis = analysis::analyze(
+            "use utils_lib\nuse utils_flat.{sub_ints}\n",
+            "file:///import_resolution_test.fdn",
+        );
+
+        let resolved = resolve_document_imports(
+            Some(&current_path),
+            &analysis.imports,
+            &analysis.user_module_imports,
+        );
+
+        assert!(resolved.namespace_imports.contains_key("utils_lib"));
+        assert_eq!(
+            resolved
+                .namespace_imports
+                .get("utils_lib")
+                .and_then(|url| url.to_file_path().ok())
+                .as_deref(),
+            Some(import_test_path("utils_lib.fdn").as_path())
+        );
+
+        let (direct_url, direct_name) = resolved
+            .direct_imports
+            .get("sub_ints")
+            .expect("expected grouped import binding");
+        assert_eq!(direct_name, "sub_ints");
+        assert_eq!(
+            direct_url.to_file_path().ok().as_deref(),
+            Some(import_test_path("utils_flat.fdn").as_path())
+        );
+    }
+
+    #[test]
+    fn import_path_url_at_offset_resolves_string_import_targets() {
+        let text = "use \"./utils.fdn\"\n";
+        let cursor = text.find("utils.fdn").expect("import path cursor") + 2;
+        let uri = path_url(&import_test_path("import_test.fdn"));
+
+        let resolved = import_path_url_at_offset(text, &uri, cursor)
+            .and_then(|url| url.to_file_path().ok())
+            .expect("expected import path target");
+
+        assert_eq!(resolved, import_test_path("utils.fdn"));
+    }
+
+    #[test]
+    fn goto_definition_resolves_wildcard_file_imported_symbols() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let import_test = import_test_path("import_test.fdn");
+            let uri = path_url(&import_test);
+            let text = std::fs::read_to_string(&import_test).expect("import_test source");
+            backend.refresh(&uri, 1, &text).await;
+
+            let doc = backend.store.get(&uri).expect("refreshed document");
+            assert!(
+                wildcard_import_entry(&backend.store, &doc.wildcard_imports, "greet").is_some(),
+                "wildcard import lookup should resolve greet before goto-definition",
+            );
+            let greet_span = doc
+                .identifier_spans
+                .iter()
+                .find(|(_, name)| name == "greet")
+                .map(|(span, _)| *span)
+                .expect("greet token span");
+            drop(doc);
+
+            let file = SourceFile::new(FileId(0), uri.as_str(), text.as_str());
+            let pos = convert::span_to_range(&file, greet_span).start;
+            assert_eq!(
+                lsp_pos_to_offset(&file, &pos),
+                greet_span.start,
+                "expected goto position to round-trip to the greet token start",
+            );
+
+            let response = LanguageServer::goto_definition(
+                backend,
+                GotoDefinitionParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position: pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                },
+            )
+            .await
+            .expect("goto definition result")
+            .expect("definition location");
+
+            let GotoDefinitionResponse::Scalar(location) = response else {
+                panic!("expected scalar definition location");
+            };
+
+            assert_eq!(location.uri, path_url(&import_test_path("utils.fdn")));
+            let target_text =
+                std::fs::read_to_string(import_test_path("utils.fdn")).expect("utils source");
+            let target_file =
+                SourceFile::new(FileId(0), location.uri.as_str(), target_text.as_str());
+            let target_offset = lsp_pos_to_offset(&target_file, &location.range.start) as usize;
+            let target_line = target_text[target_offset..]
+                .lines()
+                .next()
+                .expect("target line");
+            assert!(target_line.starts_with("action greet"));
+        });
     }
 
     #[test]
