@@ -104,36 +104,505 @@ pub struct ReceiverMemberInfo {
     pub method_return: Option<ReceiverReturnKind>,
 }
 
-const fn field(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReceiverMemberSpec {
+    pub names: &'static [&'static str],
+    pub info: ReceiverMemberInfo,
+}
+
+const fn spec(
+    names: &'static [&'static str],
     canonical_name: &'static str,
-    return_kind: ReceiverReturnKind,
-) -> ReceiverMemberInfo {
-    ReceiverMemberInfo {
-        canonical_name,
-        field_return: Some(return_kind),
-        method_return: None,
+    field_return: Option<ReceiverReturnKind>,
+    method_return: Option<ReceiverReturnKind>,
+) -> ReceiverMemberSpec {
+    ReceiverMemberSpec {
+        names,
+        info: ReceiverMemberInfo {
+            canonical_name,
+            field_return,
+            method_return,
+        },
     }
 }
 
-const fn method(
-    canonical_name: &'static str,
-    return_kind: ReceiverReturnKind,
-) -> ReceiverMemberInfo {
-    ReceiverMemberInfo {
-        canonical_name,
-        field_return: None,
-        method_return: Some(return_kind),
-    }
-}
+const INTEGER_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
+    spec(&["abs"], "abs", None, Some(ReceiverReturnKind::Integer)),
+    spec(&["sqrt"], "sqrt", None, Some(ReceiverReturnKind::Float)),
+    spec(
+        &["toFloat", "to_float"],
+        "toFloat",
+        None,
+        Some(ReceiverReturnKind::Float),
+    ),
+    spec(
+        &["toString", "to_string"],
+        "toString",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+];
 
-const fn field_and_method(
-    canonical_name: &'static str,
-    return_kind: ReceiverReturnKind,
-) -> ReceiverMemberInfo {
-    ReceiverMemberInfo {
-        canonical_name,
-        field_return: Some(return_kind),
-        method_return: Some(return_kind),
+const FLOAT_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
+    spec(&["abs"], "abs", None, Some(ReceiverReturnKind::Float)),
+    spec(&["sqrt"], "sqrt", None, Some(ReceiverReturnKind::Float)),
+    spec(&["floor"], "floor", None, Some(ReceiverReturnKind::Integer)),
+    spec(&["ceil"], "ceil", None, Some(ReceiverReturnKind::Integer)),
+    spec(&["round"], "round", None, Some(ReceiverReturnKind::Integer)),
+    spec(
+        &["toInt", "to_int"],
+        "toInt",
+        None,
+        Some(ReceiverReturnKind::Integer),
+    ),
+    spec(
+        &["toString", "to_string"],
+        "toString",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+];
+
+const STRING_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
+    spec(
+        &["len", "length"],
+        "len",
+        Some(ReceiverReturnKind::Integer),
+        Some(ReceiverReturnKind::Integer),
+    ),
+    spec(
+        &["byteLen", "byte_len"],
+        "byteLen",
+        Some(ReceiverReturnKind::Integer),
+        Some(ReceiverReturnKind::Integer),
+    ),
+    spec(
+        &["lower", "toLower", "to_lower"],
+        "lower",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["upper", "toUpper", "to_upper"],
+        "upper",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["capitalize"],
+        "capitalize",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(&["trim"], "trim", None, Some(ReceiverReturnKind::String)),
+    spec(
+        &["trimStart", "ltrim", "trim_start"],
+        "trimStart",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["trimEnd", "rtrim", "trim_end"],
+        "trimEnd",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["split"],
+        "split",
+        None,
+        Some(ReceiverReturnKind::ListOfString),
+    ),
+    spec(
+        &["lines"],
+        "lines",
+        None,
+        Some(ReceiverReturnKind::ListOfString),
+    ),
+    spec(
+        &["chars"],
+        "chars",
+        None,
+        Some(ReceiverReturnKind::ListOfString),
+    ),
+    spec(&["join"], "join", None, Some(ReceiverReturnKind::String)),
+    spec(
+        &["contains"],
+        "contains",
+        None,
+        Some(ReceiverReturnKind::Boolean),
+    ),
+    spec(
+        &["startsWith", "starts_with"],
+        "startsWith",
+        None,
+        Some(ReceiverReturnKind::Boolean),
+    ),
+    spec(
+        &["endsWith", "ends_with"],
+        "endsWith",
+        None,
+        Some(ReceiverReturnKind::Boolean),
+    ),
+    spec(
+        &["indexOf", "index_of", "find"],
+        "indexOf",
+        None,
+        Some(ReceiverReturnKind::Integer),
+    ),
+    spec(
+        &["lastIndexOf", "last_index_of"],
+        "lastIndexOf",
+        None,
+        Some(ReceiverReturnKind::Integer),
+    ),
+    spec(
+        &["replace"],
+        "replace",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["replaceAll", "replace_all"],
+        "replaceAll",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["replaceFirst", "replace_first"],
+        "replaceFirst",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["repeat"],
+        "repeat",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["reverse", "reversed"],
+        "reverse",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["charAt", "char_at"],
+        "charAt",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["substring", "substr", "slice"],
+        "substring",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["toInt", "to_int", "parseInt", "parse_int"],
+        "toInt",
+        None,
+        Some(ReceiverReturnKind::Integer),
+    ),
+    spec(
+        &["toFloat", "to_float", "parseFloat", "parse_float"],
+        "toFloat",
+        None,
+        Some(ReceiverReturnKind::Float),
+    ),
+    spec(
+        &["toBool", "to_bool"],
+        "toBool",
+        None,
+        Some(ReceiverReturnKind::Boolean),
+    ),
+    spec(
+        &["toString", "to_string"],
+        "toString",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["padStart", "pad_start"],
+        "padStart",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["padEnd", "pad_end"],
+        "padEnd",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["bytes"],
+        "bytes",
+        None,
+        Some(ReceiverReturnKind::ListOfInteger),
+    ),
+    spec(
+        &["charCode", "char_code"],
+        "charCode",
+        None,
+        Some(ReceiverReturnKind::Integer),
+    ),
+    spec(
+        &["format"],
+        "format",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["isEmpty", "is_empty"],
+        "isEmpty",
+        None,
+        Some(ReceiverReturnKind::Boolean),
+    ),
+];
+
+const LIST_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
+    spec(
+        &["len", "length", "size"],
+        "len",
+        Some(ReceiverReturnKind::Integer),
+        Some(ReceiverReturnKind::Integer),
+    ),
+    spec(
+        &["isEmpty", "is_empty"],
+        "isEmpty",
+        None,
+        Some(ReceiverReturnKind::Boolean),
+    ),
+    spec(
+        &["append", "push", "add"],
+        "append",
+        None,
+        Some(ReceiverReturnKind::Nothing),
+    ),
+    spec(
+        &["pop"],
+        "pop",
+        None,
+        Some(ReceiverReturnKind::ReceiverElement),
+    ),
+    spec(
+        &["first", "head"],
+        "first",
+        None,
+        Some(ReceiverReturnKind::ReceiverElement),
+    ),
+    spec(
+        &["last"],
+        "last",
+        None,
+        Some(ReceiverReturnKind::ReceiverElement),
+    ),
+    spec(
+        &["get"],
+        "get",
+        None,
+        Some(ReceiverReturnKind::ReceiverElement),
+    ),
+    spec(
+        &["contains"],
+        "contains",
+        None,
+        Some(ReceiverReturnKind::Boolean),
+    ),
+    spec(
+        &["indexOf", "index_of"],
+        "indexOf",
+        None,
+        Some(ReceiverReturnKind::Integer),
+    ),
+    spec(
+        &["reverse"],
+        "reverse",
+        None,
+        Some(ReceiverReturnKind::Nothing),
+    ),
+    spec(
+        &["reversed"],
+        "reversed",
+        None,
+        Some(ReceiverReturnKind::ListOfReceiverElement),
+    ),
+    spec(&["sort"], "sort", None, Some(ReceiverReturnKind::Nothing)),
+    spec(&["join"], "join", None, Some(ReceiverReturnKind::String)),
+    spec(
+        &["slice"],
+        "slice",
+        None,
+        Some(ReceiverReturnKind::ListOfReceiverElement),
+    ),
+    spec(
+        &["flatten"],
+        "flatten",
+        None,
+        Some(ReceiverReturnKind::ListOfDynamic),
+    ),
+    spec(
+        &["extend", "concat"],
+        "extend",
+        None,
+        Some(ReceiverReturnKind::Nothing),
+    ),
+    spec(
+        &["toString", "to_string"],
+        "toString",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+    spec(
+        &["forEach", "for_each", "each"],
+        "forEach",
+        None,
+        Some(ReceiverReturnKind::Nothing),
+    ),
+    spec(
+        &["map", "transform", "collect"],
+        "map",
+        None,
+        Some(ReceiverReturnKind::ListOfDynamic),
+    ),
+    spec(
+        &["filter", "where_", "select"],
+        "filter",
+        None,
+        Some(ReceiverReturnKind::ListOfReceiverElement),
+    ),
+    spec(&["find"], "find", None, Some(ReceiverReturnKind::Dynamic)),
+    spec(
+        &["firstWhere", "first_where"],
+        "firstWhere",
+        None,
+        Some(ReceiverReturnKind::ReceiverElement),
+    ),
+    spec(
+        &["remove"],
+        "remove",
+        None,
+        Some(ReceiverReturnKind::ReceiverElement),
+    ),
+    spec(
+        &["reduce", "fold"],
+        "reduce",
+        None,
+        Some(ReceiverReturnKind::Dynamic),
+    ),
+];
+
+const DICT_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
+    spec(
+        &["len", "length", "size"],
+        "len",
+        Some(ReceiverReturnKind::Integer),
+        Some(ReceiverReturnKind::Integer),
+    ),
+    spec(
+        &["isEmpty", "is_empty"],
+        "isEmpty",
+        None,
+        Some(ReceiverReturnKind::Boolean),
+    ),
+    spec(&["get"], "get", None, Some(ReceiverReturnKind::DictValue)),
+    spec(
+        &["set", "put", "insert"],
+        "set",
+        None,
+        Some(ReceiverReturnKind::Nothing),
+    ),
+    spec(
+        &["contains", "has", "has_key", "containsKey", "contains_key"],
+        "containsKey",
+        None,
+        Some(ReceiverReturnKind::Boolean),
+    ),
+    spec(
+        &["remove", "delete"],
+        "remove",
+        None,
+        Some(ReceiverReturnKind::Nothing),
+    ),
+    spec(
+        &["keys"],
+        "keys",
+        None,
+        Some(ReceiverReturnKind::ListOfString),
+    ),
+    spec(
+        &["values"],
+        "values",
+        None,
+        Some(ReceiverReturnKind::ListOfDictValue),
+    ),
+    spec(
+        &["entries", "items"],
+        "entries",
+        None,
+        Some(ReceiverReturnKind::ListOfDynamicPairs),
+    ),
+    spec(
+        &["toString", "to_string"],
+        "toString",
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+];
+
+const SHARED_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
+    spec(&["type"], "type", Some(ReceiverReturnKind::String), None),
+    spec(
+        &["get"],
+        "get",
+        None,
+        Some(ReceiverReturnKind::SharedInnerValue),
+    ),
+    spec(&["set"], "set", None, Some(ReceiverReturnKind::Nothing)),
+    spec(
+        &["weak", "downgrade"],
+        "weak",
+        None,
+        Some(ReceiverReturnKind::WeakSharedOfInner),
+    ),
+];
+
+const WEAK_SHARED_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
+    spec(&["type"], "type", Some(ReceiverReturnKind::String), None),
+    spec(
+        &["upgrade"],
+        "upgrade",
+        None,
+        Some(ReceiverReturnKind::SharedOfInner),
+    ),
+    spec(
+        &["isAlive", "is_alive", "alive"],
+        "isAlive",
+        None,
+        Some(ReceiverReturnKind::Boolean),
+    ),
+];
+
+const FUNCTION_MEMBER_SPECS: &[ReceiverMemberSpec] = &[spec(
+    &["name"],
+    "name",
+    Some(ReceiverReturnKind::String),
+    None,
+)];
+
+pub fn receiver_member_specs(receiver_kind: ReceiverBuiltinKind) -> &'static [ReceiverMemberSpec] {
+    use ReceiverBuiltinKind as Kind;
+
+    match receiver_kind {
+        Kind::Integer => INTEGER_MEMBER_SPECS,
+        Kind::Float => FLOAT_MEMBER_SPECS,
+        Kind::String => STRING_MEMBER_SPECS,
+        Kind::List => LIST_MEMBER_SPECS,
+        Kind::Dict => DICT_MEMBER_SPECS,
+        Kind::Shared => SHARED_MEMBER_SPECS,
+        Kind::WeakShared => WEAK_SHARED_MEMBER_SPECS,
+        Kind::Function => FUNCTION_MEMBER_SPECS,
+        _ => &[],
     }
 }
 
@@ -294,110 +763,10 @@ pub fn infer_receiver_member(
     receiver_kind: ReceiverBuiltinKind,
     name: &str,
 ) -> Option<ReceiverMemberInfo> {
-    use ReceiverBuiltinKind as Kind;
-    use ReceiverReturnKind as Return;
-
-    match receiver_kind {
-        Kind::String => match name {
-            "len" | "length" => Some(field_and_method("len", Return::Integer)),
-            "byteLen" | "byte_len" => Some(field_and_method("byteLen", Return::Integer)),
-            "lower" | "toLower" | "to_lower" => Some(method("lower", Return::String)),
-            "upper" | "toUpper" | "to_upper" => Some(method("upper", Return::String)),
-            "capitalize" => Some(method("capitalize", Return::String)),
-            "trim" => Some(method("trim", Return::String)),
-            "trimStart" | "ltrim" | "trim_start" => Some(method("trimStart", Return::String)),
-            "trimEnd" | "rtrim" | "trim_end" => Some(method("trimEnd", Return::String)),
-            "split" => Some(method("split", Return::ListOfString)),
-            "lines" => Some(method("lines", Return::ListOfString)),
-            "chars" => Some(method("chars", Return::ListOfString)),
-            "join" => Some(method("join", Return::String)),
-            "contains" => Some(method("contains", Return::Boolean)),
-            "startsWith" | "starts_with" => Some(method("startsWith", Return::Boolean)),
-            "endsWith" | "ends_with" => Some(method("endsWith", Return::Boolean)),
-            "indexOf" | "index_of" | "find" => Some(method("indexOf", Return::Integer)),
-            "lastIndexOf" | "last_index_of" => Some(method("lastIndexOf", Return::Integer)),
-            "replace" => Some(method("replace", Return::String)),
-            "replaceAll" | "replace_all" => Some(method("replaceAll", Return::String)),
-            "replaceFirst" | "replace_first" => Some(method("replaceFirst", Return::String)),
-            "repeat" => Some(method("repeat", Return::String)),
-            "reverse" | "reversed" => Some(method("reverse", Return::String)),
-            "charAt" | "char_at" => Some(method("charAt", Return::String)),
-            "substring" | "substr" | "slice" => Some(method("substring", Return::String)),
-            "toInt" | "to_int" | "parseInt" | "parse_int" => Some(method("toInt", Return::Integer)),
-            "toFloat" | "to_float" | "parseFloat" | "parse_float" => {
-                Some(method("toFloat", Return::Float))
-            }
-            "toBool" | "to_bool" => Some(method("toBool", Return::Boolean)),
-            "toString" | "to_string" => Some(method("toString", Return::String)),
-            "padStart" | "pad_start" => Some(method("padStart", Return::String)),
-            "padEnd" | "pad_end" => Some(method("padEnd", Return::String)),
-            "bytes" => Some(method("bytes", Return::ListOfInteger)),
-            "charCode" | "char_code" => Some(method("charCode", Return::Integer)),
-            "format" => Some(method("format", Return::String)),
-            "isEmpty" | "is_empty" => Some(method("isEmpty", Return::Boolean)),
-            _ => None,
-        },
-        Kind::List => match name {
-            "len" | "length" | "size" => Some(field_and_method("len", Return::Integer)),
-            "isEmpty" | "is_empty" => Some(method("isEmpty", Return::Boolean)),
-            "append" | "push" | "add" => Some(method("append", Return::Nothing)),
-            "pop" => Some(method("pop", Return::ReceiverElement)),
-            "first" | "head" => Some(method("first", Return::ReceiverElement)),
-            "last" => Some(method("last", Return::ReceiverElement)),
-            "get" => Some(method("get", Return::ReceiverElement)),
-            "contains" => Some(method("contains", Return::Boolean)),
-            "indexOf" | "index_of" => Some(method("indexOf", Return::Integer)),
-            "reverse" => Some(method("reverse", Return::Nothing)),
-            "reversed" => Some(method("reversed", Return::ListOfReceiverElement)),
-            "sort" => Some(method("sort", Return::Nothing)),
-            "join" => Some(method("join", Return::String)),
-            "slice" => Some(method("slice", Return::ListOfReceiverElement)),
-            "flatten" => Some(method("flatten", Return::ListOfDynamic)),
-            "extend" | "concat" => Some(method("extend", Return::Nothing)),
-            "toString" | "to_string" => Some(method("toString", Return::String)),
-            "forEach" | "for_each" | "each" => Some(method("forEach", Return::Nothing)),
-            "map" | "transform" | "collect" => Some(method("map", Return::ListOfDynamic)),
-            "filter" | "where_" | "select" => Some(method("filter", Return::ListOfReceiverElement)),
-            "find" => Some(method("find", Return::Dynamic)),
-            "firstWhere" | "first_where" => Some(method("firstWhere", Return::ReceiverElement)),
-            "remove" => Some(method("remove", Return::ReceiverElement)),
-            "reduce" | "fold" => Some(method("reduce", Return::Dynamic)),
-            _ => None,
-        },
-        Kind::Dict => match name {
-            "len" | "length" | "size" => Some(field_and_method("len", Return::Integer)),
-            "isEmpty" | "is_empty" => Some(method("isEmpty", Return::Boolean)),
-            "get" => Some(method("get", Return::DictValue)),
-            "set" | "put" | "insert" => Some(method("set", Return::Nothing)),
-            "contains" | "has" | "has_key" | "containsKey" | "contains_key" => {
-                Some(method("containsKey", Return::Boolean))
-            }
-            "remove" | "delete" => Some(method("remove", Return::Nothing)),
-            "keys" => Some(method("keys", Return::ListOfString)),
-            "values" => Some(method("values", Return::ListOfDictValue)),
-            "entries" | "items" => Some(method("entries", Return::ListOfDynamicPairs)),
-            "toString" | "to_string" => Some(method("toString", Return::String)),
-            _ => None,
-        },
-        Kind::Shared => match name {
-            "type" => Some(field("type", Return::String)),
-            "get" => Some(method("get", Return::SharedInnerValue)),
-            "set" => Some(method("set", Return::Nothing)),
-            "weak" | "downgrade" => Some(method("weak", Return::WeakSharedOfInner)),
-            _ => None,
-        },
-        Kind::WeakShared => match name {
-            "type" => Some(field("type", Return::String)),
-            "upgrade" => Some(method("upgrade", Return::SharedOfInner)),
-            "isAlive" | "is_alive" | "alive" => Some(method("isAlive", Return::Boolean)),
-            _ => None,
-        },
-        Kind::Function => match name {
-            "name" => Some(field("name", Return::String)),
-            _ => None,
-        },
-        _ => None,
-    }
+    receiver_member_specs(receiver_kind)
+        .iter()
+        .find(|spec| spec.names.contains(&name))
+        .map(|spec| spec.info)
 }
 
 pub fn type_name_info(name: &str) -> Option<&'static BuiltinInfo> {

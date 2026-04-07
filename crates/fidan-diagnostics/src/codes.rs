@@ -160,6 +160,11 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "`parent` used in a context with no parent type",
         category: "objects",
     },
+    DiagnosticCode {
+        code: "E0308",
+        title: "value is not callable",
+        category: "args",
+    },
     // ── Concurrency / safety ──────────────────────────────────────────────────
     DiagnosticCode {
         code: "E0401",

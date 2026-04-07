@@ -298,6 +298,39 @@ mod tests {
     }
 
     #[test]
+    fn integer_literal_is_not_callable() {
+        let errors = check_errors("var x = 1()");
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("type `integer` is not callable")),
+            "expected integer not callable error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn nothing_is_not_callable() {
+        let errors = check_errors("nothing()()()");
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("type `nothing` is not callable")),
+            "expected nothing not callable error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_return_value_is_not_callable_twice() {
+        let errors = check_errors("print()()");
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("type `nothing` is not callable")),
+            "expected builtin return value not callable error, got {errors:?}"
+        );
+    }
+
+    #[test]
     fn unimported_stdlib_free_functions_still_error() {
         let errors = check_errors(
             r#"sqrt(4)

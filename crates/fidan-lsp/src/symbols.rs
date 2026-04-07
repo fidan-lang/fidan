@@ -4,6 +4,7 @@
 //! Consumed by hover, go-to-definition and completion handlers.
 
 use fidan_ast::{AstArena, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr};
+use fidan_config::{ReceiverBuiltinKind, ReceiverReturnKind, receiver_member_specs};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::Span;
 use fidan_typeck::{ActionInfo, FidanType, ObjectInfo, TypedModule};
@@ -157,12 +158,72 @@ fn type_name(ty: &FidanType, interner: &SymbolInterner) -> String {
     ty.display_name(&|sym| interner.resolve(sym).to_string())
 }
 
-fn resolved_type_name(ty: &FidanType, interner: &SymbolInterner) -> Option<String> {
+fn receiver_builtin_type_name(kind: ReceiverBuiltinKind) -> Option<&'static str> {
+    match kind {
+        ReceiverBuiltinKind::Integer => Some("integer"),
+        ReceiverBuiltinKind::Float => Some("float"),
+        ReceiverBuiltinKind::Boolean => Some("boolean"),
+        ReceiverBuiltinKind::String => Some("string"),
+        ReceiverBuiltinKind::List => Some("list"),
+        ReceiverBuiltinKind::Dict => Some("dict"),
+        ReceiverBuiltinKind::Shared => Some("Shared"),
+        ReceiverBuiltinKind::WeakShared => Some("WeakShared"),
+        ReceiverBuiltinKind::Pending => Some("Pending"),
+        ReceiverBuiltinKind::Function => Some("action"),
+        ReceiverBuiltinKind::Nothing => Some("nothing"),
+        _ => None,
+    }
+}
+
+fn builtin_receiver_kind(ty: &FidanType) -> Option<ReceiverBuiltinKind> {
+    Some(match ty {
+        FidanType::Integer => ReceiverBuiltinKind::Integer,
+        FidanType::Float => ReceiverBuiltinKind::Float,
+        FidanType::Boolean => ReceiverBuiltinKind::Boolean,
+        FidanType::String => ReceiverBuiltinKind::String,
+        FidanType::List(_) => ReceiverBuiltinKind::List,
+        FidanType::Dict(_, _) => ReceiverBuiltinKind::Dict,
+        FidanType::Nothing => ReceiverBuiltinKind::Nothing,
+        FidanType::Shared(_) => ReceiverBuiltinKind::Shared,
+        FidanType::WeakShared(_) => ReceiverBuiltinKind::WeakShared,
+        FidanType::Pending(_) => ReceiverBuiltinKind::Pending,
+        FidanType::Function => ReceiverBuiltinKind::Function,
+        _ => return None,
+    })
+}
+
+fn receiver_return_summary(
+    return_kind: ReceiverReturnKind,
+) -> (&'static str, Option<&'static str>) {
+    match return_kind {
+        ReceiverReturnKind::Integer => ("integer", Some("integer")),
+        ReceiverReturnKind::Float => ("float", Some("float")),
+        ReceiverReturnKind::Boolean => ("boolean", Some("boolean")),
+        ReceiverReturnKind::String => ("string", Some("string")),
+        ReceiverReturnKind::Dynamic => ("dynamic", None),
+        ReceiverReturnKind::Nothing => ("nothing", Some("nothing")),
+        ReceiverReturnKind::ReceiverElement => ("receiver element", None),
+        ReceiverReturnKind::DictValue => ("dict value", None),
+        ReceiverReturnKind::ListOfString => ("list oftype string", Some("list")),
+        ReceiverReturnKind::ListOfInteger => ("list oftype integer", Some("list")),
+        ReceiverReturnKind::ListOfDynamic => ("list oftype dynamic", Some("list")),
+        ReceiverReturnKind::ListOfReceiverElement => ("list", Some("list")),
+        ReceiverReturnKind::ListOfDictValue => ("list", Some("list")),
+        ReceiverReturnKind::ListOfDynamicPairs => ("list", Some("list")),
+        ReceiverReturnKind::SharedInnerValue => ("Shared inner value", None),
+        ReceiverReturnKind::SharedOfInner => ("Shared", Some("Shared")),
+        ReceiverReturnKind::WeakSharedOfInner => ("WeakShared", Some("WeakShared")),
+    }
+}
+
+pub(crate) fn resolved_type_name(ty: &FidanType, interner: &SymbolInterner) -> Option<String> {
     match ty {
         FidanType::Object(sym) | FidanType::Enum(sym) | FidanType::ClassType(sym) => {
             Some(interner.resolve(*sym).to_string())
         }
-        _ => None,
+        _ => builtin_receiver_kind(ty)
+            .and_then(receiver_builtin_type_name)
+            .map(str::to_string),
     }
 }
 
@@ -216,10 +277,8 @@ fn inferred_var_type(
         })
         .or_else(|| {
             init.and_then(|expr_id| match typed.expr_types.get(&expr_id) {
-                Some(FidanType::Object(sym)) => Some(interner.resolve(*sym).to_string()),
-                Some(FidanType::Enum(sym)) => Some(interner.resolve(*sym).to_string()),
-                Some(FidanType::Function) => Some("action".to_string()),
-                _ => None,
+                Some(found_ty) => resolved_type_name(found_ty, interner),
+                None => None,
             })
         });
 
@@ -284,7 +343,13 @@ fn make_loop_binding_entry(
         kind: SymKind::Variable { is_const: false },
         span,
         detail: format!("```fidan\nfor {} -> {}\n```", name, elem_ty_s),
-        ty_name: None,
+        ty_name: typed
+            .expr_types
+            .get(&iterable)
+            .and_then(|iter_ty| match iter_ty {
+                FidanType::List(inner) => resolved_type_name(inner, interner),
+                other => resolved_type_name(other, interner),
+            }),
         param_types: vec![],
         param_required: vec![],
         return_type: None,
@@ -307,11 +372,7 @@ fn make_param_entry_from_typed(
     } else {
         ""
     };
-    let ty_name = if ty_s == "action" {
-        Some("action".to_string())
-    } else {
-        None
-    };
+    let ty_name = resolved_type_name(&info.ty, interner);
     (
         name.clone(),
         SymbolEntry {
@@ -357,6 +418,58 @@ fn make_param_entry_from_ast(param: &Param, interner: &SymbolInterner) -> (Strin
             is_param: true,
         },
     )
+}
+
+fn build_builtin_receiver_member_entries(table: &mut SymbolTable) {
+    let receiver_kinds = [
+        ReceiverBuiltinKind::Integer,
+        ReceiverBuiltinKind::Float,
+        ReceiverBuiltinKind::String,
+        ReceiverBuiltinKind::List,
+        ReceiverBuiltinKind::Dict,
+        ReceiverBuiltinKind::Shared,
+        ReceiverBuiltinKind::WeakShared,
+        ReceiverBuiltinKind::Function,
+    ];
+
+    for receiver_kind in receiver_kinds {
+        let Some(receiver_name) = receiver_builtin_type_name(receiver_kind) else {
+            continue;
+        };
+        for spec in receiver_member_specs(receiver_kind) {
+            let return_kind = spec.info.method_return.or(spec.info.field_return);
+            let (return_label, ty_name) = return_kind
+                .map(receiver_return_summary)
+                .unwrap_or(("dynamic", None));
+            let callable_suffix = if spec.info.method_return.is_some() {
+                "()"
+            } else {
+                ""
+            };
+            let detail = format!(
+                "```fidan\n{}.{}{} -> {}\n```",
+                receiver_name, spec.info.canonical_name, callable_suffix, return_label
+            );
+            table.put(
+                format!("{}.{}", receiver_name, spec.info.canonical_name),
+                SymbolEntry {
+                    kind: if spec.info.method_return.is_some() {
+                        SymKind::Method
+                    } else {
+                        SymKind::Field
+                    },
+                    span: Span::default(),
+                    detail,
+                    ty_name: ty_name.map(str::to_string),
+                    param_types: vec![],
+                    param_required: vec![],
+                    return_type: Some(return_label.to_string()),
+                    param_names: vec![],
+                    is_param: false,
+                },
+            );
+        }
+    }
 }
 
 fn make_local_action_entry(
@@ -1101,6 +1214,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
             is_param: false,
         },
     );
+
+    build_builtin_receiver_member_entries(&mut table);
 
     let child_parent_pairs: Vec<(Symbol, Option<Symbol>)> = typed
         .objects

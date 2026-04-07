@@ -506,6 +506,27 @@ Fix: either remove the `parent` reference or add an `extends` clause:
 "#,
         ),
 
+        "E0308" => Some(
+            r#"Only actions, methods, constructors, and other callable values can be
+invoked with `(...)`. Primitive values like `integer`, `float`, `string`,
+`boolean`, and `nothing` are not callable.
+
+Erroneous example:
+
+    var x = 1()
+    nothing()()
+
+Fix: call an action or method instead of the value itself:
+
+    action make_number returns integer {
+        return 1
+    }
+
+    var x = make_number()   # OK
+    var upper = "hello".upper()   # OK
+"#,
+        ),
+
         // ── Concurrency / safety ──────────────────────────────────────────────
         "E0401" => Some(
             r#"A module-level variable is written by one parallel task and read or

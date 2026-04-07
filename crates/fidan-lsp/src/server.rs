@@ -312,6 +312,7 @@ impl FidanLsp {
                 imports: import_urls.clone(),
                 stdlib_imports: stdlib_import_map,
                 inlay_hint_sites: result.inlay_hint_sites,
+                member_access_sites: result.member_access_sites,
             },
         );
         // Proactively analyse imported files.  Background-loaded documents
@@ -345,6 +346,7 @@ impl FidanLsp {
                         imports: HashMap::new(),
                         stdlib_imports: HashMap::new(),
                         inlay_hint_sites: vec![], // not shown for background docs
+                        member_access_sites: r.member_access_sites,
                     },
                 );
             }
@@ -946,6 +948,17 @@ impl LanguageServer for FidanLsp {
                 });
             if let Some(e) = in_doc {
                 HoverLookup::Found(e.detail.clone())
+            } else if let Some(site) =
+                member_access_site_at_offset(&doc.member_access_sites, offset)
+            {
+                if let Some(entry) = doc
+                    .symbol_table
+                    .get(&format!("{}.{}", site.receiver_type, site.member_name))
+                {
+                    HoverLookup::Found(entry.detail.clone())
+                } else {
+                    HoverLookup::CrossDoc(site.receiver_type.clone(), site.member_name.clone())
+                }
             } else if let Some(detail) = builtin_hover_markdown(cur_name.as_str()) {
                 HoverLookup::Found(detail)
             } else if let Some(pn) = prev_name
@@ -1318,21 +1331,20 @@ impl LanguageServer for FidanLsp {
                     let recv_chain =
                         dotted_receiver_segments(&doc.identifier_spans, &doc.text, dot_pos);
 
-                    if let Some(first) = recv_chain.first() {
-                        if recv_chain.len() == 1 {
-                            if let Some(url) = doc.imports.get(first.as_str()) {
-                                Some(DotResolution::ModuleAlias(url.clone()))
-                            } else if let Some(mod_name) = doc.stdlib_imports.get(first.as_str()) {
-                                Some(DotResolution::StdLibModule(mod_name.clone()))
-                            } else {
-                                resolve_dotted_receiver_type_name(
-                                    &doc.symbol_table,
-                                    &doc.identifier_spans,
-                                    &doc.text,
-                                    dot_pos,
-                                )
-                                .map(DotResolution::TypeName)
-                            }
+                    if recv_chain.is_empty() {
+                        resolve_dotted_receiver_type_name(
+                            &doc.symbol_table,
+                            &doc.identifier_spans,
+                            &doc.text,
+                            dot_pos,
+                        )
+                        .map(DotResolution::TypeName)
+                    } else if recv_chain.len() == 1 {
+                        let first = &recv_chain[0];
+                        if let Some(url) = doc.imports.get(first.as_str()) {
+                            Some(DotResolution::ModuleAlias(url.clone()))
+                        } else if let Some(mod_name) = doc.stdlib_imports.get(first.as_str()) {
+                            Some(DotResolution::StdLibModule(mod_name.clone()))
                         } else {
                             resolve_dotted_receiver_type_name(
                                 &doc.symbol_table,
@@ -1343,7 +1355,13 @@ impl LanguageServer for FidanLsp {
                             .map(DotResolution::TypeName)
                         }
                     } else {
-                        None
+                        resolve_dotted_receiver_type_name(
+                            &doc.symbol_table,
+                            &doc.identifier_spans,
+                            &doc.text,
+                            dot_pos,
+                        )
+                        .map(DotResolution::TypeName)
                     }
                 } else {
                     None
@@ -2789,6 +2807,15 @@ fn dotted_receiver_segments(
     segments
 }
 
+fn member_access_site_at_offset(
+    sites: &[analysis::MemberAccessSite],
+    offset: u32,
+) -> Option<&analysis::MemberAccessSite> {
+    sites
+        .iter()
+        .find(|site| offset >= site.member_span.start && offset < site.member_span.end)
+}
+
 fn resolve_dotted_receiver_type_name(
     symbol_table: &crate::symbols::SymbolTable,
     identifier_spans: &[(Span, String)],
@@ -2796,9 +2823,13 @@ fn resolve_dotted_receiver_type_name(
     dot_pos: u32,
 ) -> Option<String> {
     let segments = dotted_receiver_segments(identifier_spans, text, dot_pos);
-    let first = segments.first()?;
+    let Some(first) = segments.first() else {
+        return resolve_literal_receiver_type_name(text, dot_pos);
+    };
     let mut current_type = {
-        let entry = symbol_table.lookup_visible(dot_pos, first.as_str())?;
+        let Some(entry) = symbol_table.lookup_visible(dot_pos, first.as_str()) else {
+            return resolve_literal_receiver_type_name(text, dot_pos);
+        };
         match &entry.kind {
             SymKind::Object | SymKind::Enum => first.clone(),
             _ => entry.ty_name.clone()?,
@@ -2818,6 +2849,47 @@ fn resolve_dotted_receiver_type_name(
     }
 
     Some(current_type)
+}
+
+fn resolve_literal_receiver_type_name(text: &str, dot_pos: u32) -> Option<String> {
+    let prefix = text.get(..dot_pos as usize)?.trim_end();
+    let bytes = prefix.as_bytes();
+    let end = bytes.len();
+    if end == 0 {
+        return None;
+    }
+
+    if bytes[end - 1] == b'"' {
+        return Some("string".to_string());
+    }
+
+    if bytes[end - 1].is_ascii_digit() {
+        let mut start = end;
+        while start > 0 && bytes[start - 1].is_ascii_digit() {
+            start -= 1;
+        }
+        let mut is_float = false;
+        if start > 0 && bytes[start - 1] == b'.' {
+            let mut integer_start = start - 1;
+            while integer_start > 0 && bytes[integer_start - 1].is_ascii_digit() {
+                integer_start -= 1;
+            }
+            if integer_start < start - 1 {
+                is_float = true;
+            }
+        }
+        return Some(if is_float { "float" } else { "integer" }.to_string());
+    }
+
+    let mut start = end;
+    while start > 0 && is_ident_byte(bytes[start - 1]) {
+        start -= 1;
+    }
+    match prefix.get(start..end)? {
+        "true" | "false" => Some("boolean".to_string()),
+        "nothing" => Some("nothing".to_string()),
+        _ => None,
+    }
 }
 
 fn completion_item_for_symbol(name: &str, entry: &SymbolEntry, sort_group: &str) -> CompletionItem {
@@ -3113,6 +3185,93 @@ Holder.compass.
                 .and_then(|entry| entry.ty_name.as_deref()),
             Some("Compass")
         );
+    }
+
+    #[test]
+    fn dot_receiver_type_name_supports_builtin_literal_receivers() {
+        let text = r#""hello".
+    123.
+    12.5.
+    true.
+    nothing.
+    "#;
+        let analysis = analysis::analyze(text, "file:///literal_receiver_types.fdn");
+
+        let string_offset =
+            text.find("\"hello\".").expect("string cursor") as u32 + "\"hello\"".len() as u32;
+        let integer_offset = text.find("123.").expect("integer cursor") as u32 + 3;
+        let float_offset = text.find("12.5.").expect("float cursor") as u32 + 4;
+        let boolean_offset = text.find("true.").expect("boolean cursor") as u32 + 4;
+        let nothing_offset = text.find("nothing.").expect("nothing cursor") as u32 + 7;
+
+        assert_eq!(
+            resolve_dotted_receiver_type_name(
+                &analysis.symbol_table,
+                &analysis.identifier_spans,
+                text,
+                string_offset,
+            )
+            .as_deref(),
+            Some("string")
+        );
+        assert_eq!(
+            resolve_dotted_receiver_type_name(
+                &analysis.symbol_table,
+                &analysis.identifier_spans,
+                text,
+                integer_offset,
+            )
+            .as_deref(),
+            Some("integer")
+        );
+        assert_eq!(
+            resolve_dotted_receiver_type_name(
+                &analysis.symbol_table,
+                &analysis.identifier_spans,
+                text,
+                float_offset,
+            )
+            .as_deref(),
+            Some("float")
+        );
+        assert_eq!(
+            resolve_dotted_receiver_type_name(
+                &analysis.symbol_table,
+                &analysis.identifier_spans,
+                text,
+                boolean_offset,
+            )
+            .as_deref(),
+            Some("boolean")
+        );
+        assert_eq!(
+            resolve_dotted_receiver_type_name(
+                &analysis.symbol_table,
+                &analysis.identifier_spans,
+                text,
+                nothing_offset,
+            )
+            .as_deref(),
+            Some("nothing")
+        );
+    }
+
+    #[test]
+    fn member_access_site_lookup_resolves_builtin_literal_methods() {
+        let text = r#"var uppercased = "hello".upper()"#;
+        let analysis = analysis::analyze(text, "file:///literal_member_hover.fdn");
+        let offset = text.find(".upper").expect("upper cursor") as u32 + 1;
+
+        let site = member_access_site_at_offset(&analysis.member_access_sites, offset)
+            .expect("expected typed member-access site for upper");
+        assert_eq!(site.receiver_type, "string");
+        assert_eq!(site.member_name, "upper");
+
+        let entry = analysis
+            .symbol_table
+            .get("string.upper")
+            .expect("expected builtin string.upper symbol entry");
+        assert!(entry.detail.contains("string.upper() -> string"));
     }
 
     #[test]

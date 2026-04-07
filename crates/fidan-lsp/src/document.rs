@@ -1,6 +1,7 @@
 //! Per-document model stored in the [`DocumentStore`].
 
 use crate::analysis::InlayHintSite;
+use crate::analysis::MemberAccessSite;
 use crate::symbols::SymbolTable;
 use fidan_source::Span;
 use std::collections::HashMap;
@@ -29,4 +30,6 @@ pub struct Document {
     pub stdlib_imports: HashMap<String, String>,
     /// Inlay hint positions computed during the last analysis pass.
     pub inlay_hint_sites: Vec<InlayHintSite>,
+    /// Typed member-access spans for hover on literal/computed receivers.
+    pub member_access_sites: Vec<MemberAccessSite>,
 }

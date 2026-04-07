@@ -25,6 +25,13 @@ pub struct InlayHintSite {
     pub is_type_hint: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct MemberAccessSite {
+    pub member_span: Span,
+    pub receiver_type: String,
+    pub member_name: String,
+}
+
 /// Output of a single analysis run.
 pub struct AnalysisResult {
     pub diagnostics: Vec<lsp::Diagnostic>,
@@ -53,6 +60,8 @@ pub struct AnalysisResult {
     pub stdlib_var_call_sites: Vec<(String, String, String)>,
     /// Positions where the editor should display synthetic type labels.
     pub inlay_hint_sites: Vec<InlayHintSite>,
+    /// Typed member-access spans used for hover on literal/computed receivers.
+    pub member_access_sites: Vec<MemberAccessSite>,
 }
 
 /// Lex, parse and type-check `text`, returning all diagnostics as LSP
@@ -99,6 +108,8 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     // ── Inlay hints (untyped var declarations) ────────────────────────────────
     let inlay_hint_sites =
         collect_inlay_hints(&module, &interner, &symbol_table, &identifier_spans);
+    let member_access_sites =
+        collect_member_access_sites(&module, &typed, &interner, &identifier_spans);
 
     // Consume typed fields now (after all borrows of `typed` are done).
     let typeck_diags = typed.diagnostics;
@@ -128,6 +139,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
         dynamic_var_call_sites,
         stdlib_var_call_sites,
         inlay_hint_sites,
+        member_access_sites,
     }
 }
 
@@ -609,6 +621,809 @@ fn collect_inlay_hints(
     hints
 }
 
+fn collect_member_access_sites(
+    module: &Module,
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+    identifier_spans: &[(Span, String)],
+) -> Vec<MemberAccessSite> {
+    let mut sites = Vec::new();
+
+    for &item_id in &module.items {
+        collect_item_member_access_sites(
+            module,
+            item_id,
+            typed,
+            interner,
+            identifier_spans,
+            &mut sites,
+        );
+    }
+
+    sites
+}
+
+fn collect_item_member_access_sites(
+    module: &Module,
+    item_id: fidan_ast::ItemId,
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+    identifier_spans: &[(Span, String)],
+    out: &mut Vec<MemberAccessSite>,
+) {
+    match module.arena.get_item(item_id) {
+        Item::VarDecl { init, .. } => {
+            if let Some(init) = init {
+                collect_expr_member_access_sites(
+                    module,
+                    *init,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+        }
+        Item::ExprStmt(expr_id) => collect_expr_member_access_sites(
+            module,
+            *expr_id,
+            typed,
+            interner,
+            identifier_spans,
+            out,
+        ),
+        Item::Assign { target, value, .. } => {
+            collect_expr_member_access_sites(
+                module,
+                *target,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+            collect_expr_member_access_sites(
+                module,
+                *value,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+        }
+        Item::Destructure { value, .. } => {
+            collect_expr_member_access_sites(module, *value, typed, interner, identifier_spans, out)
+        }
+        Item::ObjectDecl {
+            fields, methods, ..
+        } => {
+            for field in fields {
+                if let Some(default) = field.default {
+                    collect_expr_member_access_sites(
+                        module,
+                        default,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+            }
+            for &method_id in methods {
+                collect_item_member_access_sites(
+                    module,
+                    method_id,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+        }
+        Item::ActionDecl {
+            params,
+            body,
+            decorators,
+            ..
+        }
+        | Item::ExtensionAction {
+            params,
+            body,
+            decorators,
+            ..
+        } => {
+            for param in params {
+                if let Some(default) = param.default {
+                    collect_expr_member_access_sites(
+                        module,
+                        default,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+            }
+            for decorator in decorators {
+                for arg in &decorator.args {
+                    collect_expr_member_access_sites(
+                        module,
+                        arg.value,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+            }
+            collect_stmt_member_access_sites(module, body, typed, interner, identifier_spans, out);
+        }
+        Item::Stmt(stmt_id) => collect_stmt_member_access_sites(
+            module,
+            &[*stmt_id],
+            typed,
+            interner,
+            identifier_spans,
+            out,
+        ),
+        Item::TestDecl { body, .. } => {
+            collect_stmt_member_access_sites(module, body, typed, interner, identifier_spans, out)
+        }
+        Item::EnumDecl { .. } | Item::Use { .. } => {}
+    }
+}
+
+fn collect_stmt_member_access_sites(
+    module: &Module,
+    stmts: &[fidan_ast::StmtId],
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+    identifier_spans: &[(Span, String)],
+    out: &mut Vec<MemberAccessSite>,
+) {
+    for &stmt_id in stmts {
+        match module.arena.get_stmt(stmt_id) {
+            fidan_ast::Stmt::VarDecl { init, .. } => {
+                if let Some(init) = init {
+                    collect_expr_member_access_sites(
+                        module,
+                        *init,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+            }
+            fidan_ast::Stmt::Destructure { value, .. } => collect_expr_member_access_sites(
+                module,
+                *value,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            ),
+            fidan_ast::Stmt::Assign { target, value, .. } => {
+                collect_expr_member_access_sites(
+                    module,
+                    *target,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+                collect_expr_member_access_sites(
+                    module,
+                    *value,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+            fidan_ast::Stmt::Expr { expr, .. } | fidan_ast::Stmt::Panic { value: expr, .. } => {
+                collect_expr_member_access_sites(
+                    module,
+                    *expr,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                )
+            }
+            fidan_ast::Stmt::ActionDecl {
+                params,
+                body,
+                decorators,
+                ..
+            } => {
+                for param in params {
+                    if let Some(default) = param.default {
+                        collect_expr_member_access_sites(
+                            module,
+                            default,
+                            typed,
+                            interner,
+                            identifier_spans,
+                            out,
+                        );
+                    }
+                }
+                for decorator in decorators {
+                    for arg in &decorator.args {
+                        collect_expr_member_access_sites(
+                            module,
+                            arg.value,
+                            typed,
+                            interner,
+                            identifier_spans,
+                            out,
+                        );
+                    }
+                }
+                collect_stmt_member_access_sites(
+                    module,
+                    body,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+            fidan_ast::Stmt::Return { value, .. } => {
+                if let Some(value) = value {
+                    collect_expr_member_access_sites(
+                        module,
+                        *value,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+            }
+            fidan_ast::Stmt::If {
+                condition,
+                then_body,
+                else_ifs,
+                else_body,
+                ..
+            } => {
+                collect_expr_member_access_sites(
+                    module,
+                    *condition,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+                collect_stmt_member_access_sites(
+                    module,
+                    then_body,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+                for else_if in else_ifs {
+                    collect_expr_member_access_sites(
+                        module,
+                        else_if.condition,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                    collect_stmt_member_access_sites(
+                        module,
+                        &else_if.body,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+                if let Some(else_body) = else_body {
+                    collect_stmt_member_access_sites(
+                        module,
+                        else_body,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+            }
+            fidan_ast::Stmt::Check {
+                scrutinee, arms, ..
+            } => {
+                collect_expr_member_access_sites(
+                    module,
+                    *scrutinee,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+                for arm in arms {
+                    collect_expr_member_access_sites(
+                        module,
+                        arm.pattern,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                    collect_stmt_member_access_sites(
+                        module,
+                        &arm.body,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+            }
+            fidan_ast::Stmt::For { iterable, body, .. }
+            | fidan_ast::Stmt::ParallelFor { iterable, body, .. } => {
+                collect_expr_member_access_sites(
+                    module,
+                    *iterable,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+                collect_stmt_member_access_sites(
+                    module,
+                    body,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+            fidan_ast::Stmt::While {
+                condition, body, ..
+            } => {
+                collect_expr_member_access_sites(
+                    module,
+                    *condition,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+                collect_stmt_member_access_sites(
+                    module,
+                    body,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+            fidan_ast::Stmt::Attempt {
+                body,
+                catches,
+                otherwise,
+                finally,
+                ..
+            } => {
+                collect_stmt_member_access_sites(
+                    module,
+                    body,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+                for catch in catches {
+                    collect_stmt_member_access_sites(
+                        module,
+                        &catch.body,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+                if let Some(otherwise) = otherwise {
+                    collect_stmt_member_access_sites(
+                        module,
+                        otherwise,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+                if let Some(finally) = finally {
+                    collect_stmt_member_access_sites(
+                        module,
+                        finally,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+            }
+            fidan_ast::Stmt::ConcurrentBlock { tasks, .. } => {
+                for task in tasks {
+                    collect_stmt_member_access_sites(
+                        module,
+                        &task.body,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+            }
+            fidan_ast::Stmt::Break { .. }
+            | fidan_ast::Stmt::Continue { .. }
+            | fidan_ast::Stmt::Error { .. } => {}
+        }
+    }
+}
+
+fn collect_expr_member_access_sites(
+    module: &Module,
+    expr_id: fidan_ast::ExprId,
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+    identifier_spans: &[(Span, String)],
+    out: &mut Vec<MemberAccessSite>,
+) {
+    match module.arena.get_expr(expr_id) {
+        Expr::Binary { lhs, rhs, .. } | Expr::NullCoalesce { lhs, rhs, .. } => {
+            collect_expr_member_access_sites(module, *lhs, typed, interner, identifier_spans, out);
+            collect_expr_member_access_sites(module, *rhs, typed, interner, identifier_spans, out);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::Spawn { expr: operand, .. }
+        | Expr::Await { expr: operand, .. } => {
+            collect_expr_member_access_sites(
+                module,
+                *operand,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_expr_member_access_sites(
+                module,
+                *callee,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+            for arg in args {
+                collect_expr_member_access_sites(
+                    module,
+                    arg.value,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+        }
+        Expr::Field {
+            object,
+            field,
+            span,
+        } => {
+            collect_expr_member_access_sites(
+                module,
+                *object,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+
+            let field_name = interner.resolve(*field).to_string();
+            let receiver_type = typed
+                .expr_types
+                .get(object)
+                .and_then(|ty| symbols::resolved_type_name(ty, interner));
+            let member_span = identifier_spans.iter().rev().find_map(|(candidate, name)| {
+                if name == &field_name && candidate.start >= span.start && candidate.end <= span.end
+                {
+                    Some(*candidate)
+                } else {
+                    None
+                }
+            });
+
+            if let (Some(receiver_type), Some(member_span)) = (receiver_type, member_span) {
+                out.push(MemberAccessSite {
+                    member_span,
+                    receiver_type,
+                    member_name: field_name,
+                });
+            }
+        }
+        Expr::Index { object, index, .. } => {
+            collect_expr_member_access_sites(
+                module,
+                *object,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+            collect_expr_member_access_sites(
+                module,
+                *index,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+        }
+        Expr::Assign { target, value, .. } | Expr::CompoundAssign { target, value, .. } => {
+            collect_expr_member_access_sites(
+                module,
+                *target,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+            collect_expr_member_access_sites(
+                module,
+                *value,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+        }
+        Expr::StringInterp { parts, .. } => {
+            for part in parts {
+                if let fidan_ast::InterpPart::Expr(expr_id) = part {
+                    collect_expr_member_access_sites(
+                        module,
+                        *expr_id,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+            }
+        }
+        Expr::Ternary {
+            condition,
+            then_val,
+            else_val,
+            ..
+        } => {
+            collect_expr_member_access_sites(
+                module,
+                *condition,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+            collect_expr_member_access_sites(
+                module,
+                *then_val,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+            collect_expr_member_access_sites(
+                module,
+                *else_val,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+        }
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+            for &element in elements {
+                collect_expr_member_access_sites(
+                    module,
+                    element,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for &(key, value) in entries {
+                collect_expr_member_access_sites(
+                    module,
+                    key,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+                collect_expr_member_access_sites(
+                    module,
+                    value,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+        }
+        Expr::Check {
+            scrutinee, arms, ..
+        } => {
+            collect_expr_member_access_sites(
+                module,
+                *scrutinee,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+            for arm in arms {
+                collect_expr_member_access_sites(
+                    module,
+                    arm.pattern,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+        }
+        Expr::Slice {
+            target,
+            start,
+            end,
+            step,
+            ..
+        } => {
+            collect_expr_member_access_sites(
+                module,
+                *target,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+            if let Some(start) = start {
+                collect_expr_member_access_sites(
+                    module,
+                    *start,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+            if let Some(end) = end {
+                collect_expr_member_access_sites(
+                    module,
+                    *end,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+            if let Some(step) = step {
+                collect_expr_member_access_sites(
+                    module,
+                    *step,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+        }
+        Expr::ListComp {
+            element,
+            iterable,
+            filter,
+            ..
+        } => {
+            collect_expr_member_access_sites(
+                module,
+                *element,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+            collect_expr_member_access_sites(
+                module,
+                *iterable,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+            if let Some(filter) = filter {
+                collect_expr_member_access_sites(
+                    module,
+                    *filter,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+        }
+        Expr::DictComp {
+            key,
+            value,
+            iterable,
+            filter,
+            ..
+        } => {
+            collect_expr_member_access_sites(module, *key, typed, interner, identifier_spans, out);
+            collect_expr_member_access_sites(
+                module,
+                *value,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+            collect_expr_member_access_sites(
+                module,
+                *iterable,
+                typed,
+                interner,
+                identifier_spans,
+                out,
+            );
+            if let Some(filter) = filter {
+                collect_expr_member_access_sites(
+                    module,
+                    *filter,
+                    typed,
+                    interner,
+                    identifier_spans,
+                    out,
+                );
+            }
+        }
+        Expr::Lambda { params, body, .. } => {
+            for param in params {
+                if let Some(default) = param.default {
+                    collect_expr_member_access_sites(
+                        module,
+                        default,
+                        typed,
+                        interner,
+                        identifier_spans,
+                        out,
+                    );
+                }
+            }
+            collect_stmt_member_access_sites(module, body, typed, interner, identifier_spans, out);
+        }
+        Expr::IntLit { .. }
+        | Expr::FloatLit { .. }
+        | Expr::StrLit { .. }
+        | Expr::BoolLit { .. }
+        | Expr::Nothing { .. }
+        | Expr::Ident { .. }
+        | Expr::This { .. }
+        | Expr::Parent { .. }
+        | Expr::Error { .. } => {}
+    }
+}
+
 /// Extract the type string from a hover detail like `"```fidan\nvar x: integer\n```"`.
 fn extract_type_from_detail(detail: &str) -> &str {
     // The detail for variables looks like:  `\`\`\`fidan\nvar x -> type\n\`\`\``
@@ -743,6 +1558,23 @@ var argv = env.args()
                 .iter()
                 .any(|(var, module, member)| var == "argv" && module == "env" && member == "args"),
             "expected env.args() to be recorded for stdlib type patching"
+        );
+    }
+
+    #[test]
+    fn analyze_collects_typed_member_access_sites_for_builtin_receivers() {
+        let src = r#"var parts = "hello".split()"#;
+
+        let result = analyze(src, "file:///builtin_member_sites.fdn");
+        let site = result
+            .member_access_sites
+            .iter()
+            .find(|site| site.receiver_type == "string" && site.member_name == "split")
+            .expect("expected typed member-access site for string.split");
+
+        assert_eq!(
+            &src[site.member_span.start as usize..site.member_span.end as usize],
+            "split"
         );
     }
 

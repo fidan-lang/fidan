@@ -2392,6 +2392,14 @@ impl TypeChecker {
         );
     }
 
+    fn emit_not_callable_error(&mut self, ty: &FidanType, span: Span) {
+        self.emit_error(
+            fidan_diagnostics::diag_code!("E0308"),
+            format!("type `{}` is not callable", self.ty_name(ty)),
+            span,
+        );
+    }
+
     fn receiver_builtin_kind(&self, ty: &FidanType) -> Option<ReceiverBuiltinKind> {
         Some(match ty {
             FidanType::Integer => ReceiverBuiltinKind::Integer,
@@ -2811,8 +2819,17 @@ impl TypeChecker {
             }
 
             _ => {
-                self.infer_expr(callee_id, module);
-                FidanType::Dynamic
+                let callee_ty = self.infer_expr(callee_id, module);
+                match callee_ty {
+                    FidanType::Function
+                    | FidanType::Dynamic
+                    | FidanType::Unknown
+                    | FidanType::Error => FidanType::Dynamic,
+                    other => {
+                        self.emit_not_callable_error(&other, span);
+                        FidanType::Error
+                    }
+                }
             }
         }
     }
