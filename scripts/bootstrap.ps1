@@ -66,6 +66,15 @@ function Show-Usage {
   Write-Host "prefer 'fidan self install' and 'fidan self use'."
 }
 
+function Exit-InstallFailure {
+  param([string]$Message)
+
+  Write-Host ""
+  Write-Host "Installation failed:" -ForegroundColor Red
+  Write-Host $Message -ForegroundColor Red
+  exit 1
+}
+
 function Test-ExistingInstall {
   param([string]$InstallRootPath)
 
@@ -344,87 +353,93 @@ function Add-PathEntry {
   Write-Host "Added '$CurrentDir' to the user PATH. Open a new shell to pick it up."
 }
 
-$manifestUrl = Get-ManifestUrl -Explicit $ManifestUrl
-$installRootResolved = ConvertTo-CanonicalPath (Resolve-InstallRoot -Explicit $InstallRoot)
-$hostTriple = Resolve-HostTriple
-
-if ((-not $AllowExistingInstall) -and (Test-ExistingInstall -InstallRootPath $installRootResolved)) {
-  throw "An existing self-managed Fidan installation was detected at '$installRootResolved'. Use 'fidan self install' or re-run bootstrap with -AllowExistingInstall if you really want to install into the same root."
-}
-
-Write-Host "Fetching manifest from $manifestUrl"
-$manifestText = Read-TextResource -Url $manifestUrl
-$manifest = $manifestText | ConvertFrom-Json
-if (-not $manifest.schema_version) {
-  throw "Distribution manifest '$manifestUrl' has invalid schema_version 0"
-}
-
-$release = Get-Release -Manifest $manifest -RequestedVersion $Version -HostTriple $hostTriple
-$releaseVersion = $release.version
-$archiveUrl = $release.url
-$expectedSha = $release.sha256.ToLowerInvariant()
-$binaryRelPath = if ($release.binary_relpath) { $release.binary_relpath } elseif ($IsWindows) { "fidan.exe" } else { "fidan" }
-
-$versionsDir = Join-Path $installRootResolved "versions"
-$metadataDir = Join-Path $installRootResolved "metadata"
-$finalDir = Join-Path $versionsDir $releaseVersion
-$existingVersions = @()
-if (Test-Path -LiteralPath $versionsDir) {
-  $existingVersions = @(Get-ChildItem -LiteralPath $versionsDir -Directory -ErrorAction SilentlyContinue)
-}
-$firstInstall = $existingVersions.Count -eq 0
-if (Test-Path -LiteralPath $finalDir) {
-  throw "Fidan version '$releaseVersion' is already installed at '$finalDir'"
-}
-
-New-Item -ItemType Directory -Force -Path $versionsDir | Out-Null
-New-Item -ItemType Directory -Force -Path $metadataDir | Out-Null
-
-$tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("fidan-bootstrap-" + [Guid]::NewGuid().ToString("N"))
-$archivePath = Join-Path $tempRoot "fidan.tar.gz"
-$extractDir = Join-Path $tempRoot "extract"
-New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-
 try {
-  Write-Host "Downloading Fidan $releaseVersion for $hostTriple"
-  Save-ResourceToFile -Url $archiveUrl -Destination $archivePath
+  $manifestUrl = Get-ManifestUrl -Explicit $ManifestUrl
+  $installRootResolved = ConvertTo-CanonicalPath (Resolve-InstallRoot -Explicit $InstallRoot)
+  $hostTriple = Resolve-HostTriple
 
-  $actualSha = Get-Sha256 -Path $archivePath
-  if ($actualSha -ne $expectedSha) {
-    throw "SHA-256 mismatch for '$archiveUrl' (expected $expectedSha, got $actualSha)"
+  if ((-not $AllowExistingInstall) -and (Test-ExistingInstall -InstallRootPath $installRootResolved)) {
+    throw "An existing self-managed Fidan installation was detected at '$installRootResolved'. Use 'fidan self install' or re-run bootstrap with -AllowExistingInstall if you really want to install into the same root."
   }
 
-  tar -xzf $archivePath -C $extractDir
+  Write-Host "Fetching manifest from $manifestUrl"
+  $manifestText = Read-TextResource -Url $manifestUrl
+  $manifest = $manifestText | ConvertFrom-Json
+  if (-not $manifest.schema_version) {
+    throw "Distribution manifest '$manifestUrl' has invalid schema_version 0"
+  }
 
-  $candidateRoot = $extractDir
-  $candidateBinary = Join-Path $candidateRoot $binaryRelPath
-  if (-not (Test-Path -LiteralPath $candidateBinary)) {
-    $children = Get-ChildItem -LiteralPath $extractDir -Directory
-    if ($children.Count -ne 1) {
-      throw "Downloaded archive does not contain '$binaryRelPath' at the root or inside a single top-level directory"
+  $release = Get-Release -Manifest $manifest -RequestedVersion $Version -HostTriple $hostTriple
+  $releaseVersion = $release.version
+  $archiveUrl = $release.url
+  $expectedSha = $release.sha256.ToLowerInvariant()
+  $binaryRelPath = if ($release.binary_relpath) { $release.binary_relpath } elseif ($IsWindows) { "fidan.exe" } else { "fidan" }
+
+  $versionsDir = Join-Path $installRootResolved "versions"
+  $metadataDir = Join-Path $installRootResolved "metadata"
+  $finalDir = Join-Path $versionsDir $releaseVersion
+  $existingVersions = @()
+  if (Test-Path -LiteralPath $versionsDir) {
+    $existingVersions = @(Get-ChildItem -LiteralPath $versionsDir -Directory -ErrorAction SilentlyContinue)
+  }
+  $firstInstall = $existingVersions.Count -eq 0
+  if (Test-Path -LiteralPath $finalDir) {
+    throw "Fidan version '$releaseVersion' is already installed at '$finalDir'"
+  }
+
+  New-Item -ItemType Directory -Force -Path $versionsDir | Out-Null
+  New-Item -ItemType Directory -Force -Path $metadataDir | Out-Null
+
+  $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("fidan-bootstrap-" + [Guid]::NewGuid().ToString("N"))
+  $archivePath = Join-Path $tempRoot "fidan.tar.gz"
+  $extractDir = Join-Path $tempRoot "extract"
+  New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+
+  try {
+    Write-Host "Downloading Fidan $releaseVersion for $hostTriple"
+    Save-ResourceToFile -Url $archiveUrl -Destination $archivePath
+
+    $actualSha = Get-Sha256 -Path $archivePath
+    if ($actualSha -ne $expectedSha) {
+      throw "SHA-256 mismatch for '$archiveUrl' (expected $expectedSha, got $actualSha)"
     }
-    $candidateRoot = $children[0].FullName
+
+    tar -xzf $archivePath -C $extractDir
+
+    $candidateRoot = $extractDir
     $candidateBinary = Join-Path $candidateRoot $binaryRelPath
     if (-not (Test-Path -LiteralPath $candidateBinary)) {
-      throw "Downloaded archive does not contain the expected file '$binaryRelPath'"
+      $children = Get-ChildItem -LiteralPath $extractDir -Directory
+      if ($children.Count -ne 1) {
+        throw "Downloaded archive does not contain '$binaryRelPath' at the root or inside a single top-level directory"
+      }
+      $candidateRoot = $children[0].FullName
+      $candidateBinary = Join-Path $candidateRoot $binaryRelPath
+      if (-not (Test-Path -LiteralPath $candidateBinary)) {
+        throw "Downloaded archive does not contain the expected file '$binaryRelPath'"
+      }
+    }
+
+    Move-Item -LiteralPath $candidateRoot -Destination $finalDir
+    Update-Metadata -MetadataDir $metadataDir -VersionString $releaseVersion -MakeActive:$firstInstall
+    if ($firstInstall) {
+      Set-CurrentPointer -InstallRootPath $installRootResolved -VersionString $releaseVersion
+      Add-PathEntry -CurrentDir (Join-Path $installRootResolved "current")
+      Write-Host "Installed Fidan $releaseVersion and made it active"
+    }
+    else {
+      Write-Host "Installed Fidan $releaseVersion"
+      Write-Host "Run 'fidan self use $releaseVersion' to activate it"
+    }
+    Write-Host "Install root: $installRootResolved"
+  }
+  finally {
+    if (Test-Path -LiteralPath $tempRoot) {
+      Remove-Item -LiteralPath $tempRoot -Force -Recurse
     }
   }
-
-  Move-Item -LiteralPath $candidateRoot -Destination $finalDir
-  Update-Metadata -MetadataDir $metadataDir -VersionString $releaseVersion -MakeActive:$firstInstall
-  if ($firstInstall) {
-    Set-CurrentPointer -InstallRootPath $installRootResolved -VersionString $releaseVersion
-    Add-PathEntry -CurrentDir (Join-Path $installRootResolved "current")
-    Write-Host "Installed Fidan $releaseVersion and made it active"
-  }
-  else {
-    Write-Host "Installed Fidan $releaseVersion"
-    Write-Host "Run 'fidan self use $releaseVersion' to activate it"
-  }
-  Write-Host "Install root: $installRootResolved"
 }
-finally {
-  if (Test-Path -LiteralPath $tempRoot) {
-    Remove-Item -LiteralPath $tempRoot -Force -Recurse
-  }
+catch {
+  $message = if ($_.Exception -and $_.Exception.Message) { $_.Exception.Message } else { $_.ToString() }
+  Exit-InstallFailure -Message $message
 }
