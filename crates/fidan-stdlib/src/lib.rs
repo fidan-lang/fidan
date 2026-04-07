@@ -422,6 +422,10 @@ pub use metadata::{
     infer_stdlib_method,
 };
 
+pub use fidan_config::{
+    ReceiverBuiltinKind, ReceiverMemberInfo, ReceiverReturnKind, infer_receiver_member,
+};
+
 const ASYNC_MEMBER_INFOS: &[StdlibMemberInfo] = &[
     StdlibMemberInfo {
         names: &["sleep", "wait"],

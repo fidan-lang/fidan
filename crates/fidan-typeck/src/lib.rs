@@ -260,6 +260,75 @@ mod tests {
     }
 
     #[test]
+    fn invalid_string_method_is_error() {
+        let errors = check_errors(r#"var result = "somestring".filter()"#);
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("type `string` has no method `filter`")),
+            "expected invalid string method error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_integer_method_is_error() {
+        let errors = check_errors("var x = 2.nonexistent()");
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("type `integer` has no method `nonexistent`")),
+            "expected invalid integer method error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_nothing_method_is_error() {
+        let errors = check_errors("print().print()");
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("type `nothing` has no method `print`")),
+            "expected invalid nothing method error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn valid_string_method_remains_clean() {
+        assert!(check_errors(r#"var size = "hello".len()"#).is_empty());
+    }
+
+    #[test]
+    fn unimported_stdlib_free_functions_still_error() {
+        let errors = check_errors(
+            r#"sqrt(4)
+            readFile("x")"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("undefined name `sqrt`")),
+            "expected undefined sqrt error, got {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("undefined name `readFile`")),
+            "expected undefined readFile error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn imported_stdlib_free_function_keeps_return_metadata() {
+        assert!(
+            check_errors(
+                r#"use std.math.sqrt
+            var root = sqrt(4)"#,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn if_otherwise_is_clean() {
         assert!(
             check_errors(

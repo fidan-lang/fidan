@@ -48,6 +48,7 @@ use crate::{
     stdlib,
     value::{FidanValue, FunctionId, display},
 };
+use fidan_config::{ReceiverBuiltinKind, infer_receiver_member};
 use std::io::BufRead;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1173,25 +1174,33 @@ pub unsafe extern "C" fn fdn_obj_invoke(
             end,
             inclusive,
         } => dispatch_range_method(*start, *end, *inclusive, &method_name, extra),
-        FidanValue::Shared(sr) => match method_name.as_str() {
-            "get" => into_raw(sr.0.lock().unwrap().clone()),
-            "set" => {
-                let val = extra.into_iter().next().unwrap_or(FidanValue::Nothing);
-                *sr.0.lock().unwrap() = val;
-                into_raw(FidanValue::Nothing)
+        FidanValue::Shared(sr) => {
+            match infer_receiver_member(ReceiverBuiltinKind::Shared, method_name.as_str())
+                .map(|info| info.canonical_name)
+            {
+                Some("get") => into_raw(sr.0.lock().unwrap().clone()),
+                Some("set") => {
+                    let val = extra.into_iter().next().unwrap_or(FidanValue::Nothing);
+                    *sr.0.lock().unwrap() = val;
+                    into_raw(FidanValue::Nothing)
+                }
+                Some("weak") => into_raw(FidanValue::WeakShared(sr.downgrade())),
+                _ => panic_missing_method(recv, &method_name),
             }
-            "weak" | "downgrade" => into_raw(FidanValue::WeakShared(sr.downgrade())),
-            _ => panic_missing_method(recv, &method_name),
-        },
-        FidanValue::WeakShared(ws) => match method_name.as_str() {
-            "upgrade" => into_raw(
-                ws.upgrade()
-                    .map(FidanValue::Shared)
-                    .unwrap_or(FidanValue::Nothing),
-            ),
-            "isAlive" | "is_alive" | "alive" => into_raw(FidanValue::Boolean(ws.is_alive())),
-            _ => panic_missing_method(recv, &method_name),
-        },
+        }
+        FidanValue::WeakShared(ws) => {
+            match infer_receiver_member(ReceiverBuiltinKind::WeakShared, method_name.as_str())
+                .map(|info| info.canonical_name)
+            {
+                Some("upgrade") => into_raw(
+                    ws.upgrade()
+                        .map(FidanValue::Shared)
+                        .unwrap_or(FidanValue::Nothing),
+                ),
+                Some("isAlive") => into_raw(FidanValue::Boolean(ws.is_alive())),
+                _ => panic_missing_method(recv, &method_name),
+            }
+        }
         _ => panic_missing_method(recv, &method_name),
     }
 }
@@ -1239,12 +1248,18 @@ fn try_take_async_value_ready(value: &FidanValue) -> Option<Result<FidanValue, S
 
 fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -> *mut FidanValue {
     let str_val = s.as_str().to_owned();
+    let Some(method) =
+        infer_receiver_member(ReceiverBuiltinKind::String, method).map(|info| info.canonical_name)
+    else {
+        eprintln!("AOT: string method not found: .{}()", method);
+        return into_raw(FidanValue::Nothing);
+    };
     match method {
         // ── Case ──────────────────────────────────────────────────────────────
-        "lower" | "toLower" | "to_lower" => into_raw(FidanValue::String(FidanString::new(
+        "lower" => into_raw(FidanValue::String(FidanString::new(
             &str_val.to_lowercase(),
         ))),
-        "upper" | "toUpper" | "to_upper" => into_raw(FidanValue::String(FidanString::new(
+        "upper" => into_raw(FidanValue::String(FidanString::new(
             &str_val.to_uppercase(),
         ))),
         "capitalize" => {
@@ -1258,17 +1273,13 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
 
         // ── Trim ──────────────────────────────────────────────────────────────
         "trim" => into_raw(FidanValue::String(FidanString::new(str_val.trim()))),
-        "trimStart" | "ltrim" | "trim_start" => {
-            into_raw(FidanValue::String(FidanString::new(str_val.trim_start())))
-        }
-        "trimEnd" | "rtrim" | "trim_end" => {
-            into_raw(FidanValue::String(FidanString::new(str_val.trim_end())))
-        }
+        "trimStart" => into_raw(FidanValue::String(FidanString::new(str_val.trim_start()))),
+        "trimEnd" => into_raw(FidanValue::String(FidanString::new(str_val.trim_end()))),
 
         // ── Length ────────────────────────────────────────────────────────────
-        "len" | "length" => into_raw(FidanValue::Integer(str_val.chars().count() as i64)),
-        "byteLen" | "byte_len" => into_raw(FidanValue::Integer(str_val.len() as i64)),
-        "isEmpty" | "is_empty" => into_raw(FidanValue::Boolean(str_val.is_empty())),
+        "len" => into_raw(FidanValue::Integer(str_val.chars().count() as i64)),
+        "byteLen" => into_raw(FidanValue::Integer(str_val.len() as i64)),
+        "isEmpty" => into_raw(FidanValue::Boolean(str_val.is_empty())),
 
         // ── Split / lines ─────────────────────────────────────────────────────
         "split" => {
@@ -1314,22 +1325,22 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
             let pat = args.first().map(as_str_val).unwrap_or_default();
             into_raw(FidanValue::Boolean(str_val.contains(pat.as_str())))
         }
-        "startsWith" | "starts_with" => {
+        "startsWith" => {
             let pat = args.first().map(as_str_val).unwrap_or_default();
             into_raw(FidanValue::Boolean(str_val.starts_with(pat.as_str())))
         }
-        "endsWith" | "ends_with" => {
+        "endsWith" => {
             let pat = args.first().map(as_str_val).unwrap_or_default();
             into_raw(FidanValue::Boolean(str_val.ends_with(pat.as_str())))
         }
-        "indexOf" | "index_of" => {
+        "indexOf" => {
             let pat = args.first().map(as_str_val).unwrap_or_default();
             match str_val.find(pat.as_str()) {
                 Some(i) => into_raw(FidanValue::Integer(i as i64)),
                 None => into_raw(FidanValue::Integer(-1)),
             }
         }
-        "lastIndexOf" | "last_index_of" => {
+        "lastIndexOf" => {
             let pat = args.first().map(as_str_val).unwrap_or_default();
             match str_val.rfind(pat.as_str()) {
                 Some(i) => into_raw(FidanValue::Integer(i as i64)),
@@ -1345,14 +1356,14 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
                 &str_val.replace(from.as_str(), to.as_str()),
             )))
         }
-        "replaceAll" | "replace_all" => {
+        "replaceAll" => {
             let from = args.first().map(as_str_val).unwrap_or_default();
             let to = args.get(1).map(as_str_val).unwrap_or_default();
             into_raw(FidanValue::String(FidanString::new(
                 &str_val.replace(from.as_str(), to.as_str()),
             )))
         }
-        "replaceFirst" | "replace_first" => {
+        "replaceFirst" => {
             let from = args.first().map(as_str_val).unwrap_or_default();
             let to = args.get(1).map(as_str_val).unwrap_or_default();
             into_raw(FidanValue::String(FidanString::new(&str_val.replacen(
@@ -1381,7 +1392,7 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
         }
 
         // ── Indexing / slicing ────────────────────────────────────────────────
-        "charAt" | "char_at" => {
+        "charAt" => {
             let idx = args
                 .first()
                 .and_then(|v| {
@@ -1397,7 +1408,7 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
                 None => into_raw(FidanValue::String(FidanString::new(""))),
             }
         }
-        "substring" | "substr" | "slice" => {
+        "substring" => {
             let start = args
                 .first()
                 .and_then(|v| {
@@ -1426,24 +1437,22 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
         }
 
         // ── Parsing ───────────────────────────────────────────────────────────
-        "toInt" | "to_int" | "parseInt" | "parse_int" => match str_val.trim().parse::<i64>() {
+        "toInt" => match str_val.trim().parse::<i64>() {
             Ok(n) => into_raw(FidanValue::Integer(n)),
             Err(_) => into_raw(FidanValue::Nothing),
         },
-        "toFloat" | "to_float" | "parseFloat" | "parse_float" => {
-            match str_val.trim().parse::<f64>() {
-                Ok(f) => into_raw(FidanValue::Float(f)),
-                Err(_) => into_raw(FidanValue::Nothing),
-            }
-        }
-        "toBool" | "to_bool" => {
+        "toFloat" => match str_val.trim().parse::<f64>() {
+            Ok(f) => into_raw(FidanValue::Float(f)),
+            Err(_) => into_raw(FidanValue::Nothing),
+        },
+        "toBool" => {
             let b = matches!(str_val.trim().to_lowercase().as_str(), "true" | "1" | "yes");
             into_raw(FidanValue::Boolean(b))
         }
-        "toString" | "to_string" => into_raw(FidanValue::String(FidanString::new(&str_val))),
+        "toString" => into_raw(FidanValue::String(FidanString::new(&str_val))),
 
         // ── Padding ───────────────────────────────────────────────────────────
-        "padStart" | "pad_start" => {
+        "padStart" => {
             let total = args
                 .first()
                 .and_then(|v| {
@@ -1468,7 +1477,7 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
             };
             into_raw(FidanValue::String(FidanString::new(&padded)))
         }
-        "padEnd" | "pad_end" => {
+        "padEnd" => {
             let total = args
                 .first()
                 .and_then(|v| {
@@ -1502,7 +1511,7 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
             }
             into_raw(FidanValue::List(OwnedRef::new(list)))
         }
-        "charCode" | "char_code" => {
+        "charCode" => {
             let code = str_val.chars().next().map(|c| c as i64).unwrap_or(0);
             into_raw(FidanValue::Integer(code))
         }
@@ -1516,10 +1525,7 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
             }
             into_raw(FidanValue::String(FidanString::new(&result)))
         }
-        _ => {
-            eprintln!("AOT: string method not found: .{}()", method);
-            into_raw(FidanValue::Nothing)
-        }
+        _ => into_raw(FidanValue::Nothing),
     }
 }
 
@@ -1530,10 +1536,16 @@ fn dispatch_list_method(
     method: &str,
     args: Vec<FidanValue>,
 ) -> *mut FidanValue {
+    let Some(method) =
+        infer_receiver_member(ReceiverBuiltinKind::List, method).map(|info| info.canonical_name)
+    else {
+        eprintln!("AOT: list method not found: .{}()", method);
+        return into_raw(FidanValue::Nothing);
+    };
     match method {
-        "len" | "length" | "size" => into_raw(FidanValue::Integer(list.borrow().len() as i64)),
-        "isEmpty" | "is_empty" => into_raw(FidanValue::Boolean(list.borrow().is_empty())),
-        "append" | "push" => {
+        "len" => into_raw(FidanValue::Integer(list.borrow().len() as i64)),
+        "isEmpty" => into_raw(FidanValue::Boolean(list.borrow().is_empty())),
+        "append" => {
             let val = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             list.borrow_mut().append(val);
             into_raw(FidanValue::Nothing)
@@ -1555,7 +1567,7 @@ fn dispatch_list_method(
                 into_raw(last)
             }
         }
-        "first" | "head" => into_raw(list.borrow().get(0).cloned().unwrap_or(FidanValue::Nothing)),
+        "first" => into_raw(list.borrow().get(0).cloned().unwrap_or(FidanValue::Nothing)),
         "last" => {
             let b = list.borrow();
             let len = b.len();
@@ -1590,7 +1602,7 @@ fn dispatch_list_method(
             let found = b.iter().any(|v| values_equal(v, &target));
             into_raw(FidanValue::Boolean(found))
         }
-        "indexOf" | "index_of" => {
+        "indexOf" => {
             let target = args.first().cloned().unwrap_or(FidanValue::Nothing);
             let b = list.borrow();
             let idx = b
@@ -1610,6 +1622,16 @@ fn dispatch_list_method(
             }
             *b = new_list;
             into_raw(FidanValue::Nothing)
+        }
+        "reversed" => {
+            let b = list.borrow();
+            let mut items: Vec<FidanValue> = b.iter().cloned().collect();
+            items.reverse();
+            let mut new_list = FidanList::new();
+            for v in items {
+                new_list.append(v);
+            }
+            into_raw(FidanValue::List(OwnedRef::new(new_list)))
         }
         "sort" => {
             let mut b = list.borrow_mut();
@@ -1675,7 +1697,7 @@ fn dispatch_list_method(
             }
             into_raw(FidanValue::List(OwnedRef::new(new_list)))
         }
-        "extend" | "concat" => {
+        "extend" => {
             let other = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             match other {
                 FidanValue::List(other_l) => {
@@ -1688,7 +1710,7 @@ fn dispatch_list_method(
                 _ => into_raw(FidanValue::Nothing),
             }
         }
-        "toString" | "to_string" => {
+        "toString" => {
             let b = list.borrow();
             let items: Vec<String> = b.iter().map(display).collect();
             into_raw(FidanValue::String(FidanString::new(&format!(
@@ -1696,7 +1718,7 @@ fn dispatch_list_method(
                 items.join(", ")
             ))))
         }
-        "forEach" | "for_each" | "each" => {
+        "forEach" => {
             // forEach(callback) — calls callback(item) for every element.
             if let Some(callback) = args.into_iter().next() {
                 let cb_ptr = into_raw(callback);
@@ -1717,7 +1739,7 @@ fn dispatch_list_method(
             into_raw(FidanValue::Nothing)
         }
 
-        "map" | "transform" | "collect" => {
+        "map" => {
             // map(fn) — returns a new list with fn applied to each element.
             if let Some(callback) = args.into_iter().next() {
                 let cb_ptr = into_raw(callback);
@@ -1746,7 +1768,7 @@ fn dispatch_list_method(
             }
         }
 
-        "filter" | "where_" | "select" => {
+        "filter" => {
             // filter(predicate) — returns elements for which predicate is truthy.
             if let Some(predicate) = args.into_iter().next() {
                 let pred_ptr = into_raw(predicate);
@@ -1793,7 +1815,7 @@ fn dispatch_list_method(
             }
         }
 
-        "firstWhere" | "first_where" => {
+        "firstWhere" => {
             // firstWhere(predicate) — returns the first element for which predicate is truthy.
             let result = if let Some(predicate) = args.into_iter().next() {
                 let pred_ptr = into_raw(predicate);
@@ -1860,7 +1882,7 @@ fn dispatch_list_method(
             }
         }
 
-        "reduce" | "fold" => {
+        "reduce" => {
             // reduce(fn) or reduce(fn, initial) — fold left over the list.
             let mut iter = args.into_iter();
             let callback_val = iter.next();
@@ -1899,10 +1921,7 @@ fn dispatch_list_method(
             }
         }
 
-        _ => {
-            eprintln!("AOT: list method not found: .{}()", method);
-            into_raw(FidanValue::Nothing)
-        }
+        _ => into_raw(FidanValue::Nothing),
     }
 }
 
@@ -1913,9 +1932,15 @@ fn dispatch_dict_method(
     method: &str,
     args: Vec<FidanValue>,
 ) -> *mut FidanValue {
+    let Some(method) =
+        infer_receiver_member(ReceiverBuiltinKind::Dict, method).map(|info| info.canonical_name)
+    else {
+        eprintln!("AOT: dict method not found: .{}()", method);
+        return into_raw(FidanValue::Nothing);
+    };
     match method {
-        "len" | "length" | "size" => into_raw(FidanValue::Integer(dict.borrow().len() as i64)),
-        "isEmpty" | "is_empty" => into_raw(FidanValue::Boolean(dict.borrow().is_empty())),
+        "len" => into_raw(FidanValue::Integer(dict.borrow().len() as i64)),
+        "isEmpty" => into_raw(FidanValue::Boolean(dict.borrow().is_empty())),
         "get" => {
             if let Some(key_val) = args.first() {
                 let key = FidanString::new(&as_str_val(key_val));
@@ -1929,14 +1954,14 @@ fn dispatch_dict_method(
                 into_raw(FidanValue::Nothing)
             }
         }
-        "set" | "put" => {
+        "set" => {
             if let (Some(k), Some(v)) = (args.first(), args.get(1)) {
                 let key = FidanString::new(&as_str_val(k));
                 dict.borrow_mut().insert(key, v.clone());
             }
             into_raw(FidanValue::Nothing)
         }
-        "contains" | "has" | "containsKey" | "contains_key" => {
+        "containsKey" => {
             if let Some(key_val) = args.first() {
                 let key = FidanString::new(&as_str_val(key_val));
                 into_raw(FidanValue::Boolean(dict.borrow().get(&key).is_some()))
@@ -1944,7 +1969,7 @@ fn dispatch_dict_method(
                 into_raw(FidanValue::Boolean(false))
             }
         }
-        "remove" | "delete" => {
+        "remove" => {
             if let Some(key_val) = args.first() {
                 let key = FidanString::new(&as_str_val(key_val));
                 dict.borrow_mut().remove(&key);
@@ -1967,7 +1992,7 @@ fn dispatch_dict_method(
             }
             into_raw(FidanValue::List(OwnedRef::new(list)))
         }
-        "entries" | "items" => {
+        "entries" => {
             let b = dict.borrow();
             let mut list = FidanList::new();
             for (k, v) in b.iter() {
@@ -1978,13 +2003,10 @@ fn dispatch_dict_method(
             }
             into_raw(FidanValue::List(OwnedRef::new(list)))
         }
-        "toString" | "to_string" => into_raw(FidanValue::String(FidanString::new(&display(
+        "toString" => into_raw(FidanValue::String(FidanString::new(&display(
             &FidanValue::Dict(dict.clone()),
         )))),
-        _ => {
-            eprintln!("AOT: dict method not found: .{}()", method);
-            into_raw(FidanValue::Nothing)
-        }
+        _ => into_raw(FidanValue::Nothing),
     }
 }
 

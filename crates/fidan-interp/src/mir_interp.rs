@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use fidan_ast::{BinOp, UnOp};
+use fidan_config::{ReceiverBuiltinKind, infer_receiver_member};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_mir::{
     BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirFunction, MirLit, MirObjectInfo,
@@ -60,6 +61,13 @@ pub struct RunError {
     /// Call stack at the moment of the panic, **innermost frame first**.
     /// Empty when the panic originated outside any named function.
     pub trace: Vec<TraceFrame>,
+}
+
+fn canonical_receiver_method_name(
+    receiver_kind: ReceiverBuiltinKind,
+    method: &str,
+) -> Option<&'static str> {
+    infer_receiver_member(receiver_kind, method).map(|info| info.canonical_name)
 }
 
 // ── Object class table ────────────────────────────────────────────────────────
@@ -2091,27 +2099,27 @@ impl MirMachine {
         // Shared<T> built-in methods (small fixed set — resolve string lazily).
         if let FidanValue::Shared(ref sr) = receiver {
             let method_name = self.sym_str(method);
-            match method_name.as_ref() {
-                "get" => return Ok(sr.0.lock().unwrap().clone()),
-                "set" => {
+            match canonical_receiver_method_name(ReceiverBuiltinKind::Shared, &method_name) {
+                Some("get") => return Ok(sr.0.lock().unwrap().clone()),
+                Some("set") => {
                     let val = args.into_iter().next().unwrap_or(FidanValue::Nothing);
                     *sr.0.lock().unwrap() = val;
                     return Ok(FidanValue::Nothing);
                 }
-                "weak" | "downgrade" => return Ok(FidanValue::WeakShared(sr.downgrade())),
+                Some("weak") => return Ok(FidanValue::WeakShared(sr.downgrade())),
                 _ => {}
             }
         }
         if let FidanValue::WeakShared(ref ws) = receiver {
             let method_name = self.sym_str(method);
-            match method_name.as_ref() {
-                "upgrade" => {
+            match canonical_receiver_method_name(ReceiverBuiltinKind::WeakShared, &method_name) {
+                Some("upgrade") => {
                     return Ok(ws
                         .upgrade()
                         .map(FidanValue::Shared)
                         .unwrap_or(FidanValue::Nothing));
                 }
-                "isAlive" | "is_alive" | "alive" => {
+                Some("isAlive") => {
                     return Ok(FidanValue::Boolean(ws.is_alive()));
                 }
                 _ => {}
@@ -2129,8 +2137,12 @@ impl MirMachine {
         // For list callbacks and bootstrap, resolve the string lazily (O(1) Arc clone).
         let method_name = self.sym_str(method);
         if let FidanValue::List(ref list_ref) = receiver
-            && let Some(result) =
-                self.dispatch_list_callbacks(list_ref, &method_name, args.clone())?
+            && let Some(result) = self.dispatch_list_callbacks(
+                list_ref,
+                canonical_receiver_method_name(ReceiverBuiltinKind::List, &method_name)
+                    .unwrap_or(method_name.as_ref()),
+                args.clone(),
+            )?
         {
             return Ok(result);
         }
@@ -2147,7 +2159,7 @@ impl MirMachine {
         args: Vec<FidanValue>,
     ) -> Result<Option<FidanValue>, MirSignal> {
         match method {
-            "forEach" | "for_each" => {
+            "forEach" => {
                 let callback = args.into_iter().next();
                 let items: Vec<FidanValue> = list_ref.borrow().iter().cloned().collect();
                 match callback {
@@ -2170,7 +2182,7 @@ impl MirMachine {
                 }
                 Ok(Some(FidanValue::Nothing))
             }
-            "firstWhere" | "first_where" => {
+            "firstWhere" => {
                 let callback = args.into_iter().next();
                 let items: Vec<FidanValue> = list_ref.borrow().iter().cloned().collect();
                 let result = match callback {

@@ -1,5 +1,6 @@
 //! Bootstrap list methods — placeholder until `std.collections` (Phase 7).
 
+use fidan_config::{ReceiverBuiltinKind, infer_receiver_member};
 use fidan_runtime::{FidanList, FidanString, FidanValue, OwnedRef};
 
 /// Value equality used internally for `contains` and `find`.
@@ -15,14 +16,15 @@ fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
 }
 
 pub fn dispatch(r: OwnedRef<FidanList>, method: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
+    let method = infer_receiver_member(ReceiverBuiltinKind::List, method)?.canonical_name;
     match method {
-        "append" | "push" | "add" => {
+        "append" => {
             for arg in args {
                 r.borrow_mut().append(arg);
             }
             Some(FidanValue::Nothing)
         }
-        "len" | "length" => Some(FidanValue::Integer(r.borrow().len() as i64)),
+        "len" => Some(FidanValue::Integer(r.borrow().len() as i64)),
         "get" => {
             if let Some(FidanValue::Integer(i)) = args.first() {
                 Some(
@@ -53,27 +55,6 @@ pub fn dispatch(r: OwnedRef<FidanList>, method: &str, args: Vec<FidanValue>) -> 
             } else {
                 Some(FidanValue::Nothing)
             }
-        }
-        "insert" => {
-            let mut iter = args.into_iter();
-            let idx = iter.next().unwrap_or(FidanValue::Nothing);
-            let item = iter.next().unwrap_or(FidanValue::Nothing);
-            if let FidanValue::Integer(i) = idx {
-                let i = i as usize;
-                let items: Vec<FidanValue> = r.borrow().iter().cloned().collect();
-                let mut new_list = FidanList::new();
-                for (pos, v) in items.iter().enumerate() {
-                    if pos == i {
-                        new_list.append(item.clone());
-                    }
-                    new_list.append(v.clone());
-                }
-                if i >= items.len() {
-                    new_list.append(item);
-                }
-                *r.borrow_mut() = new_list;
-            }
-            Some(FidanValue::Nothing)
         }
         "remove" => {
             let idx = args.into_iter().next().unwrap_or(FidanValue::Nothing);
@@ -144,7 +125,7 @@ pub fn dispatch(r: OwnedRef<FidanList>, method: &str, args: Vec<FidanValue>) -> 
             let found = r.borrow().iter().any(|v| values_equal(v, &target));
             Some(FidanValue::Boolean(found))
         }
-        "find" | "index_of" => {
+        "indexOf" | "find" => {
             let target = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             let pos = r
                 .borrow()

@@ -85,3 +85,29 @@ pub fn infer_receiver_method(
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use fidan_config::{ReceiverBuiltinKind, ReceiverReturnKind, infer_receiver_member};
+
+    #[test]
+    fn string_members_are_centralized_in_metadata() {
+        let len =
+            infer_receiver_member(ReceiverBuiltinKind::String, "len").expect("string len metadata");
+        assert_eq!(len.field_return, Some(ReceiverReturnKind::Integer));
+        assert_eq!(len.method_return, Some(ReceiverReturnKind::Integer));
+
+        let filter = infer_receiver_member(ReceiverBuiltinKind::String, "filter");
+        assert!(filter.is_none());
+    }
+
+    #[test]
+    fn shared_members_are_centralized_in_metadata() {
+        let downgrade = infer_receiver_member(ReceiverBuiltinKind::Shared, "downgrade")
+            .expect("shared downgrade metadata");
+        assert_eq!(
+            downgrade.method_return,
+            Some(ReceiverReturnKind::WeakSharedOfInner)
+        );
+    }
+}

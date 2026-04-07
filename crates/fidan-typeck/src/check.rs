@@ -4,10 +4,11 @@ use crate::types::FidanType;
 use fidan_ast::{
     AstArena, BinOp, Decorator, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp,
 };
-use fidan_config::{BUILTIN_BINDINGS, BUILTIN_DECORATORS};
+use fidan_config::{BUILTIN_BINDINGS, BUILTIN_DECORATORS, BuiltinReturnKind, builtin_return_kind};
 use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::{FileId, Span};
+use fidan_stdlib::{ReceiverBuiltinKind, ReceiverReturnKind, StdlibValueKind};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -100,6 +101,12 @@ struct SeenImport {
     re_export: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StdlibImportInfo {
+    module: Symbol,
+    export: Symbol,
+}
+
 // ── TypeChecker ───────────────────────────────────────────────────────────────
 
 pub struct TypeChecker {
@@ -147,6 +154,8 @@ pub struct TypeChecker {
     import_syms: rustc_hash::FxHashSet<Symbol>,
     /// First kept import for each bound symbol in the current module.
     seen_imports: FxHashMap<Symbol, SeenImport>,
+    /// Specific `use std.module.member` imports keyed by the bound local symbol.
+    stdlib_imports: FxHashMap<Symbol, StdlibImportInfo>,
     /// Every symbol that was successfully resolved by an `Expr::Ident` node.
     /// Used to determine which import bindings are unreferenced.
     referenced_names: rustc_hash::FxHashSet<Symbol>,
@@ -175,6 +184,7 @@ impl TypeChecker {
             import_bindings: vec![],
             import_syms: rustc_hash::FxHashSet::default(),
             seen_imports: FxHashMap::default(),
+            stdlib_imports: FxHashMap::default(),
             referenced_names: rustc_hash::FxHashSet::default(),
         };
         tc.register_builtins();
@@ -714,6 +724,17 @@ impl TypeChecker {
                                 const_value: None,
                             },
                         );
+                        if path.len() >= 3 {
+                            self.stdlib_imports.insert(
+                                binding_sym,
+                                StdlibImportInfo {
+                                    module: path[1],
+                                    export: *path.last().unwrap(),
+                                },
+                            );
+                        } else {
+                            self.stdlib_imports.remove(&binding_sym);
+                        }
                         self.record_import_binding(binding_sym, *span, *grouped, *re_export);
                     }
                 } else if !path.is_empty() && path.first() != Some(&std_sym) {
@@ -2355,6 +2376,172 @@ impl TypeChecker {
 
     // ── Field resolution ──────────────────────────────────────────────────
 
+    fn emit_unknown_member_error(
+        &mut self,
+        ty: &FidanType,
+        field: Symbol,
+        span: Span,
+        expected_kind: &str,
+    ) {
+        let type_name = self.ty_name(ty);
+        let field_name = self.interner.resolve(field).to_string();
+        self.emit_error(
+            fidan_diagnostics::diag_code!("E0204"),
+            format!("type `{type_name}` has no {expected_kind} `{field_name}`"),
+            span,
+        );
+    }
+
+    fn receiver_builtin_kind(&self, ty: &FidanType) -> Option<ReceiverBuiltinKind> {
+        Some(match ty {
+            FidanType::Integer => ReceiverBuiltinKind::Integer,
+            FidanType::Float => ReceiverBuiltinKind::Float,
+            FidanType::Boolean => ReceiverBuiltinKind::Boolean,
+            FidanType::String => ReceiverBuiltinKind::String,
+            FidanType::List(_) => ReceiverBuiltinKind::List,
+            FidanType::Dict(_, _) => ReceiverBuiltinKind::Dict,
+            FidanType::Handle => ReceiverBuiltinKind::Handle,
+            FidanType::Nothing => ReceiverBuiltinKind::Nothing,
+            FidanType::Dynamic | FidanType::Unknown | FidanType::Error => {
+                ReceiverBuiltinKind::Dynamic
+            }
+            FidanType::Shared(_) => ReceiverBuiltinKind::Shared,
+            FidanType::WeakShared(_) => ReceiverBuiltinKind::WeakShared,
+            FidanType::Pending(_) => ReceiverBuiltinKind::Pending,
+            FidanType::Function => ReceiverBuiltinKind::Function,
+            FidanType::Tuple(_)
+            | FidanType::Object(_)
+            | FidanType::Enum(_)
+            | FidanType::ClassType(_) => {
+                return None;
+            }
+        })
+    }
+
+    fn builtin_return_kind_to_type(&self, kind: BuiltinReturnKind) -> FidanType {
+        match kind {
+            BuiltinReturnKind::Nothing => FidanType::Nothing,
+            BuiltinReturnKind::String => FidanType::String,
+            BuiltinReturnKind::Integer => FidanType::Integer,
+            BuiltinReturnKind::Float => FidanType::Float,
+            BuiltinReturnKind::Boolean => FidanType::Boolean,
+            BuiltinReturnKind::Dynamic => FidanType::Dynamic,
+        }
+    }
+
+    fn stdlib_value_kind_to_type(&self, kind: StdlibValueKind) -> FidanType {
+        match kind {
+            StdlibValueKind::Integer => FidanType::Integer,
+            StdlibValueKind::Float => FidanType::Float,
+            StdlibValueKind::Boolean => FidanType::Boolean,
+            StdlibValueKind::String => FidanType::String,
+            StdlibValueKind::List => FidanType::List(Box::new(FidanType::Dynamic)),
+            StdlibValueKind::Dict => {
+                FidanType::Dict(Box::new(FidanType::Dynamic), Box::new(FidanType::Dynamic))
+            }
+            StdlibValueKind::Dynamic => FidanType::Dynamic,
+            StdlibValueKind::Nothing => FidanType::Nothing,
+        }
+    }
+
+    fn resolve_receiver_return_kind(
+        &self,
+        receiver_ty: &FidanType,
+        return_kind: ReceiverReturnKind,
+    ) -> FidanType {
+        match return_kind {
+            ReceiverReturnKind::Integer => FidanType::Integer,
+            ReceiverReturnKind::Float => FidanType::Float,
+            ReceiverReturnKind::Boolean => FidanType::Boolean,
+            ReceiverReturnKind::String => FidanType::String,
+            ReceiverReturnKind::Dynamic => FidanType::Dynamic,
+            ReceiverReturnKind::Nothing => FidanType::Nothing,
+            ReceiverReturnKind::ReceiverElement => match receiver_ty {
+                FidanType::List(inner) => (**inner).clone(),
+                _ => FidanType::Dynamic,
+            },
+            ReceiverReturnKind::DictValue => match receiver_ty {
+                FidanType::Dict(_, value) => (**value).clone(),
+                _ => FidanType::Dynamic,
+            },
+            ReceiverReturnKind::ListOfString => FidanType::List(Box::new(FidanType::String)),
+            ReceiverReturnKind::ListOfInteger => FidanType::List(Box::new(FidanType::Integer)),
+            ReceiverReturnKind::ListOfDynamic => FidanType::List(Box::new(FidanType::Dynamic)),
+            ReceiverReturnKind::ListOfReceiverElement => match receiver_ty {
+                FidanType::List(inner) => FidanType::List(inner.clone()),
+                _ => FidanType::List(Box::new(FidanType::Dynamic)),
+            },
+            ReceiverReturnKind::ListOfDictValue => match receiver_ty {
+                FidanType::Dict(_, value) => FidanType::List(value.clone()),
+                _ => FidanType::List(Box::new(FidanType::Dynamic)),
+            },
+            ReceiverReturnKind::ListOfDynamicPairs => {
+                FidanType::List(Box::new(FidanType::List(Box::new(FidanType::Dynamic))))
+            }
+            ReceiverReturnKind::SharedInnerValue => match receiver_ty {
+                FidanType::Shared(inner) => (**inner).clone(),
+                _ => FidanType::Dynamic,
+            },
+            ReceiverReturnKind::SharedOfInner => match receiver_ty {
+                FidanType::WeakShared(inner) => FidanType::Shared(inner.clone()),
+                _ => FidanType::Shared(Box::new(FidanType::Dynamic)),
+            },
+            ReceiverReturnKind::WeakSharedOfInner => match receiver_ty {
+                FidanType::Shared(inner) => FidanType::WeakShared(inner.clone()),
+                _ => FidanType::WeakShared(Box::new(FidanType::Dynamic)),
+            },
+        }
+    }
+
+    fn builtin_field_type(&self, ty: &FidanType, field: Symbol) -> Option<FidanType> {
+        let receiver_kind = self.receiver_builtin_kind(ty)?;
+        let member = fidan_stdlib::infer_receiver_member(
+            receiver_kind,
+            self.interner.resolve(field).as_ref(),
+        )?;
+        member
+            .field_return
+            .map(|return_kind| self.resolve_receiver_return_kind(ty, return_kind))
+    }
+
+    fn builtin_method_return(&self, ty: &FidanType, field: Symbol) -> Option<FidanType> {
+        let receiver_kind = self.receiver_builtin_kind(ty)?;
+        let member = fidan_stdlib::infer_receiver_member(
+            receiver_kind,
+            self.interner.resolve(field).as_ref(),
+        )?;
+        member
+            .method_return
+            .map(|return_kind| self.resolve_receiver_return_kind(ty, return_kind))
+    }
+
+    fn stdlib_import_return_type(&self, import: StdlibImportInfo) -> Option<FidanType> {
+        let module_name = self.interner.resolve(import.module);
+        let export_name = self.interner.resolve(import.export);
+        let return_kind =
+            fidan_stdlib::member_return_type(module_name.as_ref(), export_name.as_ref()).and_then(
+                |ty| match ty {
+                    "integer" => Some(StdlibValueKind::Integer),
+                    "float" => Some(StdlibValueKind::Float),
+                    "boolean" => Some(StdlibValueKind::Boolean),
+                    "string" => Some(StdlibValueKind::String),
+                    "list" => Some(StdlibValueKind::List),
+                    "dict" => Some(StdlibValueKind::Dict),
+                    "dynamic" => Some(StdlibValueKind::Dynamic),
+                    "nothing" => Some(StdlibValueKind::Nothing),
+                    _ => None,
+                },
+            )?;
+        Some(self.stdlib_value_kind_to_type(return_kind))
+    }
+
+    fn should_emit_member_error(&self, ty: &FidanType) -> bool {
+        !matches!(
+            ty,
+            FidanType::Dynamic | FidanType::Unknown | FidanType::Error
+        )
+    }
+
     fn resolve_field(&mut self, ty: &FidanType, field: Symbol, span: Span) -> FidanType {
         match ty {
             FidanType::Object(sym) => {
@@ -2418,55 +2605,16 @@ impl TypeChecker {
                     }
                 }
             }
-            FidanType::String => {
-                let f = self.interner.resolve(field);
-                if matches!(f.as_ref(), "length" | "len") {
-                    FidanType::Integer
+            _ => {
+                if let Some(field_ty) = self.builtin_field_type(ty, field) {
+                    field_ty
+                } else if self.should_emit_member_error(ty) {
+                    self.emit_unknown_member_error(ty, field, span, "field or method");
+                    FidanType::Error
                 } else {
                     FidanType::Dynamic
                 }
             }
-            FidanType::List(_) => {
-                let f = self.interner.resolve(field);
-                if matches!(f.as_ref(), "length" | "len") {
-                    FidanType::Integer
-                } else {
-                    FidanType::Dynamic
-                }
-            }
-            FidanType::Shared(inner) => {
-                let f = self.interner.resolve(field);
-                match f.as_ref() {
-                    "get" | "set" | "weak" | "downgrade" => FidanType::Function,
-                    "type" => FidanType::String,
-                    _ => {
-                        let _ = inner;
-                        FidanType::Dynamic
-                    }
-                }
-            }
-            FidanType::WeakShared(inner) => {
-                let f = self.interner.resolve(field);
-                match f.as_ref() {
-                    "upgrade" | "isAlive" | "is_alive" | "alive" => FidanType::Function,
-                    "type" => FidanType::String,
-                    _ => {
-                        let _ = inner;
-                        FidanType::Dynamic
-                    }
-                }
-            }
-            // First-class action values expose `.name` (the declared action name).
-            FidanType::Function => {
-                let f = self.interner.resolve(field);
-                if f.as_ref() == "name" {
-                    FidanType::String
-                } else {
-                    FidanType::Dynamic
-                }
-            }
-            FidanType::Dynamic | FidanType::Unknown | FidanType::Error => FidanType::Dynamic,
-            _ => FidanType::Dynamic,
         }
     }
 
@@ -2489,63 +2637,64 @@ impl TypeChecker {
                     self.referenced_names.insert(name);
                 }
                 let name_str = self.interner.resolve(name).to_string();
-                // Built-in return types
-                match name_str.as_str() {
-                    "print" | "eprint" => return FidanType::Nothing,
-                    "input" => return FidanType::String,
-                    "len" => return FidanType::Integer,
-                    "type" => return FidanType::String,
-                    "string" => return FidanType::String,
-                    "integer" => return FidanType::Integer,
-                    "float" | "sqrt" => return FidanType::Float,
-                    "boolean" => return FidanType::Boolean,
-                    "WeakShared" => {
-                        let inferred_args: Vec<FidanType> = args
-                            .iter()
-                            .map(|arg| self.infer_expr(arg.value, module))
-                            .collect();
-                        if inferred_args.is_empty() {
-                            self.emit_error(
-                                fidan_diagnostics::diag_code!("E0301"),
-                                "WeakShared(shared) requires a Shared argument",
-                                span,
-                            );
-                            return FidanType::WeakShared(Box::new(FidanType::Dynamic));
+                if name_str.as_str() == "Shared" {
+                    let inner = args
+                        .first()
+                        .map(|arg| self.infer_expr(arg.value, module))
+                        .unwrap_or(FidanType::Dynamic);
+                    return FidanType::Shared(Box::new(inner));
+                }
+                if name_str.as_str() == "WeakShared" {
+                    let inferred_args: Vec<FidanType> = args
+                        .iter()
+                        .map(|arg| self.infer_expr(arg.value, module))
+                        .collect();
+                    if inferred_args.is_empty() {
+                        self.emit_error(
+                            fidan_diagnostics::diag_code!("E0301"),
+                            "WeakShared(shared) requires a Shared argument",
+                            span,
+                        );
+                        return FidanType::WeakShared(Box::new(FidanType::Dynamic));
+                    }
+                    if inferred_args.len() > 1 {
+                        self.emit_error(
+                            fidan_diagnostics::diag_code!("E0302"),
+                            "WeakShared(shared) accepts exactly one argument",
+                            span,
+                        );
+                    }
+                    return match inferred_args.first() {
+                        Some(FidanType::Shared(inner)) => {
+                            FidanType::WeakShared(Box::new((**inner).clone()))
                         }
-                        if inferred_args.len() > 1 {
+                        Some(FidanType::WeakShared(inner)) => {
+                            FidanType::WeakShared(Box::new((**inner).clone()))
+                        }
+                        Some(FidanType::Dynamic | FidanType::Unknown | FidanType::Error) => {
+                            FidanType::WeakShared(Box::new(FidanType::Dynamic))
+                        }
+                        Some(other) => {
                             self.emit_error(
                                 fidan_diagnostics::diag_code!("E0302"),
-                                "WeakShared(shared) accepts exactly one argument",
+                                format!(
+                                    "WeakShared(shared) expects a Shared value, found `{}`",
+                                    self.ty_name(other)
+                                ),
                                 span,
                             );
+                            FidanType::WeakShared(Box::new(FidanType::Dynamic))
                         }
-                        return match inferred_args.first() {
-                            Some(FidanType::Shared(inner)) => {
-                                FidanType::WeakShared(Box::new((**inner).clone()))
-                            }
-                            Some(FidanType::WeakShared(inner)) => {
-                                FidanType::WeakShared(Box::new((**inner).clone()))
-                            }
-                            Some(FidanType::Dynamic | FidanType::Unknown | FidanType::Error) => {
-                                FidanType::WeakShared(Box::new(FidanType::Dynamic))
-                            }
-                            Some(other) => {
-                                self.emit_error(
-                                    fidan_diagnostics::diag_code!("E0302"),
-                                    format!(
-                                        "WeakShared(shared) expects a Shared value, found `{}`",
-                                        self.ty_name(other)
-                                    ),
-                                    span,
-                                );
-                                FidanType::WeakShared(Box::new(FidanType::Dynamic))
-                            }
-                            None => FidanType::WeakShared(Box::new(FidanType::Dynamic)),
-                        };
-                    }
-                    "floor" | "ceil" | "round" => return FidanType::Integer,
-                    "abs" | "max" | "min" => return FidanType::Dynamic,
-                    _ => {}
+                        None => FidanType::WeakShared(Box::new(FidanType::Dynamic)),
+                    };
+                }
+                if let Some(return_kind) = builtin_return_kind(&name_str) {
+                    return self.builtin_return_kind_to_type(return_kind);
+                }
+                if let Some(import) = self.stdlib_imports.get(&name).copied()
+                    && let Some(return_ty) = self.stdlib_import_return_type(import)
+                {
+                    return return_ty;
                 }
                 // Look up in symbol table: Object constructor, user action, or builtin.
                 match self.table.lookup(name).map(|i| i.kind) {
@@ -2604,32 +2753,42 @@ impl TypeChecker {
                 let recv = self.infer_expr(object, module);
                 match recv {
                     FidanType::Object(sym) => {
+                        let object_type = FidanType::Object(sym);
+                        if let Some(field_ty) = self.resolve_object_field_only(sym, field) {
+                            self.emit_unknown_member_error(&object_type, field, span, "method");
+                            let _ = field_ty;
+                            return FidanType::Error;
+                        }
+
                         let ret = self.method_return(&sym, field);
                         if matches!(ret, FidanType::Dynamic) {
-                            // Method not in local chain — may be in a cross-module
-                            // parent.  Record for LSP-level validation.
-                            let recv_ty = self.interner.resolve(sym).to_string();
-                            let mname = self.interner.resolve(field).to_string();
-                            let arg_tys: Vec<String> = args
-                                .iter()
-                                .map(|arg| {
-                                    self.expr_types
-                                        .get(&arg.value)
-                                        .map(|t| {
-                                            t.display_name(&|s| {
-                                                self.interner.resolve(s).to_string()
+                            if self.object_method_may_be_cross_module(sym) {
+                                let recv_ty = self.interner.resolve(sym).to_string();
+                                let mname = self.interner.resolve(field).to_string();
+                                let arg_tys: Vec<String> = args
+                                    .iter()
+                                    .map(|arg| {
+                                        self.expr_types
+                                            .get(&arg.value)
+                                            .map(|t| {
+                                                t.display_name(&|s| {
+                                                    self.interner.resolve(s).to_string()
+                                                })
                                             })
-                                        })
-                                        .unwrap_or_else(|| "?".to_string())
-                                })
-                                .collect();
-                            self.cross_module_call_sites
-                                .push(crate::CrossModuleCallSite {
-                                    receiver_ty: recv_ty,
-                                    method_name: mname,
-                                    arg_tys,
-                                    span,
-                                });
+                                            .unwrap_or_else(|| "?".to_string())
+                                    })
+                                    .collect();
+                                self.cross_module_call_sites
+                                    .push(crate::CrossModuleCallSite {
+                                        receiver_ty: recv_ty,
+                                        method_name: mname,
+                                        arg_tys,
+                                        span,
+                                    });
+                            } else {
+                                self.emit_unknown_member_error(&object_type, field, span, "method");
+                                return FidanType::Error;
+                            }
                         } else {
                             // Method found locally — validate the full local signature.
                             if let Some(minfo) = self.find_method_info(&sym, field) {
@@ -2638,24 +2797,16 @@ impl TypeChecker {
                         }
                         ret
                     }
-                    FidanType::Shared(inner) => {
-                        let method_name = self.interner.resolve(field);
-                        match method_name.as_ref() {
-                            "get" => *inner,
-                            "set" => FidanType::Nothing,
-                            "weak" | "downgrade" => FidanType::WeakShared(inner),
-                            _ => FidanType::Dynamic,
+                    _ => {
+                        if let Some(ret) = self.builtin_method_return(&recv, field) {
+                            ret
+                        } else if self.should_emit_member_error(&recv) {
+                            self.emit_unknown_member_error(&recv, field, span, "method");
+                            FidanType::Error
+                        } else {
+                            FidanType::Dynamic
                         }
                     }
-                    FidanType::WeakShared(inner) => {
-                        let method_name = self.interner.resolve(field);
-                        match method_name.as_ref() {
-                            "upgrade" => FidanType::Shared(inner),
-                            "isAlive" | "is_alive" | "alive" => FidanType::Boolean,
-                            _ => FidanType::Dynamic,
-                        }
-                    }
-                    _ => FidanType::Dynamic,
                 }
             }
 
@@ -2676,6 +2827,42 @@ impl TypeChecker {
             }
         }
         FidanType::Dynamic
+    }
+
+    fn resolve_object_field_only(&self, obj_sym: Symbol, field: Symbol) -> Option<FidanType> {
+        if !self.objects.contains_key(&obj_sym) {
+            return None;
+        }
+
+        let mut cur = obj_sym;
+        loop {
+            let info = self.objects.get(&cur)?;
+            if let Some(field_ty) = info.fields.get(&field) {
+                return Some(field_ty.clone());
+            }
+            match info.parent {
+                Some(parent) if self.objects.contains_key(&parent) => cur = parent,
+                _ => return None,
+            }
+        }
+    }
+
+    fn object_method_may_be_cross_module(&self, obj_sym: Symbol) -> bool {
+        if !self.objects.contains_key(&obj_sym) {
+            return true;
+        }
+
+        let mut cur = obj_sym;
+        loop {
+            let Some(info) = self.objects.get(&cur) else {
+                return true;
+            };
+            match info.parent {
+                Some(parent) if self.objects.contains_key(&parent) => cur = parent,
+                Some(_) => return true,
+                None => return false,
+            }
+        }
     }
 
     /// Walk the local object inheritance chain of `obj_sym` to find the [`ActionInfo`] for

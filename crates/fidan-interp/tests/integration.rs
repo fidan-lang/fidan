@@ -907,6 +907,30 @@ fn weak_shared_survives_function_scope_copy_chain() {
 }
 
 #[test]
+fn receiver_aliases_work_through_interpreter_dispatch() {
+    assert!(
+        run_src(
+            r#"var word = "abc"
+        assert_eq(word.to_upper(), "ABC")
+
+        var nums = [1, 2]
+        nums.push(3)
+        assert_eq(nums.reversed()[0], 3)
+
+        var data = {"a": 1}
+        assert_eq(data.contains_key("a"), true)
+
+        var shared = Shared(5)
+        var weak = shared.downgrade()
+        assert_eq(type(weak), "WeakShared")
+        assert_eq(weak.is_alive(), true)
+        assert_eq(weak.upgrade().get(), 5)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn concurrent_block_ok() {
     assert!(
         run_src(

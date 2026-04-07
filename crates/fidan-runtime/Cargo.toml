@@ -13,6 +13,7 @@ repository.workspace = true
 crate-type = ["rlib", "staticlib", "cdylib"]
 
 [dependencies]
+fidan-config = { workspace = true }
 fidan-source = { workspace = true }
 fidan-lexer = { workspace = true }
 rustc-hash = { workspace = true }

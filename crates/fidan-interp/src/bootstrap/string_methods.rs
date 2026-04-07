@@ -1,21 +1,23 @@
 //! Bootstrap string methods — placeholder until `std.string` (Phase 7).
 
+use fidan_config::{ReceiverBuiltinKind, infer_receiver_member};
 use fidan_runtime::{FidanList, FidanString, FidanValue, OwnedRef};
 
 pub fn dispatch(s: FidanString, method: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
+    let method = infer_receiver_member(ReceiverBuiltinKind::String, method)?.canonical_name;
     match method {
-        "upper" | "to_upper" => Some(FidanValue::String(FidanString::new(
+        "upper" => Some(FidanValue::String(FidanString::new(
             &s.as_str().to_uppercase(),
         ))),
-        "lower" | "to_lower" => Some(FidanValue::String(FidanString::new(
+        "lower" => Some(FidanValue::String(FidanString::new(
             &s.as_str().to_lowercase(),
         ))),
         "trim" => Some(FidanValue::String(FidanString::new(s.as_str().trim()))),
-        "trim_start" | "ltrim" => Some(FidanValue::String(FidanString::new(
+        "trimStart" => Some(FidanValue::String(FidanString::new(
             s.as_str().trim_start(),
         ))),
-        "trim_end" | "rtrim" => Some(FidanValue::String(FidanString::new(s.as_str().trim_end()))),
-        "len" | "length" => Some(FidanValue::Integer(s.len() as i64)),
+        "trimEnd" => Some(FidanValue::String(FidanString::new(s.as_str().trim_end()))),
+        "len" => Some(FidanValue::Integer(s.len() as i64)),
         "contains" => {
             let pat = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             if let FidanValue::String(p) = pat {
@@ -24,7 +26,7 @@ pub fn dispatch(s: FidanString, method: &str, args: Vec<FidanValue>) -> Option<F
                 Some(FidanValue::Boolean(false))
             }
         }
-        "starts_with" | "startsWith" => {
+        "startsWith" => {
             let pat = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             if let FidanValue::String(p) = pat {
                 Some(FidanValue::Boolean(s.as_str().starts_with(p.as_str())))
@@ -32,7 +34,7 @@ pub fn dispatch(s: FidanString, method: &str, args: Vec<FidanValue>) -> Option<F
                 Some(FidanValue::Boolean(false))
             }
         }
-        "ends_with" | "endsWith" => {
+        "endsWith" => {
             let pat = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             if let FidanValue::String(p) = pat {
                 Some(FidanValue::Boolean(s.as_str().ends_with(p.as_str())))
@@ -69,7 +71,7 @@ pub fn dispatch(s: FidanString, method: &str, args: Vec<FidanValue>) -> Option<F
             }
             Some(FidanValue::List(OwnedRef::new(list)))
         }
-        "find" | "index_of" => {
+        "indexOf" => {
             let target = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             if let FidanValue::String(pat) = target {
                 let idx = s
@@ -82,7 +84,7 @@ pub fn dispatch(s: FidanString, method: &str, args: Vec<FidanValue>) -> Option<F
                 Some(FidanValue::Integer(-1))
             }
         }
-        "substr" | "slice" => {
+        "substring" => {
             let mut iter = args.into_iter();
             let start = iter.next().unwrap_or(FidanValue::Nothing);
             let end = iter.next().unwrap_or(FidanValue::Nothing);
@@ -99,7 +101,7 @@ pub fn dispatch(s: FidanString, method: &str, args: Vec<FidanValue>) -> Option<F
             let sub: String = chars[si.min(len)..ei.min(len)].iter().collect();
             Some(FidanValue::String(FidanString::new(&sub)))
         }
-        "char_at" => {
+        "charAt" => {
             let idx = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             if let FidanValue::Integer(i) = idx {
                 Some(
@@ -115,7 +117,7 @@ pub fn dispatch(s: FidanString, method: &str, args: Vec<FidanValue>) -> Option<F
         }
         // Returns a new string with characters in reversed order.
         // Strings are immutable so this always produces a fresh value.
-        "reverse" | "reversed" => {
+        "reverse" => {
             let rev: String = s.as_str().chars().rev().collect();
             Some(FidanValue::String(FidanString::new(&rev)))
         }
