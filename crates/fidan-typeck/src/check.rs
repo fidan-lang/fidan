@@ -2997,6 +2997,7 @@ impl TypeChecker {
                     && let Some(return_ty) =
                         self.stdlib_namespace_return_type(module_sym, field, args, module)
                 {
+                    self.referenced_names.insert(*namespace);
                     return return_ty;
                 }
 
