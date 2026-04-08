@@ -1,6 +1,8 @@
 use crate::options::ExecutionMode;
 use crate::{CompileOptions, Session};
-use anyhow::{Context, Result};
+#[cfg(windows)]
+use anyhow::Context;
+use anyhow::Result;
 use fidan_diagnostics::{Severity, render_message_to_stderr};
 use fidan_lexer::SymbolInterner;
 use fidan_mir::MirProgram;

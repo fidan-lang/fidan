@@ -720,6 +720,7 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
+#[cfg(target_os = "windows")]
 fn local_data_dir() -> Result<PathBuf> {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
@@ -788,12 +789,16 @@ fn create_directory_pointer(target: &Path, link: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn sandbox() -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let nonce = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "fidan-driver-install-test-{}-{}",
+            "fidan-driver-install-test-{}_{}_{}",
             std::process::id(),
-            now_secs()
+            now_secs(),
+            nonce
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();

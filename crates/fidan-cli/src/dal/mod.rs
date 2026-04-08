@@ -743,12 +743,17 @@ fn remove_package_cli_binary(
 
 fn cli_binary_candidates(bin_root: &Path, cli: &DalCliMeta) -> Result<Vec<PathBuf>> {
     let stem = cli_binary_stem(cli)?;
-    let mut candidates = vec![bin_root.join(&stem)];
+    let candidates = vec![bin_root.join(&stem)];
     #[cfg(target_os = "windows")]
     {
+        let mut candidates = candidates;
         candidates.push(bin_root.join(format!("{stem}.exe")));
+        Ok(candidates)
     }
-    Ok(candidates)
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(candidates)
+    }
 }
 
 fn cleanup_empty_local_layout(project_root: &Path) -> Result<()> {
