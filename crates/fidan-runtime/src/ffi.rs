@@ -860,6 +860,20 @@ pub extern "C" fn fdn_list_new() -> *mut FidanValue {
     into_raw(FidanValue::List(OwnedRef::new(FidanList::new())))
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_tuple_pack(
+    values_ptr: *const *mut FidanValue,
+    values_count: i64,
+) -> *mut FidanValue {
+    let mut values = Vec::with_capacity(values_count.max(0) as usize);
+    if values_count > 0 && !values_ptr.is_null() {
+        for i in 0..values_count as usize {
+            values.push(borrow(*values_ptr.add(i)).clone());
+        }
+    }
+    into_raw(FidanValue::Tuple(values))
+}
+
 /// Append a clone of `val` to `list`.  Borrows both.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_list_push(list: *mut FidanValue, val: *mut FidanValue) {
@@ -886,6 +900,18 @@ pub unsafe extern "C" fn fdn_list_get(
                     *n as usize
                 };
                 b.get(i).cloned().unwrap_or(FidanValue::Nothing)
+            } else {
+                FidanValue::Nothing
+            }
+        }
+        FidanValue::Tuple(items) => {
+            if let FidanValue::Integer(n) = idx_val {
+                let i = if *n < 0 {
+                    (items.len() as i64 + n).max(0) as usize
+                } else {
+                    *n as usize
+                };
+                items.get(i).cloned().unwrap_or(FidanValue::Nothing)
             } else {
                 FidanValue::Nothing
             }
@@ -3056,5 +3082,47 @@ pub unsafe extern "C" fn fdn_call_dynamic(
             drop(Box::from_raw(*ptr));
         }
         result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tuple_pack_and_index_round_trip() {
+        unsafe {
+            let first = into_raw(FidanValue::Integer(7));
+            let second = into_raw(FidanValue::String(FidanString::new("value")));
+            let values = [first, second];
+
+            let tuple = fdn_tuple_pack(values.as_ptr(), values.len() as i64);
+            match borrow(tuple) {
+                FidanValue::Tuple(items) => {
+                    assert_eq!(items.len(), 2);
+                    assert!(matches!(items.first(), Some(FidanValue::Integer(7))));
+                }
+                other => panic!("expected tuple, got {:?}", other),
+            }
+
+            let zero = into_raw(FidanValue::Integer(0));
+            let one = into_raw(FidanValue::Integer(1));
+            let first_value = fdn_list_get(tuple, zero);
+            let second_value = fdn_list_get(tuple, one);
+
+            assert!(matches!(borrow(first_value), FidanValue::Integer(7)));
+            match borrow(second_value) {
+                FidanValue::String(text) => assert_eq!(text.as_str(), "value"),
+                other => panic!("expected string, got {:?}", other),
+            }
+
+            drop(Box::from_raw(first));
+            drop(Box::from_raw(second));
+            drop(Box::from_raw(zero));
+            drop(Box::from_raw(one));
+            drop(Box::from_raw(first_value));
+            drop(Box::from_raw(second_value));
+            drop(Box::from_raw(tuple));
+        }
     }
 }

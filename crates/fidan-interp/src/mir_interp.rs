@@ -354,7 +354,11 @@ unsafe fn jit_call_fn_raw(ctx: *mut c_void, fn_id: u32, args_ptr: *const i64, ar
         .map(|param| param.ty.clone())
         .collect::<Vec<_>>();
     let return_ty = machine.program.function(func_id).return_ty.clone();
-    let raw_args = unsafe { std::slice::from_raw_parts(args_ptr, arg_cnt.max(0) as usize) };
+    let raw_args = if arg_cnt <= 0 || args_ptr.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(args_ptr, arg_cnt as usize) }
+    };
     let args = raw_args
         .iter()
         .enumerate()
@@ -538,21 +542,11 @@ impl MirMachine {
     }
 
     fn encode_jit_abi_value(&self, value: &FidanValue, ty: &MirTy) -> i64 {
-        match (value, ty) {
-            (FidanValue::Integer(n), MirTy::Integer) => *n,
-            (FidanValue::Float(f), MirTy::Float) => f.to_bits() as i64,
-            (FidanValue::Boolean(b), MirTy::Boolean) => i64::from(*b),
-            _ => 0,
-        }
+        fidan_codegen_cranelift::encode_jit_abi_value(value, ty)
     }
 
     fn decode_jit_abi_value(&self, raw: i64, ty: &MirTy) -> FidanValue {
-        match ty {
-            MirTy::Integer => FidanValue::Integer(raw),
-            MirTy::Float => FidanValue::Float(f64::from_bits(raw as u64)),
-            MirTy::Boolean => FidanValue::Boolean(raw != 0),
-            _ => FidanValue::Nothing,
-        }
+        fidan_codegen_cranelift::decode_jit_abi_value(raw, ty)
     }
 
     fn cleanup_frame_locals(&mut self, frame: &mut CallFrame) -> Result<(), MirSignal> {

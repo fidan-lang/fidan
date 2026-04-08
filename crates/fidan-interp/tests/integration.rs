@@ -1043,9 +1043,14 @@ fn collections_helpers_cover_enumerate_chunk_window_partition_and_group_by() {
             r#"use std.collections
 
         var enumerated = collections.enumerate(["a", "b", "c"])
+        assert_eq("{enumerated[0]}", "(0, a)")
         assert_eq(enumerated[0][0], 0)
         assert_eq(enumerated[0][1], "a")
         assert_eq(enumerated[2][0], 2)
+
+        var zipped = collections.zip([1, 2], ["a", "b"])
+        assert_eq("{zipped[0]}", "(1, a)")
+        assert_eq(zipped[1][1], "b")
 
         var chunked = collections.chunk([1, 2, 3, 4, 5], 2)
         assert_eq(len(chunked), 3)
@@ -1057,6 +1062,7 @@ fn collections_helpers_cover_enumerate_chunk_window_partition_and_group_by() {
         assert_eq(windows[1][2], 4)
 
         var partitioned = collections.partition([0, 1, nothing, "ok", false])
+        assert_eq("{partitioned}", "([1, ok], [0, nothing, false])")
         assert_eq(len(partitioned[0]), 2)
         assert_eq(len(partitioned[1]), 3)
 
@@ -1086,10 +1092,12 @@ fn async_std_sleep_gather_wait_any_and_timeout_work() {
         assert_eq(results[2], 3)
 
         var raced = await async.waitAny([async.sleep(25), async.ready(99)])
+        assert_eq("{raced}", "(1, 99)")
         assert_eq(raced[0], 1)
         assert_eq(raced[1], 99)
 
         var timeoutFast = await async.timeout(async.ready(7), 10)
+        assert_eq("{timeoutFast}", "(true, 7)")
         assert_eq(timeoutFast[0], true)
         assert_eq(timeoutFast[1], 7)
 
@@ -1102,6 +1110,42 @@ fn async_std_sleep_gather_wait_any_and_timeout_work() {
         )
         .is_ok()
     );
+}
+
+#[test]
+fn json_helpers_round_trip_string_and_file_values() {
+    let path = std::env::temp_dir().join("fidan-interp-json-roundtrip.json");
+    let escaped_path = path.display().to_string().replace('\\', "\\\\");
+    let src = format!(
+        r#"use std.json
+
+        var payload = {{"ok": true, "items": [1, 2, {{"name": "fidan"}}], "meta": nothing}}
+
+        var compact = json.dumps(payload)
+        var reparsed = json.loads(compact)
+        assert_eq(reparsed["ok"], true)
+        assert_eq(reparsed["items"][2]["name"], "fidan")
+        assert_eq(reparsed["meta"], nothing)
+
+        assert_eq(json.isValid(compact), true)
+        assert_eq(json.isValid("\{{broken"), false)
+
+        assert_eq(json.dump(payload, "{escaped_path}"), true)
+        var from_file = json.load("{escaped_path}")
+        assert_eq(from_file["items"][2]["name"], "fidan")
+
+        var pretty = json.pretty(payload)
+        assert_eq(pretty.contains("\n  \"items\""), true)
+
+        var compat_compact = json.stringify(payload)
+        var compat_loaded = json.parse(compat_compact)
+        assert_eq(compat_loaded["items"][2]["name"], "fidan")
+        "#
+    );
+
+    let result = run_src(&src);
+    let _ = std::fs::remove_file(&path);
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -1234,6 +1278,30 @@ fn jitted_function_with_many_args_ok() {
         }
 
         assert_eq(hot(1, 2, 3, 4, 5, 6, 7, 8, 9, 10), 55)"#,
+            1,
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn tuple_values_round_trip_with_jit_enabled() {
+    assert!(
+        run_src_with_threshold(
+            r#"action echo with (certain pair oftype (integer, string)) returns (integer, string) {
+                return pair
+            }
+
+            var pair = (0, "ok")
+            var i = 1
+            while i < 5 {
+                pair = echo((i, "ok"))
+                i = i + 1
+            }
+
+            assert_eq(type(pair), "tuple")
+            assert_eq(pair[0], 4)
+            assert_eq(pair[1], "ok")"#,
             1,
         )
         .is_ok()

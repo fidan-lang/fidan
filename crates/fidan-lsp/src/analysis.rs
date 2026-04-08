@@ -62,6 +62,9 @@ pub struct AnalysisResult {
     /// Stdlib imports: `(alias_name, module_name)`.
     /// E.g. `use std.io` → `("io", "io")`; `use std.math as m` → `("m", "math")`.
     pub stdlib_imports: Vec<(String, String)>,
+    /// Grouped stdlib imports flattened into local scope.
+    /// E.g. `use std.collections.{enumerate}` → `("enumerate", "collections", "enumerate")`.
+    pub stdlib_direct_imports: Vec<(String, String, String)>,
     /// Non-call member accesses where the target type has a cross-module parent.
     pub cross_module_field_accesses: Vec<(String, String, Span)>,
     /// Method call sites on cross-module receivers, with inferred arg types.
@@ -96,7 +99,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     let (module, parse_diags) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
 
     // ── Identifier-span index (for hover / go-to-def positional lookup) ────────
-    let identifier_spans: Vec<(Span, String)> = tokens
+    let mut identifier_spans: Vec<(Span, String)> = tokens
         .iter()
         .filter_map(|tok| match &tok.kind {
             TokenKind::Ident(sym) => Some((tok.span, interner.resolve(*sym).to_string())),
@@ -106,6 +109,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
             _ => None,
         })
         .collect();
+    augment_identifier_spans_with_ast(&module, &interner, text, &mut identifier_spans);
 
     // ── Type-check (full — needed to build hover/completion symbol table) ────
     let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
@@ -119,6 +123,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
 
     // ── Stdlib import extraction (`use std.<module>`) ────────────────────
     let stdlib_imports = extract_stdlib_imports(&module, &interner);
+    let stdlib_direct_imports = extract_stdlib_direct_imports(&module, &interner);
 
     // ── Dynamic var call sites (cross-module method return type patching) ──
     let dynamic_var_call_sites = extract_dynamic_var_calls(&module, &typed, &interner);
@@ -127,8 +132,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     // ── Inlay hints (untyped var declarations) ────────────────────────────────
     let inlay_hint_sites =
         collect_inlay_hints(&module, &interner, &symbol_table, &identifier_spans);
-    let member_access_sites =
-        collect_member_access_sites(&module, &typed, &interner, &identifier_spans);
+    let member_access_sites = collect_member_access_sites(&module, &typed, &interner, text);
 
     // Consume typed fields now (after all borrows of `typed` are done).
     let typeck_diags = typed.diagnostics;
@@ -154,6 +158,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
         imports,
         user_module_imports,
         stdlib_imports,
+        stdlib_direct_imports,
         cross_module_field_accesses,
         cross_module_call_sites,
         dynamic_var_call_sites,
@@ -270,6 +275,40 @@ fn extract_stdlib_imports(module: &Module, interner: &SymbolInterner) -> Vec<(St
                     .map(|a| interner.resolve(a).to_string())
                     .unwrap_or_else(|| module_name.clone());
                 Some((alias_str, module_name))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn extract_stdlib_direct_imports(
+    module: &Module,
+    interner: &SymbolInterner,
+) -> Vec<(String, String, String)> {
+    module
+        .items
+        .iter()
+        .filter_map(|&iid| {
+            if let Item::Use {
+                path,
+                alias,
+                grouped,
+                ..
+            } = module.arena.get_item(iid)
+            {
+                if path.len() < 3 || !grouped {
+                    return None;
+                }
+                if interner.resolve(path[0]).as_ref() != "std" {
+                    return None;
+                }
+                let module_name = interner.resolve(path[1]).to_string();
+                let member_name = interner.resolve(*path.last()?).to_string();
+                let binding_name = alias
+                    .map(|sym| interner.resolve(sym).to_string())
+                    .unwrap_or_else(|| member_name.clone());
+                Some((binding_name, module_name, member_name))
             } else {
                 None
             }
@@ -679,102 +718,95 @@ fn collect_inlay_hints(
     hints
 }
 
-fn collect_member_access_sites(
-    module: &Module,
-    typed: &fidan_typeck::TypedModule,
-    interner: &SymbolInterner,
-    identifier_spans: &[(Span, String)],
-) -> Vec<MemberAccessSite> {
-    let mut sites = Vec::new();
-
-    for &item_id in &module.items {
-        collect_item_member_access_sites(
-            module,
-            item_id,
-            typed,
-            interner,
-            identifier_spans,
-            &mut sites,
-        );
-    }
-
-    sites
+fn is_ident_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-fn collect_item_member_access_sites(
+fn find_identifier_span_in_range(text: &str, search_span: Span, target: &str) -> Option<Span> {
+    let bytes = text.as_bytes();
+    let target_bytes = target.as_bytes();
+    let start = search_span.start as usize;
+    let end = search_span.end as usize;
+    if start >= end
+        || end > bytes.len()
+        || target_bytes.is_empty()
+        || target_bytes.len() > end - start
+    {
+        return None;
+    }
+
+    for offset in (0..=end - start - target_bytes.len()).rev() {
+        let candidate_start = start + offset;
+        let candidate_end = candidate_start + target_bytes.len();
+        if &bytes[candidate_start..candidate_end] != target_bytes {
+            continue;
+        }
+        let left_ok = candidate_start == start || !is_ident_byte(bytes[candidate_start - 1]);
+        let right_ok = candidate_end == end || !is_ident_byte(bytes[candidate_end]);
+        if left_ok && right_ok {
+            return Some(Span::new(
+                search_span.file,
+                candidate_start as u32,
+                candidate_end as u32,
+            ));
+        }
+    }
+
+    None
+}
+
+fn augment_identifier_spans_with_ast(
+    module: &Module,
+    interner: &SymbolInterner,
+    text: &str,
+    out: &mut Vec<(Span, String)>,
+) {
+    for &item_id in &module.items {
+        collect_item_identifier_spans(module, item_id, interner, text, out);
+    }
+    out.sort_by(|(left_span, left_name), (right_span, right_name)| {
+        left_span
+            .start
+            .cmp(&right_span.start)
+            .then(left_span.end.cmp(&right_span.end))
+            .then(left_name.cmp(right_name))
+    });
+    out.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+}
+
+fn collect_item_identifier_spans(
     module: &Module,
     item_id: fidan_ast::ItemId,
-    typed: &fidan_typeck::TypedModule,
     interner: &SymbolInterner,
-    identifier_spans: &[(Span, String)],
-    out: &mut Vec<MemberAccessSite>,
+    text: &str,
+    out: &mut Vec<(Span, String)>,
 ) {
     match module.arena.get_item(item_id) {
         Item::VarDecl { init, .. } => {
             if let Some(init) = init {
-                collect_expr_member_access_sites(
-                    module,
-                    *init,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_identifier_spans(module, *init, interner, text, out);
             }
         }
-        Item::ExprStmt(expr_id) => collect_expr_member_access_sites(
-            module,
-            *expr_id,
-            typed,
-            interner,
-            identifier_spans,
-            out,
-        ),
+        Item::ExprStmt(expr_id) => {
+            collect_expr_identifier_spans(module, *expr_id, interner, text, out)
+        }
         Item::Assign { target, value, .. } => {
-            collect_expr_member_access_sites(
-                module,
-                *target,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
-            collect_expr_member_access_sites(
-                module,
-                *value,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
+            collect_expr_identifier_spans(module, *target, interner, text, out);
+            collect_expr_identifier_spans(module, *value, interner, text, out);
         }
         Item::Destructure { value, .. } => {
-            collect_expr_member_access_sites(module, *value, typed, interner, identifier_spans, out)
+            collect_expr_identifier_spans(module, *value, interner, text, out)
         }
         Item::ObjectDecl {
             fields, methods, ..
         } => {
             for field in fields {
                 if let Some(default) = field.default {
-                    collect_expr_member_access_sites(
-                        module,
-                        default,
-                        typed,
-                        interner,
-                        identifier_spans,
-                        out,
-                    );
+                    collect_expr_identifier_spans(module, default, interner, text, out);
                 }
             }
             for &method_id in methods {
-                collect_item_member_access_sites(
-                    module,
-                    method_id,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_item_identifier_spans(module, method_id, interner, text, out);
             }
         }
         Item::ActionDecl {
@@ -791,40 +823,365 @@ fn collect_item_member_access_sites(
         } => {
             for param in params {
                 if let Some(default) = param.default {
-                    collect_expr_member_access_sites(
-                        module,
-                        default,
-                        typed,
-                        interner,
-                        identifier_spans,
-                        out,
-                    );
+                    collect_expr_identifier_spans(module, default, interner, text, out);
                 }
             }
             for decorator in decorators {
                 for arg in &decorator.args {
-                    collect_expr_member_access_sites(
-                        module,
-                        arg.value,
-                        typed,
-                        interner,
-                        identifier_spans,
-                        out,
-                    );
+                    collect_expr_identifier_spans(module, arg.value, interner, text, out);
                 }
             }
-            collect_stmt_member_access_sites(module, body, typed, interner, identifier_spans, out);
+            collect_stmt_identifier_spans(module, body, interner, text, out);
         }
-        Item::Stmt(stmt_id) => collect_stmt_member_access_sites(
-            module,
-            &[*stmt_id],
-            typed,
-            interner,
-            identifier_spans,
-            out,
-        ),
+        Item::Stmt(stmt_id) => {
+            collect_stmt_identifier_spans(module, &[*stmt_id], interner, text, out)
+        }
         Item::TestDecl { body, .. } => {
-            collect_stmt_member_access_sites(module, body, typed, interner, identifier_spans, out)
+            collect_stmt_identifier_spans(module, body, interner, text, out)
+        }
+        Item::EnumDecl { .. } | Item::Use { .. } => {}
+    }
+}
+
+fn collect_stmt_identifier_spans(
+    module: &Module,
+    stmts: &[fidan_ast::StmtId],
+    interner: &SymbolInterner,
+    text: &str,
+    out: &mut Vec<(Span, String)>,
+) {
+    for &stmt_id in stmts {
+        match module.arena.get_stmt(stmt_id) {
+            fidan_ast::Stmt::VarDecl { init, .. } => {
+                if let Some(init) = init {
+                    collect_expr_identifier_spans(module, *init, interner, text, out);
+                }
+            }
+            fidan_ast::Stmt::Destructure { value, .. } => {
+                collect_expr_identifier_spans(module, *value, interner, text, out)
+            }
+            fidan_ast::Stmt::Assign { target, value, .. } => {
+                collect_expr_identifier_spans(module, *target, interner, text, out);
+                collect_expr_identifier_spans(module, *value, interner, text, out);
+            }
+            fidan_ast::Stmt::Expr { expr, .. } | fidan_ast::Stmt::Panic { value: expr, .. } => {
+                collect_expr_identifier_spans(module, *expr, interner, text, out)
+            }
+            fidan_ast::Stmt::ActionDecl {
+                params,
+                body,
+                decorators,
+                ..
+            } => {
+                for param in params {
+                    if let Some(default) = param.default {
+                        collect_expr_identifier_spans(module, default, interner, text, out);
+                    }
+                }
+                for decorator in decorators {
+                    for arg in &decorator.args {
+                        collect_expr_identifier_spans(module, arg.value, interner, text, out);
+                    }
+                }
+                collect_stmt_identifier_spans(module, body, interner, text, out);
+            }
+            fidan_ast::Stmt::Return { value, .. } => {
+                if let Some(value) = value {
+                    collect_expr_identifier_spans(module, *value, interner, text, out);
+                }
+            }
+            fidan_ast::Stmt::If {
+                condition,
+                then_body,
+                else_ifs,
+                else_body,
+                ..
+            } => {
+                collect_expr_identifier_spans(module, *condition, interner, text, out);
+                collect_stmt_identifier_spans(module, then_body, interner, text, out);
+                for else_if in else_ifs {
+                    collect_expr_identifier_spans(module, else_if.condition, interner, text, out);
+                    collect_stmt_identifier_spans(module, &else_if.body, interner, text, out);
+                }
+                if let Some(else_body) = else_body {
+                    collect_stmt_identifier_spans(module, else_body, interner, text, out);
+                }
+            }
+            fidan_ast::Stmt::Check {
+                scrutinee, arms, ..
+            } => {
+                collect_expr_identifier_spans(module, *scrutinee, interner, text, out);
+                for arm in arms {
+                    collect_expr_identifier_spans(module, arm.pattern, interner, text, out);
+                    collect_stmt_identifier_spans(module, &arm.body, interner, text, out);
+                }
+            }
+            fidan_ast::Stmt::For { iterable, body, .. }
+            | fidan_ast::Stmt::ParallelFor { iterable, body, .. } => {
+                collect_expr_identifier_spans(module, *iterable, interner, text, out);
+                collect_stmt_identifier_spans(module, body, interner, text, out);
+            }
+            fidan_ast::Stmt::While {
+                condition, body, ..
+            } => {
+                collect_expr_identifier_spans(module, *condition, interner, text, out);
+                collect_stmt_identifier_spans(module, body, interner, text, out);
+            }
+            fidan_ast::Stmt::Attempt {
+                body,
+                catches,
+                otherwise,
+                finally,
+                ..
+            } => {
+                collect_stmt_identifier_spans(module, body, interner, text, out);
+                for catch in catches {
+                    collect_stmt_identifier_spans(module, &catch.body, interner, text, out);
+                }
+                if let Some(otherwise) = otherwise {
+                    collect_stmt_identifier_spans(module, otherwise, interner, text, out);
+                }
+                if let Some(finally) = finally {
+                    collect_stmt_identifier_spans(module, finally, interner, text, out);
+                }
+            }
+            fidan_ast::Stmt::ConcurrentBlock { tasks, .. } => {
+                for task in tasks {
+                    collect_stmt_identifier_spans(module, &task.body, interner, text, out);
+                }
+            }
+            fidan_ast::Stmt::Break { .. }
+            | fidan_ast::Stmt::Continue { .. }
+            | fidan_ast::Stmt::Error { .. } => {}
+        }
+    }
+}
+
+fn collect_expr_identifier_spans(
+    module: &Module,
+    expr_id: fidan_ast::ExprId,
+    interner: &SymbolInterner,
+    text: &str,
+    out: &mut Vec<(Span, String)>,
+) {
+    match module.arena.get_expr(expr_id) {
+        Expr::Ident { name, span } => {
+            out.push((*span, interner.resolve(*name).to_string()));
+        }
+        Expr::This { span } => out.push((*span, "this".to_string())),
+        Expr::Parent { span } => out.push((*span, "parent".to_string())),
+        Expr::Binary { lhs, rhs, .. } | Expr::NullCoalesce { lhs, rhs, .. } => {
+            collect_expr_identifier_spans(module, *lhs, interner, text, out);
+            collect_expr_identifier_spans(module, *rhs, interner, text, out);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::Spawn { expr: operand, .. }
+        | Expr::Await { expr: operand, .. } => {
+            collect_expr_identifier_spans(module, *operand, interner, text, out);
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_expr_identifier_spans(module, *callee, interner, text, out);
+            for arg in args {
+                collect_expr_identifier_spans(module, arg.value, interner, text, out);
+            }
+        }
+        Expr::Field {
+            object,
+            field,
+            span,
+        } => {
+            collect_expr_identifier_spans(module, *object, interner, text, out);
+            let field_name = interner.resolve(*field).to_string();
+            if let Some(field_span) = find_identifier_span_in_range(text, *span, &field_name) {
+                out.push((field_span, field_name));
+            }
+        }
+        Expr::Index { object, index, .. } => {
+            collect_expr_identifier_spans(module, *object, interner, text, out);
+            collect_expr_identifier_spans(module, *index, interner, text, out);
+        }
+        Expr::Assign { target, value, .. } | Expr::CompoundAssign { target, value, .. } => {
+            collect_expr_identifier_spans(module, *target, interner, text, out);
+            collect_expr_identifier_spans(module, *value, interner, text, out);
+        }
+        Expr::StringInterp { parts, .. } => {
+            for part in parts {
+                if let fidan_ast::InterpPart::Expr(expr_id) = part {
+                    collect_expr_identifier_spans(module, *expr_id, interner, text, out);
+                }
+            }
+        }
+        Expr::Ternary {
+            condition,
+            then_val,
+            else_val,
+            ..
+        } => {
+            collect_expr_identifier_spans(module, *condition, interner, text, out);
+            collect_expr_identifier_spans(module, *then_val, interner, text, out);
+            collect_expr_identifier_spans(module, *else_val, interner, text, out);
+        }
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+            for &element in elements {
+                collect_expr_identifier_spans(module, element, interner, text, out);
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for &(key, value) in entries {
+                collect_expr_identifier_spans(module, key, interner, text, out);
+                collect_expr_identifier_spans(module, value, interner, text, out);
+            }
+        }
+        Expr::Check {
+            scrutinee, arms, ..
+        } => {
+            collect_expr_identifier_spans(module, *scrutinee, interner, text, out);
+            for arm in arms {
+                collect_expr_identifier_spans(module, arm.pattern, interner, text, out);
+                collect_stmt_identifier_spans(module, &arm.body, interner, text, out);
+            }
+        }
+        Expr::Slice {
+            target,
+            start,
+            end,
+            step,
+            ..
+        } => {
+            collect_expr_identifier_spans(module, *target, interner, text, out);
+            if let Some(start) = start {
+                collect_expr_identifier_spans(module, *start, interner, text, out);
+            }
+            if let Some(end) = end {
+                collect_expr_identifier_spans(module, *end, interner, text, out);
+            }
+            if let Some(step) = step {
+                collect_expr_identifier_spans(module, *step, interner, text, out);
+            }
+        }
+        Expr::ListComp {
+            element,
+            iterable,
+            filter,
+            ..
+        } => {
+            collect_expr_identifier_spans(module, *element, interner, text, out);
+            collect_expr_identifier_spans(module, *iterable, interner, text, out);
+            if let Some(filter) = filter {
+                collect_expr_identifier_spans(module, *filter, interner, text, out);
+            }
+        }
+        Expr::DictComp {
+            key,
+            value,
+            iterable,
+            filter,
+            ..
+        } => {
+            collect_expr_identifier_spans(module, *key, interner, text, out);
+            collect_expr_identifier_spans(module, *value, interner, text, out);
+            collect_expr_identifier_spans(module, *iterable, interner, text, out);
+            if let Some(filter) = filter {
+                collect_expr_identifier_spans(module, *filter, interner, text, out);
+            }
+        }
+        Expr::Lambda { params, body, .. } => {
+            for param in params {
+                if let Some(default) = param.default {
+                    collect_expr_identifier_spans(module, default, interner, text, out);
+                }
+            }
+            collect_stmt_identifier_spans(module, body, interner, text, out);
+        }
+        Expr::IntLit { .. }
+        | Expr::FloatLit { .. }
+        | Expr::StrLit { .. }
+        | Expr::BoolLit { .. }
+        | Expr::Nothing { .. }
+        | Expr::Error { .. } => {}
+    }
+}
+
+fn collect_member_access_sites(
+    module: &Module,
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+    text: &str,
+) -> Vec<MemberAccessSite> {
+    let mut sites = Vec::new();
+
+    for &item_id in &module.items {
+        collect_item_member_access_sites(module, item_id, typed, interner, text, &mut sites);
+    }
+
+    sites
+}
+
+fn collect_item_member_access_sites(
+    module: &Module,
+    item_id: fidan_ast::ItemId,
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+    text: &str,
+    out: &mut Vec<MemberAccessSite>,
+) {
+    match module.arena.get_item(item_id) {
+        Item::VarDecl { init, .. } => {
+            if let Some(init) = init {
+                collect_expr_member_access_sites(module, *init, typed, interner, text, out);
+            }
+        }
+        Item::ExprStmt(expr_id) => {
+            collect_expr_member_access_sites(module, *expr_id, typed, interner, text, out)
+        }
+        Item::Assign { target, value, .. } => {
+            collect_expr_member_access_sites(module, *target, typed, interner, text, out);
+            collect_expr_member_access_sites(module, *value, typed, interner, text, out);
+        }
+        Item::Destructure { value, .. } => {
+            collect_expr_member_access_sites(module, *value, typed, interner, text, out)
+        }
+        Item::ObjectDecl {
+            fields, methods, ..
+        } => {
+            for field in fields {
+                if let Some(default) = field.default {
+                    collect_expr_member_access_sites(module, default, typed, interner, text, out);
+                }
+            }
+            for &method_id in methods {
+                collect_item_member_access_sites(module, method_id, typed, interner, text, out);
+            }
+        }
+        Item::ActionDecl {
+            params,
+            body,
+            decorators,
+            ..
+        }
+        | Item::ExtensionAction {
+            params,
+            body,
+            decorators,
+            ..
+        } => {
+            for param in params {
+                if let Some(default) = param.default {
+                    collect_expr_member_access_sites(module, default, typed, interner, text, out);
+                }
+            }
+            for decorator in decorators {
+                for arg in &decorator.args {
+                    collect_expr_member_access_sites(module, arg.value, typed, interner, text, out);
+                }
+            }
+            collect_stmt_member_access_sites(module, body, typed, interner, text, out);
+        }
+        Item::Stmt(stmt_id) => {
+            collect_stmt_member_access_sites(module, &[*stmt_id], typed, interner, text, out)
+        }
+        Item::TestDecl { body, .. } => {
+            collect_stmt_member_access_sites(module, body, typed, interner, text, out)
         }
         Item::EnumDecl { .. } | Item::Use { .. } => {}
     }
@@ -835,58 +1192,25 @@ fn collect_stmt_member_access_sites(
     stmts: &[fidan_ast::StmtId],
     typed: &fidan_typeck::TypedModule,
     interner: &SymbolInterner,
-    identifier_spans: &[(Span, String)],
+    text: &str,
     out: &mut Vec<MemberAccessSite>,
 ) {
     for &stmt_id in stmts {
         match module.arena.get_stmt(stmt_id) {
             fidan_ast::Stmt::VarDecl { init, .. } => {
                 if let Some(init) = init {
-                    collect_expr_member_access_sites(
-                        module,
-                        *init,
-                        typed,
-                        interner,
-                        identifier_spans,
-                        out,
-                    );
+                    collect_expr_member_access_sites(module, *init, typed, interner, text, out);
                 }
             }
-            fidan_ast::Stmt::Destructure { value, .. } => collect_expr_member_access_sites(
-                module,
-                *value,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            ),
+            fidan_ast::Stmt::Destructure { value, .. } => {
+                collect_expr_member_access_sites(module, *value, typed, interner, text, out)
+            }
             fidan_ast::Stmt::Assign { target, value, .. } => {
-                collect_expr_member_access_sites(
-                    module,
-                    *target,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
-                collect_expr_member_access_sites(
-                    module,
-                    *value,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, *target, typed, interner, text, out);
+                collect_expr_member_access_sites(module, *value, typed, interner, text, out);
             }
             fidan_ast::Stmt::Expr { expr, .. } | fidan_ast::Stmt::Panic { value: expr, .. } => {
-                collect_expr_member_access_sites(
-                    module,
-                    *expr,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                )
+                collect_expr_member_access_sites(module, *expr, typed, interner, text, out)
             }
             fidan_ast::Stmt::ActionDecl {
                 params,
@@ -897,46 +1221,22 @@ fn collect_stmt_member_access_sites(
                 for param in params {
                     if let Some(default) = param.default {
                         collect_expr_member_access_sites(
-                            module,
-                            default,
-                            typed,
-                            interner,
-                            identifier_spans,
-                            out,
+                            module, default, typed, interner, text, out,
                         );
                     }
                 }
                 for decorator in decorators {
                     for arg in &decorator.args {
                         collect_expr_member_access_sites(
-                            module,
-                            arg.value,
-                            typed,
-                            interner,
-                            identifier_spans,
-                            out,
+                            module, arg.value, typed, interner, text, out,
                         );
                     }
                 }
-                collect_stmt_member_access_sites(
-                    module,
-                    body,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_stmt_member_access_sites(module, body, typed, interner, text, out);
             }
             fidan_ast::Stmt::Return { value, .. } => {
                 if let Some(value) = value {
-                    collect_expr_member_access_sites(
-                        module,
-                        *value,
-                        typed,
-                        interner,
-                        identifier_spans,
-                        out,
-                    );
+                    collect_expr_member_access_sites(module, *value, typed, interner, text, out);
                 }
             }
             fidan_ast::Stmt::If {
@@ -946,29 +1246,15 @@ fn collect_stmt_member_access_sites(
                 else_body,
                 ..
             } => {
-                collect_expr_member_access_sites(
-                    module,
-                    *condition,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
-                collect_stmt_member_access_sites(
-                    module,
-                    then_body,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, *condition, typed, interner, text, out);
+                collect_stmt_member_access_sites(module, then_body, typed, interner, text, out);
                 for else_if in else_ifs {
                     collect_expr_member_access_sites(
                         module,
                         else_if.condition,
                         typed,
                         interner,
-                        identifier_spans,
+                        text,
                         out,
                     );
                     collect_stmt_member_access_sites(
@@ -976,89 +1262,40 @@ fn collect_stmt_member_access_sites(
                         &else_if.body,
                         typed,
                         interner,
-                        identifier_spans,
+                        text,
                         out,
                     );
                 }
                 if let Some(else_body) = else_body {
-                    collect_stmt_member_access_sites(
-                        module,
-                        else_body,
-                        typed,
-                        interner,
-                        identifier_spans,
-                        out,
-                    );
+                    collect_stmt_member_access_sites(module, else_body, typed, interner, text, out);
                 }
             }
             fidan_ast::Stmt::Check {
                 scrutinee, arms, ..
             } => {
-                collect_expr_member_access_sites(
-                    module,
-                    *scrutinee,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, *scrutinee, typed, interner, text, out);
                 for arm in arms {
                     collect_expr_member_access_sites(
                         module,
                         arm.pattern,
                         typed,
                         interner,
-                        identifier_spans,
+                        text,
                         out,
                     );
-                    collect_stmt_member_access_sites(
-                        module,
-                        &arm.body,
-                        typed,
-                        interner,
-                        identifier_spans,
-                        out,
-                    );
+                    collect_stmt_member_access_sites(module, &arm.body, typed, interner, text, out);
                 }
             }
             fidan_ast::Stmt::For { iterable, body, .. }
             | fidan_ast::Stmt::ParallelFor { iterable, body, .. } => {
-                collect_expr_member_access_sites(
-                    module,
-                    *iterable,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
-                collect_stmt_member_access_sites(
-                    module,
-                    body,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, *iterable, typed, interner, text, out);
+                collect_stmt_member_access_sites(module, body, typed, interner, text, out);
             }
             fidan_ast::Stmt::While {
                 condition, body, ..
             } => {
-                collect_expr_member_access_sites(
-                    module,
-                    *condition,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
-                collect_stmt_member_access_sites(
-                    module,
-                    body,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, *condition, typed, interner, text, out);
+                collect_stmt_member_access_sites(module, body, typed, interner, text, out);
             }
             fidan_ast::Stmt::Attempt {
                 body,
@@ -1067,54 +1304,28 @@ fn collect_stmt_member_access_sites(
                 finally,
                 ..
             } => {
-                collect_stmt_member_access_sites(
-                    module,
-                    body,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_stmt_member_access_sites(module, body, typed, interner, text, out);
                 for catch in catches {
                     collect_stmt_member_access_sites(
                         module,
                         &catch.body,
                         typed,
                         interner,
-                        identifier_spans,
+                        text,
                         out,
                     );
                 }
                 if let Some(otherwise) = otherwise {
-                    collect_stmt_member_access_sites(
-                        module,
-                        otherwise,
-                        typed,
-                        interner,
-                        identifier_spans,
-                        out,
-                    );
+                    collect_stmt_member_access_sites(module, otherwise, typed, interner, text, out);
                 }
                 if let Some(finally) = finally {
-                    collect_stmt_member_access_sites(
-                        module,
-                        finally,
-                        typed,
-                        interner,
-                        identifier_spans,
-                        out,
-                    );
+                    collect_stmt_member_access_sites(module, finally, typed, interner, text, out);
                 }
             }
             fidan_ast::Stmt::ConcurrentBlock { tasks, .. } => {
                 for task in tasks {
                     collect_stmt_member_access_sites(
-                        module,
-                        &task.body,
-                        typed,
-                        interner,
-                        identifier_spans,
-                        out,
+                        module, &task.body, typed, interner, text, out,
                     );
                 }
             }
@@ -1130,44 +1341,23 @@ fn collect_expr_member_access_sites(
     expr_id: fidan_ast::ExprId,
     typed: &fidan_typeck::TypedModule,
     interner: &SymbolInterner,
-    identifier_spans: &[(Span, String)],
+    text: &str,
     out: &mut Vec<MemberAccessSite>,
 ) {
     match module.arena.get_expr(expr_id) {
         Expr::Binary { lhs, rhs, .. } | Expr::NullCoalesce { lhs, rhs, .. } => {
-            collect_expr_member_access_sites(module, *lhs, typed, interner, identifier_spans, out);
-            collect_expr_member_access_sites(module, *rhs, typed, interner, identifier_spans, out);
+            collect_expr_member_access_sites(module, *lhs, typed, interner, text, out);
+            collect_expr_member_access_sites(module, *rhs, typed, interner, text, out);
         }
         Expr::Unary { operand, .. }
         | Expr::Spawn { expr: operand, .. }
         | Expr::Await { expr: operand, .. } => {
-            collect_expr_member_access_sites(
-                module,
-                *operand,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
+            collect_expr_member_access_sites(module, *operand, typed, interner, text, out);
         }
         Expr::Call { callee, args, .. } => {
-            collect_expr_member_access_sites(
-                module,
-                *callee,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
+            collect_expr_member_access_sites(module, *callee, typed, interner, text, out);
             for arg in args {
-                collect_expr_member_access_sites(
-                    module,
-                    arg.value,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, arg.value, typed, interner, text, out);
             }
         }
         Expr::Field {
@@ -1175,28 +1365,14 @@ fn collect_expr_member_access_sites(
             field,
             span,
         } => {
-            collect_expr_member_access_sites(
-                module,
-                *object,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
+            collect_expr_member_access_sites(module, *object, typed, interner, text, out);
 
             let field_name = interner.resolve(*field).to_string();
             let receiver_type = typed
                 .expr_types
                 .get(object)
                 .and_then(|ty| symbols::resolved_type_name(ty, interner));
-            let member_span = identifier_spans.iter().rev().find_map(|(candidate, name)| {
-                if name == &field_name && candidate.start >= span.start && candidate.end <= span.end
-                {
-                    Some(*candidate)
-                } else {
-                    None
-                }
-            });
+            let member_span = find_identifier_span_in_range(text, *span, &field_name);
 
             if let (Some(receiver_type), Some(member_span)) = (receiver_type, member_span) {
                 out.push(MemberAccessSite {
@@ -1207,52 +1383,17 @@ fn collect_expr_member_access_sites(
             }
         }
         Expr::Index { object, index, .. } => {
-            collect_expr_member_access_sites(
-                module,
-                *object,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
-            collect_expr_member_access_sites(
-                module,
-                *index,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
+            collect_expr_member_access_sites(module, *object, typed, interner, text, out);
+            collect_expr_member_access_sites(module, *index, typed, interner, text, out);
         }
         Expr::Assign { target, value, .. } | Expr::CompoundAssign { target, value, .. } => {
-            collect_expr_member_access_sites(
-                module,
-                *target,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
-            collect_expr_member_access_sites(
-                module,
-                *value,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
+            collect_expr_member_access_sites(module, *target, typed, interner, text, out);
+            collect_expr_member_access_sites(module, *value, typed, interner, text, out);
         }
         Expr::StringInterp { parts, .. } => {
             for part in parts {
                 if let fidan_ast::InterpPart::Expr(expr_id) = part {
-                    collect_expr_member_access_sites(
-                        module,
-                        *expr_id,
-                        typed,
-                        interner,
-                        identifier_spans,
-                        out,
-                    );
+                    collect_expr_member_access_sites(module, *expr_id, typed, interner, text, out);
                 }
             }
         }
@@ -1262,83 +1403,27 @@ fn collect_expr_member_access_sites(
             else_val,
             ..
         } => {
-            collect_expr_member_access_sites(
-                module,
-                *condition,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
-            collect_expr_member_access_sites(
-                module,
-                *then_val,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
-            collect_expr_member_access_sites(
-                module,
-                *else_val,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
+            collect_expr_member_access_sites(module, *condition, typed, interner, text, out);
+            collect_expr_member_access_sites(module, *then_val, typed, interner, text, out);
+            collect_expr_member_access_sites(module, *else_val, typed, interner, text, out);
         }
         Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
             for &element in elements {
-                collect_expr_member_access_sites(
-                    module,
-                    element,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, element, typed, interner, text, out);
             }
         }
         Expr::Dict { entries, .. } => {
             for &(key, value) in entries {
-                collect_expr_member_access_sites(
-                    module,
-                    key,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
-                collect_expr_member_access_sites(
-                    module,
-                    value,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, key, typed, interner, text, out);
+                collect_expr_member_access_sites(module, value, typed, interner, text, out);
             }
         }
         Expr::Check {
             scrutinee, arms, ..
         } => {
-            collect_expr_member_access_sites(
-                module,
-                *scrutinee,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
+            collect_expr_member_access_sites(module, *scrutinee, typed, interner, text, out);
             for arm in arms {
-                collect_expr_member_access_sites(
-                    module,
-                    arm.pattern,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, arm.pattern, typed, interner, text, out);
             }
         }
         Expr::Slice {
@@ -1348,43 +1433,15 @@ fn collect_expr_member_access_sites(
             step,
             ..
         } => {
-            collect_expr_member_access_sites(
-                module,
-                *target,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
+            collect_expr_member_access_sites(module, *target, typed, interner, text, out);
             if let Some(start) = start {
-                collect_expr_member_access_sites(
-                    module,
-                    *start,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, *start, typed, interner, text, out);
             }
             if let Some(end) = end {
-                collect_expr_member_access_sites(
-                    module,
-                    *end,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, *end, typed, interner, text, out);
             }
             if let Some(step) = step {
-                collect_expr_member_access_sites(
-                    module,
-                    *step,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, *step, typed, interner, text, out);
             }
         }
         Expr::ListComp {
@@ -1393,31 +1450,10 @@ fn collect_expr_member_access_sites(
             filter,
             ..
         } => {
-            collect_expr_member_access_sites(
-                module,
-                *element,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
-            collect_expr_member_access_sites(
-                module,
-                *iterable,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
+            collect_expr_member_access_sites(module, *element, typed, interner, text, out);
+            collect_expr_member_access_sites(module, *iterable, typed, interner, text, out);
             if let Some(filter) = filter {
-                collect_expr_member_access_sites(
-                    module,
-                    *filter,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, *filter, typed, interner, text, out);
             }
         }
         Expr::DictComp {
@@ -1427,48 +1463,20 @@ fn collect_expr_member_access_sites(
             filter,
             ..
         } => {
-            collect_expr_member_access_sites(module, *key, typed, interner, identifier_spans, out);
-            collect_expr_member_access_sites(
-                module,
-                *value,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
-            collect_expr_member_access_sites(
-                module,
-                *iterable,
-                typed,
-                interner,
-                identifier_spans,
-                out,
-            );
+            collect_expr_member_access_sites(module, *key, typed, interner, text, out);
+            collect_expr_member_access_sites(module, *value, typed, interner, text, out);
+            collect_expr_member_access_sites(module, *iterable, typed, interner, text, out);
             if let Some(filter) = filter {
-                collect_expr_member_access_sites(
-                    module,
-                    *filter,
-                    typed,
-                    interner,
-                    identifier_spans,
-                    out,
-                );
+                collect_expr_member_access_sites(module, *filter, typed, interner, text, out);
             }
         }
         Expr::Lambda { params, body, .. } => {
             for param in params {
                 if let Some(default) = param.default {
-                    collect_expr_member_access_sites(
-                        module,
-                        default,
-                        typed,
-                        interner,
-                        identifier_spans,
-                        out,
-                    );
+                    collect_expr_member_access_sites(module, default, typed, interner, text, out);
                 }
             }
-            collect_stmt_member_access_sites(module, body, typed, interner, identifier_spans, out);
+            collect_stmt_member_access_sites(module, body, typed, interner, text, out);
         }
         Expr::IntLit { .. }
         | Expr::FloatLit { .. }
@@ -1620,6 +1628,72 @@ var argv = env.args()
     }
 
     #[test]
+    fn interpolation_method_error_points_at_interpolation_site() {
+        let src = r#"const var commands oftype list oftype string = ["help"]
+
+action main {
+    print("Available commands: {commands.joins(", ")}")
+}
+"#;
+
+        let result = analyze(src, "file:///interp_error_site.fdn");
+        let diag = result
+            .diagnostics
+            .iter()
+            .find(|diag| diag.message.contains("has no method `joins`"))
+            .expect("missing joins diagnostic");
+
+        assert_eq!(diag.range.start.line, 3);
+        assert!(diag.range.start.character >= 31);
+    }
+
+    #[test]
+    fn tuple_index_assignment_surfaces_as_lsp_error() {
+        let src = r#"var coords = (1, 2, 3)
+coords[0] = 9
+"#;
+
+        let result = analyze(src, "file:///tuple_assign_diag.fdn");
+        let diag = result
+            .diagnostics
+            .iter()
+            .find(|diag| {
+                diag.severity == Some(DiagnosticSeverity::ERROR)
+                    && diag
+                        .message
+                        .contains("cannot assign through index into `(integer, integer, integer)`")
+            })
+            .expect("missing tuple indexed-assignment diagnostic");
+
+        assert_eq!(diag.range.start.line, 1);
+    }
+
+    #[test]
+    fn analyze_collects_grouped_stdlib_import_bindings() {
+        let src = r#"use std.collections.{enumerate}
+use std.json.{parse}
+"#;
+
+        let result = analyze(src, "file:///stdlib_grouped_imports.fdn");
+        assert!(
+            result
+                .stdlib_direct_imports
+                .iter()
+                .any(|(binding, module, member)| binding == "enumerate"
+                    && module == "collections"
+                    && member == "enumerate")
+        );
+        assert!(
+            result
+                .stdlib_direct_imports
+                .iter()
+                .any(|(binding, module, member)| binding == "parse"
+                    && module == "json"
+                    && member == "parse")
+        );
+    }
+
+    #[test]
     fn analyze_preserves_file_import_modes() {
         let src = r#"use "./utils.fdn"
 use "./utils_lib.fdn" as lib
@@ -1685,6 +1759,40 @@ use nested.tools as tools
         assert_eq!(
             &src[site.member_span.start as usize..site.member_span.end as usize],
             "split"
+        );
+    }
+
+    #[test]
+    fn analyze_indexes_identifiers_inside_string_interpolation() {
+        let src = "action main {\n    var name = \"Ada\"\n    print(\"Hello {name}\")\n}\n";
+
+        let result = analyze(src, "file:///interp_identifier_sites.fdn");
+        let interp_offset = src.find("{name}").expect("interpolation name") as u32 + 1;
+
+        let span = result
+            .identifier_spans
+            .iter()
+            .find(|(span, name)| *name == "name" && span.start == interp_offset)
+            .map(|(span, _)| *span)
+            .expect("expected interpolation identifier span");
+
+        assert_eq!(&src[span.start as usize..span.end as usize], "name");
+    }
+
+    #[test]
+    fn analyze_collects_member_access_sites_inside_string_interpolation() {
+        let src = "action main {\n    var name = \"Ada\"\n    print(\"Hello {name.upper()}\")\n}\n";
+
+        let result = analyze(src, "file:///interp_member_sites.fdn");
+        let site = result
+            .member_access_sites
+            .iter()
+            .find(|site| site.receiver_type == "string" && site.member_name == "upper")
+            .expect("expected interpolation member-access site for string.upper");
+
+        assert_eq!(
+            &src[site.member_span.start as usize..site.member_span.end as usize],
+            "upper"
         );
     }
 

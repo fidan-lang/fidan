@@ -93,6 +93,7 @@ pub fn typecheck_full(module: &Module, interner: Arc<SymbolInterner>) -> TypedMo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fidan_ast::Item;
     use fidan_diagnostics::Severity;
     use fidan_lexer::Lexer;
     use fidan_source::{FileId, SourceFile};
@@ -122,6 +123,70 @@ mod tests {
             .filter(|d| d.severity == Severity::Warning)
             .map(|d| d.code.to_string())
             .collect()
+    }
+
+    fn top_level_var_type(src: &str, var_name: &str) -> String {
+        let interner = Arc::new(SymbolInterner::new());
+        let file = SourceFile::new(FileId(0), "<test>", src);
+        let (tokens, lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        assert!(lex_diags.is_empty(), "lexer diagnostics: {lex_diags:#?}");
+        let (module, parse_diags) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+        assert!(
+            parse_diags.is_empty(),
+            "parser diagnostics: {parse_diags:#?}"
+        );
+        let typed = typecheck_full(&module, Arc::clone(&interner));
+        let errors: Vec<_> = typed
+            .diagnostics
+            .iter()
+            .filter(|diag| diag.severity == Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "type diagnostics: {errors:#?}");
+
+        module
+            .items
+            .iter()
+            .find_map(|item_id| match module.arena.get_item(*item_id) {
+                Item::VarDecl {
+                    name,
+                    init: Some(init),
+                    ..
+                } if interner.resolve(*name).as_ref() == var_name => typed
+                    .expr_types
+                    .get(init)
+                    .map(|ty| ty.display_name(&|sym| interner.resolve(sym).to_string())),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("missing top-level var `{var_name}`"))
+    }
+
+    fn top_level_action_return_type(src: &str, action_name: &str) -> String {
+        let interner = Arc::new(SymbolInterner::new());
+        let file = SourceFile::new(FileId(0), "<test>", src);
+        let (tokens, lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        assert!(lex_diags.is_empty(), "lexer diagnostics: {lex_diags:#?}");
+        let (module, parse_diags) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+        assert!(
+            parse_diags.is_empty(),
+            "parser diagnostics: {parse_diags:#?}"
+        );
+        let typed = typecheck_full(&module, Arc::clone(&interner));
+        let errors: Vec<_> = typed
+            .diagnostics
+            .iter()
+            .filter(|diag| diag.severity == Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "type diagnostics: {errors:#?}");
+
+        let action_sym = interner.intern(action_name);
+        typed
+            .actions
+            .get(&action_sym)
+            .map(|info| {
+                info.return_ty
+                    .display_name(&|sym| interner.resolve(sym).to_string())
+            })
+            .unwrap_or_else(|| panic!("missing action `{action_name}`"))
     }
 
     // ── Well-typed programs produce no errors ─────────────────────────────────
@@ -223,6 +288,187 @@ mod tests {
                 .any(|msg| msg.contains("argument `a` expects type `integer`, found `string`")),
             "expected user-action type mismatch, got {errors:?}"
         );
+    }
+
+    #[test]
+    fn stdlib_enumerate_preserves_tuple_element_types() {
+        let src = r#"use std.collections.{enumerate}
+
+var rows = enumerate(["a", "b"])
+var pair = rows[0]
+var index = rows[0][0]
+var value = rows[0][1]
+"#;
+
+        assert_eq!(
+            top_level_var_type(src, "rows"),
+            "list oftype (integer, string)"
+        );
+        assert_eq!(top_level_var_type(src, "pair"), "(integer, string)");
+        assert_eq!(top_level_var_type(src, "index"), "integer");
+        assert_eq!(top_level_var_type(src, "value"), "string");
+    }
+
+    #[test]
+    fn tuple_index_assignment_is_rejected() {
+        let errors = check_errors(
+            r#"var coords = (1, 2, 3)
+coords[0] = 9"#,
+        );
+
+        assert!(
+            errors.iter().any(|msg| msg
+                .contains("cannot assign through index into `(integer, integer, integer)`")),
+            "expected tuple indexed-assignment error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn string_index_assignment_is_rejected() {
+        let errors = check_errors(
+            r#"var name = "Ada"
+name[0] = "E""#,
+        );
+
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("cannot assign through index into `string`")),
+            "expected string indexed-assignment error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn stdlib_json_namespace_calls_have_precise_return_types() {
+        let src = r#"use std.json
+
+var compact = json.dumps({"ok": true})
+var payload = json.loads(compact)
+var wrote = json.dump(payload, "tmp.json")
+"#;
+
+        assert_eq!(top_level_var_type(src, "payload"), "dynamic");
+        assert_eq!(top_level_var_type(src, "compact"), "string");
+        assert_eq!(top_level_var_type(src, "wrote"), "boolean");
+    }
+
+    #[test]
+    fn stdlib_collections_helpers_preserve_fixed_tuple_shapes() {
+        let src = r#"use std.collections
+
+var zipped = collections.zip([1, 2], ["a", "b"])
+var pair = zipped[0]
+var partitioned = collections.partition([1, 0, 3])
+var grouped = collections.groupBy(["red", "blue", "red"])
+"#;
+
+        assert_eq!(
+            top_level_var_type(src, "zipped"),
+            "list oftype (integer, string)"
+        );
+        assert_eq!(top_level_var_type(src, "pair"), "(integer, string)");
+        assert_eq!(
+            top_level_var_type(src, "partitioned"),
+            "(list oftype integer, list oftype integer)"
+        );
+        assert_eq!(
+            top_level_var_type(src, "grouped"),
+            "dict oftype string oftype list oftype string"
+        );
+    }
+
+    #[test]
+    fn stdlib_async_helpers_keep_pending_payload_shapes() {
+        let src = r#"use std.async
+
+var ready = async.ready(7)
+var gathered = async.gather([ready, async.ready(9)])
+var raced = async.waitAny([async.sleep(1), async.ready(99)])
+var timed = async.timeout(async.ready("ok"), 10)
+"#;
+
+        assert_eq!(top_level_var_type(src, "ready"), "Pending oftype integer");
+        assert_eq!(
+            top_level_var_type(src, "gathered"),
+            "Pending oftype list oftype integer"
+        );
+        assert_eq!(
+            top_level_var_type(src, "raced"),
+            "Pending oftype (integer, integer)"
+        );
+        assert_eq!(
+            top_level_var_type(src, "timed"),
+            "Pending oftype (boolean, string)"
+        );
+    }
+
+    #[test]
+    fn ternary_merges_all_possible_branch_types() {
+        let src = r#"const var flag = true
+var result = true if flag else "not"
+"#;
+
+        assert_eq!(top_level_var_type(src, "result"), "dynamic");
+    }
+
+    #[test]
+    fn check_expression_merges_all_arm_result_types() {
+        let src = r#"var result = check 1 {
+    1 => true
+    otherwise => "not"
+}
+"#;
+
+        assert_eq!(top_level_var_type(src, "result"), "dynamic");
+    }
+
+    #[test]
+    fn unannotated_actions_merge_all_return_paths() {
+        let src = r#"action choose with (certain flag oftype boolean) {
+    if flag {
+        return true
+    } otherwise {
+        return "not"
+    }
+}
+
+var result = choose(true)
+"#;
+
+        assert_eq!(top_level_action_return_type(src, "choose"), "dynamic");
+        assert_eq!(top_level_var_type(src, "result"), "dynamic");
+    }
+
+    #[test]
+    fn unannotated_actions_keep_precise_return_type_when_paths_agree() {
+        let src = r#"action choose with (certain flag oftype boolean) {
+    if flag {
+        return 1
+    } otherwise {
+        return 2
+    }
+}
+
+var result = choose(true)
+"#;
+
+        assert_eq!(top_level_action_return_type(src, "choose"), "integer");
+        assert_eq!(top_level_var_type(src, "result"), "integer");
+    }
+
+    #[test]
+    fn unannotated_actions_keep_nullable_return_type_on_fallthrough() {
+        let src = r#"action choose with (certain flag oftype boolean) {
+    if flag {
+        return 1
+    }
+}
+
+var result = choose(true)
+"#;
+
+        assert_eq!(top_level_action_return_type(src, "choose"), "integer");
+        assert_eq!(top_level_var_type(src, "result"), "integer");
     }
 
     #[test]

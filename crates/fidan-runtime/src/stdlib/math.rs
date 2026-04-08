@@ -78,15 +78,22 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             (Some(a), Some(b)) => Some(float_val(to_f64(a).max(to_f64(b)))),
             _ => Some(FidanValue::Nothing),
         },
-        "clamp" => {
-            let lo = arg1(&args);
-            let hi = match args.get(2) {
-                Some(FidanValue::Float(f)) => *f,
-                Some(FidanValue::Integer(n)) => *n as f64,
-                _ => f64::MAX,
-            };
-            Some(float_val(arg0(&args).clamp(lo, hi)))
-        }
+        "clamp" => match (args.first(), args.get(1), args.get(2)) {
+            (
+                Some(FidanValue::Integer(value)),
+                Some(FidanValue::Integer(lo)),
+                Some(FidanValue::Integer(hi)),
+            ) => Some(FidanValue::Integer((*value).clamp(*lo, *hi))),
+            _ => {
+                let lo = arg1(&args);
+                let hi = match args.get(2) {
+                    Some(FidanValue::Float(f)) => *f,
+                    Some(FidanValue::Integer(n)) => *n as f64,
+                    _ => f64::MAX,
+                };
+                Some(float_val(arg0(&args).clamp(lo, hi)))
+            }
+        },
         "hypot" => Some(float_val(arg0(&args).hypot(arg1(&args)))),
         "pi" | "PI" => Some(float_val(std::f64::consts::PI)),
         "e" | "E" => Some(float_val(std::f64::consts::E)),

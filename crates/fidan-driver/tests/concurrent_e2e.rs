@@ -283,6 +283,10 @@ assert_eq(enumerated[0][0], 0)
 assert_eq(enumerated[0][1], "a")
 assert_eq(enumerated[2][0], 2)
 
+var zipped = collections.zip([1, 2], ["a", "b"])
+assert_eq("{zipped[0]}", "(1, a)")
+assert_eq(zipped[1][1], "b")
+
 var chunked = collections.chunk([1, 2, 3, 4, 5], 2)
 assert_eq(len(chunked), 3)
 assert_eq(chunked[1][0], 3)
@@ -293,12 +297,22 @@ assert_eq(len(windows), 2)
 assert_eq(windows[1][2], 4)
 
 var partitioned = collections.partition([0, 1, nothing, "ok", false])
+assert_eq("{partitioned}", "([1, ok], [0, nothing, false])")
 assert_eq(len(partitioned[0]), 2)
 assert_eq(len(partitioned[1]), 3)
 
 var grouped = collections.groupBy(["red", "blue", "red"])
 assert_eq(len(grouped["red"]), 2)
 assert_eq(len(grouped["blue"]), 1)
+print("ok")
+"#
+}
+
+fn tuple_literal_source() -> &'static str {
+    r#"var pair = (42, "ok")
+assert_eq(type(pair), "tuple")
+assert_eq(pair[0], 42)
+assert_eq(pair[1], "ok")
 print("ok")
 "#
 }
@@ -318,10 +332,12 @@ assert_eq(results[1], 41)
 assert_eq(results[2], 3)
 
 var raced = await async.waitAny([async.sleep(25), async.ready(99)])
+assert_eq("{raced}", "(1, 99)")
 assert_eq(raced[0], 1)
 assert_eq(raced[1], 99)
 
 var timeoutFast = await async.timeout(async.ready(7), 10)
+assert_eq("{timeoutFast}", "(true, 7)")
 assert_eq(timeoutFast[0], true)
 assert_eq(timeoutFast[1], 7)
 
@@ -942,6 +958,39 @@ fn collections_helpers_llvm_aot_match_interpreter_contract() {
         sandbox.join("collections_smoke")
     };
     compile_program(collections_helpers_source(), Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn tuple_literals_cranelift_aot_preserve_tuple_runtime_contract() {
+    let sandbox = temp_dir("fidan_tuple_literal_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("tuple_literal_smoke.exe")
+    } else {
+        sandbox.join("tuple_literal_smoke")
+    };
+    compile_program(tuple_literal_source(), Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn tuple_literals_llvm_aot_preserve_tuple_runtime_contract() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM tuple-literal AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_tuple_literal_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("tuple_literal_smoke.exe")
+    } else {
+        sandbox.join("tuple_literal_smoke")
+    };
+    compile_program(tuple_literal_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
     fs::remove_dir_all(&sandbox).ok();
 }

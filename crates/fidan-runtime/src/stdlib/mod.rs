@@ -3,6 +3,7 @@ pub mod collections;
 mod common;
 pub mod env;
 pub mod io;
+pub mod json;
 pub mod math;
 pub mod regex;
 pub mod string;
@@ -33,6 +34,11 @@ const VALUE_MODULES: &[ValueModuleInfo] = &[
         name: "io",
         dispatch: io::dispatch,
         exports: io::exported_names,
+    },
+    ValueModuleInfo {
+        name: "json",
+        dispatch: json::dispatch,
+        exports: json::exported_names,
     },
     ValueModuleInfo {
         name: "collections",

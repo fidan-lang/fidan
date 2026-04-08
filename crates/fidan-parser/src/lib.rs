@@ -497,9 +497,8 @@ mod tests {
 
     #[test]
     fn string_interpolation_with_nested_string_literals_and_indexing() {
-        let (_, diags) = parse_src(
-            r#"var msg = "value {sentence.contains(\"quick\")} and {scores[\"Alice\"]}""#,
-        );
+        let (_, diags) =
+            parse_src(r#"var msg = "value {sentence.contains("quick")} and {scores["Alice"]}""#);
         assert!(
             errors(&diags).is_empty(),
             "unexpected errors: {:?}",
@@ -509,9 +508,8 @@ mod tests {
 
     #[test]
     fn string_interpolation_with_braces_inside_nested_string_literal() {
-        let (_, diags) = parse_src(
-            r#"var msg = "Name: {\"{\\\"James\\\"} with occupation {\\\"Teacher\\\"}\"}""#,
-        );
+        let (_, diags) =
+            parse_src(r#"var msg = "Name: {"{\"James\"} with occupation {\"Teacher\"}"}""#);
         assert!(
             errors(&diags).is_empty(),
             "unexpected errors: {:?}",
@@ -521,7 +519,30 @@ mod tests {
 
     #[test]
     fn string_interpolation_with_nested_dict_literal_expression() {
-        let (_, diags) = parse_src(r#"var msg = "answer: {{"a": 1}[\"a\"]}""#);
+        let (_, diags) = parse_src(r#"var msg = "answer: {{"a": 1}["a"]}""#);
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn string_interpolation_with_nested_interpolated_string_inside_index_expression() {
+        let (_, diags) =
+            parse_src(r#"var msg = "Available commands: {user_action["{commands.join(", ")}"]}""#);
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn string_interpolation_with_nested_interpolated_string_and_multi_arg_inner_call() {
+        let (_, diags) = parse_src(
+            r#"var msg = "Available commands: {user_action["{user_action.join(commands, ", ")}"]}""#,
+        );
         assert!(
             errors(&diags).is_empty(),
             "unexpected errors: {:?}",

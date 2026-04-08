@@ -32,6 +32,8 @@ pub struct Document {
     /// Stdlib module alias → canonical module name. E.g. `use std.io` → `"io" → "io"`;
     /// `use std.math as m` → `"m" → "math"`.
     pub stdlib_imports: HashMap<String, String>,
+    /// Grouped stdlib import binding → `(module_name, member_name)`.
+    pub stdlib_direct_imports: HashMap<String, (String, String)>,
     /// Inlay hint positions computed during the last analysis pass.
     pub inlay_hint_sites: Vec<InlayHintSite>,
     /// Typed member-access spans for hover on literal/computed receivers.

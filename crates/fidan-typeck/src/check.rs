@@ -8,7 +8,7 @@ use fidan_config::{BUILTIN_BINDINGS, BUILTIN_DECORATORS, BuiltinReturnKind, buil
 use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::{FileId, Span};
-use fidan_stdlib::{ReceiverBuiltinKind, ReceiverReturnKind, StdlibValueKind};
+use fidan_stdlib::{ReceiverBuiltinKind, ReceiverReturnKind, StdlibTypeSpec};
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 
@@ -79,6 +79,7 @@ struct CallArgInfo {
 
 struct ExternActionContext<'a> {
     params: &'a [Param],
+    return_ty: &'a Option<TypeExpr>,
     body: &'a [StmtId],
     decorators: &'a [Decorator],
     is_parallel: bool,
@@ -105,6 +106,12 @@ struct SeenImport {
 struct StdlibImportInfo {
     module: Symbol,
     export: Symbol,
+}
+
+#[derive(Debug, Clone)]
+struct FlowSummary {
+    falls_through: bool,
+    return_ty: Option<FidanType>,
 }
 
 // ── TypeChecker ───────────────────────────────────────────────────────────────
@@ -156,6 +163,8 @@ pub struct TypeChecker {
     seen_imports: FxHashMap<Symbol, SeenImport>,
     /// Specific `use std.module.member` imports keyed by the bound local symbol.
     stdlib_imports: FxHashMap<Symbol, StdlibImportInfo>,
+    /// `use std.module` namespace bindings keyed by the bound local symbol.
+    stdlib_namespace_imports: FxHashMap<Symbol, Symbol>,
     /// Every symbol that was successfully resolved by an `Expr::Ident` node.
     /// Used to determine which import bindings are unreferenced.
     referenced_names: rustc_hash::FxHashSet<Symbol>,
@@ -185,6 +194,7 @@ impl TypeChecker {
             import_syms: rustc_hash::FxHashSet::default(),
             seen_imports: FxHashMap::default(),
             stdlib_imports: FxHashMap::default(),
+            stdlib_namespace_imports: FxHashMap::default(),
             referenced_names: rustc_hash::FxHashSet::default(),
         };
         tc.register_builtins();
@@ -732,8 +742,10 @@ impl TypeChecker {
                                     export: *path.last().unwrap(),
                                 },
                             );
+                            self.stdlib_namespace_imports.remove(&binding_sym);
                         } else {
                             self.stdlib_imports.remove(&binding_sym);
+                            self.stdlib_namespace_imports.insert(binding_sym, path[1]);
                         }
                         self.record_import_binding(binding_sym, *span, *grouped, *re_export);
                     }
@@ -980,6 +992,7 @@ impl TypeChecker {
                     *name,
                     ExternActionContext {
                         params,
+                        return_ty,
                         body,
                         decorators,
                         is_parallel: *is_parallel,
@@ -996,6 +1009,11 @@ impl TypeChecker {
                     self.deprecated_actions.insert(*name);
                 }
                 if self.has_marker_decorator(decorators, "extern") {
+                    if return_ty.is_none()
+                        && let Some(info) = self.actions.get_mut(name)
+                    {
+                        info.return_ty = FidanType::Nothing;
+                    }
                     return;
                 }
                 // A `new` constructor inside an object always returns nothing — the
@@ -1008,7 +1026,7 @@ impl TypeChecker {
                     None
                 };
                 // `this_ty` is already set if we're inside an ObjectDecl scope.
-                self.check_action_body(
+                let inferred_return = self.check_action_body(
                     ActionBody {
                         params,
                         return_ty,
@@ -1019,6 +1037,11 @@ impl TypeChecker {
                     },
                     module,
                 );
+                if return_ty.is_none()
+                    && let Some(info) = self.actions.get_mut(name)
+                {
+                    info.return_ty = inferred_return;
+                }
             }
 
             Item::ExtensionAction {
@@ -1038,6 +1061,7 @@ impl TypeChecker {
                     *name,
                     ExternActionContext {
                         params,
+                        return_ty,
                         body,
                         decorators,
                         is_parallel: *is_parallel,
@@ -1059,7 +1083,7 @@ impl TypeChecker {
                     self.this_ty = prev_this;
                     return;
                 }
-                self.check_action_body(
+                let inferred_return = self.check_action_body(
                     ActionBody {
                         params,
                         return_ty,
@@ -1070,6 +1094,12 @@ impl TypeChecker {
                     },
                     module,
                 );
+                if return_ty.is_none()
+                    && let Some(obj) = self.objects.get_mut(extends)
+                    && let Some(info) = obj.methods.get_mut(name)
+                {
+                    info.return_ty = inferred_return;
+                }
                 self.this_ty = prev_this;
             }
 
@@ -1096,7 +1126,7 @@ impl TypeChecker {
                 value,
                 span,
             } => {
-                self.check_const_assign(*target, *span, module);
+                self.check_assignment_target(*target, *span, module);
                 let rhs = self.infer_expr(*value, module);
                 let lhs = self.infer_expr(*target, module);
                 if !lhs.is_assignable_from(&rhs) {
@@ -1162,7 +1192,7 @@ impl TypeChecker {
         }
     }
 
-    fn check_action_body(&mut self, action: ActionBody<'_>, module: &Module) {
+    fn check_action_body(&mut self, action: ActionBody<'_>, module: &Module) -> FidanType {
         let ActionBody {
             params,
             return_ty,
@@ -1243,8 +1273,13 @@ impl TypeChecker {
             );
         }
 
+        let inferred_return = declared_ret
+            .clone()
+            .unwrap_or_else(|| self.infer_action_return_type(body, module));
+
         self.pop_scope();
         self.current_return_ty = prev_ret;
+        inferred_return
     }
 
     // ── Statement checking ────────────────────────────────────────────────
@@ -1293,7 +1328,7 @@ impl TypeChecker {
                 value,
                 span,
             } => {
-                self.check_const_assign(target, span, module);
+                self.check_assignment_target(target, span, module);
                 let rhs = self.infer_expr(value, module);
                 let lhs = self.infer_expr(target, module);
                 if !lhs.is_assignable_from(&rhs) {
@@ -1403,6 +1438,7 @@ impl TypeChecker {
                     name,
                     ExternActionContext {
                         params: &params,
+                        return_ty: &return_ty,
                         body: &body,
                         decorators: &decorators,
                         is_parallel,
@@ -1412,10 +1448,16 @@ impl TypeChecker {
                     },
                 );
                 if self.has_marker_decorator(&decorators, "extern") {
+                    if return_ty.is_none()
+                        && let Some(scope) = self.local_actions.last_mut()
+                        && let Some(info) = scope.get_mut(&name)
+                    {
+                        info.return_ty = FidanType::Nothing;
+                    }
                     return;
                 }
 
-                self.check_action_body(
+                let inferred_return = self.check_action_body(
                     ActionBody {
                         params: &params,
                         return_ty: &return_ty,
@@ -1426,6 +1468,12 @@ impl TypeChecker {
                     },
                     module,
                 );
+                if return_ty.is_none()
+                    && let Some(scope) = self.local_actions.last_mut()
+                    && let Some(info) = scope.get_mut(&name)
+                {
+                    info.return_ty = inferred_return;
+                }
             }
 
             Stmt::Return { value, span } => {
@@ -1654,6 +1702,20 @@ impl TypeChecker {
         self.push_scope(ScopeKind::Block);
         self.check_statements_in_current_scope(stmts, module, true);
         self.pop_scope();
+    }
+
+    fn infer_check_arm_body_type(&mut self, stmts: &[StmtId], module: &Module) -> FidanType {
+        self.push_scope(ScopeKind::Block);
+        self.check_statements_in_current_scope(stmts, module, true);
+        let result = stmts
+            .last()
+            .and_then(|sid| match module.arena.get_stmt(*sid) {
+                Stmt::Expr { expr, .. } => self.expr_types.get(expr).cloned(),
+                _ => None,
+            })
+            .unwrap_or(FidanType::Nothing);
+        self.pop_scope();
+        result
     }
 
     fn check_statements_in_current_scope(
@@ -1947,6 +2009,34 @@ impl TypeChecker {
         }
     }
 
+    /// Reject assignment targets that are syntactically valid but semantically
+    /// immutable, such as tuple/string/range indexed writes.
+    fn check_assignment_target(&mut self, target_id: ExprId, span: Span, module: &Module) {
+        self.check_const_assign(target_id, span, module);
+
+        let expr = module.arena.get_expr(target_id).clone();
+        if let Expr::Index { object, .. } = expr {
+            let object_ty = self.infer_expr(object, module);
+            match object_ty {
+                FidanType::List(_)
+                | FidanType::Dict(_, _)
+                | FidanType::Dynamic
+                | FidanType::Unknown
+                | FidanType::Error => {}
+                other => {
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0201"),
+                        format!(
+                            "cannot assign through index into `{}`; only `list` and `dict` support indexed assignment",
+                            self.ty_name(&other)
+                        ),
+                        span,
+                    );
+                }
+            }
+        }
+    }
+
     // ── Expression inference ──────────────────────────────────────────────
 
     /// Infer the type of `expr_id`, record the result in `expr_types`, and return it.
@@ -2100,11 +2190,19 @@ impl TypeChecker {
                     module,
                 );
                 let obj_ty = self.infer_expr(object, module);
-                self.infer_expr(index, module);
+                let index_ty = self.infer_expr(index, module);
                 match obj_ty {
                     FidanType::List(inner) => *inner,
                     FidanType::Dict(_, v) => *v,
                     FidanType::String => FidanType::String,
+                    FidanType::Tuple(elements) => match (module.arena.get_expr(index), index_ty) {
+                        (Expr::IntLit { value, .. }, FidanType::Integer)
+                            if *value >= 0 && (*value as usize) < elements.len() =>
+                        {
+                            elements[*value as usize].clone()
+                        }
+                        _ => FidanType::Dynamic,
+                    },
                     _ => FidanType::Dynamic,
                 }
             }
@@ -2187,7 +2285,11 @@ impl TypeChecker {
                 let l = self.infer_expr(lhs, module);
                 let r = self.infer_expr(rhs, module);
                 // If lhs is definitely Nothing, result is rhs type.
-                if l.is_nothing() { r } else { l }
+                if l.is_nothing() {
+                    r
+                } else {
+                    self.merge_possible_types([l, r])
+                }
             }
 
             Expr::Ternary {
@@ -2198,8 +2300,8 @@ impl TypeChecker {
             } => {
                 self.infer_expr(condition, module);
                 let then_ty = self.infer_expr(then_val, module);
-                self.infer_expr(else_val, module);
-                then_ty
+                let else_ty = self.infer_expr(else_val, module);
+                self.merge_possible_types([then_ty, else_ty])
             }
 
             Expr::Assign {
@@ -2207,6 +2309,7 @@ impl TypeChecker {
                 value,
                 span,
             } => {
+                self.check_assignment_target(target, span, module);
                 let rhs = self.infer_expr(value, module);
                 let lhs = self.infer_expr(target, module);
                 if !lhs.is_assignable_from(&rhs) && !lhs.is_error() {
@@ -2226,6 +2329,7 @@ impl TypeChecker {
                 value,
                 span,
             } => {
+                self.check_assignment_target(target, span, module);
                 let rhs = self.infer_expr(value, module);
                 let lhs = self.infer_expr(target, module);
                 self.binary_result(op, &lhs, &rhs, span)
@@ -2245,12 +2349,16 @@ impl TypeChecker {
             }
 
             Expr::List { elements, .. } => {
-                let elem = elements
-                    .first()
-                    .map(|&id| self.infer_expr(id, module))
-                    .unwrap_or(FidanType::Dynamic);
-                for &id in elements.iter().skip(1) {
-                    self.infer_expr(id, module);
+                let mut elem = FidanType::Dynamic;
+                let mut saw_element = false;
+                for id in elements {
+                    let ty = self.infer_expr(id, module);
+                    elem = if saw_element {
+                        self.merge_two_types(&elem, &ty)
+                    } else {
+                        saw_element = true;
+                        ty
+                    };
                 }
                 FidanType::List(Box::new(elem))
             }
@@ -2275,11 +2383,12 @@ impl TypeChecker {
                 scrutinee, arms, ..
             } => {
                 self.infer_expr(scrutinee, module);
+                let mut arm_types = Vec::with_capacity(arms.len());
                 for arm in arms {
                     self.infer_expr(arm.pattern, module);
-                    self.check_arm_body(&arm.body, module);
+                    arm_types.push(self.infer_check_arm_body_type(&arm.body, module));
                 }
-                FidanType::Dynamic
+                self.merge_possible_types(arm_types)
             }
 
             Expr::Error { .. } => FidanType::Error,
@@ -2437,21 +2546,6 @@ impl TypeChecker {
         }
     }
 
-    fn stdlib_value_kind_to_type(&self, kind: StdlibValueKind) -> FidanType {
-        match kind {
-            StdlibValueKind::Integer => FidanType::Integer,
-            StdlibValueKind::Float => FidanType::Float,
-            StdlibValueKind::Boolean => FidanType::Boolean,
-            StdlibValueKind::String => FidanType::String,
-            StdlibValueKind::List => FidanType::List(Box::new(FidanType::Dynamic)),
-            StdlibValueKind::Dict => {
-                FidanType::Dict(Box::new(FidanType::Dynamic), Box::new(FidanType::Dynamic))
-            }
-            StdlibValueKind::Dynamic => FidanType::Dynamic,
-            StdlibValueKind::Nothing => FidanType::Nothing,
-        }
-    }
-
     fn resolve_receiver_return_kind(
         &self,
         receiver_ty: &FidanType,
@@ -2523,24 +2617,120 @@ impl TypeChecker {
             .map(|return_kind| self.resolve_receiver_return_kind(ty, return_kind))
     }
 
-    fn stdlib_import_return_type(&self, import: StdlibImportInfo) -> Option<FidanType> {
+    fn fidan_type_to_stdlib_spec(&self, ty: &FidanType) -> StdlibTypeSpec {
+        match ty {
+            FidanType::Integer => StdlibTypeSpec::Integer,
+            FidanType::Float => StdlibTypeSpec::Float,
+            FidanType::Boolean => StdlibTypeSpec::Boolean,
+            FidanType::String => StdlibTypeSpec::String,
+            FidanType::Handle => StdlibTypeSpec::Handle,
+            FidanType::Nothing => StdlibTypeSpec::Nothing,
+            FidanType::Dynamic | FidanType::Unknown | FidanType::Error => StdlibTypeSpec::Dynamic,
+            FidanType::List(inner) => {
+                StdlibTypeSpec::List(Box::new(self.fidan_type_to_stdlib_spec(inner)))
+            }
+            FidanType::Dict(key, value) => StdlibTypeSpec::Dict(
+                Box::new(self.fidan_type_to_stdlib_spec(key)),
+                Box::new(self.fidan_type_to_stdlib_spec(value)),
+            ),
+            FidanType::Tuple(elements) => StdlibTypeSpec::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.fidan_type_to_stdlib_spec(element))
+                    .collect(),
+            ),
+            FidanType::Shared(inner) => {
+                StdlibTypeSpec::Shared(Box::new(self.fidan_type_to_stdlib_spec(inner)))
+            }
+            FidanType::WeakShared(inner) => {
+                StdlibTypeSpec::WeakShared(Box::new(self.fidan_type_to_stdlib_spec(inner)))
+            }
+            FidanType::Pending(inner) => {
+                StdlibTypeSpec::Pending(Box::new(self.fidan_type_to_stdlib_spec(inner)))
+            }
+            FidanType::Function => StdlibTypeSpec::Function,
+            FidanType::Object(_) | FidanType::Enum(_) | FidanType::ClassType(_) => {
+                StdlibTypeSpec::Dynamic
+            }
+        }
+    }
+
+    fn stdlib_spec_to_fidan_type(&self, spec: &StdlibTypeSpec) -> FidanType {
+        match spec {
+            StdlibTypeSpec::Integer => FidanType::Integer,
+            StdlibTypeSpec::Float => FidanType::Float,
+            StdlibTypeSpec::Boolean => FidanType::Boolean,
+            StdlibTypeSpec::String => FidanType::String,
+            StdlibTypeSpec::Handle => FidanType::Handle,
+            StdlibTypeSpec::Dynamic => FidanType::Dynamic,
+            StdlibTypeSpec::Nothing => FidanType::Nothing,
+            StdlibTypeSpec::List(inner) => {
+                FidanType::List(Box::new(self.stdlib_spec_to_fidan_type(inner)))
+            }
+            StdlibTypeSpec::Dict(key, value) => FidanType::Dict(
+                Box::new(self.stdlib_spec_to_fidan_type(key)),
+                Box::new(self.stdlib_spec_to_fidan_type(value)),
+            ),
+            StdlibTypeSpec::Tuple(elements) => FidanType::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.stdlib_spec_to_fidan_type(element))
+                    .collect(),
+            ),
+            StdlibTypeSpec::Shared(inner) => {
+                FidanType::Shared(Box::new(self.stdlib_spec_to_fidan_type(inner)))
+            }
+            StdlibTypeSpec::WeakShared(inner) => {
+                FidanType::WeakShared(Box::new(self.stdlib_spec_to_fidan_type(inner)))
+            }
+            StdlibTypeSpec::Pending(inner) => {
+                FidanType::Pending(Box::new(self.stdlib_spec_to_fidan_type(inner)))
+            }
+            StdlibTypeSpec::Function => FidanType::Function,
+        }
+    }
+
+    fn stdlib_import_return_type(
+        &mut self,
+        import: StdlibImportInfo,
+        args: &[CallArgInfo],
+        module: &Module,
+    ) -> Option<FidanType> {
         let module_name = self.interner.resolve(import.module);
         let export_name = self.interner.resolve(import.export);
-        let return_kind =
-            fidan_stdlib::member_return_type(module_name.as_ref(), export_name.as_ref()).and_then(
-                |ty| match ty {
-                    "integer" => Some(StdlibValueKind::Integer),
-                    "float" => Some(StdlibValueKind::Float),
-                    "boolean" => Some(StdlibValueKind::Boolean),
-                    "string" => Some(StdlibValueKind::String),
-                    "list" => Some(StdlibValueKind::List),
-                    "dict" => Some(StdlibValueKind::Dict),
-                    "dynamic" => Some(StdlibValueKind::Dynamic),
-                    "nothing" => Some(StdlibValueKind::Nothing),
-                    _ => None,
-                },
-            )?;
-        Some(self.stdlib_value_kind_to_type(return_kind))
+        let mut inferred_args = Vec::with_capacity(args.len());
+        for arg in args {
+            let inferred = self.infer_expr(arg.value, module);
+            inferred_args.push(self.fidan_type_to_stdlib_spec(&inferred));
+        }
+        fidan_stdlib::infer_precise_stdlib_return_type(
+            module_name.as_ref(),
+            export_name.as_ref(),
+            &inferred_args,
+        )
+        .map(|spec| self.stdlib_spec_to_fidan_type(&spec))
+    }
+
+    fn stdlib_namespace_return_type(
+        &mut self,
+        namespace: Symbol,
+        export: Symbol,
+        args: &[CallArgInfo],
+        module: &Module,
+    ) -> Option<FidanType> {
+        let module_name = self.interner.resolve(namespace);
+        let export_name = self.interner.resolve(export);
+        let mut inferred_args = Vec::with_capacity(args.len());
+        for arg in args {
+            let inferred = self.infer_expr(arg.value, module);
+            inferred_args.push(self.fidan_type_to_stdlib_spec(&inferred));
+        }
+        fidan_stdlib::infer_precise_stdlib_return_type(
+            module_name.as_ref(),
+            export_name.as_ref(),
+            &inferred_args,
+        )
+        .map(|spec| self.stdlib_spec_to_fidan_type(&spec))
     }
 
     fn should_emit_member_error(&self, ty: &FidanType) -> bool {
@@ -2730,7 +2920,7 @@ impl TypeChecker {
                     return self.builtin_return_kind_to_type(return_kind);
                 }
                 if let Some(import) = self.stdlib_imports.get(&name).copied()
-                    && let Some(return_ty) = self.stdlib_import_return_type(import)
+                    && let Some(return_ty) = self.stdlib_import_return_type(import, args, module)
                 {
                     return return_ty;
                 }
@@ -2744,6 +2934,18 @@ impl TypeChecker {
                         // User action — validate call arguments against the declared signature.
                         if let Some(info) = self.lookup_action_info(name) {
                             self.check_call_arguments(&info.params, args, span, module);
+                            // The checker keeps the action signature up to date for
+                            // unannotated actions once their body has been analyzed.
+                            // Use that return type here instead of discarding it.
+                            if self.is_action_deprecated(name) {
+                                let n = self.interner.resolve(name).to_string();
+                                self.emit_warning(
+                                    fidan_diagnostics::diag_code!("W2005"),
+                                    format!("`{n}` is marked `@deprecated` and may be removed in a future version"),
+                                    callee_span,
+                                );
+                            }
+                            return info.return_ty;
                         }
                         // Emit W2005 if the action is marked @deprecated.
                         if self.is_action_deprecated(name) {
@@ -2788,6 +2990,16 @@ impl TypeChecker {
             }
 
             Expr::Field { object, field, .. } => {
+                if let Expr::Ident {
+                    name: namespace, ..
+                } = module.arena.get_expr(object)
+                    && let Some(module_sym) = self.stdlib_namespace_imports.get(namespace).copied()
+                    && let Some(return_ty) =
+                        self.stdlib_namespace_return_type(module_sym, field, args, module)
+                {
+                    return return_ty;
+                }
+
                 let recv = self.infer_expr(object, module);
                 match recv {
                     FidanType::Enum(sym) => {
@@ -3009,6 +3221,227 @@ impl TypeChecker {
         false
     }
 
+    fn infer_action_return_type(&self, body: &[StmtId], module: &Module) -> FidanType {
+        let summary = self.summarize_stmt_list(body, module);
+        let mut outcomes = Vec::new();
+        if let Some(return_ty) = summary.return_ty {
+            outcomes.push(return_ty);
+        }
+        if summary.falls_through || outcomes.is_empty() {
+            outcomes.push(FidanType::Nothing);
+        }
+        self.merge_possible_types(outcomes)
+    }
+
+    fn summarize_stmt_list(&self, stmts: &[StmtId], module: &Module) -> FlowSummary {
+        let mut summary = FlowSummary {
+            falls_through: true,
+            return_ty: None,
+        };
+
+        for &sid in stmts {
+            if !summary.falls_through {
+                break;
+            }
+            let stmt = module.arena.get_stmt(sid).clone();
+            let stmt_summary = self.summarize_stmt(&stmt, module);
+            summary.return_ty =
+                self.merge_optional_types(summary.return_ty, stmt_summary.return_ty);
+            summary.falls_through = stmt_summary.falls_through;
+        }
+
+        summary
+    }
+
+    fn summarize_stmt(&self, stmt: &Stmt, module: &Module) -> FlowSummary {
+        match stmt {
+            Stmt::Return { value, .. } => FlowSummary {
+                falls_through: false,
+                return_ty: Some(
+                    value
+                        .and_then(|expr| self.expr_types.get(&expr).cloned())
+                        .unwrap_or(FidanType::Nothing),
+                ),
+            },
+            Stmt::Panic { .. } => FlowSummary {
+                falls_through: false,
+                return_ty: None,
+            },
+            Stmt::If {
+                then_body,
+                else_ifs,
+                else_body,
+                ..
+            } => {
+                let mut branch_summaries = Vec::with_capacity(else_ifs.len() + 2);
+                branch_summaries.push(self.summarize_stmt_list(then_body, module));
+                branch_summaries.extend(
+                    else_ifs
+                        .iter()
+                        .map(|branch| self.summarize_stmt_list(&branch.body, module)),
+                );
+
+                let has_else = else_body.is_some();
+                if let Some(body) = else_body {
+                    branch_summaries.push(self.summarize_stmt_list(body, module));
+                }
+
+                let mut return_ty = None;
+                let mut falls_through = !has_else;
+                for branch in branch_summaries {
+                    return_ty = self.merge_optional_types(return_ty, branch.return_ty);
+                    falls_through |= branch.falls_through;
+                }
+
+                FlowSummary {
+                    falls_through,
+                    return_ty,
+                }
+            }
+            Stmt::Check { arms, .. } => {
+                let mut return_ty = None;
+                let mut falls_through = !self.check_has_catch_all_arm(arms, module);
+                for arm in arms {
+                    let arm_summary = self.summarize_stmt_list(&arm.body, module);
+                    return_ty = self.merge_optional_types(return_ty, arm_summary.return_ty);
+                    falls_through |= arm_summary.falls_through;
+                }
+                FlowSummary {
+                    falls_through,
+                    return_ty,
+                }
+            }
+            Stmt::Attempt {
+                body,
+                catches,
+                otherwise,
+                ..
+            } => {
+                let mut return_ty = None;
+                let body_summary = self.summarize_stmt_list(body, module);
+                return_ty = self.merge_optional_types(return_ty, body_summary.return_ty);
+                let mut falls_through = body_summary.falls_through;
+
+                for catch in catches {
+                    let catch_summary = self.summarize_stmt_list(&catch.body, module);
+                    return_ty = self.merge_optional_types(return_ty, catch_summary.return_ty);
+                    falls_through |= catch_summary.falls_through;
+                }
+
+                if let Some(otherwise_body) = otherwise {
+                    let otherwise_summary = self.summarize_stmt_list(otherwise_body, module);
+                    return_ty = self.merge_optional_types(return_ty, otherwise_summary.return_ty);
+                    falls_through |= otherwise_summary.falls_through;
+                } else {
+                    falls_through = true;
+                }
+
+                FlowSummary {
+                    falls_through,
+                    return_ty,
+                }
+            }
+            Stmt::While { body, .. } | Stmt::For { body, .. } | Stmt::ParallelFor { body, .. } => {
+                let body_summary = self.summarize_stmt_list(body, module);
+                FlowSummary {
+                    falls_through: true,
+                    return_ty: body_summary.return_ty,
+                }
+            }
+            _ => FlowSummary {
+                falls_through: true,
+                return_ty: None,
+            },
+        }
+    }
+
+    fn check_has_catch_all_arm(&self, arms: &[fidan_ast::CheckArm], module: &Module) -> bool {
+        arms.iter().any(|arm| {
+            matches!(
+                module.arena.get_expr(arm.pattern),
+                Expr::Ident { name, .. } if self.interner.resolve(*name).as_ref() == "_"
+            )
+        })
+    }
+
+    fn merge_optional_types(
+        &self,
+        lhs: Option<FidanType>,
+        rhs: Option<FidanType>,
+    ) -> Option<FidanType> {
+        match (lhs, rhs) {
+            (Some(lhs), Some(rhs)) => Some(self.merge_possible_types([lhs, rhs])),
+            (Some(lhs), None) => Some(lhs),
+            (None, Some(rhs)) => Some(rhs),
+            (None, None) => None,
+        }
+    }
+
+    fn merge_possible_types<I>(&self, types: I) -> FidanType
+    where
+        I: IntoIterator<Item = FidanType>,
+    {
+        let mut iter = types.into_iter();
+        let Some(first) = iter.next() else {
+            return FidanType::Dynamic;
+        };
+        iter.fold(first, |acc, ty| self.merge_two_types(&acc, &ty))
+    }
+
+    fn merge_two_types(&self, lhs: &FidanType, rhs: &FidanType) -> FidanType {
+        if lhs == rhs {
+            return lhs.clone();
+        }
+        if lhs.is_error() {
+            return rhs.clone();
+        }
+        if rhs.is_error() {
+            return lhs.clone();
+        }
+        if lhs.is_dynamic() || rhs.is_dynamic() {
+            return FidanType::Dynamic;
+        }
+        // Fidan types are nullable by default, so merging with `nothing`
+        // preserves the non-`nothing` type instead of degrading to `dynamic`.
+        if lhs.is_nothing() {
+            return rhs.clone();
+        }
+        if rhs.is_nothing() {
+            return lhs.clone();
+        }
+
+        match (lhs, rhs) {
+            (FidanType::Integer, FidanType::Float) | (FidanType::Float, FidanType::Integer) => {
+                FidanType::Float
+            }
+            (FidanType::List(lhs), FidanType::List(rhs)) => {
+                FidanType::List(Box::new(self.merge_two_types(lhs, rhs)))
+            }
+            (FidanType::Dict(lhs_k, lhs_v), FidanType::Dict(rhs_k, rhs_v)) => FidanType::Dict(
+                Box::new(self.merge_two_types(lhs_k, rhs_k)),
+                Box::new(self.merge_two_types(lhs_v, rhs_v)),
+            ),
+            (FidanType::Tuple(lhs), FidanType::Tuple(rhs)) if lhs.len() == rhs.len() => {
+                FidanType::Tuple(
+                    lhs.iter()
+                        .zip(rhs.iter())
+                        .map(|(lhs, rhs)| self.merge_two_types(lhs, rhs))
+                        .collect(),
+                )
+            }
+            (FidanType::Shared(lhs), FidanType::Shared(rhs)) => {
+                FidanType::Shared(Box::new(self.merge_two_types(lhs, rhs)))
+            }
+            (FidanType::WeakShared(lhs), FidanType::WeakShared(rhs)) => {
+                FidanType::WeakShared(Box::new(self.merge_two_types(lhs, rhs)))
+            }
+            (FidanType::Pending(lhs), FidanType::Pending(rhs)) => {
+                FidanType::Pending(Box::new(self.merge_two_types(lhs, rhs)))
+            }
+            _ => FidanType::Dynamic,
+        }
+    }
+
     /// Returns `true` if executing `stmt` guarantees that all subsequent control
     /// flow ends with a return or panic (i.e. no execution path falls through).
     fn stmt_terminates_all_paths(&self, stmt: &Stmt, module: &Module) -> bool {
@@ -3035,7 +3468,9 @@ impl TypeChecker {
             // least one arm (a check with zero arms is vacuously non-terminating
             // because no path is taken).
             Stmt::Check { arms, .. } => {
-                !arms.is_empty() && arms.iter().all(|a| self.all_paths_return(&a.body, module))
+                !arms.is_empty()
+                    && self.check_has_catch_all_arm(arms, module)
+                    && arms.iter().all(|a| self.all_paths_return(&a.body, module))
             }
 
             // `attempt` — terminates if the try body AND every catch AND the
@@ -3645,7 +4080,7 @@ impl TypeChecker {
         let ret_ty = return_ty
             .as_ref()
             .map(|t| self.resolve_type_expr(&t.clone()))
-            .unwrap_or(FidanType::Nothing);
+            .unwrap_or(FidanType::Dynamic);
         ActionInfo {
             params: param_infos,
             return_ty: ret_ty,
@@ -3983,18 +4418,20 @@ impl TypeChecker {
         }
 
         if matches!(spec.abi, ExternAbiKind::Native)
-            && let Some(action_info) = self.actions.get(&name)
-            && !Self::native_extern_return_type_allowed(&action_info.return_ty)
+            && let Some(return_ty) = ctx.return_ty.as_ref()
         {
-            let ty_name = self.ty_name(&action_info.return_ty);
-            self.emit_error(
-                fidan_diagnostics::diag_code!("E0304"),
-                format!(
-                    "native @extern action `{}` has unsupported return type `{ty_name}`; use integer, float, boolean, nothing, or handle",
-                    self.interner.resolve(name)
-                ),
-                ctx.span,
-            );
+            let resolved_return_ty = self.resolve_type_expr(return_ty);
+            if !Self::native_extern_return_type_allowed(&resolved_return_ty) {
+                let ty_name = self.ty_name(&resolved_return_ty);
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0304"),
+                    format!(
+                        "native @extern action `{}` has unsupported return type `{ty_name}`; use integer, float, boolean, nothing, or handle",
+                        self.interner.resolve(name)
+                    ),
+                    ctx.span,
+                );
+            }
         }
     }
 

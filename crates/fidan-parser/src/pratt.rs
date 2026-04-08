@@ -786,8 +786,11 @@ impl<'t> Parser<'t> {
                 )));
             }
             if let Some(close) = scan_interp_fragment_end(&raw, open) {
-                let inner = raw[open + 1..close].trim();
-                let expr = self.parse_interp_fragment(inner, span);
+                let inner = &raw[open + 1..close];
+                let trimmed = inner.trim();
+                let leading_ws = inner.len() - inner.trim_start().len();
+                let fragment_offset = span.start + 1 + (open + 1 + leading_ws) as u32;
+                let expr = self.parse_interp_fragment(trimmed, span, fragment_offset);
                 parts.push(InterpPart::Expr(expr));
                 cursor = close + 1;
             } else {
@@ -821,20 +824,28 @@ impl<'t> Parser<'t> {
     ///
     /// Re-lexes the raw fragment string so that arbitrary Fidan expressions
     /// (literals, operators, calls, member access, etc.) work correctly.
-    fn parse_interp_fragment(&mut self, inner: &str, span: Span) -> ExprId {
+    fn parse_interp_fragment(&mut self, inner: &str, span: Span, fragment_offset: u32) -> ExprId {
         if inner.is_empty() {
             return self.error_expr(span);
         }
         // Build a tiny SourceFile for the fragment and tokenise it.
         let frag_file = SourceFile::new(span.file, "<interp-fragment>", inner);
-        let (frag_tokens, _) = Lexer::new(&frag_file, Arc::clone(&self.interner)).tokenise();
+        let (mut frag_tokens, _) = Lexer::new(&frag_file, Arc::clone(&self.interner)).tokenise();
+        for token in &mut frag_tokens {
+            token.span = Span::new(
+                token.span.file,
+                token.span.start + fragment_offset,
+                token.span.end + fragment_offset,
+            );
+        }
         if frag_tokens.is_empty() || matches!(frag_tokens[0].kind, TokenKind::Eof) {
             return self.error_expr(span);
         }
         // Activate fragment mode: peek/advance will read from this token buffer.
+        let previous_fragment = self.fragment.take();
         self.fragment = Some((frag_tokens, 0));
         let expr = self.parse_expr();
-        self.fragment = None;
+        self.fragment = previous_fragment;
         expr
     }
 

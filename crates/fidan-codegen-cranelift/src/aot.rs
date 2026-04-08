@@ -512,6 +512,7 @@ struct RuntimeDecls {
     slice_fn: cranelift_module::FuncId,
     list_new: cranelift_module::FuncId,
     list_push: cranelift_module::FuncId,
+    tuple_pack: cranelift_module::FuncId,
     list_get: cranelift_module::FuncId,
     list_set: cranelift_module::FuncId,
     list_len: cranelift_module::FuncId,
@@ -679,6 +680,7 @@ impl RuntimeDecls {
             }),
             list_new: decl!("fdn_list_new", sig!(() -> ptr)),
             list_push: decl!("fdn_list_push", sig!((p, p) -> void)),
+            tuple_pack: decl!("fdn_tuple_pack", sig!((p, i64t) -> ptr)),
             list_get: decl!("fdn_list_get", sig!((p, p) -> ptr)),
             list_set: decl!("fdn_list_set", sig!((p, p, p) -> void)),
             list_len: decl!("fdn_list_len", sig!((p) -> i64)),
@@ -2187,13 +2189,12 @@ fn lower_rvalue(
         }
 
         Rvalue::Tuple(elems) => {
-            let list = call_rt(module, builder, rt.list_new, &[])?
-                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
-            for elem in elems {
-                let ev = lower_operand_boxed(builder, cl_vars, local_types, elem, rt, module)?;
-                call_rt(module, builder, rt.list_push, &[list, ev])?;
-            }
-            Ok(list)
+            let (items_ptr, item_count) =
+                build_ptr_array(module, rt, builder, cl_vars, local_types, elems, interner)?;
+            Ok(
+                call_rt(module, builder, rt.tuple_pack, &[items_ptr, item_count])?
+                    .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)),
+            )
         }
 
         Rvalue::StringInterp(parts) => {

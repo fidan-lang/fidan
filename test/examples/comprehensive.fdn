@@ -65,13 +65,13 @@ print("§4 upper: {upper_s.upper()}")
 # expected: §4 upper: FIDAN
 
 var sentence = "the quick brown fox"
-print("§4 contains 'quick': {sentence.contains(\"quick\")}")
-print("§4 contains 'slow': {sentence.contains(\"slow\")}")
+print("§4 contains 'quick': {sentence.contains("quick")}")
+print("§4 contains 'slow': {sentence.contains("slow")}")
 # expected: §4 contains 'quick': true
 # expected: §4 contains 'slow': false
 
-print("§4 starts_with 'the': {sentence.startsWith(\"the\")}")
-print("§4 ends_with 'fox': {sentence.endsWith(\"fox\")}")
+print("§4 starts_with 'the': {sentence.startsWith("the")}")
+print("§4 ends_with 'fox': {sentence.endsWith("fox")}")
 # expected: §4 starts_with 'the': true
 # expected: §4 ends_with 'fox': true
 
@@ -89,7 +89,7 @@ print("§4 split[2]: {parts[2]}")
 # expected: §4 split[2]: three
 
 var words = ["Hello", "World", "Fidan"]
-print("§4 join: {words.join(\", \")}")
+print("§4 join: {words.join(", ")}")
 # expected: §4 join: Hello, World, Fidan
 
 # ── §5  List methods ──────────────────────────────────────────────────────────
@@ -123,10 +123,10 @@ print("§5 removed[0] = {removed}")
 
 # ── §6  Dict operations ───────────────────────────────────────────────────────
 var scores = {"Alice": 95, "Bob": 87, "Charlie": 92}
-print("§6 Alice: {scores[\"Alice\"]}")
-print("§6 Bob: {scores[\"Bob\"]}")
+print("§6 Alice: {scores["Alice"]}")
+print("§6 Bob: {scores["Bob"]}")
 scores["Dave"] = 88
-print("§6 Dave: {scores[\"Dave\"]}")
+print("§6 Dave: {scores["Dave"]}")
 # expected: §6 Alice: 95
 # expected: §6 Bob: 87
 # expected: §6 Dave: 88
@@ -160,7 +160,7 @@ for i in 1..11 {
         evens.append(i)
     }
 }
-print("§9 evens: {evens.join(\", \")}")
+print("§9 evens: {evens.join(", ")}")
 # expected: §9 evens: 2, 4, 6, 8, 10
 
 var n = 1
@@ -328,8 +328,8 @@ print("§13 not: {not true}")
 # expected: §13 not: false
 
 # ── §14  Type conversions ─────────────────────────────────────────────────────
-print("§14 int('42'): {integer(\"42\")}")
-print("§14 float('3.14'): {float(\"3.14\")}")
+print("§14 int('42'): {integer("42")}")
+print("§14 float('3.14'): {float("3.14")}")
 print("§14 string(99): {string(99)}")
 print("§14 boolean(0): {boolean(0)}")
 print("§14 boolean(1): {boolean(1)}")

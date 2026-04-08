@@ -65,6 +65,11 @@ pub const STDLIB_MODULES: &[StdlibModuleInfo] = &[
         doc: "Printing, input, file I/O, paths, directories, and terminal helpers.",
     },
     StdlibModuleInfo {
+        name: "json",
+        exports: fidan_runtime::stdlib::json::exported_names,
+        doc: "JSON parsing, validation, compact serialization, and pretty-print helpers.",
+    },
+    StdlibModuleInfo {
         name: "math",
         exports: fidan_runtime::stdlib::math::exported_names,
         doc: "Math functions, constants, random helpers, and numeric transforms.",
@@ -106,6 +111,7 @@ pub fn module_members(module: &str) -> &'static [StdlibMemberInfo] {
         "collections" => COLLECTIONS_MEMBER_INFOS,
         "env" => ENV_MEMBER_INFOS,
         "io" => IO_MEMBER_INFOS,
+        "json" => JSON_MEMBER_INFOS,
         "math" => MATH_MEMBER_INFOS,
         "parallel" => PARALLEL_MEMBER_INFOS,
         "regex" => REGEX_MEMBER_INFOS,
@@ -131,49 +137,55 @@ pub fn member_doc(module: &str, name: &str) -> Option<String> {
     Some(format!("```fidan\n{}\n```\n\n{}", signature, info.doc))
 }
 
+/// Returns the canonical static return-type metadata for a stdlib member.
+///
+/// ```rust
+/// assert_eq!(fidan_stdlib::member_return_type("collections", "zip"), Some("list oftype (dynamic, dynamic)"));
+/// assert_eq!(fidan_stdlib::member_return_type("async", "waitAny"), Some("Pending oftype (integer, dynamic)"));
+/// ```
 pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
     let info = member_info(module, name)?;
     Some(match info.signature {
         // async
-        "std.async.sleep(ms)" => "Pending",
-        "std.async.ready(value)" => "Pending",
-        "std.async.gather(handles)" => "Pending",
-        "std.async.waitAny(handles)" => "Pending",
-        "std.async.timeout(handle, ms)" => "Pending",
+        "std.async.sleep(ms)" => "Pending oftype nothing",
+        "std.async.ready(value)" => "Pending oftype dynamic",
+        "std.async.gather(handles)" => "Pending oftype list oftype dynamic",
+        "std.async.waitAny(handles)" => "Pending oftype (integer, dynamic)",
+        "std.async.timeout(handle, ms)" => "Pending oftype (boolean, dynamic)",
 
         // collections
-        "std.collections.range(start, end?)" => "list",
-        "std.collections.Set(items?)" => "dynamic",
+        "std.collections.range(start, end?)" => "list oftype integer",
+        "std.collections.Set(items?)" => "dict oftype string oftype boolean",
         "std.collections.setAdd(set, value)" => "nothing",
         "std.collections.setRemove(set, value)" => "nothing",
         "std.collections.setContains(set, value)" => "boolean",
-        "std.collections.setToList(set)" => "list",
+        "std.collections.setToList(set)" => "list oftype string",
         "std.collections.setLen(set)" => "integer",
-        "std.collections.setUnion(left, right)" => "dynamic",
-        "std.collections.setIntersect(left, right)" => "dynamic",
-        "std.collections.setDiff(left, right)" => "dynamic",
-        "std.collections.Queue(items?)" => "dynamic",
+        "std.collections.setUnion(left, right)" => "dict oftype string oftype boolean",
+        "std.collections.setIntersect(left, right)" => "dict oftype string oftype boolean",
+        "std.collections.setDiff(left, right)" => "dict oftype string oftype boolean",
+        "std.collections.Queue(items?)" => "list oftype dynamic",
         "std.collections.enqueue(queue, value)" => "nothing",
         "std.collections.dequeue(queue)" => "dynamic",
         "std.collections.peek(queue)" => "dynamic",
-        "std.collections.Stack(items?)" => "dynamic",
+        "std.collections.Stack(items?)" => "list oftype dynamic",
         "std.collections.push(stack, value)" => "nothing",
         "std.collections.pop(stack)" => "dynamic",
         "std.collections.top(stack)" => "dynamic",
-        "std.collections.flatten(list)" => "list",
-        "std.collections.zip(left, right)" => "list",
-        "std.collections.enumerate(list)" => "list",
-        "std.collections.chunk(list, size)" => "list",
-        "std.collections.window(list, size)" => "list",
-        "std.collections.partition(list)" => "list",
-        "std.collections.groupBy(list)" => "dict",
-        "std.collections.unique(list)" => "list",
-        "std.collections.reverse(list)" => "list",
-        "std.collections.sort(list)" => "list",
+        "std.collections.flatten(list)" => "list oftype dynamic",
+        "std.collections.zip(left, right)" => "list oftype (dynamic, dynamic)",
+        "std.collections.enumerate(list)" => "list oftype (integer, dynamic)",
+        "std.collections.chunk(list, size)" => "list oftype list oftype dynamic",
+        "std.collections.window(list, size)" => "list oftype list oftype dynamic",
+        "std.collections.partition(list)" => "(list oftype dynamic, list oftype dynamic)",
+        "std.collections.groupBy(list)" => "dict oftype string oftype list oftype dynamic",
+        "std.collections.unique(list)" => "list oftype dynamic",
+        "std.collections.reverse(list)" => "list oftype dynamic",
+        "std.collections.sort(list)" => "list oftype dynamic",
         "std.collections.len(list)" => "integer",
         "std.collections.isEmpty(list)" => "boolean",
-        "std.collections.concat(left, right)" => "list",
-        "std.collections.slice(list, start, end?)" => "list",
+        "std.collections.concat(left, right)" => "list oftype dynamic",
+        "std.collections.slice(list, start, end?)" => "list oftype dynamic",
         "std.collections.first(list)" => "dynamic",
         "std.collections.last(list)" => "dynamic",
         "std.collections.join(list, separator)" => "string",
@@ -183,37 +195,47 @@ pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
         "std.collections.max(list)" => "dynamic",
 
         // env
-        "std.env.get(key)" => "dynamic",
+        "std.env.get(key)" => "string",
         "std.env.set(key, value)" => "nothing",
-        "std.env.args()" => "list",
+        "std.env.args()" => "list oftype string",
 
         // io
         "std.io.print(value...)" => "nothing",
         "std.io.eprint(value...)" => "nothing",
         "std.io.readLine(prompt?)" => "string",
         "std.io.readFile(path)" => "string",
-        "std.io.readLines(path)" => "list",
-        "std.io.writeFile(path, content)" => "nothing",
-        "std.io.appendFile(path, content)" => "nothing",
-        "std.io.deleteFile(path)" => "nothing",
+        "std.io.readLines(path)" => "list oftype string",
+        "std.io.writeFile(path, content)" => "boolean",
+        "std.io.appendFile(path, content)" => "boolean",
+        "std.io.deleteFile(path)" => "boolean",
         "std.io.fileExists(path)" => "boolean",
         "std.io.isFile(path)" => "boolean",
         "std.io.isDir(path)" => "boolean",
-        "std.io.makeDir(path)" => "nothing",
-        "std.io.listDir(path)" => "list",
-        "std.io.copyFile(from, to)" => "nothing",
-        "std.io.renameFile(from, to)" => "nothing",
+        "std.io.makeDir(path)" => "boolean",
+        "std.io.listDir(path)" => "list oftype string",
+        "std.io.copyFile(from, to)" => "boolean",
+        "std.io.renameFile(from, to)" => "boolean",
         "std.io.joinPath(part...)" => "string",
         "std.io.dirname(path)" => "string",
         "std.io.basename(path)" => "string",
         "std.io.extension(path)" => "string",
         "std.io.cwd()" => "string",
         "std.io.absolutePath(path)" => "string",
-        "std.io.getEnv(key)" => "dynamic",
+        "std.io.getEnv(key)" => "string",
         "std.io.setEnv(key, value)" => "nothing",
-        "std.io.args()" => "list",
+        "std.io.args()" => "list oftype string",
         "std.io.flush()" => "nothing",
         "std.io.isatty(stream?)" => "boolean",
+
+        // json
+        "std.json.loads(text)" => "dynamic",
+        "std.json.parse(text)" => "dynamic",
+        "std.json.load(path)" => "dynamic",
+        "std.json.dumps(value)" => "string",
+        "std.json.stringify(value)" => "string",
+        "std.json.dump(value, path)" => "boolean",
+        "std.json.pretty(value)" => "string",
+        "std.json.isValid(text)" => "boolean",
 
         // math
         "std.math.sin(x)" => "float",
@@ -238,13 +260,13 @@ pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
         "std.math.floor(x)" => "integer",
         "std.math.ceil(x)" => "integer",
         "std.math.round(x)" => "integer",
-        "std.math.trunc(x)" => "integer",
+        "std.math.trunc(x)" => "float",
         "std.math.fract(x)" => "float",
         "std.math.abs(x)" => "dynamic",
-        "std.math.sign(x)" => "integer",
+        "std.math.sign(x)" => "dynamic",
         "std.math.min(a, b)" => "dynamic",
         "std.math.max(a, b)" => "dynamic",
-        "std.math.clamp(x, lo, hi)" => "dynamic",
+        "std.math.clamp(x, lo, hi)" => "float",
         "std.math.hypot(x, y)" => "float",
         "std.math.pi()" => "float",
         "std.math.e()" => "float",
@@ -260,20 +282,20 @@ pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
         "std.math.toRad(x)" => "float",
 
         // parallel
-        "std.parallel.parallelMap(list, fn)" => "list",
-        "std.parallel.parallelFilter(list, fn)" => "list",
+        "std.parallel.parallelMap(list, fn)" => "list oftype dynamic",
+        "std.parallel.parallelFilter(list, fn)" => "list oftype dynamic",
         "std.parallel.parallelForEach(list, fn)" => "nothing",
         "std.parallel.parallelReduce(list, init, fn)" => "dynamic",
 
         // regex
         "std.regex.test(pattern, subject)" => "boolean",
-        "std.regex.match(pattern, subject)" => "dynamic",
-        "std.regex.findAll(pattern, subject)" => "list",
-        "std.regex.capture(pattern, subject)" => "list",
-        "std.regex.captureAll(pattern, subject)" => "list",
+        "std.regex.match(pattern, subject)" => "string",
+        "std.regex.findAll(pattern, subject)" => "list oftype string",
+        "std.regex.capture(pattern, subject)" => "list oftype dynamic",
+        "std.regex.captureAll(pattern, subject)" => "list oftype list oftype dynamic",
         "std.regex.replace(pattern, subject, replacement)" => "string",
         "std.regex.replaceAll(pattern, subject, replacement)" => "string",
-        "std.regex.split(pattern, subject)" => "list",
+        "std.regex.split(pattern, subject)" => "list oftype string",
         "std.regex.isValid(pattern)" => "boolean",
 
         // string
@@ -283,9 +305,9 @@ pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
         "std.string.trim(text)" => "string",
         "std.string.trimStart(text)" => "string",
         "std.string.trimEnd(text)" => "string",
-        "std.string.split(text, separator)" => "list",
+        "std.string.split(text, separator)" => "list oftype string",
         "std.string.join(separator, list)" => "string",
-        "std.string.lines(text)" => "list",
+        "std.string.lines(text)" => "list oftype string",
         "std.string.contains(text, pattern)" => "boolean",
         "std.string.startsWith(text, prefix)" => "boolean",
         "std.string.endsWith(text, suffix)" => "boolean",
@@ -301,10 +323,10 @@ pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
         "std.string.len(text)" => "integer",
         "std.string.isEmpty(text)" => "boolean",
         "std.string.format(template, value...)" => "string",
-        "std.string.parseInt(text)" => "dynamic",
-        "std.string.parseFloat(text)" => "dynamic",
-        "std.string.chars(text)" => "list",
-        "std.string.bytes(text)" => "list",
+        "std.string.parseInt(text)" => "integer",
+        "std.string.parseFloat(text)" => "float",
+        "std.string.chars(text)" => "list oftype string",
+        "std.string.bytes(text)" => "list oftype integer",
         "std.string.fromChars(chars)" => "string",
         "std.string.charCode(text)" => "integer",
         "std.string.fromCharCode(code)" => "string",
@@ -418,8 +440,9 @@ pub fn dispatch_test_assertion(
 }
 
 pub use metadata::{
-    MathIntrinsic, StdlibIntrinsic, StdlibMethodInfo, StdlibValueKind, infer_receiver_method,
-    infer_stdlib_method,
+    MathIntrinsic, StdlibIntrinsic, StdlibMethodInfo, StdlibTypeSpec, StdlibValueKind,
+    infer_precise_stdlib_return_type, infer_receiver_method, infer_stdlib_method,
+    parse_stdlib_type_spec,
 };
 
 pub use fidan_config::{
@@ -800,6 +823,49 @@ const IO_MEMBER_INFOS: &[StdlibMemberInfo] = &[
         names: &["isatty"],
         signature: "std.io.isatty(stream?)",
         doc: "Return whether stdin, stdout, or stderr is attached to a terminal.",
+    },
+];
+
+const JSON_MEMBER_INFOS: &[StdlibMemberInfo] = &[
+    StdlibMemberInfo {
+        names: &["loads"],
+        signature: "std.json.loads(text)",
+        doc: "Parse JSON text into Fidan dynamic values using dict, list, string, number, boolean, and nothing.",
+    },
+    StdlibMemberInfo {
+        names: &["parse"],
+        signature: "std.json.parse(text)",
+        doc: "Parse JSON text into Fidan dynamic values using dict, list, string, number, boolean, and nothing. `parse` is a compatibility alias for `loads`.",
+    },
+    StdlibMemberInfo {
+        names: &["load", "readFile", "read_file"],
+        signature: "std.json.load(path)",
+        doc: "Read a JSON file from disk and parse it into Fidan dynamic values.",
+    },
+    StdlibMemberInfo {
+        names: &["dumps"],
+        signature: "std.json.dumps(value)",
+        doc: "Serialize a JSON-compatible Fidan value into compact JSON text. Unsupported runtime-only values are stringified via their display form.",
+    },
+    StdlibMemberInfo {
+        names: &["stringify"],
+        signature: "std.json.stringify(value)",
+        doc: "Serialize a JSON-compatible Fidan value into compact JSON text. `stringify` is a compatibility alias for `dumps`. Unsupported runtime-only values are stringified via their display form.",
+    },
+    StdlibMemberInfo {
+        names: &["dump", "writeFile", "write_file"],
+        signature: "std.json.dump(value, path)",
+        doc: "Serialize a JSON-compatible Fidan value and write it directly to a file path, returning whether the write succeeded.",
+    },
+    StdlibMemberInfo {
+        names: &["pretty", "prettyPrint", "pretty_print"],
+        signature: "std.json.pretty(value)",
+        doc: "Serialize a JSON-compatible Fidan value into indented JSON text for logs, snapshots, and debugging output.",
+    },
+    StdlibMemberInfo {
+        names: &["isValid", "is_valid"],
+        signature: "std.json.isValid(text)",
+        doc: "Return whether the provided string is valid JSON without materializing the parsed value.",
     },
 ];
 
@@ -1418,6 +1484,9 @@ mod tests {
 
         let gather = member_doc("async", "gather").expect("missing std.async.gather doc");
         assert!(gather.contains("std.async.gather"));
+
+        let json = member_doc("json", "parse").expect("missing std.json.parse doc");
+        assert!(json.contains("std.json.parse"));
 
         assert!(member_doc("time", "definitely_missing").is_none());
     }

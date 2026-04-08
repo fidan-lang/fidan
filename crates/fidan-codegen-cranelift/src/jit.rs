@@ -7,17 +7,17 @@
 //
 // # ABI Convention
 //
-// All compiled functions use a unified "I64 everything" calling convention:
+// All compiled functions use a unified i64 boundary:
 //   - Integer params  → passed as i64 (the value itself)
 //   - Float params    → passed as i64 (f64 bit pattern)
 //   - Boolean params  → passed as i64 (0 or 1)
+//   - Boxed values    → passed as i64 (scoped `*mut FidanValue`)
 //   - Return value    → same encoding as above
 //
-// This simplifies the Rust trampoline: it always deals with `i64` values and
-// calls `fn(i64, i64, ...) -> i64` regardless of the logical parameter types.
-//
-// Inside the Cranelift IR we use native types (I64 / F64) and emit bitcasts at
-// the function entry / exit to convert the ABI "all I64" representation.
+// This keeps the Rust trampoline simple while still allowing native JIT
+// compilation for tuple-valued functions. Boxed values are tracked in a
+// thread-local scope for the duration of the active native JIT call chain and
+// are released automatically when the outermost call returns.
 
 use cranelift_codegen::ir::{
     AbiParam, Block, BlockArg, Function, InstBuilder, MemFlags, TrapCode, UserFuncName, Value,
@@ -27,17 +27,19 @@ use cranelift_codegen::ir::{
 use cranelift_codegen::{Context, settings, settings::Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{FuncId, Linkage, Module as CraneliftModule};
+use cranelift_module::{DataDescription, FuncId, Linkage, Module as CraneliftModule};
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{
     BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirFunction, MirLit, MirProgram, MirTy,
     Operand, Rvalue, Terminator, collect_effective_local_types,
 };
+use fidan_runtime::FidanValue;
 use fidan_stdlib::{
     MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_stdlib_method, is_stdlib_module,
 };
 use libffi::middle::{Cif, CodePtr, Type, arg};
 use std::cell::Cell;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::OnceLock;
@@ -58,6 +60,8 @@ static JIT_RUNTIME_HOOKS: OnceLock<JitRuntimeHooks> = OnceLock::new();
 
 thread_local! {
     static ACTIVE_JIT_CONTEXT: Cell<*mut c_void> = const { Cell::new(std::ptr::null_mut()) };
+    static ACTIVE_JIT_ABI_DEPTH: Cell<u32> = const { Cell::new(0) };
+    static ACTIVE_JIT_ABI_VALUES: RefCell<Vec<*mut FidanValue>> = const { RefCell::new(Vec::new()) };
 }
 
 pub fn register_jit_runtime_hooks(hooks: JitRuntimeHooks) {
@@ -67,7 +71,9 @@ pub fn register_jit_runtime_hooks(hooks: JitRuntimeHooks) {
 pub fn with_jit_runtime_context<T>(ctx: *mut c_void, f: impl FnOnce() -> T) -> T {
     ACTIVE_JIT_CONTEXT.with(|cell| {
         let previous = cell.replace(ctx);
+        enter_jit_abi_scope();
         let result = f();
+        exit_jit_abi_scope();
         cell.set(previous);
         result
     })
@@ -81,6 +87,96 @@ fn active_jit_runtime_hooks() -> &'static JitRuntimeHooks {
 
 fn active_jit_context() -> *mut c_void {
     ACTIVE_JIT_CONTEXT.with(Cell::get)
+}
+
+fn enter_jit_abi_scope() {
+    ACTIVE_JIT_ABI_DEPTH.with(|depth| {
+        let current = depth.get();
+        if current == 0 {
+            ACTIVE_JIT_ABI_VALUES.with(|values| values.borrow_mut().clear());
+        }
+        depth.set(current + 1);
+    });
+}
+
+fn exit_jit_abi_scope() {
+    ACTIVE_JIT_ABI_DEPTH.with(|depth| {
+        let current = depth.get();
+        let next = current.saturating_sub(1);
+        depth.set(next);
+        if next == 0 {
+            ACTIVE_JIT_ABI_VALUES.with(|values| {
+                for ptr in values.borrow_mut().drain(..).rev() {
+                    if !ptr.is_null() {
+                        unsafe { drop(Box::from_raw(ptr)) };
+                    }
+                }
+            });
+        }
+    });
+}
+
+fn register_jit_abi_ptr(ptr: *mut FidanValue) -> i64 {
+    if !ptr.is_null() {
+        ACTIVE_JIT_ABI_VALUES.with(|values| values.borrow_mut().push(ptr));
+    }
+    ptr as i64
+}
+
+pub fn encode_jit_abi_value(value: &FidanValue, ty: &MirTy) -> i64 {
+    match (value, ty) {
+        (FidanValue::Integer(n), MirTy::Integer) => *n,
+        (FidanValue::Float(f), MirTy::Float) => f.to_bits() as i64,
+        (FidanValue::Boolean(b), MirTy::Boolean) => i64::from(*b),
+        _ => register_jit_abi_ptr(Box::into_raw(Box::new(value.clone()))),
+    }
+}
+
+pub fn decode_jit_abi_value(raw: i64, ty: &MirTy) -> FidanValue {
+    match ty {
+        MirTy::Integer => FidanValue::Integer(raw),
+        MirTy::Float => FidanValue::Float(f64::from_bits(raw as u64)),
+        MirTy::Boolean => FidanValue::Boolean(raw != 0),
+        _ if raw == 0 => FidanValue::Nothing,
+        _ => unsafe { (*(raw as *mut FidanValue)).clone() },
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_box_int_scoped(v: i64) -> i64 {
+    register_jit_abi_ptr(fidan_runtime::ffi::fdn_box_int(v))
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_box_float_scoped(v: f64) -> i64 {
+    register_jit_abi_ptr(fidan_runtime::ffi::fdn_box_float(v))
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_box_bool_scoped(v: i8) -> i64 {
+    register_jit_abi_ptr(fidan_runtime::ffi::fdn_box_bool(v))
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_box_handle_scoped(v: i64) -> i64 {
+    register_jit_abi_ptr(fidan_runtime::ffi::fdn_box_handle(v as usize))
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_box_nothing_scoped() -> i64 {
+    register_jit_abi_ptr(fidan_runtime::ffi::fdn_box_nothing())
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn fdn_jit_box_str_scoped(bytes: *const u8, len: i64) -> i64 {
+    register_jit_abi_ptr(unsafe { fidan_runtime::ffi::fdn_box_str(bytes, len) })
+}
+
+#[unsafe(no_mangle)]
+unsafe extern "C" fn fdn_jit_tuple_pack_scoped(values_ptr: *const i64, values_count: i64) -> i64 {
+    register_jit_abi_ptr(unsafe {
+        fidan_runtime::ffi::fdn_tuple_pack(values_ptr as *const *mut FidanValue, values_count)
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -109,17 +205,16 @@ extern "C" fn fdn_jit_call_fn_raw(fn_id: i64, args_ptr: *const i64, arg_cnt: i64
 /// Map a `MirTy` to a Cranelift type.
 /// Returns `None` for types that cannot be JIT-compiled (strings, objects, etc.).
 fn mir_ty_to_cl(ty: &MirTy) -> Option<cranelift_codegen::ir::Type> {
-    match ty {
-        MirTy::Integer => Some(I64),
-        MirTy::Float => Some(F64),
-        MirTy::Boolean => Some(I8),
-        _ => None,
-    }
+    Some(match ty {
+        MirTy::Float => F64,
+        MirTy::Boolean => I8,
+        _ => I64,
+    })
 }
 
-/// Returns `true` for the primitive `MirTy` variants that the JIT can handle.
-fn is_jit_primitive(ty: &MirTy) -> bool {
-    matches!(ty, MirTy::Integer | MirTy::Float | MirTy::Boolean)
+/// Returns `true` for MIR types that can cross the native JIT ABI boundary.
+fn is_jit_abi_supported(ty: &MirTy) -> bool {
+    mir_ty_to_cl(ty).is_some()
 }
 
 /// Cranelift type to use for the I64-ABI boundary.
@@ -186,6 +281,13 @@ pub struct JitCompiler {
     load_global_raw_id: FuncId,
     store_global_raw_id: FuncId,
     call_fn_raw_id: FuncId,
+    box_int_scoped_id: FuncId,
+    box_float_scoped_id: FuncId,
+    box_bool_scoped_id: FuncId,
+    box_handle_scoped_id: FuncId,
+    box_nothing_scoped_id: FuncId,
+    box_str_scoped_id: FuncId,
+    tuple_pack_scoped_id: FuncId,
     /// Counter used to generate unique function names.
     fn_counter: u32,
 }
@@ -219,6 +321,34 @@ impl JitCompiler {
             fdn_jit_store_global_raw as *const u8,
         );
         builder.symbol("fdn_jit_call_fn_raw", fdn_jit_call_fn_raw as *const u8);
+        builder.symbol(
+            "fdn_jit_box_int_scoped",
+            fdn_jit_box_int_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_box_float_scoped",
+            fdn_jit_box_float_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_box_bool_scoped",
+            fdn_jit_box_bool_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_box_handle_scoped",
+            fdn_jit_box_handle_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_box_nothing_scoped",
+            fdn_jit_box_nothing_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_box_str_scoped",
+            fdn_jit_box_str_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_tuple_pack_scoped",
+            fdn_jit_tuple_pack_scoped as *const u8,
+        );
         let mut module = JITModule::new(builder);
         let load_global_raw_id = {
             let mut sig = module.make_signature();
@@ -246,6 +376,28 @@ impl JitCompiler {
                 .declare_function("fdn_jit_call_fn_raw", Linkage::Import, &sig)
                 .expect("declare fdn_jit_call_fn_raw")
         };
+        let box_int_scoped_id =
+            declare_import_fn(&mut module, "fdn_jit_box_int_scoped", &[I64], Some(I64));
+        let box_float_scoped_id =
+            declare_import_fn(&mut module, "fdn_jit_box_float_scoped", &[F64], Some(I64));
+        let box_bool_scoped_id =
+            declare_import_fn(&mut module, "fdn_jit_box_bool_scoped", &[I8], Some(I64));
+        let box_handle_scoped_id =
+            declare_import_fn(&mut module, "fdn_jit_box_handle_scoped", &[I64], Some(I64));
+        let box_nothing_scoped_id =
+            declare_import_fn(&mut module, "fdn_jit_box_nothing_scoped", &[], Some(I64));
+        let box_str_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_box_str_scoped",
+            &[I64, I64],
+            Some(I64),
+        );
+        let tuple_pack_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_tuple_pack_scoped",
+            &[I64, I64],
+            Some(I64),
+        );
         let ctx = module.make_context();
         let builder_ctx = FunctionBuilderContext::new();
         Self {
@@ -255,6 +407,13 @@ impl JitCompiler {
             load_global_raw_id,
             store_global_raw_id,
             call_fn_raw_id,
+            box_int_scoped_id,
+            box_float_scoped_id,
+            box_bool_scoped_id,
+            box_handle_scoped_id,
+            box_nothing_scoped_id,
+            box_str_scoped_id,
+            tuple_pack_scoped_id,
             fn_counter: 0,
         }
     }
@@ -283,11 +442,11 @@ impl JitCompiler {
     ) -> Option<JitFnEntry> {
         // ── Eligibility check ─────────────────────────────────────────────────
         for p in &func.params {
-            if !is_jit_primitive(&p.ty) {
+            if !is_jit_abi_supported(&p.ty) {
                 return None;
             }
         }
-        if !is_jit_primitive(&func.return_ty) {
+        if !is_jit_abi_supported(&func.return_ty) {
             return None;
         }
 
@@ -362,6 +521,29 @@ impl JitCompiler {
             let call_fn_raw_ref = self
                 .module
                 .declare_func_in_func(self.call_fn_raw_id, builder.func);
+            let rt = JitRuntimeRefs {
+                box_int_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.box_int_scoped_id, builder.func),
+                box_float_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.box_float_scoped_id, builder.func),
+                box_bool_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.box_bool_scoped_id, builder.func),
+                box_handle_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.box_handle_scoped_id, builder.func),
+                box_nothing_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.box_nothing_scoped_id, builder.func),
+                box_str_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.box_str_scoped_id, builder.func),
+                tuple_pack_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.tuple_pack_scoped_id, builder.func),
+            };
 
             // Declare Cranelift Variables for every MIR local.
             let num_locals = func.local_count as usize;
@@ -409,8 +591,15 @@ impl JitCompiler {
                                 ns_locals: &namespace_locals,
                                 interner,
                                 call_fn_raw_ref,
+                                rt: &rt,
                             };
-                            let val = emit_rvalue(&mut builder, rhs, effective_ty, &emit_ctx)?;
+                            let val = emit_rvalue(
+                                &mut self.module,
+                                &mut builder,
+                                rhs,
+                                effective_ty,
+                                &emit_ctx,
+                            )?;
                             builder.def_var(cl_vars[dest.0 as usize], val);
                         }
 
@@ -610,9 +799,21 @@ struct RvalueEmitCtx<'a> {
     ns_locals: &'a HashMap<LocalId, String>,
     interner: &'a SymbolInterner,
     call_fn_raw_ref: cranelift_codegen::ir::FuncRef,
+    rt: &'a JitRuntimeRefs,
+}
+
+struct JitRuntimeRefs {
+    box_int_scoped_ref: cranelift_codegen::ir::FuncRef,
+    box_float_scoped_ref: cranelift_codegen::ir::FuncRef,
+    box_bool_scoped_ref: cranelift_codegen::ir::FuncRef,
+    box_handle_scoped_ref: cranelift_codegen::ir::FuncRef,
+    box_nothing_scoped_ref: cranelift_codegen::ir::FuncRef,
+    box_str_scoped_ref: cranelift_codegen::ir::FuncRef,
+    tuple_pack_scoped_ref: cranelift_codegen::ir::FuncRef,
 }
 
 fn emit_rvalue(
+    module: &mut JITModule,
     builder: &mut FunctionBuilder,
     rhs: &Rvalue,
     dest_ty: &MirTy,
@@ -647,6 +848,8 @@ fn emit_rvalue(
             dest_ty,
         ),
 
+        Rvalue::Tuple(elems) => emit_tuple_rvalue(module, builder, elems, ctx),
+
         Rvalue::Call {
             callee:
                 Callee::Method {
@@ -667,6 +870,86 @@ fn emit_rvalue(
             )
         }
 
+        _ => None,
+    }
+}
+
+fn emit_tuple_rvalue(
+    module: &mut JITModule,
+    builder: &mut FunctionBuilder,
+    elems: &[Operand],
+    ctx: &RvalueEmitCtx<'_>,
+) -> Option<Value> {
+    let mut items = Vec::with_capacity(elems.len());
+    for elem in elems {
+        items.push(box_operand_for_abi(module, builder, elem, ctx)?);
+    }
+    let (items_ptr, item_count) = stack_i64_array(builder, &items);
+    call_runtime(
+        builder,
+        ctx.rt.tuple_pack_scoped_ref,
+        &[items_ptr, item_count],
+    )
+}
+
+fn box_operand_for_abi(
+    module: &mut JITModule,
+    builder: &mut FunctionBuilder,
+    op: &Operand,
+    ctx: &RvalueEmitCtx<'_>,
+) -> Option<Value> {
+    match op {
+        Operand::Local(local) => {
+            let value = builder.use_var(ctx.vars[local.0 as usize]);
+            let ty = ctx.local_types.get(local).unwrap_or(&MirTy::Dynamic);
+            box_value_for_abi(module, builder, value, ty, ctx)
+        }
+        Operand::Const(lit) => box_const_for_abi(module, builder, lit, ctx),
+    }
+}
+
+fn box_value_for_abi(
+    module: &mut JITModule,
+    builder: &mut FunctionBuilder,
+    value: Value,
+    ty: &MirTy,
+    ctx: &RvalueEmitCtx<'_>,
+) -> Option<Value> {
+    let _ = module;
+    match ty {
+        MirTy::Integer => call_runtime(builder, ctx.rt.box_int_scoped_ref, &[value]),
+        MirTy::Float => call_runtime(builder, ctx.rt.box_float_scoped_ref, &[value]),
+        MirTy::Boolean => call_runtime(builder, ctx.rt.box_bool_scoped_ref, &[value]),
+        MirTy::Handle => call_runtime(builder, ctx.rt.box_handle_scoped_ref, &[value]),
+        MirTy::Nothing => call_runtime(builder, ctx.rt.box_nothing_scoped_ref, &[]),
+        _ => Some(value),
+    }
+}
+
+fn box_const_for_abi(
+    module: &mut JITModule,
+    builder: &mut FunctionBuilder,
+    lit: &MirLit,
+    ctx: &RvalueEmitCtx<'_>,
+) -> Option<Value> {
+    match lit {
+        MirLit::Int(n) => {
+            let value = builder.ins().iconst(I64, *n);
+            call_runtime(builder, ctx.rt.box_int_scoped_ref, &[value])
+        }
+        MirLit::Float(f) => {
+            let value = builder.ins().f64const(*f);
+            call_runtime(builder, ctx.rt.box_float_scoped_ref, &[value])
+        }
+        MirLit::Bool(b) => {
+            let value = builder.ins().iconst(I8, i64::from(*b));
+            call_runtime(builder, ctx.rt.box_bool_scoped_ref, &[value])
+        }
+        MirLit::Nothing => call_runtime(builder, ctx.rt.box_nothing_scoped_ref, &[]),
+        MirLit::Str(text) => {
+            let (ptr, len) = str_const(module, builder, text)?;
+            call_runtime(builder, ctx.rt.box_str_scoped_ref, &[ptr, len])
+        }
         _ => None,
     }
 }
@@ -730,6 +1013,50 @@ fn emit_literal(builder: &mut FunctionBuilder, lit: &MirLit) -> Value {
         MirLit::Bool(b) => builder.ins().iconst(I8, *b as i64),
         _ => builder.ins().iconst(I64, 0),
     }
+}
+
+fn declare_import_fn(
+    module: &mut JITModule,
+    name: &str,
+    params: &[cranelift_codegen::ir::Type],
+    result: Option<cranelift_codegen::ir::Type>,
+) -> FuncId {
+    let mut sig = module.make_signature();
+    for param in params {
+        sig.params.push(AbiParam::new(*param));
+    }
+    if let Some(result) = result {
+        sig.returns.push(AbiParam::new(result));
+    }
+    module
+        .declare_function(name, Linkage::Import, &sig)
+        .expect("declare jit runtime import")
+}
+
+fn call_runtime(
+    builder: &mut FunctionBuilder,
+    func_ref: cranelift_codegen::ir::FuncRef,
+    args: &[Value],
+) -> Option<Value> {
+    let inst = builder.ins().call(func_ref, args);
+    builder.inst_results(inst).first().copied()
+}
+
+fn str_const(
+    module: &mut JITModule,
+    builder: &mut FunctionBuilder<'_>,
+    s: &str,
+) -> Option<(Value, Value)> {
+    let mut desc = DataDescription::new();
+    let mut bytes = s.as_bytes().to_vec();
+    bytes.push(0);
+    desc.define(bytes.into_boxed_slice());
+    let data_id = module.declare_anonymous_data(false, false).ok()?;
+    module.define_data(data_id, &desc).ok()?;
+    let gref = module.declare_data_in_func(data_id, builder.func);
+    let ptr = builder.ins().global_value(I64, gref);
+    let len = builder.ins().iconst(I64, s.len() as i64);
+    Some((ptr, len))
 }
 
 fn emit_binop(
@@ -1104,16 +1431,8 @@ pub fn call_jit_fn(
     let code_ptr = CodePtr(fn_ptr as *mut _);
 
     unsafe {
-        match entry.return_ty {
-            MirTy::Integer => fidan_runtime::FidanValue::Integer(cif.call(code_ptr, &ffi_args)),
-            MirTy::Float => fidan_runtime::FidanValue::Float(f64::from_bits(
-                cif.call::<i64>(code_ptr, &ffi_args) as u64,
-            )),
-            MirTy::Boolean => {
-                fidan_runtime::FidanValue::Boolean(cif.call::<i64>(code_ptr, &ffi_args) != 0)
-            }
-            _ => fidan_runtime::FidanValue::Nothing,
-        }
+        let raw = cif.call::<i64>(code_ptr, &ffi_args);
+        decode_jit_abi_value(raw, &entry.return_ty)
     }
 }
 
@@ -1123,14 +1442,7 @@ enum JitArgValue {
 
 impl JitArgValue {
     fn from_fidan(value: &fidan_runtime::FidanValue, ty: &MirTy) -> Self {
-        match (value, ty) {
-            (fidan_runtime::FidanValue::Integer(n), MirTy::Integer) => Self::Integer(*n),
-            (fidan_runtime::FidanValue::Float(f), MirTy::Float) => {
-                Self::Integer(f.to_bits() as i64)
-            }
-            (fidan_runtime::FidanValue::Boolean(b), MirTy::Boolean) => Self::Integer(i64::from(*b)),
-            _ => Self::Integer(0),
-        }
+        Self::Integer(encode_jit_abi_value(value, ty))
     }
 
     fn as_ffi_arg(&self) -> libffi::middle::Arg<'_> {
@@ -1244,5 +1556,79 @@ mod tests {
             entry.is_native(),
             "expected primitive direct-call action to compile natively"
         );
+    }
+
+    #[test]
+    fn tuple_identity_round_trip_compiles_and_executes_natively() {
+        let (mir, interner) = lower(
+            r#"action echo with (certain pair oftype (integer, string)) returns (integer, string) {
+                return pair
+            }"#,
+        );
+        let func = mir
+            .functions
+            .iter()
+            .find(|func| interner.resolve(func.name).as_ref() == "echo")
+            .expect("missing echo action");
+        let mut jit = JitCompiler::new();
+        let entry = jit.compile_function(func, &mir, &interner);
+        assert!(
+            entry.is_native(),
+            "expected tuple identity action to compile natively"
+        );
+
+        let result = with_jit_runtime_context(std::ptr::null_mut(), || {
+            call_jit_fn(
+                &entry,
+                &[FidanValue::Tuple(vec![
+                    FidanValue::Integer(7),
+                    FidanValue::String(fidan_runtime::FidanString::new("ok")),
+                ])],
+            )
+        });
+
+        match result {
+            FidanValue::Tuple(items) => {
+                assert!(matches!(items.first(), Some(FidanValue::Integer(7))));
+                assert!(
+                    matches!(items.get(1), Some(FidanValue::String(text)) if text.as_str() == "ok")
+                );
+            }
+            other => panic!("expected tuple result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tuple_literal_with_string_element_executes_natively() {
+        let (mir, interner) = lower(
+            r#"action make_pair with (certain n oftype integer) returns (integer, string) {
+                return (n, "ok")
+            }"#,
+        );
+        let func = mir
+            .functions
+            .iter()
+            .find(|func| interner.resolve(func.name).as_ref() == "make_pair")
+            .expect("missing make_pair action");
+        let mut jit = JitCompiler::new();
+        let entry = jit.compile_function(func, &mir, &interner);
+        assert!(
+            entry.is_native(),
+            "expected tuple literal action to compile natively"
+        );
+
+        let result = with_jit_runtime_context(std::ptr::null_mut(), || {
+            call_jit_fn(&entry, &[FidanValue::Integer(42)])
+        });
+
+        match result {
+            FidanValue::Tuple(items) => {
+                assert!(matches!(items.first(), Some(FidanValue::Integer(42))));
+                assert!(
+                    matches!(items.get(1), Some(FidanValue::String(text)) if text.as_str() == "ok")
+                );
+            }
+            other => panic!("expected tuple result, got {other:?}"),
+        }
     }
 }

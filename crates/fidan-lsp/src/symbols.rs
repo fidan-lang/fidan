@@ -776,15 +776,7 @@ fn collect_stmt_entries(
                 name.clone(),
                 make_loop_binding_entry(name, *span, *iterable, typed, interner),
             );
-            collect_block_scope_entries(
-                nested_initial,
-                body,
-                *span,
-                arena,
-                typed,
-                interner,
-                scopes,
-            );
+            collect_scope_entries(*span, nested_initial, body, arena, typed, interner, scopes);
         }
         Stmt::While { body, span, .. } => {
             collect_block_scope_entries(
@@ -1453,6 +1445,40 @@ action outer {
         assert!(table.lookup_visible(then_cursor, "else_only").is_none());
         assert!(table.lookup_visible(else_cursor, "else_only").is_some());
         assert!(table.lookup_visible(else_cursor, "then_only").is_none());
+    }
+
+    #[test]
+    fn loop_bindings_are_visible_from_header_and_body() {
+        let src = r#"use std.collections.{enumerate}
+
+action outer {
+    for task_info in enumerate(["a", "b"]) {
+        print(task_info[0])
+        print(task_info[1])
+    }
+}
+"#;
+        let table = build_symbols(src);
+        let header_cursor = src.find("task_info in").expect("header cursor") as u32;
+        let body_cursor = src.rfind("task_info[1]").expect("body cursor") as u32;
+
+        let header_entry = table
+            .lookup_visible(header_cursor, "task_info")
+            .expect("loop binding should resolve in header");
+        assert!(
+            header_entry
+                .detail
+                .contains("for task_info -> (integer, string)")
+        );
+
+        let body_entry = table
+            .lookup_visible(body_cursor, "task_info")
+            .expect("loop binding should resolve in body");
+        assert!(
+            body_entry
+                .detail
+                .contains("for task_info -> (integer, string)")
+        );
     }
 
     #[test]

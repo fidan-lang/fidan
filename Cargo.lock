@@ -1317,6 +1317,7 @@ dependencies = [
  "fidan-source",
  "regex",
  "rustc-hash",
+ "serde_json",
 ]
 
 [[package]]

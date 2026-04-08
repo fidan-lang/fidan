@@ -2,6 +2,17 @@ use crate::{FidanDict, FidanList, FidanString, FidanValue, OwnedRef, display};
 
 use super::common::{list_value, string_value};
 
+fn compare_collection_values(left: &FidanValue, right: &FidanValue) -> Option<std::cmp::Ordering> {
+    match (left, right) {
+        (FidanValue::Integer(lhs), FidanValue::Integer(rhs)) => Some(lhs.cmp(rhs)),
+        (FidanValue::Float(lhs), FidanValue::Float(rhs)) => lhs.partial_cmp(rhs),
+        (FidanValue::Integer(lhs), FidanValue::Float(rhs)) => (*lhs as f64).partial_cmp(rhs),
+        (FidanValue::Float(lhs), FidanValue::Integer(rhs)) => lhs.partial_cmp(&(*rhs as f64)),
+        (FidanValue::String(lhs), FidanValue::String(rhs)) => Some(lhs.as_str().cmp(rhs.as_str())),
+        _ => None,
+    }
+}
+
 fn as_key(v: &FidanValue) -> String {
     match v {
         FidanValue::String(s) => s.as_str().to_string(),
@@ -59,7 +70,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 let value = args.into_iter().nth(1).unwrap_or(FidanValue::Nothing);
                 d.borrow_mut()
                     .insert(FidanString::new(&as_key(&value)), FidanValue::Boolean(true));
-                Some(FidanValue::Dict(d))
+                Some(FidanValue::Nothing)
             } else {
                 Some(FidanValue::Nothing)
             }
@@ -69,7 +80,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             if let FidanValue::Dict(d) = set {
                 let value = args.into_iter().nth(1).unwrap_or(FidanValue::Nothing);
                 d.borrow_mut().remove(&FidanString::new(&as_key(&value)));
-                Some(FidanValue::Dict(d))
+                Some(FidanValue::Nothing)
             } else {
                 Some(FidanValue::Nothing)
             }
@@ -245,7 +256,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 let len = a_ref.len().min(b_ref.len());
                 let mut result = FidanList::new();
                 for index in 0..len {
-                    result.append(list_value([
+                    result.append(FidanValue::Tuple(vec![
                         a_ref.get(index).cloned().unwrap_or(FidanValue::Nothing),
                         b_ref.get(index).cloned().unwrap_or(FidanValue::Nothing),
                     ]));
@@ -259,7 +270,10 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             if let Some(FidanValue::List(list)) = args.first() {
                 let mut result = FidanList::new();
                 for (index, value) in list.borrow().iter().cloned().enumerate() {
-                    result.append(list_value([FidanValue::Integer(index as i64), value]));
+                    result.append(FidanValue::Tuple(vec![
+                        FidanValue::Integer(index as i64),
+                        value,
+                    ]));
                 }
                 Some(FidanValue::List(OwnedRef::new(result)))
             } else {
@@ -315,7 +329,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                         falsy.append(value);
                     }
                 }
-                Some(list_value([
+                Some(FidanValue::Tuple(vec![
                     FidanValue::List(OwnedRef::new(truthy)),
                     FidanValue::List(OwnedRef::new(falsy)),
                 ]))
@@ -368,13 +382,8 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "sort" => {
             if let Some(FidanValue::List(list)) = args.first() {
                 let mut items: Vec<FidanValue> = list.borrow().iter().cloned().collect();
-                items.sort_by(|a, b| match (a, b) {
-                    (FidanValue::Integer(x), FidanValue::Integer(y)) => x.cmp(y),
-                    (FidanValue::Float(x), FidanValue::Float(y)) => {
-                        x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
-                    }
-                    (FidanValue::String(x), FidanValue::String(y)) => x.as_str().cmp(y.as_str()),
-                    _ => std::cmp::Ordering::Equal,
+                items.sort_by(|a, b| {
+                    compare_collection_values(a, b).unwrap_or(std::cmp::Ordering::Equal)
                 });
                 Some(list_value(items))
             } else {
@@ -494,15 +503,10 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 list.borrow()
                     .iter()
                     .cloned()
-                    .reduce(|a, b| match (&a, &b) {
-                        (FidanValue::Integer(x), FidanValue::Integer(y)) => {
-                            if x <= y {
-                                a
-                            } else {
-                                b
-                            }
-                        }
-                        _ => a,
+                    .reduce(|a, b| match compare_collection_values(&a, &b) {
+                        Some(std::cmp::Ordering::Greater) => b,
+                        Some(_) => a,
+                        None => a,
                     })
                     .or(Some(FidanValue::Nothing))
             } else {
@@ -514,15 +518,10 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 list.borrow()
                     .iter()
                     .cloned()
-                    .reduce(|a, b| match (&a, &b) {
-                        (FidanValue::Integer(x), FidanValue::Integer(y)) => {
-                            if x >= y {
-                                a
-                            } else {
-                                b
-                            }
-                        }
-                        _ => a,
+                    .reduce(|a, b| match compare_collection_values(&a, &b) {
+                        Some(std::cmp::Ordering::Less) => b,
+                        Some(_) => a,
+                        None => a,
                     })
                     .or(Some(FidanValue::Nothing))
             } else {

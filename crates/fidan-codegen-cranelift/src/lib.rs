@@ -10,6 +10,6 @@ pub use aot::{
     LtoMode as CraneliftLtoMode, OptLevel as CraneliftOptLevel, StripMode as CraneliftStripMode,
 };
 pub use jit::{
-    JitCompiler, JitFnEntry, JitRuntimeHooks, call_jit_fn, register_jit_runtime_hooks,
-    with_jit_runtime_context,
+    JitCompiler, JitFnEntry, JitRuntimeHooks, call_jit_fn, decode_jit_abi_value,
+    encode_jit_abi_value, register_jit_runtime_hooks, with_jit_runtime_context,
 };

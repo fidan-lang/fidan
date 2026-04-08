@@ -290,6 +290,11 @@ impl FidanLsp {
 
         let stdlib_import_map: HashMap<String, String> =
             result.stdlib_imports.into_iter().collect();
+        let stdlib_direct_import_map: HashMap<String, (String, String)> = result
+            .stdlib_direct_imports
+            .into_iter()
+            .map(|(binding, module_name, member_name)| (binding, (module_name, member_name)))
+            .collect();
 
         self.store.insert(
             uri.clone(),
@@ -304,6 +309,7 @@ impl FidanLsp {
                 direct_imports: resolved_imports.direct_imports.clone(),
                 wildcard_imports: resolved_imports.wildcard_imports.clone(),
                 stdlib_imports: stdlib_import_map,
+                stdlib_direct_imports: stdlib_direct_import_map,
                 inlay_hint_sites: result.inlay_hint_sites,
                 member_access_sites: result.member_access_sites,
             },
@@ -340,6 +346,14 @@ impl FidanLsp {
                     &r.imports,
                     &r.user_module_imports,
                 );
+                let background_stdlib_imports = r.stdlib_imports.into_iter().collect();
+                let background_stdlib_direct_imports = r
+                    .stdlib_direct_imports
+                    .into_iter()
+                    .map(|(binding, module_name, member_name)| {
+                        (binding, (module_name, member_name))
+                    })
+                    .collect();
                 self.store.insert(
                     import_url.clone(),
                     Document {
@@ -352,7 +366,8 @@ impl FidanLsp {
                         imports: background_imports.namespace_imports,
                         direct_imports: background_imports.direct_imports,
                         wildcard_imports: background_imports.wildcard_imports,
-                        stdlib_imports: HashMap::new(),
+                        stdlib_imports: background_stdlib_imports,
+                        stdlib_direct_imports: background_stdlib_direct_imports,
                         inlay_hint_sites: vec![], // not shown for background docs
                         member_access_sites: r.member_access_sites,
                     },
@@ -677,7 +692,12 @@ fn load_background_document(store: &DocumentStore, url: &Url) -> Option<()> {
             imports: resolved_imports.namespace_imports,
             direct_imports: resolved_imports.direct_imports,
             wildcard_imports: resolved_imports.wildcard_imports,
-            stdlib_imports: HashMap::new(),
+            stdlib_imports: analysis.stdlib_imports.into_iter().collect(),
+            stdlib_direct_imports: analysis
+                .stdlib_direct_imports
+                .into_iter()
+                .map(|(binding, module_name, member_name)| (binding, (module_name, member_name)))
+                .collect(),
             inlay_hint_sites: vec![],
             member_access_sites: analysis.member_access_sites,
         },
@@ -1275,6 +1295,12 @@ impl LanguageServer for FidanLsp {
                     Some(detail) => HoverLookup::Found(detail),
                     None => HoverLookup::NotFound,
                 }
+            } else if let Some((mod_name, member_name)) =
+                doc.stdlib_direct_imports.get(cur_name.as_str())
+                && let Some(detail) =
+                    stdlib_member_hover_markdown(mod_name.as_str(), member_name.as_str())
+            {
+                HoverLookup::Found(detail)
             } else if !doc.wildcard_imports.is_empty() {
                 HoverLookup::WildcardImport(doc.wildcard_imports.clone(), cur_name.clone())
             } else {
@@ -3306,6 +3332,7 @@ mod tests {
             direct_imports: HashMap::new(),
             wildcard_imports: vec![],
             stdlib_imports: HashMap::new(),
+            stdlib_direct_imports: HashMap::new(),
             inlay_hint_sites: vec![],
             member_access_sites: analysis.member_access_sites,
         }
@@ -3315,9 +3342,9 @@ mod tests {
     fn stdlib_completion_surface_tracks_runtime_modules() {
         assert!(STDLIB_MODULES.iter().any(|info| info.name == "async"));
         assert!(STDLIB_MODULES.iter().any(|info| info.name == "collections"));
+        assert!(STDLIB_MODULES.iter().any(|info| info.name == "json"));
         assert!(STDLIB_MODULES.iter().any(|info| info.name == "parallel"));
         assert!(!STDLIB_MODULES.iter().any(|info| info.name == "net"));
-        assert!(!STDLIB_MODULES.iter().any(|info| info.name == "json"));
     }
 
     #[test]
@@ -3911,7 +3938,121 @@ Holder.compass.
 
         let wait_any = stdlib_member_hover_markdown("async", "waitAny")
             .expect("missing std.async.waitAny doc");
-        assert!(wait_any.contains("std.async.waitAny(handles) -> Pending"));
+        assert!(
+            wait_any.contains("std.async.waitAny(handles) -> Pending oftype (integer, dynamic)")
+        );
+
+        let parse =
+            stdlib_member_hover_markdown("json", "parse").expect("missing std.json.parse doc");
+        assert!(parse.contains("std.json.parse(text) -> dynamic"));
+    }
+
+    #[test]
+    fn hover_resolves_grouped_stdlib_imports() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let uri = Url::parse("file:///stdlib_grouped_hover.fdn").expect("document uri");
+            let text = "use std.collections.{enumerate}\n\naction main {\n    var rows = enumerate([10, 20])\n}\n";
+            backend.refresh(&uri, 1, text).await;
+
+            let offset = text
+                .find("enumerate([10, 20])")
+                .expect("call site offset") as u32;
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+            let pos = convert::span_to_range(&file, Span::new(FileId(0), offset, offset + 1)).start;
+
+            let hover = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position: pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("hover result")
+            .expect("hover contents");
+
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markdown hover contents");
+            };
+            assert!(markup.value.contains("std.collections.enumerate(list) -> list"));
+        });
+    }
+
+    #[test]
+    fn hover_resolves_identifiers_and_methods_inside_string_interpolation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let uri = Url::parse("file:///interp_hover.fdn").expect("document uri");
+            let text =
+                "action main {\n    var name = \"Ada\"\n    print(\"Hello {name.upper()}\")\n}\n";
+            backend.refresh(&uri, 1, text).await;
+
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+
+            let name_offset = text.find("{name.upper()}").expect("interp name offset") as u32 + 1;
+            let name_pos =
+                convert::span_to_range(&file, Span::new(FileId(0), name_offset, name_offset + 1))
+                    .start;
+            let name_hover = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position: name_pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("name hover result")
+            .expect("name hover contents");
+
+            let HoverContents::Markup(name_markup) = name_hover.contents else {
+                panic!("expected markdown hover contents for interpolation identifier");
+            };
+            assert!(name_markup.value.contains("var name -> string"));
+
+            let upper_offset = text.find("upper()").expect("interp method offset") as u32;
+            let upper_pos =
+                convert::span_to_range(&file, Span::new(FileId(0), upper_offset, upper_offset + 1))
+                    .start;
+            let upper_hover = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position: upper_pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("method hover result")
+            .expect("method hover contents");
+
+            let HoverContents::Markup(upper_markup) = upper_hover.contents else {
+                panic!("expected markdown hover contents for interpolation method");
+            };
+            assert!(upper_markup.value.contains("string.upper() -> string"));
+        });
     }
 
     #[test]

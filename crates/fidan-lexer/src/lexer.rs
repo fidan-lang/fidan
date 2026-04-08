@@ -10,6 +10,17 @@ use std::sync::Arc;
 pub const ESCAPED_INTERP_OPEN: char = '\u{E000}';
 pub const ESCAPED_INTERP_CLOSE: char = '\u{E001}';
 
+#[derive(Clone, Copy)]
+enum InterpStringState {
+    Normal,
+    String,
+    RawString,
+}
+
+fn is_ident_continue(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
+}
+
 /// The Fidan lexer.
 ///
 /// Consumes a `SourceFile` and produces a flat `Vec<Token>`.
@@ -197,6 +208,8 @@ impl<'src> Lexer<'src> {
         self.advance(); // opening `"`
         let mut s = String::new();
         let mut terminated = false;
+        let mut interp_depth = 0usize;
+        let mut interp_state = InterpStringState::Normal;
         loop {
             match self.advance() {
                 None => {
@@ -211,11 +224,11 @@ impl<'src> Lexer<'src> {
                     );
                     break;
                 }
-                Some('"') => {
+                Some('"') if interp_depth == 0 => {
                     terminated = true;
                     break;
                 }
-                Some('\\') => {
+                Some('\\') if interp_depth == 0 => {
                     // Basic escape sequences
                     match self.advance() {
                         Some('n') => s.push('\n'),
@@ -232,6 +245,64 @@ impl<'src> Lexer<'src> {
                         None => break,
                     }
                 }
+                Some('{') if interp_depth == 0 => {
+                    s.push('{');
+                    interp_depth = 1;
+                    interp_state = InterpStringState::Normal;
+                }
+                Some(c) if interp_depth > 0 => match interp_state {
+                    InterpStringState::Normal => match c {
+                        '"' => {
+                            s.push('"');
+                            interp_state = InterpStringState::String;
+                        }
+                        '{' => {
+                            s.push('{');
+                            interp_depth += 1;
+                        }
+                        '}' => {
+                            s.push('}');
+                            interp_depth -= 1;
+                            if interp_depth == 0 {
+                                interp_state = InterpStringState::Normal;
+                            }
+                        }
+                        'r' => {
+                            let prev = s.chars().next_back();
+                            if self.peek() == Some('"')
+                                && prev.is_none_or(|ch| !is_ident_continue(ch))
+                            {
+                                s.push('r');
+                                s.push(self.advance().expect("peeked raw string quote"));
+                                interp_state = InterpStringState::RawString;
+                            } else {
+                                self.push_normalized_string_char(&mut s, c);
+                            }
+                        }
+                        _ => self.push_normalized_string_char(&mut s, c),
+                    },
+                    InterpStringState::String => match c {
+                        '\\' => {
+                            s.push('\\');
+                            if let Some(next) = self.advance() {
+                                self.push_normalized_string_char(&mut s, next);
+                            } else {
+                                break;
+                            }
+                        }
+                        '"' => {
+                            s.push('"');
+                            interp_state = InterpStringState::Normal;
+                        }
+                        _ => self.push_normalized_string_char(&mut s, c),
+                    },
+                    InterpStringState::RawString => {
+                        self.push_normalized_string_char(&mut s, c);
+                        if c == '"' {
+                            interp_state = InterpStringState::Normal;
+                        }
+                    }
+                },
                 Some(c) => self.push_normalized_string_char(&mut s, c),
             }
         }
@@ -586,6 +657,17 @@ mod tests {
                 open = ESCAPED_INTERP_OPEN,
                 close = ESCAPED_INTERP_CLOSE,
             ))
+        );
+    }
+
+    #[test]
+    fn test_string_interpolation_preserves_unescaped_nested_quotes() {
+        let tokens = lex("\"task {items[\"description\"]} and {sentence.contains(\"quick\")}\"");
+        assert_eq!(
+            tokens[0],
+            TokenKind::LitString(
+                "task {items[\"description\"]} and {sentence.contains(\"quick\")}".to_string()
+            )
         );
     }
 

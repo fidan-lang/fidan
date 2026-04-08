@@ -1,4 +1,4 @@
-use crate::{FidanList, FidanValue, OwnedRef};
+use crate::FidanValue;
 
 #[derive(Debug, Clone)]
 pub enum AsyncOp {
@@ -31,17 +31,11 @@ fn list_values(arg: Option<&FidanValue>) -> Vec<FidanValue> {
 }
 
 pub fn wait_any_result(index: i64, value: FidanValue) -> FidanValue {
-    let mut list = FidanList::new();
-    list.append(FidanValue::Integer(index));
-    list.append(value);
-    FidanValue::List(OwnedRef::new(list))
+    FidanValue::Tuple(vec![FidanValue::Integer(index), value])
 }
 
 pub fn timeout_result(completed: bool, value: FidanValue) -> FidanValue {
-    let mut list = FidanList::new();
-    list.append(FidanValue::Boolean(completed));
-    list.append(value);
-    FidanValue::List(OwnedRef::new(list))
+    FidanValue::Tuple(vec![FidanValue::Boolean(completed), value])
 }
 
 pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<AsyncDispatch> {

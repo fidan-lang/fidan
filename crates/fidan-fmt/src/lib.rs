@@ -576,43 +576,41 @@ var x=1 # tail
     }
 
     #[test]
-    fn interpolation_expressions_reescape_nested_strings_and_indexes() {
+    fn interpolation_expressions_render_nested_strings_as_plain_code() {
         let src = r#"action demo {
     var sentence = "the quick brown fox"
     var scores = {"Alice": 95}
-    print("contains quick: {sentence.contains(\"quick\")}")
-    print("Alice: {scores[\"Alice\"]}")
-    print("join: {[\"a\", \"b\"].join(\", \")}")
+    print("contains quick: {sentence.contains("quick")}")
+    print("Alice: {scores["Alice"]}")
+    print("join: {["a", "b"].join(", ")}")
 }
 "#;
         let formatted = fmt(src);
         assert!(
-            formatted.contains(r#"print("contains quick: {sentence.contains(\"quick\")}")"#),
-            "formatted output should preserve escaped nested string literals:\n{formatted}"
+            formatted.contains(r#"print("contains quick: {sentence.contains("quick")}")"#),
+            "formatted output should preserve nested string literals as code inside interpolation:\n{formatted}"
         );
         assert!(
-            formatted.contains(r#"print("Alice: {scores[\"Alice\"]}")"#),
-            "formatted output should preserve escaped string index keys:\n{formatted}"
+            formatted.contains(r#"print("Alice: {scores["Alice"]}")"#),
+            "formatted output should preserve string index keys as code inside interpolation:\n{formatted}"
         );
         assert!(
-            formatted.contains(r#"print("join: {[\"a\", \"b\"].join(\", \")}")"#),
-            "formatted output should preserve escaped nested string arguments:\n{formatted}"
+            formatted.contains(r#"print("join: {["a", "b"].join(", ")}")"#),
+            "formatted output should preserve nested string arguments as code inside interpolation:\n{formatted}"
         );
         assert_idempotent(&formatted);
     }
 
     #[test]
-    fn interpolation_expression_preserves_deeply_nested_string_escapes() {
+    fn interpolation_expression_preserves_required_inner_string_escapes_only() {
         let src = r#"action demo {
-    print("Name: {\"{\\\"James\\\"} with occupation {\\\"Teacher\\\"}\"}")
+    print("Quote: {"He said \"hi\""}")
 }
 "#;
         let formatted = fmt(src);
         assert!(
-            formatted.contains(
-                r#"print("Name: {\"{\\\"James\\\"} with occupation {\\\"Teacher\\\"}\"}")"#
-            ),
-            "formatted output should preserve deeply nested escaped strings inside interpolation:\n{formatted}"
+            formatted.contains(r#"print("Quote: {"He said \"hi\""}")"#),
+            "formatted output should preserve only the escapes required by the nested string literal itself:\n{formatted}"
         );
         assert_idempotent(&formatted);
     }

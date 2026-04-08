@@ -1284,6 +1284,11 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
         );
         self.declare_runtime_fn(
+            "fdn_tuple_pack",
+            self.ptr_type
+                .fn_type(&[self.ptr_type.into(), self.i64_type.into()], false),
+        );
+        self.declare_runtime_fn(
             "fdn_list_get",
             self.ptr_type
                 .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
@@ -2437,7 +2442,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             Rvalue::Construct { ty, fields } => self.lower_construct(*ty, fields),
             Rvalue::List(values) => self.lower_list(values),
             Rvalue::Dict(pairs) => self.lower_dict(pairs),
-            Rvalue::Tuple(values) => self.lower_list(values),
+            Rvalue::Tuple(values) => self.lower_tuple(values),
             Rvalue::StringInterp(parts) => self.lower_string_interp(parts),
             Rvalue::Literal(literal) => self.lower_literal(literal),
             Rvalue::CatchException => self.call_ptr("fdn_catch_exception", &[]),
@@ -3496,6 +3501,15 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             self.call_void("fdn_list_push", &[list.into(), value.into()])?;
         }
         Ok(list)
+    }
+
+    fn lower_tuple(&mut self, values: &[Operand]) -> Result<PointerValue<'ctx>> {
+        let values = values
+            .iter()
+            .map(|value| self.lower_operand(value))
+            .collect::<Result<Vec<_>>>()?;
+        let (array_ptr, count) = self.build_ptr_array(&values)?;
+        self.call_ptr("fdn_tuple_pack", &[array_ptr.into(), count.into()])
     }
 
     fn lower_dict(&mut self, pairs: &[(Operand, Operand)]) -> Result<PointerValue<'ctx>> {
