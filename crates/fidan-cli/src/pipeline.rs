@@ -306,7 +306,32 @@ pub(crate) fn run_fmt(
     indent_width: Option<usize>,
     max_line_len: Option<usize>,
 ) -> Result<()> {
+    use fidan_lexer::{Lexer, SymbolInterner};
+    use fidan_source::SourceMap;
+    use std::sync::Arc;
+
     let src = std::fs::read_to_string(&file).with_context(|| format!("cannot read {:?}", file))?;
+
+    let source_map = Arc::new(SourceMap::new());
+    let interner = Arc::new(SymbolInterner::new());
+    let source_name = file.display().to_string();
+    let source_file = source_map.add_file(&*source_name, &*src);
+    let (tokens, lex_diags) = Lexer::new(&source_file, Arc::clone(&interner)).tokenise();
+    let (_, parse_diags) = fidan_parser::parse(&tokens, source_file.id, Arc::clone(&interner));
+
+    let has_syntax_errors = lex_diags
+        .iter()
+        .chain(parse_diags.iter())
+        .any(|diag| diag.severity == Severity::Error);
+    if has_syntax_errors {
+        for diag in lex_diags.iter().chain(parse_diags.iter()) {
+            fidan_diagnostics::render_to_stderr(diag, &source_map);
+        }
+        bail!(
+            "refusing to format {} because it contains syntax errors",
+            file.display()
+        );
+    }
 
     let opts = fidan_fmt::resolve_format_options_for_path(Some(&file), indent_width, max_line_len)?;
 

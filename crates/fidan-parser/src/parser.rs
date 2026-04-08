@@ -100,7 +100,11 @@ impl<'t> Parser<'t> {
 
     /// Look `n` tokens ahead without consuming.
     pub(crate) fn peek_nth(&self, n: usize) -> &TokenKind {
-        &self.tokens[self.pos.saturating_add(n).min(self.tokens.len() - 1)].kind
+        if let Some((ref toks, pos)) = self.fragment {
+            &toks[pos.saturating_add(n).min(toks.len().saturating_sub(1))].kind
+        } else {
+            &self.tokens[self.pos.saturating_add(n).min(self.tokens.len() - 1)].kind
+        }
     }
 
     pub(crate) fn current_span(&self) -> Span {

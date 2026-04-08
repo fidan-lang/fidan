@@ -904,6 +904,46 @@ main()
 }
 
 #[test]
+fn format_refuses_to_rewrite_parse_invalid_source() {
+    let original = r#"use std.json
+
+action main {
+  var nested_data = json.parse("{"name": "Alice", "age": 30}")
+}
+"#;
+    let file = make_temp_program("fmt_rejects_invalid_interp", original);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("format")
+        .arg("--in-place")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan format on malformed source");
+
+    let patched = std::fs::read_to_string(&file).expect("read malformed source after format");
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        !output.status.success(),
+        "expected fidan format to reject malformed input:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        patched, original,
+        "formatter must not rewrite malformed input"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unexpected trailing tokens in interpolation expression")
+            || stderr.contains("refusing to format"),
+        "expected syntax-aware format rejection, got:\n{stderr}"
+    );
+}
+
+#[test]
 fn direct_stdlib_function_import_counts_as_used() {
     let file = make_temp_program(
         "direct_stdlib_import_used",

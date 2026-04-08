@@ -845,8 +845,20 @@ impl<'t> Parser<'t> {
         let previous_fragment = self.fragment.take();
         self.fragment = Some((frag_tokens, 0));
         let expr = self.parse_expr();
+        while matches!(self.peek(), TokenKind::Newline) {
+            self.advance();
+        }
+        let result = if matches!(self.peek(), TokenKind::Eof) {
+            expr
+        } else {
+            self.error(
+                "unexpected trailing tokens in interpolation expression",
+                self.current_span(),
+            );
+            self.error_expr(span)
+        };
         self.fragment = previous_fragment;
-        expr
+        result
     }
 
     // ── Binding-power tables ──────────────────────────────────────────────────

@@ -486,6 +486,35 @@ mod tests {
     }
 
     #[test]
+    fn string_interpolation_simple_identifier_fragment_stays_an_identifier() {
+        let (module, diags) = parse_src(r#"var msg = "hello {name}!""#);
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+
+        let init = match module.arena.get_item(module.items[0]) {
+            fidan_ast::Item::VarDecl {
+                init: Some(init), ..
+            } => *init,
+            other => panic!("expected module var decl, got {other:?}"),
+        };
+        let parts = match module.arena.get_expr(init) {
+            fidan_ast::Expr::StringInterp { parts, .. } => parts,
+            other => panic!("expected string interpolation expr, got {other:?}"),
+        };
+        let expr = match &parts[1] {
+            fidan_ast::InterpPart::Expr(expr) => *expr,
+            other => panic!("expected interpolation expression part, got {other:?}"),
+        };
+        match module.arena.get_expr(expr) {
+            fidan_ast::Expr::Ident { .. } => {}
+            other => panic!("expected identifier interpolation fragment, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn string_interpolation_escaped_braces() {
         let (_, diags) = parse_src(r#"var msg = "literal \{name\} and {value}""#);
         assert!(
@@ -547,6 +576,50 @@ mod tests {
             errors(&diags).is_empty(),
             "unexpected errors: {:?}",
             errors(&diags)
+        );
+    }
+
+    #[test]
+    fn string_interpolation_fragment_uses_fragment_lookahead() {
+        let (module, diags) = parse_src(r#"var msg = "{value is not nothing}""#);
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+
+        let init = match module.arena.get_item(module.items[0]) {
+            fidan_ast::Item::VarDecl {
+                init: Some(init), ..
+            } => *init,
+            other => panic!("expected module var decl, got {other:?}"),
+        };
+        let parts = match module.arena.get_expr(init) {
+            fidan_ast::Expr::StringInterp { parts, .. } => parts,
+            other => panic!("expected string interpolation expr, got {other:?}"),
+        };
+        let expr = match &parts[0] {
+            fidan_ast::InterpPart::Expr(expr) => *expr,
+            other => panic!("expected interpolation expression part, got {other:?}"),
+        };
+        match module.arena.get_expr(expr) {
+            fidan_ast::Expr::Binary { op, .. } => {
+                assert_eq!(*op, fidan_ast::BinOp::NotEq)
+            }
+            other => panic!("expected `is not` to normalize to `!=`, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn string_interpolation_rejects_trailing_tokens_inside_fragment() {
+        let (_, diags) = parse_src(r#"var msg = "broken: {"name": "Alice", "age": 30}""#);
+        let parse_errors = errors(&diags);
+        assert!(
+            parse_errors
+                .iter()
+                .any(|diag| diag.contains("unexpected trailing tokens in interpolation expression")),
+            "expected interpolation trailing-token error, got {:?}",
+            parse_errors
         );
     }
 
