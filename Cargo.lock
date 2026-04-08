@@ -1033,7 +1033,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-ast"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "fidan-lexer",
  "fidan-source",
@@ -1044,7 +1044,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-cli"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "clap",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-codegen-cranelift"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "cranelift-codegen",
@@ -1107,7 +1107,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-codegen-llvm"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "fidan-ast",
@@ -1124,11 +1124,11 @@ dependencies = [
 
 [[package]]
 name = "fidan-config"
-version = "1.0.6"
+version = "1.0.7"
 
 [[package]]
 name = "fidan-diagnostics"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "fidan-source",
  "strsim",
@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-driver"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "fidan-ast",
@@ -1163,7 +1163,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-embed"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "libfidan",
  "thiserror 2.0.18",
@@ -1171,14 +1171,14 @@ dependencies = [
 
 [[package]]
 name = "fidan-extern-fixture"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "fidan-runtime",
 ]
 
 [[package]]
 name = "fidan-fmt"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "fidan-ast",
  "fidan-diagnostics",
@@ -1191,7 +1191,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-hir"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "fidan-ast",
  "fidan-config",
@@ -1204,7 +1204,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-interp"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "fidan-ast",
  "fidan-codegen-cranelift",
@@ -1226,7 +1226,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-lexer"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "dashmap 6.1.0",
  "fidan-diagnostics",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-lsp"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "dashmap 6.1.0",
@@ -1271,7 +1271,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-mir"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "fidan-ast",
  "fidan-config",
@@ -1288,7 +1288,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-parser"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "fidan-ast",
  "fidan-diagnostics",
@@ -1298,7 +1298,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-passes"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "fidan-ast",
  "fidan-lexer",
@@ -1309,7 +1309,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-runtime"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "dashmap 6.1.0",
  "fidan-config",
@@ -1322,7 +1322,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-secrets"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "anyhow",
  "keyring",
@@ -1330,14 +1330,14 @@ dependencies = [
 
 [[package]]
 name = "fidan-source"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "fidan-stdlib"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "dashmap 6.1.0",
  "fidan-config",
@@ -1348,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-typeck"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "fidan-ast",
  "fidan-config",
@@ -2135,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "libfidan"
-version = "1.0.6"
+version = "1.0.7"
 dependencies = [
  "fidan-driver",
  "fidan-interp",
@@ -2202,9 +2202,9 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "llvm-sys"
-version = "211.0.0"
+version = "211.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "108b3ad2b2eaf2a561fc74196273b20e3436e4a688b8b44e250d83974dc1b2e2"
+checksum = "44007a7a44b73bdd877fa9c9ccef256036511220e90f65b4d50e7a15773c0ee3"
 dependencies = [
  "anyhow",
  "cc",
@@ -3509,9 +3509,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.51.0"
+version = "1.51.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2bd1c4c0fc4a7ab90fc15ef6daaa3ec3b893f004f915f2392557ed23237820cd"
+checksum = "f66bf9585cda4b724d3e78ab34b73fb2bbaba9011b9bfdf69dc836382ea13b8c"
 dependencies = [
  "bytes",
  "libc",
@@ -3582,9 +3582,9 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.25.10+spec-1.1.0"
+version = "0.25.11+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a82418ca169e235e6c399a84e395ab6debeb3bc90edc959bf0f48647c6a32d1b"
+checksum = "0b59c4d22ed448339746c59b905d24568fcbb3ab65a500494f7b8c3e97739f2b"
 dependencies = [
  "indexmap",
  "toml_datetime",

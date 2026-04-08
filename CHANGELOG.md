@@ -12,6 +12,45 @@ compiler releases.
 
 ---
 
+## [1.0.7] — 2026-04-08
+
+### Added
+- New `std.json` module with parsing, validation, file I/O, compact
+  serialization, and pretty-print helpers, backed by runtime, stdlib metadata,
+  type-checker inference, interpreter coverage, and editor hover/completion
+  support.
+- Native tuple runtime packing and tuple-index access are now covered by
+  dedicated regressions across the runtime, Cranelift JIT, interpreter JIT,
+  Cranelift AOT, and LLVM AOT paths.
+- Parser, lexer, formatter, and LSP regression coverage now includes nested
+  string literals and member/index expressions inside interpolation fragments,
+  plus grouped stdlib-import hover resolution.
+
+### Changed
+- Tuple-valued results are now used consistently for helpers such as
+  `std.collections.zip`, `std.collections.enumerate`, `std.collections.partition`,
+  `std.async.waitAny`, and `std.async.timeout`, aligning runtime behavior with
+  type metadata, display formatting, and backend lowering.
+- Stdlib return-type metadata is now significantly more precise and shared more
+  broadly across the type checker and editor tooling, improving inferred tuple,
+  pending, collection, JSON, regex, IO, and numeric helper result types.
+- Unannotated action return inference now merges all reachable return paths,
+  preserving precise result types where possible and avoiding premature
+  degradation to `dynamic`.
+
+### Fixed
+- Cranelift JIT now supports tuple-valued ABI crossings natively instead of
+  silently relying on fallback execution for non-primitive tuple signatures.
+- Indexed assignment diagnostics now reject immutable targets such as tuples and
+  strings with explicit errors instead of permitting invalid assignment shapes.
+- LSP identifier/member indexing inside interpolation fragments now points to
+  the real inner expression spans, improving hover, navigation, and method-error
+  locations for interpolated code.
+- Loop binding scope analysis and grouped stdlib import handling now remain
+  consistent between type checking, symbol lookup, completion, and hover.
+
+---
+
 ## [1.0.6] — 2026-04-07
 
 ### Added
@@ -200,7 +239,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.6...HEAD
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.7...HEAD
+[1.0.7]: https://github.com/fidan-lang/fidan/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/fidan-lang/fidan/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/fidan-lang/fidan/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/fidan-lang/fidan/compare/v1.0.3...v1.0.4
