@@ -158,9 +158,7 @@ enum Command {
         /// Stop after this many errors (default: 1, 0 = no limit)
         #[arg(long, default_value = "1")]
         max_errors: usize,
-        /// Target CPU for AOT codegen: `generic` (portable), `native` (host-tuned), or
-        /// a backend-specific CPU name. LLVM fully supports this today; Cranelift
-        /// currently treats `native`/omitted as host ISA and rejects other values.
+        /// AOT target CPU: `generic`, `native`, or a backend-specific CPU spec.
         #[arg(long)]
         target_cpu: Option<String>,
     },
