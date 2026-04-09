@@ -4,6 +4,8 @@ use anyhow::{Context, Result, bail};
 use semver::{Version, VersionReq};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+#[cfg(any(test, not(target_os = "windows")))]
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -150,7 +152,7 @@ pub fn ensure_persistent_path_entry(path: &Path) -> Result<bool> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let path_line = bootstrap_path_line(path);
+        let path_lines = bootstrap_path_lines(path);
         let profiles = candidate_bootstrap_profiles()?;
         let already_present = profiles.iter().any(|profile| {
             profile.exists()
@@ -158,7 +160,10 @@ pub fn ensure_persistent_path_entry(path: &Path) -> Result<bool> {
                     .map(|text| {
                         split_lines_preserve_trailing_newline(&text)
                             .into_iter()
-                            .any(|line| line.trim_end_matches('\r') == path_line)
+                            .any(|line| {
+                                let normalized = line.trim_end_matches('\r');
+                                path_lines.iter().any(|expected| normalized == expected)
+                            })
                     })
                     .unwrap_or(false)
         });
@@ -178,7 +183,7 @@ pub fn ensure_persistent_path_entry(path: &Path) -> Result<bool> {
         if !contents.is_empty() && !contents.ends_with('\n') {
             contents.push('\n');
         }
-        contents.push_str(&path_line);
+        contents.push_str(&path_lines[0]);
         contents.push('\n');
 
         if let Some(parent) = target_profile.parent() {
@@ -199,7 +204,7 @@ pub fn remove_persistent_path_entry(path: &Path) -> Result<bool> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let path_line = bootstrap_path_line(path);
+        let path_lines = bootstrap_path_lines(path);
         let mut changed = false;
 
         for profile in candidate_bootstrap_profiles()? {
@@ -210,7 +215,10 @@ pub fn remove_persistent_path_entry(path: &Path) -> Result<bool> {
                 .with_context(|| format!("failed to read `{}`", profile.display()))?;
             let filtered_lines = split_lines_preserve_trailing_newline(&original)
                 .into_iter()
-                .filter(|line| line.trim_end_matches('\r') != path_line)
+                .filter(|line| {
+                    let normalized = line.trim_end_matches('\r');
+                    !path_lines.iter().any(|expected| normalized == expected)
+                })
                 .collect::<Vec<_>>();
             let rewritten = filtered_lines.join("\n");
             if rewritten != original {
@@ -487,13 +495,8 @@ pub fn schedule_last_uninstall_cleanup(root: &Path, purge_home: Option<&Path>) -
 
     #[cfg(not(target_os = "windows"))]
     {
-        let script = if let Some(home) = purge_home {
-            format!("sleep 1; rm -rf '{}' '{}';", root.display(), home.display())
-        } else {
-            format!("sleep 1; rm -rf '{}';", root.display())
-        };
         std::process::Command::new("sh")
-            .args(["-c", &script])
+            .args(posix_cleanup_command_args(root, purge_home))
             .spawn()
             .context("failed to schedule POSIX cleanup process")?;
         Ok(())
@@ -684,9 +687,28 @@ fn primary_bootstrap_profile() -> Result<PathBuf> {
     Ok(home_dir()?.join(".profile"))
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(any(test, not(target_os = "windows")))]
 fn bootstrap_path_line(path: &Path) -> String {
+    format!(
+        "export PATH={}:\"$PATH\"",
+        posix_single_quote(path.to_string_lossy().as_ref())
+    )
+}
+
+#[cfg(any(test, not(target_os = "windows")))]
+fn legacy_bootstrap_path_line(path: &Path) -> String {
     format!("export PATH=\"{}:$PATH\"", path.to_string_lossy())
+}
+
+#[cfg(any(test, not(target_os = "windows")))]
+fn bootstrap_path_lines(path: &Path) -> Vec<String> {
+    let canonical = bootstrap_path_line(path);
+    let legacy = legacy_bootstrap_path_line(path);
+    if canonical == legacy {
+        vec![canonical]
+    } else {
+        vec![canonical, legacy]
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -752,6 +774,30 @@ fn remove_existing_path(path: &Path) -> Result<()> {
     } else {
         fs::remove_dir_all(path).with_context(|| format!("failed to remove `{}`", path.display()))
     }
+}
+
+#[cfg(any(test, not(target_os = "windows")))]
+fn posix_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(any(test, not(target_os = "windows")))]
+fn posix_cleanup_command_args(root: &Path, purge_home: Option<&Path>) -> Vec<OsString> {
+    let script = if purge_home.is_some() {
+        r#"sleep 1; rm -rf -- "$1" "$2""#
+    } else {
+        r#"sleep 1; rm -rf -- "$1""#
+    };
+    let mut args = vec![
+        OsString::from("-c"),
+        OsString::from(script),
+        OsString::from("fidan-cleanup"),
+        root.as_os_str().to_owned(),
+    ];
+    if let Some(home) = purge_home {
+        args.push(home.as_os_str().to_owned());
+    }
+    args
 }
 
 #[cfg(target_os = "windows")]
@@ -833,5 +879,47 @@ mod tests {
             unsafe { std::env::remove_var("FIDAN_HOME") };
         }
         assert!(matches!(backend, EffectiveBackend::Cranelift));
+    }
+
+    #[test]
+    fn posix_single_quote_escapes_embedded_quotes() {
+        assert_eq!(
+            posix_single_quote("/tmp/fidan's/bin"),
+            "'/tmp/fidan'\"'\"'s/bin'"
+        );
+    }
+
+    #[test]
+    fn posix_cleanup_command_uses_positional_args_instead_of_inlining_paths() {
+        let root = Path::new("/tmp/fidan's/root");
+        let home = Path::new("/tmp/$HOME/with spaces");
+
+        let args = posix_cleanup_command_args(root, Some(home));
+
+        assert_eq!(args[0], OsString::from("-c"));
+        assert_eq!(args[1], OsString::from(r#"sleep 1; rm -rf -- "$1" "$2""#));
+        assert_eq!(args[2], OsString::from("fidan-cleanup"));
+        assert_eq!(args[3], root.as_os_str());
+        assert_eq!(args[4], home.as_os_str());
+        let script = args[1].to_string_lossy();
+        assert!(!script.contains("fidan's"));
+        assert!(!script.contains("$HOME/with spaces"));
+    }
+
+    #[test]
+    fn bootstrap_path_line_shell_quotes_metacharacters() {
+        let path = Path::new("/tmp/fidan's/$HOME/bin");
+        assert_eq!(
+            bootstrap_path_line(path),
+            "export PATH='/tmp/fidan'\"'\"'s/$HOME/bin':\"$PATH\""
+        );
+    }
+
+    #[test]
+    fn bootstrap_path_lines_keep_legacy_format_for_cleanup_compatibility() {
+        let path = Path::new("/tmp/fidan/bin");
+        let lines = bootstrap_path_lines(path);
+        assert_eq!(lines[0], "export PATH='/tmp/fidan/bin':\"$PATH\"");
+        assert_eq!(lines[1], "export PATH=\"/tmp/fidan/bin:$PATH\"");
     }
 }

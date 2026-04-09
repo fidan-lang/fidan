@@ -13,7 +13,9 @@ use std::ffi::c_void;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
-use fidan_interp::{FidanValue, RunError, register_self_symbol, run_mir, run_mir_with_jit};
+use fidan_interp::{
+    FidanValue, RunError, register_self_symbol, run_mir, run_mir_with_jit, run_mir_with_replay,
+};
 use fidan_lexer::{Lexer, SymbolInterner};
 use fidan_source::SourceMap;
 
@@ -222,6 +224,28 @@ fn run_src_with_threshold(src: &str, jit_threshold: u32) -> Result<(), RunError>
     } else {
         run_mir_with_jit(mir, interner, source_map, jit_threshold)
     }
+}
+
+fn run_src_with_sandbox(src: &str, sandbox: fidan_stdlib::SandboxPolicy) -> Result<(), RunError> {
+    let source_map = Arc::new(SourceMap::new());
+    let interner = make_interner();
+    let file = source_map.add_file("<test>", src);
+    let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+    let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+    let parse_errors: Vec<_> = parse_diags
+        .iter()
+        .filter(|d| d.severity == fidan_diagnostics::Severity::Error)
+        .collect();
+    assert!(
+        parse_errors.is_empty(),
+        "unexpected parse errors in test source:\n{:?}",
+        parse_errors
+    );
+    let tm = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+    let hir = fidan_hir::lower_module(&module, &tm, &interner);
+    let mut mir = fidan_mir::lower_program(&hir, &interner, &[]);
+    fidan_passes::run_all(&mut mir);
+    run_mir_with_replay(mir, interner, source_map, 500, vec![], Some(sandbox)).0
 }
 
 /// Build MIR without running it — used for static analysis assertions.
@@ -1369,6 +1393,82 @@ fn json_helpers_preserve_typed_dict_keys_and_hashsets() {
     let _ = std::fs::remove_file(&dict_path);
     let _ = std::fs::remove_file(&set_path);
     assert!(result.is_ok());
+}
+
+#[test]
+fn sandbox_copy_file_requires_readable_source() {
+    let root = std::env::temp_dir().join("fidan-interp-sandbox-copy-read");
+    let source_dir = root.join("source");
+    let dest_dir = root.join("dest");
+    std::fs::create_dir_all(&source_dir).expect("create source dir");
+    std::fs::create_dir_all(&dest_dir).expect("create dest dir");
+
+    let source_path = source_dir.join("input.txt");
+    let dest_path = dest_dir.join("output.txt");
+    std::fs::write(&source_path, "hello").expect("write source file");
+
+    let escaped_source = source_path.display().to_string().replace('\\', "\\\\");
+    let escaped_dest = dest_path.display().to_string().replace('\\', "\\\\");
+    let src = format!(
+        "use std.io\nassert_eq(io.copyFile(\"{escaped_source}\", \"{escaped_dest}\"), true)"
+    );
+
+    let result = run_src_with_sandbox(
+        &src,
+        fidan_stdlib::SandboxPolicy::default()
+            .with_allow_write_prefix(dest_dir.display().to_string()),
+    );
+
+    assert!(matches!(
+        result,
+        Err(RunError { code, message, .. })
+            if code == fidan_diagnostics::diag_code!("R4001")
+                && message.contains("copyFile")
+                && message.contains("input.txt")
+    ));
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn sandbox_copy_file_rejects_write_outside_allowed_destination() {
+    let root = std::env::temp_dir().join("fidan-interp-sandbox-copy-write");
+    let source_dir = root.join("source");
+    let allowed_dest_dir = root.join("allowed");
+    let blocked_dest_dir = root.join("blocked");
+    std::fs::create_dir_all(&source_dir).expect("create source dir");
+    std::fs::create_dir_all(&allowed_dest_dir).expect("create allowed dest dir");
+    std::fs::create_dir_all(&blocked_dest_dir).expect("create blocked dest dir");
+
+    let source_path = source_dir.join("input.txt");
+    let blocked_dest_path = blocked_dest_dir.join("output.txt");
+    std::fs::write(&source_path, "hello").expect("write source file");
+
+    let escaped_source = source_path.display().to_string().replace('\\', "\\\\");
+    let escaped_dest = blocked_dest_path
+        .display()
+        .to_string()
+        .replace('\\', "\\\\");
+    let src = format!(
+        "use std.io\nassert_eq(io.copyFile(\"{escaped_source}\", \"{escaped_dest}\"), true)"
+    );
+
+    let result = run_src_with_sandbox(
+        &src,
+        fidan_stdlib::SandboxPolicy::default()
+            .with_allow_read_prefix(source_dir.display().to_string())
+            .with_allow_write_prefix(allowed_dest_dir.display().to_string()),
+    );
+
+    assert!(matches!(
+        result,
+        Err(RunError { code, message, .. })
+            if code == fidan_diagnostics::diag_code!("R4002")
+                && message.contains("copyFile")
+                && message.contains("output.txt")
+    ));
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]

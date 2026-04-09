@@ -134,7 +134,18 @@ function Copy-ResourceToFile {
     [string]$Destination
   )
   if ($SourceUrl.StartsWith("file://")) {
-    Copy-Item -LiteralPath $SourceUrl.Substring(7) -Destination $Destination
+    $localPath = $SourceUrl.Substring(7)
+    if ($localPath -notmatch '^[A-Za-z]:[\\/]' ) {
+      $uri = [Uri]$SourceUrl
+      if (-not $uri.IsFile) {
+        throw "Unsupported file URL '$SourceUrl'"
+      }
+      $localPath = $uri.LocalPath
+      if ($IsWindows -and $localPath.StartsWith("/") -and $localPath.Length -ge 3 -and $localPath[2] -eq ':') {
+        $localPath = $localPath.Substring(1)
+      }
+    }
+    Copy-Item -LiteralPath $localPath -Destination $Destination
     return
   }
   Invoke-WebRequest -Uri $SourceUrl -OutFile $Destination

@@ -48,13 +48,16 @@ pub(crate) fn record(code: impl std::fmt::Display, message: &str) {
         return;
     }
 
-    let dir = cache_dir();
-    if std::fs::create_dir_all(&dir).is_err() {
+    let path = cache_path();
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && std::fs::create_dir_all(parent).is_err()
+    {
         return;
     }
 
     let payload = format!("{code}\n{message}");
-    let _ = std::fs::write(cache_path(), payload);
+    let _ = std::fs::write(path, payload);
 }
 
 pub(crate) fn load() -> Result<LastErrorRecord> {
@@ -77,7 +80,30 @@ pub(crate) fn load() -> Result<LastErrorRecord> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_diagnostic_code;
+    use super::{cache_path, is_diagnostic_code, record};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time before unix epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "fidan-last-error-{label}-{}-{}",
+            std::process::id(),
+            nonce
+        ));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
 
     #[test]
     fn diagnostic_code_shape_is_checked() {
@@ -87,5 +113,32 @@ mod tests {
         assert!(!is_diagnostic_code("cli"));
         assert!(!is_diagnostic_code("E101"));
         assert!(!is_diagnostic_code("E0101X"));
+    }
+
+    #[test]
+    fn record_creates_parent_dirs_for_override_path() {
+        let _guard = env_lock().lock().expect("env lock");
+        let sandbox = temp_dir("override");
+        let override_path = sandbox.join("nested").join("last-error.txt");
+        let previous = std::env::var_os("FIDAN_LAST_ERROR_PATH");
+        // SAFETY: tests serialize access to process env via `env_lock`.
+        unsafe { std::env::set_var("FIDAN_LAST_ERROR_PATH", &override_path) };
+
+        record("E0101", "override path works");
+
+        assert_eq!(
+            fs::read_to_string(&override_path).expect("read override last-error file"),
+            "E0101\noverride path works"
+        );
+        assert_eq!(cache_path(), override_path);
+
+        if let Some(previous) = previous {
+            // SAFETY: tests serialize access to process env via `env_lock`.
+            unsafe { std::env::set_var("FIDAN_LAST_ERROR_PATH", previous) };
+        } else {
+            // SAFETY: tests serialize access to process env via `env_lock`.
+            unsafe { std::env::remove_var("FIDAN_LAST_ERROR_PATH") };
+        }
+        let _ = fs::remove_dir_all(&sandbox);
     }
 }

@@ -79,9 +79,9 @@ impl FidanHashKeyRepr {
             FidanValue::Dict(entries) => {
                 let mut items = entries
                     .borrow()
-                    .entries_sorted()
+                    .entries_sorted_refs()
                     .into_iter()
-                    .map(|(key, value)| Ok((Self::from_value(&key)?, Self::from_value(&value)?)))
+                    .map(|(key, value)| Ok((Self::from_value(key)?, Self::from_value(value)?)))
                     .collect::<Result<Vec<_>, HashKeyError>>()?;
                 items.sort();
                 Ok(Self::Dict(items))
@@ -261,16 +261,15 @@ impl FidanHashSet {
         self.inner.values()
     }
 
+    pub fn values_sorted_refs(&self) -> Vec<&FidanValue> {
+        let mut entries: Vec<_> = self.inner.iter().collect();
+        entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+        entries.sort_by_cached_key(|(_, value)| display(value));
+        entries.into_iter().map(|(_, value)| value).collect()
+    }
+
     pub fn values_sorted(&self) -> Vec<FidanValue> {
-        let mut entries: Vec<_> = self
-            .inner
-            .iter()
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect();
-        entries.sort_by(|left, right| left.0.cmp(&right.0));
-        let mut values: Vec<FidanValue> = entries.into_iter().map(|(_, value)| value).collect();
-        values.sort_by_key(display);
-        values
+        self.values_sorted_refs().into_iter().cloned().collect()
     }
 }
 
@@ -354,5 +353,23 @@ mod tests {
         assert_eq!(set.len(), 2);
         assert!(set.contains(&first).expect("contains first"));
         assert!(set.contains(&second).expect("contains second"));
+    }
+
+    #[test]
+    fn values_sorted_refs_preserve_values_sorted_order() {
+        let mut set = FidanHashSet::new();
+        assert!(set.insert(FidanValue::Integer(7)).expect("insert int"));
+        assert!(
+            set.insert(FidanValue::String(FidanString::new("alpha")))
+                .expect("insert string")
+        );
+        assert!(set.insert(FidanValue::Integer(3)).expect("insert int"));
+
+        let owned = set.values_sorted();
+        let borrowed: Vec<FidanValue> = set.values_sorted_refs().into_iter().cloned().collect();
+        assert_eq!(
+            owned.iter().map(crate::display).collect::<Vec<_>>(),
+            borrowed.iter().map(crate::display).collect::<Vec<_>>()
+        );
     }
 }

@@ -541,10 +541,7 @@ fn parse_fix_payload(raw: &str) -> Result<FixPayload> {
     if let Ok(payload) = serde_json::from_str::<FixPayload>(raw) {
         return Ok(normalize_fix_payload(payload));
     }
-    if let Some(start) = raw.find("```json")
-        && let Some(end) = raw[start + 7..].find("```")
-    {
-        let body = &raw[start + 7..start + 7 + end];
+    if let Some(body) = extract_json_fence_body(raw) {
         let payload: FixPayload = serde_json::from_str(body.trim())
             .context("failed to parse fenced JSON fix payload from model response")?;
         return Ok(normalize_fix_payload(payload));
@@ -589,6 +586,23 @@ fn consecutive_trimmed_block_matches(source: &str, old_text: &str) -> bool {
             .zip(expected_lines.iter())
             .all(|(actual, expected)| actual.trim() == expected.trim())
     })
+}
+
+fn extract_json_fence_body(raw: &str) -> Option<&str> {
+    let mut offset = 0usize;
+    while let Some(start_rel) = raw[offset..].find("```") {
+        let start = offset + start_rel;
+        let fence = &raw[start + 3..];
+        let newline_rel = fence.find('\n')?;
+        let info = fence[..newline_rel].trim();
+        let body_start = start + 3 + newline_rel + 1;
+        let end_rel = raw[body_start..].find("```")?;
+        if info.is_empty() || info.eq_ignore_ascii_case("json") {
+            return Some(raw[body_start..body_start + end_rel].trim());
+        }
+        offset = body_start + end_rel + 3;
+    }
+    None
 }
 
 fn call_openai_compatible(
@@ -1021,10 +1035,7 @@ fn parse_json_payload(raw: &str) -> Result<ExplanationPayload> {
         return normalize_explanation_payload(value);
     }
 
-    if let Some(start) = raw.find("```json")
-        && let Some(end) = raw[start + 7..].find("```")
-    {
-        let body = &raw[start + 7..start + 7 + end];
+    if let Some(body) = extract_json_fence_body(raw) {
         if let Ok(payload) = serde_json::from_str::<ExplanationPayload>(body.trim()) {
             return Ok(payload);
         }
@@ -1087,8 +1098,8 @@ fn extract_anthropic_text(value: &serde_json::Value) -> Option<String> {
 mod tests {
     use super::{
         FixPayload, build_fix_system_prompt, build_fix_user_prompt, build_system_prompt,
-        build_user_prompt, normalize_fix_payload, parse_json_payload, validate_explanation_payload,
-        validate_fix_payload,
+        build_user_prompt, normalize_fix_payload, parse_fix_payload, parse_json_payload,
+        validate_explanation_payload, validate_fix_payload,
     };
     use crate::config::Config;
     use fidan_driver::{
@@ -1124,6 +1135,20 @@ mod tests {
         let payload = parse_json_payload(&text).expect("parse fenced payload");
         assert_eq!(payload.dependencies, "Deps");
         assert_eq!(payload.related_symbols, "Symbols");
+    }
+
+    #[test]
+    fn parse_json_payload_accepts_uppercase_json_fence() {
+        let text = format!("Here is the result:\n```JSON\n{}\n```", raw_payload());
+        let payload = parse_json_payload(&text).expect("parse uppercase fenced payload");
+        assert_eq!(payload.summary, "Summary");
+    }
+
+    #[test]
+    fn parse_json_payload_accepts_generic_fence() {
+        let text = format!("Here is the result:\n```\n{}\n```", raw_payload());
+        let payload = parse_json_payload(&text).expect("parse generic fenced payload");
+        assert_eq!(payload.dependencies, "Deps");
     }
 
     #[test]
@@ -1537,5 +1562,51 @@ mod tests {
 
         assert_eq!(payload.hunks.len(), 1);
         assert_eq!(payload.hunks[0].old_text, "    old()");
+    }
+
+    #[test]
+    fn parse_fix_payload_accepts_uppercase_json_fence() {
+        let text = r#"```JSON
+{
+  "summary": "Replace old call.",
+  "hunks": [
+    {
+      "line_start": 2,
+      "line_end": 2,
+      "old_text": "    old()",
+      "new_text": "    new()",
+      "reason": "E0101"
+    }
+  ]
+}
+```"#;
+
+        let payload = parse_fix_payload(text).expect("parse uppercase fenced fix payload");
+        assert_eq!(payload.summary, "Replace old call.");
+        assert_eq!(payload.hunks.len(), 1);
+        assert_eq!(payload.hunks[0].new_text, "    new()");
+    }
+
+    #[test]
+    fn parse_fix_payload_accepts_generic_fence() {
+        let text = r#"```
+{
+  "summary": "Insert helper.",
+  "hunks": [
+    {
+      "line_start": 4,
+      "line_end": 4,
+      "old_text": "",
+      "new_text": "action helper {}",
+      "reason": "E0101"
+    }
+  ]
+}
+```"#;
+
+        let payload = parse_fix_payload(text).expect("parse generic fenced fix payload");
+        assert_eq!(payload.summary, "Insert helper.");
+        assert_eq!(payload.hunks.len(), 1);
+        assert_eq!(payload.hunks[0].line_start, 4);
     }
 }

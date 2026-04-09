@@ -203,31 +203,34 @@
 
    1. Trademark
 
-   The name "Fidan", the Fidan logo, and related branding are
+   The name "Fidan", the Fidan logo, and all related branding are
    trademarks of Kaan Gönüldinc (AppSolves).
 
-   This license does not grant permission to use the "Fidan" name
-   or branding for derivative languages, forks, or competing
-   distributions without explicit written permission.
+   This license does NOT grant permission to use the "Fidan" name,
+   logo, or branding for:
 
-   Forks or modified versions of the language must not present
-   themselves as the official Fidan language.
+   • derivative languages
+   • forks or modified versions
+   • competing distributions
+
+   without explicit prior written permission.
+
+   Any fork or modified version of the software must:
+
+   • use a different name
+   • not imply affiliation with the original Fidan Project
+   • not present itself as the official Fidan language
 
 
-   2. Commercial Redistribution of the Language
+   2. Commercial Use Clarification
 
-   The Fidan™ programming language itself — including its source code,
-   compiler, interpreter, runtime, official distributions, and official
-   extensions — may not be sold or marketed as a standalone commercial product
-   or programming language distribution without explicit written
-   permission from the copyright holder.
+   This project is licensed under the Apache License 2.0.
 
-   This restriction does NOT apply to:
+   Commercial use, distribution, and sale of the software are fully
+   permitted under the terms of the Apache License 2.0.
 
-   • distribution of Fidan through open-source package managers
-   • distribution as part of operating system repositories
-   • inclusion of Fidan in development environments or toolchains
-   • software written using the Fidan programming language
+   However, any commercial use of the "Fidan" name, branding, or
+   identity remains subject to the trademark restrictions above.
 
-   Programs written in Fidan may be used, distributed, and sold
-   commercially without restriction.
+   No commercial entity may imply official affiliation, endorsement,
+   or origin from the Fidan Project without explicit permission.

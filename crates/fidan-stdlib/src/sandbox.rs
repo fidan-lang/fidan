@@ -164,7 +164,9 @@ impl SandboxPolicy {
     /// Returns `Ok(())` if allowed, or `Err(SandboxViolation)` if denied.
     /// The caller is responsible for mapping `SandboxViolation` to the
     /// appropriate diagnostic code and `RunError`.
-    pub fn check_io_call(&self, fn_name: &str, first_arg: &str) -> Result<(), SandboxViolation> {
+    pub fn check_io_call(&self, fn_name: &str, args: &[&str]) -> Result<(), SandboxViolation> {
+        let first_arg = args.first().copied().unwrap_or("");
+        let second_arg = args.get(1).copied().unwrap_or("");
         match fn_name {
             // ── File reads ────────────────────────────────────────────────────
             "readFile" | "read_file" | "fileExists" | "file_exists" | "exists" | "isFile"
@@ -179,10 +181,39 @@ impl SandboxPolicy {
                     })
                 }
             }
+            "copyFile" | "copy_file" => {
+                if !self.allow_read.permits(first_arg) {
+                    return Err(SandboxViolation::ReadDenied {
+                        fn_name: fn_name.to_string(),
+                        path: first_arg.to_string(),
+                    });
+                }
+                if !self.allow_write.permits(second_arg) {
+                    return Err(SandboxViolation::WriteDenied {
+                        fn_name: fn_name.to_string(),
+                        path: second_arg.to_string(),
+                    });
+                }
+                Ok(())
+            }
+            "renameFile" | "rename_file" | "moveFile" | "move_file" => {
+                if !self.allow_write.permits(first_arg) {
+                    return Err(SandboxViolation::WriteDenied {
+                        fn_name: fn_name.to_string(),
+                        path: first_arg.to_string(),
+                    });
+                }
+                if !self.allow_write.permits(second_arg) {
+                    return Err(SandboxViolation::WriteDenied {
+                        fn_name: fn_name.to_string(),
+                        path: second_arg.to_string(),
+                    });
+                }
+                Ok(())
+            }
             // ── File writes ───────────────────────────────────────────────────
             "writeFile" | "write_file" | "appendFile" | "append_file" | "deleteFile"
-            | "delete_file" | "makeDir" | "make_dir" | "mkdir" | "renameFile" | "rename_file"
-            | "copyFile" | "copy_file" => {
+            | "delete_file" | "makeDir" | "make_dir" | "mkdir" => {
                 if self.allow_write.permits(first_arg) {
                     Ok(())
                 } else {
@@ -206,6 +237,64 @@ impl SandboxPolicy {
             // Everything else (print, readLine, flush, path utils) is always allowed.
             _ => Ok(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SandboxPolicy, SandboxViolation};
+
+    #[test]
+    fn copy_file_requires_readable_source_and_writable_destination() {
+        let policy = SandboxPolicy::default()
+            .with_allow_read_prefix("/allowed/source")
+            .with_allow_write_prefix("/allowed/dest");
+
+        assert!(
+            policy
+                .check_io_call(
+                    "copyFile",
+                    &["/allowed/source/input.txt", "/allowed/dest/output.txt"],
+                )
+                .is_ok()
+        );
+
+        assert!(matches!(
+            policy.check_io_call(
+                "copyFile",
+                &["/blocked/input.txt", "/allowed/dest/output.txt"],
+            ),
+            Err(SandboxViolation::ReadDenied { path, .. }) if path == "/blocked/input.txt"
+        ));
+
+        assert!(matches!(
+            policy.check_io_call(
+                "copyFile",
+                &["/allowed/source/input.txt", "/blocked/output.txt"],
+            ),
+            Err(SandboxViolation::WriteDenied { path, .. }) if path == "/blocked/output.txt"
+        ));
+    }
+
+    #[test]
+    fn rename_file_requires_writable_source_and_destination() {
+        let policy = SandboxPolicy::default().with_allow_write_prefix("/allowed");
+
+        assert!(
+            policy
+                .check_io_call("renameFile", &["/allowed/from.txt", "/allowed/to.txt"])
+                .is_ok()
+        );
+
+        assert!(matches!(
+            policy.check_io_call("renameFile", &["/blocked/from.txt", "/allowed/to.txt"]),
+            Err(SandboxViolation::WriteDenied { path, .. }) if path == "/blocked/from.txt"
+        ));
+
+        assert!(matches!(
+            policy.check_io_call("renameFile", &["/allowed/from.txt", "/blocked/to.txt"]),
+            Err(SandboxViolation::WriteDenied { path, .. }) if path == "/blocked/to.txt"
+        ));
     }
 }
 

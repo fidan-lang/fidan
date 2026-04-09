@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
-use semver::Version;
+use semver::{Version, VersionReq};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -71,8 +71,10 @@ pub fn fetch_manifest(explicit: Option<&str>) -> Result<DistributionManifest> {
 }
 
 pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
-    if let Some(path) = url.strip_prefix("file://") {
-        return fs::read(path).with_context(|| format!("failed to read `{path}`"));
+    if let Some(path) = resolve_local_file_url(url)? {
+        return fs::read(&path).with_context(|| {
+            format!("failed to read local file URL `{url}` ({})", path.display())
+        });
     }
 
     let response = reqwest::blocking::get(url)
@@ -83,8 +85,10 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
 }
 
 pub fn fetch_text(url: &str) -> Result<String> {
-    if let Some(path) = url.strip_prefix("file://") {
-        return fs::read_to_string(path).with_context(|| format!("failed to read `{path}`"));
+    if let Some(path) = resolve_local_file_url(url)? {
+        return fs::read_to_string(&path).with_context(|| {
+            format!("failed to read local file URL `{url}` ({})", path.display())
+        });
     }
 
     let response = reqwest::blocking::get(url)
@@ -141,6 +145,42 @@ fn download_label(url: &str) -> String {
         .find(|segment| !segment.is_empty())
         .map(ToOwned::to_owned)
         .unwrap_or_else(|| url.to_string())
+}
+
+fn resolve_local_file_url(url: &str) -> Result<Option<PathBuf>> {
+    let Some(rest) = url.strip_prefix("file://") else {
+        return Ok(None);
+    };
+
+    let path_part = if looks_like_windows_drive_path(rest) || rest.starts_with('/') {
+        rest.to_string()
+    } else if let Some(stripped) = rest.strip_prefix("localhost/") {
+        format!("/{stripped}")
+    } else {
+        bail!("unsupported file URL `{url}`");
+    };
+
+    let decoded = urlencoding::decode(&path_part)
+        .with_context(|| format!("failed to decode local file URL `{url}`"))?;
+
+    #[cfg(windows)]
+    {
+        let mut normalized = decoded.replace('/', "\\");
+        if normalized.starts_with('\\') && looks_like_windows_drive_path(&normalized[1..]) {
+            normalized.remove(0);
+        }
+        Ok(Some(PathBuf::from(normalized)))
+    }
+
+    #[cfg(not(windows))]
+    {
+        Ok(Some(PathBuf::from(decoded.as_ref())))
+    }
+}
+
+fn looks_like_windows_drive_path(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 pub fn verify_sha256(bytes: &[u8], expected: &str) -> Result<()> {
@@ -261,6 +301,8 @@ pub fn select_toolchain_release<'a>(
     version: Option<&str>,
     host_triple: &str,
 ) -> Result<&'a ToolchainRelease> {
+    let current_fidan_version = Version::parse(env!("CARGO_PKG_VERSION"))
+        .context("failed to parse current Fidan version for toolchain selection")?;
     let mut candidates = manifest
         .toolchains
         .iter()
@@ -283,17 +325,43 @@ pub fn select_toolchain_release<'a>(
     if let Some(version) = version
         && version != "latest"
     {
-        return candidates
+        let release = candidates
             .into_iter()
             .find(|release| release.toolchain_version == version)
             .with_context(|| {
                 format!(
                     "toolchain `{kind}` version `{version}` is not available for `{host_triple}`"
                 )
-            });
+            })?;
+        let requirement = VersionReq::parse(&release.supported_fidan_versions).with_context(|| {
+            format!(
+                "toolchain `{kind}` version `{version}` has invalid supported_fidan_versions `{}`",
+                release.supported_fidan_versions
+            )
+        })?;
+        if !requirement.matches(&current_fidan_version) {
+            bail!(
+                "toolchain `{kind}` version `{version}` is not compatible with Fidan {} (requires `{}`)",
+                current_fidan_version,
+                release.supported_fidan_versions
+            );
+        }
+        return Ok(release);
     }
 
-    Ok(candidates[0])
+    candidates
+        .into_iter()
+        .find(|release| {
+            VersionReq::parse(&release.supported_fidan_versions)
+                .map(|req| req.matches(&current_fidan_version))
+                .unwrap_or(false)
+        })
+        .with_context(|| {
+            format!(
+                "no compatible `{kind}` toolchain packages are available for host `{host_triple}` and Fidan {}",
+                current_fidan_version
+            )
+        })
 }
 
 pub fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -394,6 +462,119 @@ mod tests {
             "expected source read failure after stale-cache rejection, got {err_text}"
         );
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn test_manifest_with_toolchains(toolchains: Vec<ToolchainRelease>) -> DistributionManifest {
+        DistributionManifest {
+            schema_version: 1,
+            fidan_versions: vec![],
+            toolchains,
+        }
+    }
+
+    fn test_toolchain_release(
+        toolchain_version: &str,
+        supported_fidan_versions: &str,
+    ) -> ToolchainRelease {
+        ToolchainRelease {
+            kind: "ai-analysis".to_string(),
+            toolchain_version: toolchain_version.to_string(),
+            tool_version: "1.0.0".to_string(),
+            host_triple: "x86_64-pc-windows-msvc".to_string(),
+            url: format!("https://example.invalid/{toolchain_version}.tar.gz"),
+            sha256: "abc123".to_string(),
+            helper_relpath: "fidan-ai-analysis-helper.exe".to_string(),
+            exec_commands: vec![],
+            supported_fidan_versions: supported_fidan_versions.to_string(),
+            backend_protocol_version: 1,
+        }
+    }
+
+    #[test]
+    fn select_toolchain_release_prefers_latest_compatible_version() {
+        let manifest = test_manifest_with_toolchains(vec![
+            test_toolchain_release("9.9.9", "^999.0.0"),
+            test_toolchain_release("1.2.0", "^1.0.0"),
+            test_toolchain_release("1.1.0", "^1.0.0"),
+        ]);
+
+        let selected =
+            select_toolchain_release(&manifest, "ai-analysis", None, "x86_64-pc-windows-msvc")
+                .expect("latest compatible toolchain should be selected");
+
+        assert_eq!(selected.toolchain_version, "1.2.0");
+    }
+
+    #[test]
+    fn select_toolchain_release_rejects_explicit_incompatible_version() {
+        let manifest =
+            test_manifest_with_toolchains(vec![test_toolchain_release("9.9.9", "^999.0.0")]);
+
+        let err = select_toolchain_release(
+            &manifest,
+            "ai-analysis",
+            Some("9.9.9"),
+            "x86_64-pc-windows-msvc",
+        )
+        .expect_err("explicit incompatible version should be rejected");
+
+        assert!(err.to_string().contains("is not compatible with Fidan"));
+    }
+
+    #[test]
+    fn select_toolchain_release_errors_when_only_incompatible_versions_exist() {
+        let manifest = test_manifest_with_toolchains(vec![
+            test_toolchain_release("9.9.9", "^999.0.0"),
+            test_toolchain_release("8.0.0", "^998.0.0"),
+        ]);
+
+        let err =
+            select_toolchain_release(&manifest, "ai-analysis", None, "x86_64-pc-windows-msvc")
+                .expect_err("latest should fail when no compatible toolchain exists");
+
+        assert!(
+            err.to_string()
+                .contains("no compatible `ai-analysis` toolchain packages")
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fetch_text_accepts_standard_windows_file_urls() {
+        let dir = test_temp_dir("std-file-url-text");
+        let source = dir.join("manifest.json");
+        fs::write(&source, "{\"schema_version\":1}").expect("failed to write manifest");
+        let url = format!(
+            "file:///{}",
+            source.display().to_string().replace('\\', "/")
+        );
+
+        let text = fetch_text(&url).expect("standard Windows file URL should be readable");
+
+        assert_eq!(text, "{\"schema_version\":1}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn fetch_cached_bytes_accepts_standard_windows_file_urls() {
+        let dir = test_temp_dir("std-file-url-bytes");
+        let source = dir.join("archive.tar.gz");
+        let cache = dir.join("cache.tar.gz");
+        let expected = b"archive-bytes";
+        fs::write(&source, expected).expect("failed to write archive");
+        let url = format!(
+            "file:///{}",
+            source.display().to_string().replace('\\', "/")
+        );
+        let sha = sha256_hex(expected);
+
+        let bytes = fetch_cached_bytes(&url, &cache, &sha)
+            .expect("standard Windows file URL should be readable");
+
+        assert_eq!(bytes, expected);
+        assert_eq!(fs::read(&cache).expect("failed to read cache"), expected);
         let _ = fs::remove_dir_all(&dir);
     }
 }

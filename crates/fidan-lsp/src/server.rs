@@ -819,35 +819,45 @@ fn resolve_user_module_import_url(
     grouped: bool,
 ) -> Option<Url> {
     let parent = current_path.and_then(|path| path.parent())?;
+    let resolved = if grouped && segments.len() > 1 {
+        resolve_user_module_candidate(parent, &[&segments[..segments.len() - 1], segments])
+    } else {
+        resolve_user_module_candidate(parent, &[segments])
+    }?;
+    Url::from_file_path(resolved).ok()
+}
 
-    let mut full_path = parent.to_path_buf();
-    for segment in segments {
-        full_path.push(segment);
-    }
-    full_path.set_extension("fdn");
-
-    if grouped || segments.len() <= 1 {
-        if grouped && segments.len() > 1 {
-            let mut prefix_path = parent.to_path_buf();
-            for segment in &segments[..segments.len() - 1] {
-                prefix_path.push(segment);
+fn resolve_user_module_candidate(
+    base_dir: &Path,
+    segments_sets: &[&[String]],
+) -> Option<std::path::PathBuf> {
+    let mut fallback = None;
+    for segments in segments_sets {
+        for candidate in user_module_path_candidates(base_dir, segments) {
+            if fallback.is_none() {
+                fallback = Some(candidate.clone());
             }
-            prefix_path.set_extension("fdn");
-            return Url::from_file_path(&prefix_path).ok();
+            if candidate.exists() {
+                return Some(candidate);
+            }
         }
-        return Url::from_file_path(&full_path).ok();
+    }
+    fallback
+}
+
+fn user_module_path_candidates(base_dir: &Path, segments: &[String]) -> Vec<std::path::PathBuf> {
+    let (dir_parts, leaf) = segments.split_at(segments.len().saturating_sub(1));
+
+    let mut dir = base_dir.to_path_buf();
+    for part in dir_parts {
+        dir.push(part);
     }
 
-    if full_path.exists() {
-        return Url::from_file_path(&full_path).ok();
-    }
-
-    let mut prefix_path = parent.to_path_buf();
-    for segment in &segments[..segments.len() - 1] {
-        prefix_path.push(segment);
-    }
-    prefix_path.set_extension("fdn");
-    Url::from_file_path(&prefix_path).ok()
+    let leaf = leaf.first().map(|segment| segment.as_str()).unwrap_or("");
+    vec![
+        dir.join(format!("{leaf}.fdn")),
+        dir.join(leaf).join("init.fdn"),
+    ]
 }
 
 fn load_background_document(store: &DocumentStore, url: &Url) -> Option<()> {
@@ -3914,6 +3924,7 @@ mod tests {
     use serde_json::json;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
     use tower_lsp::{LanguageServer, LspService};
 
     fn workspace_root() -> PathBuf {
@@ -3933,6 +3944,16 @@ mod tests {
         workspace_root()
             .join("test/examples/import_test")
             .join(rel_path)
+    }
+
+    fn temp_test_dir(name: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock before unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("fidan-lsp-{name}-{nonce}"));
+        std::fs::create_dir_all(&path).expect("create temp test dir");
+        path
     }
 
     fn background_doc(uri: &Url, text: &str) -> Document {
@@ -4319,6 +4340,56 @@ action greet with (certain name oftype string) returns string {
             direct_url.to_file_path().ok().as_deref(),
             Some(import_test_path("utils_flat.fdn").as_path())
         );
+    }
+
+    #[test]
+    fn resolve_user_module_import_url_supports_init_modules() {
+        let root = temp_test_dir("import-init");
+        let current_path = root.join("main.fdn");
+        let nested_dir = root.join("pkg");
+        std::fs::create_dir_all(&nested_dir).expect("create nested module dir");
+        let init_path = nested_dir.join("init.fdn");
+        std::fs::write(
+            &init_path,
+            "action greet returns string { return \"hi\" }\n",
+        )
+        .expect("write init module");
+
+        let segments = vec!["pkg".to_string()];
+        let resolved = resolve_user_module_import_url(Some(&current_path), &segments, false)
+            .and_then(|url| url.to_file_path().ok());
+
+        assert_eq!(resolved.as_deref(), Some(init_path.as_path()));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn resolve_user_module_import_url_does_not_fallback_non_grouped_to_parent_module() {
+        let root = temp_test_dir("import-non-grouped");
+        let current_path = root.join("main.fdn");
+        let parent_module = root.join("pkg.fdn");
+        std::fs::write(
+            &parent_module,
+            "action greet returns string { return \"hi\" }\n",
+        )
+        .expect("write parent module");
+
+        let grouped_segments = vec!["pkg".to_string(), "member".to_string()];
+        let grouped = resolve_user_module_import_url(Some(&current_path), &grouped_segments, true)
+            .and_then(|url| url.to_file_path().ok());
+        assert_eq!(grouped.as_deref(), Some(parent_module.as_path()));
+
+        let expected_nested_module = root.join("pkg").join("member.fdn");
+        let non_grouped =
+            resolve_user_module_import_url(Some(&current_path), &grouped_segments, false)
+                .and_then(|url| url.to_file_path().ok());
+        assert_eq!(
+            non_grouped.as_deref(),
+            Some(expected_nested_module.as_path())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::{fmt::Write as _, string::String};
 
 use crate::parallel::FidanPending;
 use crate::{
@@ -241,85 +242,147 @@ impl FidanValue {
 /// This is the single source of truth — `fidan-interp::builtins::display` and
 /// `fidan-stdlib::io::format_val` both delegate here so the output is consistent.
 pub fn display(val: &FidanValue) -> String {
+    let mut out = String::new();
+    display_into(&mut out, val);
+    out
+}
+
+pub(crate) fn display_into(out: &mut String, val: &FidanValue) {
     match val {
-        FidanValue::Integer(n) => n.to_string(),
+        FidanValue::Integer(n) => {
+            let _ = write!(out, "{n}");
+        }
         FidanValue::Float(f) => {
             if f.fract() == 0.0 {
-                format!("{:.1}", f)
+                let _ = write!(out, "{f:.1}");
             } else {
-                f.to_string()
+                let _ = write!(out, "{f}");
             }
         }
-        FidanValue::Boolean(b) => b.to_string(),
-        FidanValue::Handle(h) => format!("handle({h:#x})"),
-        FidanValue::Nothing => "nothing".to_string(),
-        FidanValue::String(s) => s.as_str().to_string(),
+        FidanValue::Boolean(b) => {
+            let _ = write!(out, "{b}");
+        }
+        FidanValue::Handle(h) => {
+            let _ = write!(out, "handle({h:#x})");
+        }
+        FidanValue::Nothing => out.push_str("nothing"),
+        FidanValue::String(s) => out.push_str(s.as_str()),
         FidanValue::List(l) => {
-            let items: Vec<String> = l.borrow().iter().map(display).collect();
-            format!("[{}]", items.join(", "))
+            out.push('[');
+            for (index, item) in l.borrow().iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                display_into(out, item);
+            }
+            out.push(']');
         }
         FidanValue::Dict(d) => {
             let borrowed = d.borrow();
             // If the dict has a "__class__" entry it's an AOT object — display as <ClassName>.
             let class_key = FidanValue::String(FidanString::new("__class__"));
             if let Ok(Some(FidanValue::String(cn))) = borrowed.get(&class_key) {
-                return format!("<{}>", cn.as_str());
+                out.push('<');
+                out.push_str(cn.as_str());
+                out.push('>');
+                return;
             }
-            let pairs: Vec<String> = borrowed
-                .entries_sorted()
-                .into_iter()
-                .map(|(k, v)| format!("{}: {}", display(&k), display(&v)))
-                .collect();
-            format!("{{{}}}", pairs.join(", "))
+            out.push('{');
+            for (index, (key, value)) in borrowed.entries_sorted_refs().into_iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                display_into(out, key);
+                out.push_str(": ");
+                display_into(out, value);
+            }
+            out.push('}');
         }
         FidanValue::HashSet(set) => {
-            let items: Vec<String> = set.borrow().values_sorted().iter().map(display).collect();
-            format!("hashset({{{}}})", items.join(", "))
+            out.push_str("hashset({");
+            for (index, value) in set.borrow().values_sorted_refs().into_iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                display_into(out, value);
+            }
+            out.push_str("})");
         }
         FidanValue::Tuple(items) => {
-            let parts: Vec<String> = items.iter().map(display).collect();
-            format!("({})", parts.join(", "))
+            out.push('(');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                display_into(out, item);
+            }
+            out.push(')');
         }
         FidanValue::Object(o) => {
             let name = o.borrow().class.name_str.clone();
-            format!("<{}>", name)
+            out.push('<');
+            out.push_str(&name);
+            out.push('>');
         }
         FidanValue::Shared(s) => {
             let inner = s.0.lock().unwrap();
-            format!("Shared({})", display(&inner))
+            out.push_str("Shared(");
+            display_into(out, &inner);
+            out.push(')');
         }
         FidanValue::WeakShared(ws) => {
             if let Some(shared) = ws.upgrade() {
                 let inner = shared.0.lock().unwrap();
-                format!("WeakShared({})", display(&inner))
+                out.push_str("WeakShared(");
+                display_into(out, &inner);
+                out.push(')');
             } else {
-                "WeakShared(<collected>)".to_string()
+                out.push_str("WeakShared(<collected>)");
             }
         }
-        FidanValue::Pending(_) | FidanValue::PendingTask(_) => "<pending>".to_string(),
-        FidanValue::Function(id) => format!("<action#{}>", id.0),
-        FidanValue::Closure { fn_id, .. } => format!("<action#{}>", fn_id.0),
-        FidanValue::Namespace(m) => format!("<module:{}>", m),
-        FidanValue::StdlibFn(module, name) => format!("<action:{}.{}>", module, name),
-        FidanValue::EnumType(s) => format!("<enum:{}>", s),
+        FidanValue::Pending(_) | FidanValue::PendingTask(_) => out.push_str("<pending>"),
+        FidanValue::Function(id) => {
+            let _ = write!(out, "<action#{}>", id.0);
+        }
+        FidanValue::Closure { fn_id, .. } => {
+            let _ = write!(out, "<action#{}>", fn_id.0);
+        }
+        FidanValue::Namespace(m) => {
+            let _ = write!(out, "<module:{m}>");
+        }
+        FidanValue::StdlibFn(module, name) => {
+            let _ = write!(out, "<action:{module}.{name}>");
+        }
+        FidanValue::EnumType(s) => {
+            let _ = write!(out, "<enum:{s}>");
+        }
         FidanValue::EnumVariant { tag, payload } => {
             if payload.is_empty() {
-                tag.as_ref().to_string()
+                out.push_str(tag);
             } else {
-                let args: Vec<String> = payload.iter().map(display).collect();
-                format!("{}({})", tag, args.join(", "))
+                out.push_str(tag);
+                out.push('(');
+                for (index, item) in payload.iter().enumerate() {
+                    if index > 0 {
+                        out.push_str(", ");
+                    }
+                    display_into(out, item);
+                }
+                out.push(')');
             }
         }
-        FidanValue::ClassType(s) => format!("<class:{}>", s),
+        FidanValue::ClassType(s) => {
+            let _ = write!(out, "<class:{s}>");
+        }
         FidanValue::Range {
             start,
             end,
             inclusive,
         } => {
             if *inclusive {
-                format!("{}...{}", start, end)
+                let _ = write!(out, "{start}...{end}");
             } else {
-                format!("{}..{}", start, end)
+                let _ = write!(out, "{start}..{end}");
             }
         }
     }

@@ -75,14 +75,14 @@ fn decode_tagged_json_object(entries: &JsonMap<String, JsonValue>) -> Option<Fid
 
 fn plain_json_object(dict: &FidanDict) -> Option<JsonMap<String, JsonValue>> {
     let mut map = JsonMap::new();
-    for (key, value) in dict.entries_sorted() {
+    for (key, value) in dict.entries_sorted_refs() {
         let FidanValue::String(key) = key else {
             return None;
         };
         if key.as_str() == FIDAN_TAG_KEY {
             return None;
         }
-        map.insert(key.as_str().to_string(), fidan_to_json(&value));
+        map.insert(key.as_str().to_string(), fidan_to_json(value));
     }
     Some(map)
 }
@@ -93,18 +93,18 @@ fn fidan_dict_to_json(dict: &FidanDict) -> JsonValue {
     }
 
     let entries = dict
-        .entries_sorted()
+        .entries_sorted_refs()
         .into_iter()
-        .map(|(key, value)| JsonValue::Array(vec![fidan_to_json(&key), fidan_to_json(&value)]))
+        .map(|(key, value)| JsonValue::Array(vec![fidan_to_json(key), fidan_to_json(value)]))
         .collect();
     tagged_json_value(FIDAN_DICT_TAG, FIDAN_ENTRIES_KEY, JsonValue::Array(entries))
 }
 
 fn fidan_hashset_to_json(set: &FidanHashSet) -> JsonValue {
     let items = set
-        .values_sorted()
+        .values_sorted_refs()
         .into_iter()
-        .map(|value| fidan_to_json(&value))
+        .map(fidan_to_json)
         .collect();
     tagged_json_value(FIDAN_HASHSET_TAG, FIDAN_ITEMS_KEY, JsonValue::Array(items))
 }

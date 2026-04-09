@@ -2244,17 +2244,17 @@ impl MirMachine {
         if let Some(ref policy) = self.sandbox
             && module == "io"
         {
-            let first_arg = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::String(s) = v {
+            let string_args: Vec<&str> = args
+                .iter()
+                .filter_map(|value| {
+                    if let FidanValue::String(s) = value {
                         Some(s.as_str())
                     } else {
                         None
                     }
                 })
-                .unwrap_or("");
-            if let Err(violation) = policy.check_io_call(name, first_arg) {
+                .collect();
+            if let Err(violation) = policy.check_io_call(name, &string_args) {
                 let (code, msg) = match &violation {
                     SandboxViolation::ReadDenied { .. } => {
                         (fidan_diagnostics::diag_code!("R4001"), violation.message())

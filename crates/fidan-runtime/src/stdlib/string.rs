@@ -2,6 +2,47 @@ use crate::{FidanList, FidanValue, OwnedRef};
 
 use super::common::{coerce_string, string_value};
 
+fn char_len(s: &str) -> usize {
+    s.chars().count()
+}
+
+fn char_index_of(s: &str, pat: &str) -> i64 {
+    s.find(pat)
+        .map(|byte_index| char_len(&s[..byte_index]) as i64)
+        .unwrap_or(-1)
+}
+
+fn char_last_index_of(s: &str, pat: &str) -> i64 {
+    s.rfind(pat)
+        .map(|byte_index| char_len(&s[..byte_index]) as i64)
+        .unwrap_or(-1)
+}
+
+fn clamp_char_index(len: usize, value: Option<&FidanValue>, default: usize) -> usize {
+    match value {
+        Some(FidanValue::Integer(n)) if *n <= 0 => 0,
+        Some(FidanValue::Integer(n)) => (*n as usize).min(len),
+        _ => default,
+    }
+}
+
+fn pad_string(s: &str, width: usize, pad_char: char, pad_start: bool) -> String {
+    let current_width = char_len(s);
+    if current_width >= width {
+        return s.to_string();
+    }
+    let pad_count = width - current_width;
+    let mut padded = String::with_capacity(s.len() + pad_count * pad_char.len_utf8());
+    if pad_start {
+        padded.extend(std::iter::repeat_n(pad_char, pad_count));
+        padded.push_str(s);
+    } else {
+        padded.push_str(s);
+        padded.extend(std::iter::repeat_n(pad_char, pad_count));
+    }
+    padded
+}
+
 pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
     match name {
         "fromChars" | "from_chars" => {
@@ -70,12 +111,17 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "join" => {
             let sep = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
             let list = match args.get(1) {
-                Some(FidanValue::List(l)) => {
-                    l.borrow().iter().map(coerce_string).collect::<Vec<_>>()
-                }
+                Some(FidanValue::List(l)) => l.borrow(),
                 _ => return Some(string_value("")),
             };
-            Some(string_value(&list.join(&sep)))
+            let mut joined = String::new();
+            for (index, value) in list.iter().enumerate() {
+                if index > 0 {
+                    joined.push_str(&sep);
+                }
+                joined.push_str(&coerce_string(value));
+            }
+            Some(string_value(&joined))
         }
         "lines" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
@@ -103,16 +149,12 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "indexOf" | "index_of" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
             let pat = coerce_string(args.get(1).unwrap_or(&FidanValue::Nothing));
-            Some(FidanValue::Integer(
-                s.find(pat.as_str()).map(|i| i as i64).unwrap_or(-1),
-            ))
+            Some(FidanValue::Integer(char_index_of(&s, pat.as_str())))
         }
         "lastIndexOf" | "last_index_of" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
             let pat = coerce_string(args.get(1).unwrap_or(&FidanValue::Nothing));
-            Some(FidanValue::Integer(
-                s.rfind(pat.as_str()).map(|i| i as i64).unwrap_or(-1),
-            ))
+            Some(FidanValue::Integer(char_last_index_of(&s, pat.as_str())))
         }
         "replace" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
@@ -130,15 +172,13 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
             let chars: Vec<char> = s.chars().collect();
             let len = chars.len();
-            let start = match args.get(1) {
-                Some(FidanValue::Integer(n)) => (*n).max(0) as usize,
-                _ => 0,
+            let start = clamp_char_index(len, args.get(1), 0);
+            let end = clamp_char_index(len, args.get(2), len);
+            let sub: String = if start >= end {
+                String::new()
+            } else {
+                chars[start..end].iter().collect()
             };
-            let end = match args.get(2) {
-                Some(FidanValue::Integer(n)) => (*n as usize).min(len),
-                _ => len,
-            };
-            let sub: String = chars[start.min(len)..end.min(len)].iter().collect();
             Some(string_value(&sub))
         }
         "padStart" | "pad_start" => {
@@ -152,12 +192,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 .map(coerce_string)
                 .unwrap_or_else(|| " ".to_string());
             let pad_char = pad.chars().next().unwrap_or(' ');
-            if s.len() >= width {
-                Some(string_value(&s))
-            } else {
-                let padding: String = std::iter::repeat_n(pad_char, width - s.len()).collect();
-                Some(string_value(&format!("{padding}{s}")))
-            }
+            Some(string_value(&pad_string(&s, width, pad_char, true)))
         }
         "padEnd" | "pad_end" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
@@ -170,12 +205,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 .map(coerce_string)
                 .unwrap_or_else(|| " ".to_string());
             let pad_char = pad.chars().next().unwrap_or(' ');
-            if s.len() >= width {
-                Some(string_value(&s))
-            } else {
-                let padding: String = std::iter::repeat_n(pad_char, width - s.len()).collect();
-                Some(string_value(&format!("{s}{padding}")))
-            }
+            Some(string_value(&pad_string(&s, width, pad_char, false)))
         }
         "repeat" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
@@ -308,4 +338,73 @@ pub fn exported_names() -> &'static [&'static str] {
         "fromCharCode",
         "from_char_code",
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch;
+    use crate::{FidanString, FidanValue};
+
+    fn string_arg(value: &str) -> FidanValue {
+        FidanValue::String(FidanString::new(value))
+    }
+
+    fn dispatch_string(name: &str, args: Vec<FidanValue>) -> String {
+        match dispatch(name, args) {
+            Some(FidanValue::String(value)) => value.as_str().to_string(),
+            other => panic!("expected string result, got {other:?}"),
+        }
+    }
+
+    fn dispatch_integer(name: &str, args: Vec<FidanValue>) -> i64 {
+        match dispatch(name, args) {
+            Some(FidanValue::Integer(value)) => value,
+            other => panic!("expected integer result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn index_of_reports_character_offset_for_unicode_strings() {
+        assert_eq!(
+            dispatch_integer("indexOf", vec![string_arg("aéz"), string_arg("z")]),
+            2
+        );
+        assert_eq!(
+            dispatch_integer("lastIndexOf", vec![string_arg("éaé"), string_arg("é")]),
+            2
+        );
+    }
+
+    #[test]
+    fn slice_returns_empty_when_start_exceeds_end() {
+        assert_eq!(
+            dispatch_string(
+                "slice",
+                vec![
+                    string_arg("abcdef"),
+                    FidanValue::Integer(4),
+                    FidanValue::Integer(2),
+                ],
+            ),
+            ""
+        );
+    }
+
+    #[test]
+    fn pad_start_and_end_count_unicode_characters() {
+        assert_eq!(
+            dispatch_string(
+                "padStart",
+                vec![string_arg("é"), FidanValue::Integer(2), string_arg("0")],
+            ),
+            "0é"
+        );
+        assert_eq!(
+            dispatch_string(
+                "padEnd",
+                vec![string_arg("é"), FidanValue::Integer(2), string_arg("0")],
+            ),
+            "é0"
+        );
+    }
 }

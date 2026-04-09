@@ -562,10 +562,14 @@ pub unsafe extern "C" fn fdn_println(ptr: *mut FidanValue) {
 /// `ptrs` is an array of `n` `*mut FidanValue` pointers.  Borrows each.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_print_many(ptrs: *const *mut FidanValue, n: i64) {
-    let parts: Vec<String> = (0..n as usize)
-        .map(|i| display(borrow(*ptrs.add(i))).to_string())
-        .collect();
-    println!("{}", parts.join(" "));
+    let mut rendered = String::new();
+    for i in 0..n as usize {
+        if i > 0 {
+            rendered.push(' ');
+        }
+        crate::value::display_into(&mut rendered, borrow(*ptrs.add(i)));
+    }
+    println!("{rendered}");
 }
 
 /// Print without newline.  Borrows `ptr`.

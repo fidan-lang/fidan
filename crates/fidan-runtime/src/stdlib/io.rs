@@ -1,17 +1,30 @@
-use crate::{FidanList, FidanValue, OwnedRef, current_program_args, display as format_val};
+use crate::value::display_into;
+use crate::{FidanList, FidanValue, OwnedRef, current_program_args};
 
 use super::common::{coerce_string, display_string, string_value};
 
 pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
     match name {
         "print" => {
-            let parts: Vec<String> = args.iter().map(format_val).collect();
-            println!("{}", parts.join(" "));
+            let mut rendered = String::new();
+            for (index, value) in args.iter().enumerate() {
+                if index > 0 {
+                    rendered.push(' ');
+                }
+                display_into(&mut rendered, value);
+            }
+            println!("{rendered}");
             Some(FidanValue::Nothing)
         }
         "eprint" => {
-            let parts: Vec<String> = args.iter().map(format_val).collect();
-            eprintln!("{}", parts.join(" "));
+            let mut rendered = String::new();
+            for (index, value) in args.iter().enumerate() {
+                if index > 0 {
+                    rendered.push(' ');
+                }
+                display_into(&mut rendered, value);
+            }
+            eprintln!("{rendered}");
             Some(FidanValue::Nothing)
         }
         "readLine" | "read_line" | "readline" => {
@@ -152,7 +165,15 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "absolutePath" | "absolute_path" => {
             let path = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
-            let abs = std::fs::canonicalize(&path)
+            let path_buf = std::path::PathBuf::from(&path);
+            let abs = std::fs::canonicalize(&path_buf)
+                .or_else(|_| {
+                    if path_buf.is_absolute() {
+                        Ok(path_buf.clone())
+                    } else {
+                        std::env::current_dir().map(|cwd| cwd.join(&path_buf))
+                    }
+                })
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or(path);
             Some(string_value(&abs))
@@ -265,4 +286,31 @@ pub fn exported_names() -> &'static [&'static str] {
         "flush",
         "isatty",
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dispatch;
+    use crate::FidanValue;
+
+    fn string_arg(value: &str) -> FidanValue {
+        FidanValue::String(crate::FidanString::new(value))
+    }
+
+    #[test]
+    fn absolute_path_makes_missing_relative_paths_absolute() {
+        let missing = "fidan-runtime-missing-path-check/file.txt";
+        let value = dispatch("absolutePath", vec![string_arg(missing)]).expect("dispatch result");
+
+        let FidanValue::String(path) = value else {
+            panic!("expected absolutePath to return a string");
+        };
+        let path = std::path::PathBuf::from(path.as_str());
+        assert!(
+            path.is_absolute(),
+            "expected absolute path, got {}",
+            path.display()
+        );
+        assert!(path.ends_with(std::path::Path::new(missing)));
+    }
 }

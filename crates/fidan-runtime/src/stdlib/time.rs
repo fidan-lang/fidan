@@ -53,19 +53,59 @@ fn format_default(ms: i64) -> String {
 
 fn format_with(ms: i64, fmt: &str) -> String {
     let (y, mo, d, h, mi, s) = ms_to_civil(ms);
-    fmt.replace("%Y", &format!("{y:04}"))
-        .replace("%m", &format!("{mo:02}"))
-        .replace("%d", &format!("{d:02}"))
-        .replace("%H", &format!("{h:02}"))
-        .replace("%M", &format!("{mi:02}"))
-        .replace("%S", &format!("{s:02}"))
-        .replace("%L", &format!("{:03}", (ms.abs() % 1000) as u32))
-        .replace("YYYY", &format!("{y:04}"))
-        .replace("MM", &format!("{mo:02}"))
-        .replace("DD", &format!("{d:02}"))
-        .replace("HH", &format!("{h:02}"))
-        .replace("mm", &format!("{mi:02}"))
-        .replace("ss", &format!("{s:02}"))
+    let year = format!("{y:04}");
+    let month = format!("{mo:02}");
+    let day = format!("{d:02}");
+    let hour = format!("{h:02}");
+    let minute = format!("{mi:02}");
+    let second = format!("{s:02}");
+    let millis = format!("{:03}", ms.rem_euclid(1000) as u32);
+
+    let mut out = String::with_capacity(fmt.len() + 8);
+    let mut index = 0;
+    while index < fmt.len() {
+        let rest = &fmt[index..];
+        let replacement = if rest.starts_with("%Y") {
+            Some((year.as_str(), 2))
+        } else if rest.starts_with("%m") {
+            Some((month.as_str(), 2))
+        } else if rest.starts_with("%d") {
+            Some((day.as_str(), 2))
+        } else if rest.starts_with("%H") {
+            Some((hour.as_str(), 2))
+        } else if rest.starts_with("%M") {
+            Some((minute.as_str(), 2))
+        } else if rest.starts_with("%S") {
+            Some((second.as_str(), 2))
+        } else if rest.starts_with("%L") {
+            Some((millis.as_str(), 2))
+        } else if rest.starts_with("YYYY") {
+            Some((year.as_str(), 4))
+        } else if rest.starts_with("MM") {
+            Some((month.as_str(), 2))
+        } else if rest.starts_with("DD") {
+            Some((day.as_str(), 2))
+        } else if rest.starts_with("HH") {
+            Some((hour.as_str(), 2))
+        } else if rest.starts_with("mm") {
+            Some((minute.as_str(), 2))
+        } else if rest.starts_with("ss") {
+            Some((second.as_str(), 2))
+        } else {
+            None
+        };
+
+        if let Some((value, consumed)) = replacement {
+            out.push_str(value);
+            index += consumed;
+        } else {
+            let ch = rest.chars().next().unwrap();
+            out.push(ch);
+            index += ch.len_utf8();
+        }
+    }
+
+    out
 }
 
 pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
@@ -200,4 +240,37 @@ pub fn exported_names() -> &'static [&'static str] {
         "second",
         "weekday",
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dispatch, format_with};
+    use crate::{FidanString, FidanValue};
+
+    fn dispatch_string(name: &str, args: Vec<FidanValue>) -> String {
+        match dispatch(name, args) {
+            Some(FidanValue::String(value)) => value.as_str().to_string(),
+            other => panic!("expected string result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn format_supports_percent_and_named_tokens_in_one_pass() {
+        let formatted = dispatch_string(
+            "format",
+            vec![
+                FidanValue::Integer(1_735_689_904_321),
+                FidanValue::String(FidanString::new("%Y-%m-%d HH:mm:ss.%L")),
+            ],
+        );
+        assert_eq!(formatted, "2025-01-01 00:05:04.321");
+    }
+
+    #[test]
+    fn format_uses_positive_millisecond_component_for_negative_timestamps() {
+        assert_eq!(
+            format_with(-1, "%Y-%m-%d %H:%M:%S.%L"),
+            "1969-12-31 23:59:59.999"
+        );
+    }
 }

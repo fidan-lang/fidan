@@ -54,16 +54,23 @@ impl FidanDict {
         self.inner.values().map(|(key, value)| (key, value))
     }
 
-    pub fn entries_sorted(&self) -> Vec<(FidanValue, FidanValue)> {
+    pub fn entries_sorted_refs(&self) -> Vec<(&FidanValue, &FidanValue)> {
         let mut entries: Vec<_> = self
             .inner
             .iter()
-            .map(|(hashed, (key, value))| (hashed.clone(), key.clone(), value.clone()))
+            .map(|(hashed, (key, value))| (hashed, key, value))
             .collect();
-        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
         entries
             .into_iter()
             .map(|(_, key, value)| (key, value))
+            .collect()
+    }
+
+    pub fn entries_sorted(&self) -> Vec<(FidanValue, FidanValue)> {
+        self.entries_sorted_refs()
+            .into_iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     }
 }
@@ -71,5 +78,41 @@ impl FidanDict {
 impl Default for FidanDict {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FidanDict;
+    use crate::{FidanString, FidanValue};
+
+    #[test]
+    fn entries_sorted_refs_preserve_entries_sorted_order() {
+        let mut dict = FidanDict::new();
+        let _ = dict.insert(
+            FidanValue::String(FidanString::new("b")),
+            FidanValue::Integer(2),
+        );
+        let _ = dict.insert(
+            FidanValue::String(FidanString::new("a")),
+            FidanValue::Integer(1),
+        );
+
+        let owned = dict.entries_sorted();
+        let borrowed: Vec<(FidanValue, FidanValue)> = dict
+            .entries_sorted_refs()
+            .into_iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        assert_eq!(
+            owned
+                .iter()
+                .map(|(key, value)| (crate::display(key), crate::display(value)))
+                .collect::<Vec<_>>(),
+            borrowed
+                .iter()
+                .map(|(key, value)| (crate::display(key), crate::display(value)))
+                .collect::<Vec<_>>()
+        );
     }
 }
