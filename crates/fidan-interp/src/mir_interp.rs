@@ -2050,6 +2050,9 @@ impl MirMachine {
                         let n = Arc::clone(name);
                         self.dispatch_stdlib_call(&m, &n, args)
                     }
+                    FidanValue::ClassType(ref class_name) => {
+                        self.instantiate_class_value(class_name.as_ref(), args)
+                    }
                     _ => Err(MirSignal::Panic(format!(
                         "cannot call value of type `{}`",
                         v.type_name()
@@ -2381,6 +2384,36 @@ impl MirMachine {
             obj.set_field(sym, val);
         }
         Ok(FidanValue::Object(OwnedRef::new(obj)))
+    }
+
+    fn instantiate_class_value(
+        &mut self,
+        class_name: &str,
+        args: Vec<FidanValue>,
+    ) -> Result<FidanValue, MirSignal> {
+        let Some(obj_info) = self
+            .program
+            .objects
+            .iter()
+            .find(|obj| self.interner.resolve(obj.name).as_ref() == class_name)
+        else {
+            return Err(MirSignal::Panic(format!("unknown class `{class_name}`")));
+        };
+
+        let class = self.classes.get(&obj_info.name).cloned().ok_or_else(|| {
+            MirSignal::Panic(format!("runtime class metadata missing for `{class_name}`"))
+        })?;
+
+        let object = FidanValue::Object(OwnedRef::new(FidanObject::new(class)));
+
+        if let Some(init_fn) = obj_info.init_fn {
+            let mut init_args = Vec::with_capacity(args.len() + 1);
+            init_args.push(object.clone());
+            init_args.extend(args);
+            let _ = self.call_function(init_fn, init_args)?;
+        }
+
+        Ok(object)
     }
 
     // ── Field access ──────────────────────────────────────────────────────────

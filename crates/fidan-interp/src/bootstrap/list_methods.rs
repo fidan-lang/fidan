@@ -25,6 +25,7 @@ pub fn dispatch(r: OwnedRef<FidanList>, method: &str, args: Vec<FidanValue>) -> 
             Some(FidanValue::Nothing)
         }
         "len" => Some(FidanValue::Integer(r.borrow().len() as i64)),
+        "isEmpty" => Some(FidanValue::Boolean(r.borrow().is_empty())),
         "get" => {
             if let Some(FidanValue::Integer(i)) = args.first() {
                 Some(
@@ -120,6 +121,9 @@ pub fn dispatch(r: OwnedRef<FidanList>, method: &str, args: Vec<FidanValue>) -> 
                 .collect();
             Some(FidanValue::String(FidanString::new(&parts.join(&sep_str))))
         }
+        "toString" => Some(FidanValue::String(FidanString::new(
+            &fidan_runtime::display(&FidanValue::List(r.clone())),
+        ))),
         "contains" => {
             let target = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             let found = r.borrow().iter().any(|v| values_equal(v, &target));

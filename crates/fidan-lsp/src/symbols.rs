@@ -36,6 +36,9 @@ pub struct SymbolEntry {
     pub ty_name: Option<String>,
     /// Used by the LSP to validate cross-module call argument types.
     pub param_types: Vec<String>,
+    /// For object declarations: the parent object type name, used to walk
+    /// inheritance chains across documents without overloading `ty_name`.
+    pub parent_type_name: Option<String>,
     /// For Method/Action entries: whether each parameter is required (`!optional`).
     /// Used by the LSP to emit E0301 when a required arg is not provided.
     pub param_required: Vec<bool>,
@@ -319,6 +322,7 @@ fn make_var_entry(
         span,
         detail: format!("```fidan\n{} {} -> {}\n```", kw, name, ty_rendered),
         ty_name,
+        parent_type_name: None,
         param_types: vec![],
         param_required: vec![],
         return_type: None,
@@ -353,6 +357,7 @@ fn make_loop_binding_entry(
                 FidanType::List(inner) => resolved_type_name(inner, interner),
                 other => resolved_type_name(other, interner),
             }),
+        parent_type_name: None,
         param_types: vec![],
         param_required: vec![],
         return_type: None,
@@ -383,6 +388,7 @@ fn make_param_entry_from_typed(
             span: param.span,
             detail: format!("```fidan\n{}{} -> {}\n```", prefix, name, ty_s),
             ty_name,
+            parent_type_name: None,
             param_types: vec![],
             param_required: vec![],
             return_type: None,
@@ -414,6 +420,7 @@ fn make_param_entry_from_ast(param: &Param, interner: &SymbolInterner) -> (Strin
             span: param.span,
             detail: format!("```fidan\n{}{} -> {}\n```", prefix, name, ty_s),
             ty_name,
+            parent_type_name: None,
             param_types: vec![],
             param_required: vec![],
             return_type: None,
@@ -464,6 +471,7 @@ fn build_builtin_receiver_member_entries(table: &mut SymbolTable) {
                     span: Span::default(),
                     detail,
                     ty_name: ty_name.map(str::to_string),
+                    parent_type_name: None,
                     param_types: vec![],
                     param_required: vec![],
                     return_type: Some(return_label.to_string()),
@@ -513,6 +521,7 @@ fn make_local_action_entry(
             name, params_suffix, rendered_ret
         ),
         ty_name: Some("action".to_string()),
+        parent_type_name: None,
         param_types: params
             .iter()
             .map(|param| fmt_type_expr(&param.ty, interner))
@@ -538,6 +547,7 @@ fn make_enum_entry(name: String, span: Span, variants: &[String]) -> SymbolEntry
         span,
         detail: format!("```fidan\nenum {} {{{}\n}}\n```", name, variant_lines),
         ty_name: None,
+        parent_type_name: None,
         param_types: vec![],
         param_required: vec![],
         return_type: None,
@@ -567,6 +577,7 @@ fn make_enum_variant_entry(
         span,
         detail: format!("```fidan\n{}\n```", signature),
         ty_name: None,
+        parent_type_name: None,
         param_types: payload_types.to_vec(),
         param_required: vec![true; payload_types.len()],
         return_type: Some(enum_name.to_string()),
@@ -908,6 +919,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 span: info.span,
                 detail,
                 ty_name: Some("action".to_string()),
+                parent_type_name: None,
                 param_types,
                 param_required: info.params.iter().map(|p| !p.optional).collect(),
                 return_type: Some(type_name(&info.return_ty, interner)),
@@ -927,9 +939,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 kind: SymKind::Object,
                 span: info.span,
                 detail,
-                // Store the parent type name so the LSP can follow the
-                // inheritance chain across documents (e.g. TRex → Dinosaur).
-                ty_name: info.parent.map(&res),
+                ty_name: Some(name.clone()),
+                parent_type_name: info.parent.map(&res),
                 param_types: vec![],
                 param_required: vec![],
                 return_type: None,
@@ -955,6 +966,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     span: minfo.span,
                     detail: sig,
                     ty_name: None,
+                    parent_type_name: None,
                     param_types,
                     param_required: minfo.params.iter().map(|p| !p.optional).collect(),
                     return_type: Some(type_name(&minfo.return_ty, interner)),
@@ -977,6 +989,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                     span: info.span,
                     detail: format!("```fidan\n{}.{}: {}\n```", name, fname, ty_s),
                     ty_name: resolved_type_name(fty, interner),
+                    parent_type_name: None,
                     param_types: vec![],
                     param_required: vec![],
                     return_type: None,
@@ -1202,6 +1215,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
             span: Span::default(),
             detail: "```fidan\naction.name -> string\n```\n\nThe name of the action as declared in source.".to_string(),
             ty_name: None,
+            parent_type_name: None,
             param_types: vec![],
             param_required: vec![],
             return_type: Some("string".to_string()),
@@ -1248,6 +1262,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                             parent_name, fname, ty_s
                         ),
                         ty_name: resolved_type_name(fty, interner),
+                        parent_type_name: None,
                         param_types: vec![],
                         param_required: vec![],
                         return_type: None,
@@ -1275,6 +1290,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                         span: minfo.span,
                         detail: sig,
                         ty_name: None,
+                        parent_type_name: None,
                         param_types,
                         param_required: minfo.params.iter().map(|p| !p.optional).collect(),
                         return_type: Some(type_name(&minfo.return_ty, interner)),
@@ -1517,5 +1533,21 @@ object Worker {
         let method = table.get("Worker.run").expect("method symbol");
         assert!(method.detail.contains("action run"));
         assert!(method.detail.contains("-> dynamic"));
+    }
+
+    #[test]
+    fn unannotated_object_method_symbols_use_inferred_nothing_return_type() {
+        let table = build_symbols(
+            r#"object StorageManager {
+    action addTask with (certain name oftype string) {
+        print(name)
+    }
+}
+"#,
+        );
+
+        let method = table.get("StorageManager.addTask").expect("method symbol");
+        assert!(method.detail.contains("action addTask"));
+        assert!(method.detail.contains("-> nothing"));
     }
 }

@@ -873,13 +873,71 @@ pub const LANGUAGE_BUILTINS: &[BuiltinInfo] = &[
     },
 ];
 
-pub const LANGUAGE_TYPE_NAMES: &[BuiltinInfo] = &[BuiltinInfo {
-    name: "handle",
-    signature: "handle",
-    doc: "Opaque native handle type used for extern interop and low-level OS or library handles.",
-    semantic: None,
-    return_kind: None,
-}];
+pub const LANGUAGE_TYPE_NAMES: &[BuiltinInfo] = &[
+    BuiltinInfo {
+        name: "handle",
+        signature: "handle",
+        doc: "Opaque native handle type used for extern interop and low-level OS or library handles.",
+        semantic: None,
+        return_kind: None,
+    },
+    BuiltinInfo {
+        name: "list",
+        signature: "list oftype T",
+        doc: "Ordered growable collection. Use `list oftype T` for typed lists or bare `list` when element type is dynamic.",
+        semantic: None,
+        return_kind: None,
+    },
+    BuiltinInfo {
+        name: "dict",
+        signature: "dict oftype (K, V)",
+        doc: "Key-value map type. Use `dict oftype (K, V)` for typed dictionaries or bare `dict` when both sides are dynamic.",
+        semantic: None,
+        return_kind: None,
+    },
+    BuiltinInfo {
+        name: "map",
+        signature: "map oftype (K, V)",
+        doc: "Alias for `dict`. Use `map oftype (K, V)` when you prefer map-style terminology.",
+        semantic: None,
+        return_kind: None,
+    },
+    BuiltinInfo {
+        name: "hashset",
+        signature: "hashset oftype T",
+        doc: "Unordered collection of unique, hashable values. Use `hashset oftype T` for typed sets or bare `hashset` for dynamic elements.",
+        semantic: None,
+        return_kind: None,
+    },
+    BuiltinInfo {
+        name: "tuple",
+        signature: "tuple or (T1, T2, ...)",
+        doc: "Fixed-position product type. Use bare `tuple` for an untyped tuple value or `(T1, T2, ...)` for a typed tuple shape.",
+        semantic: None,
+        return_kind: None,
+    },
+    BuiltinInfo {
+        name: "Shared",
+        signature: "Shared oftype T",
+        doc: "Thread-safe shared wrapper type for values used across parallel work.",
+        semantic: None,
+        return_kind: None,
+    },
+    BuiltinInfo {
+        name: "WeakShared",
+        signature: "WeakShared oftype T",
+        doc: "Non-owning weak reference to a `Shared` value. Upgrade it when the shared value is still alive.",
+        semantic: None,
+        return_kind: None,
+    },
+    BuiltinInfo {
+        name: "Pending",
+        signature: "Pending oftype T",
+        doc: "Handle type for asynchronous work that will eventually resolve to `T`.",
+        semantic: None,
+        return_kind: None,
+    },
+];
 
 /// Canonical decorator metadata used by editor/tooling surfaces.
 ///

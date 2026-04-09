@@ -154,7 +154,7 @@ pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
         "std.async.timeout(handle, ms)" => "Pending oftype (boolean, dynamic)",
 
         // collections
-        "std.collections.range(start, end?)" => "list oftype integer",
+        "std.collections.range(start, stop, step?)" => "list oftype integer",
         "std.collections.hashset(items?)" => "hashset oftype dynamic",
         "std.collections.setAdd(set, value)" => "nothing",
         "std.collections.setRemove(set, value)" => "nothing",
@@ -184,7 +184,7 @@ pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
         "std.collections.sort(list)" => "list oftype dynamic",
         "std.collections.len(list)" => "integer",
         "std.collections.isEmpty(list)" => "boolean",
-        "std.collections.concat(left, right)" => "list oftype dynamic",
+        "std.collections.concat(items...)" => "list oftype dynamic",
         "std.collections.slice(list, start, end?)" => "list oftype dynamic",
         "std.collections.first(list)" => "dynamic",
         "std.collections.last(list)" => "dynamic",
@@ -481,7 +481,7 @@ const ASYNC_MEMBER_INFOS: &[StdlibMemberInfo] = &[
 const COLLECTIONS_MEMBER_INFOS: &[StdlibMemberInfo] = &[
     StdlibMemberInfo {
         names: &["range"],
-        signature: "std.collections.range(start, end?)",
+        signature: "std.collections.range(start, stop, step?)",
         doc: "Create a numeric range as a list of integers.",
     },
     StdlibMemberInfo {
@@ -631,7 +631,7 @@ const COLLECTIONS_MEMBER_INFOS: &[StdlibMemberInfo] = &[
     },
     StdlibMemberInfo {
         names: &["concat"],
-        signature: "std.collections.concat(left, right)",
+        signature: "std.collections.concat(items...)",
         doc: "Concatenate two lists into a new list.",
     },
     StdlibMemberInfo {

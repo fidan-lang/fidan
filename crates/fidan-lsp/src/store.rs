@@ -82,7 +82,7 @@ impl DocumentStore {
                 if next_type.is_none()
                     && let Some(e) = tbl.get(&cur_type)
                 {
-                    next_type = e.ty_name.clone();
+                    next_type = e.parent_type_name.clone();
                 }
             }
             match next_type {

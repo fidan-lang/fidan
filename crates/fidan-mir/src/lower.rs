@@ -2967,11 +2967,14 @@ pub fn lower_program(
     let mut obj_map: FxHashMap<Symbol, FunctionId> = FxHashMap::default();
     let mut method_ids: FxHashMap<(Symbol, Symbol), FunctionId> = FxHashMap::default();
     let mut parent_map: FxHashMap<Symbol, Symbol> = FxHashMap::default();
+    let mut synthetic_default_ctor_objs: FxHashSet<Symbol> = FxHashSet::default();
 
     for obj in &hir.objects {
         if let Some(p) = obj.parent {
             parent_map.insert(obj.name, p);
         }
+        let has_user_ctor = obj.methods.iter().any(|method| method.name == new_sym);
+        let has_field_defaults = obj.fields.iter().any(|field| field.default.is_some());
         let mut obj_info = MirObjectInfo {
             name: obj.name,
             parent: obj.parent,
@@ -2997,6 +3000,17 @@ pub fn lower_program(
                 obj_info.init_fn = Some(id);
                 obj_map.insert(obj.name, id);
             }
+        }
+
+        if !has_user_ctor && has_field_defaults {
+            let id = FunctionId(prog.functions.len() as u32);
+            method_ids.insert((obj.name, new_sym), id);
+            prog.functions
+                .push(MirFunction::new(id, new_sym, MirTy::Nothing));
+            obj_info.methods.insert(new_sym, id);
+            obj_info.init_fn = Some(id);
+            obj_map.insert(obj.name, id);
+            synthetic_default_ctor_objs.insert(obj.name);
         }
 
         // Extension actions that target this class — reuse their fn_map FunctionId.
@@ -3197,6 +3211,26 @@ pub fn lower_program(
                         fn_id: FunctionId,
                         owner_class: Option<Symbol>,
                         pending: Rc<RefCell<VecDeque<PendingParallelFor>>>| {
+        let emit_object_field_defaults = |ctx: &mut FnCtx<'_>, owner: Symbol| {
+            let Some(this_local) = ctx.this_reg else {
+                return;
+            };
+            let Some(object) = hir.objects.iter().find(|object| object.name == owner) else {
+                return;
+            };
+            for field in &object.fields {
+                let Some(default_expr) = field.default.as_ref() else {
+                    continue;
+                };
+                let value = ctx.lower_expr(default_expr);
+                ctx.emit(Instr::SetField {
+                    object: Operand::Local(this_local),
+                    field: field.name,
+                    value,
+                });
+            }
+        };
+
         let entry_bb = prog.function_mut(fn_id).alloc_block();
         let mut ctx = FnCtx {
             prog,
@@ -3250,6 +3284,70 @@ pub fn lower_program(
                 certain: param.certain,
                 default,
             });
+        }
+
+        // Non-literal defaults cannot ride through `MirParam.default`, so lower
+        // them into the function prologue as `if param == nothing { param = expr }`.
+        for param in &func.params {
+            let Some(default_expr) = param.default.as_ref() else {
+                continue;
+            };
+            if hir_lit_to_mir_lit(default_expr).is_some() {
+                continue;
+            }
+
+            let current_local = ctx
+                .lookup_var(param.name)
+                .expect("parameter local must exist before lowering defaults");
+            let pre_bb = ctx.cur_bb;
+            let default_bb = ctx.alloc_block();
+            let join_bb = ctx.alloc_block();
+
+            let cond_local = ctx.alloc_local();
+            ctx.emit(Instr::Assign {
+                dest: cond_local,
+                ty: MirTy::Boolean,
+                rhs: Rvalue::Binary {
+                    op: fidan_ast::BinOp::Eq,
+                    lhs: Operand::Local(current_local),
+                    rhs: Operand::Const(MirLit::Nothing),
+                },
+            });
+            ctx.set_terminator(Terminator::Branch {
+                cond: Operand::Local(cond_local),
+                then_bb: default_bb,
+                else_bb: join_bb,
+            });
+
+            ctx.switch_to(default_bb);
+            let default_value = ctx.lower_expr(default_expr);
+            let default_local = ctx.alloc_local();
+            ctx.emit(Instr::Assign {
+                dest: default_local,
+                ty: fidan_ty_to_mir(&param.ty),
+                rhs: Rvalue::Use(default_value),
+            });
+            let default_end_bb = ctx.cur_bb;
+            ctx.goto(join_bb);
+
+            ctx.switch_to(join_bb);
+            let resolved_local = ctx.alloc_local();
+            ctx.add_phi(
+                join_bb,
+                resolved_local,
+                fidan_ty_to_mir(&param.ty),
+                vec![
+                    (pre_bb, Operand::Local(current_local)),
+                    (default_end_bb, Operand::Local(default_local)),
+                ],
+            );
+            ctx.define_var(param.name, resolved_local);
+        }
+
+        for param in &func.params {
+            let local = ctx
+                .lookup_var(param.name)
+                .expect("parameter local must exist before emitting certain checks");
             // Emit a certain-param null guard as a real MIR instruction so it
             // survives inlining without any special-casing in the inliner.
             if param.certain {
@@ -3258,6 +3356,12 @@ pub fn lower_program(
                     name: param.name,
                 });
             }
+        }
+
+        if func.name == new_sym
+            && let Some(owner) = owner_class
+        {
+            emit_object_field_defaults(&mut ctx, owner);
         }
 
         ctx.lower_stmts(&func.body);
@@ -3310,6 +3414,41 @@ pub fn lower_program(
                 lambda_sym,
                 &global_map,
                 method,
+                fn_id,
+                Some(obj.name),
+                Rc::clone(&pending_par_fors),
+            );
+        }
+
+        if synthetic_default_ctor_objs.contains(&obj.name) {
+            let fn_id = method_ids[&(obj.name, new_sym)];
+            let synthetic_ctor = HirFunction {
+                name: new_sym,
+                extends: None,
+                params: vec![],
+                return_ty: FidanType::Nothing,
+                body: vec![],
+                is_parallel: false,
+                precompile: false,
+                extern_decl: None,
+                custom_decorators: vec![],
+                span: obj.span,
+            };
+            lower_hir_fn(
+                &mut prog,
+                &fn_map,
+                &obj_map,
+                &parent_map,
+                &method_ids,
+                &fn_is_extension,
+                new_sym,
+                len_sym,
+                append_sym,
+                type_sym,
+                wildcard_sym,
+                lambda_sym,
+                &global_map,
+                &synthetic_ctor,
                 fn_id,
                 Some(obj.name),
                 Rc::clone(&pending_par_fors),

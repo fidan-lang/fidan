@@ -189,6 +189,37 @@ mod tests {
             .unwrap_or_else(|| panic!("missing action `{action_name}`"))
     }
 
+    fn object_method_return_type(src: &str, object_name: &str, method_name: &str) -> String {
+        let interner = Arc::new(SymbolInterner::new());
+        let file = SourceFile::new(FileId(0), "<test>", src);
+        let (tokens, lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        assert!(lex_diags.is_empty(), "lexer diagnostics: {lex_diags:#?}");
+        let (module, parse_diags) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+        assert!(
+            parse_diags.is_empty(),
+            "parser diagnostics: {parse_diags:#?}"
+        );
+        let typed = typecheck_full(&module, Arc::clone(&interner));
+        let errors: Vec<_> = typed
+            .diagnostics
+            .iter()
+            .filter(|diag| diag.severity == Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "type diagnostics: {errors:#?}");
+
+        let object_sym = interner.intern(object_name);
+        let method_sym = interner.intern(method_name);
+        typed
+            .objects
+            .get(&object_sym)
+            .and_then(|obj| obj.methods.get(&method_sym))
+            .map(|info| {
+                info.return_ty
+                    .display_name(&|sym| interner.resolve(sym).to_string())
+            })
+            .unwrap_or_else(|| panic!("missing method `{object_name}.{method_name}`"))
+    }
+
     // ── Well-typed programs produce no errors ─────────────────────────────────
 
     #[test]
@@ -522,6 +553,21 @@ var result = choose(true)
     }
 
     #[test]
+    fn unannotated_object_methods_infer_nothing_on_fallthrough_only() {
+        let src = r#"object StorageManager {
+    action addTask with (certain name oftype string) {
+        print(name)
+    }
+}
+"#;
+
+        assert_eq!(
+            object_method_return_type(src, "StorageManager", "addTask"),
+            "nothing"
+        );
+    }
+
+    #[test]
     fn object_constructor_argument_type_mismatch_is_error() {
         let errors = check_errors(
             r#"object Point {
@@ -653,6 +699,58 @@ var result = choose(true)
     }
 
     #[test]
+    fn builtin_len_rejects_extra_arguments() {
+        let errors = check_errors("var size = len([1, 2, 3], 1, 2)");
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("expected 1 argument, got 3")),
+            "expected builtin len arity error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn bare_dict_annotation_still_checks_member_existence() {
+        let errors = check_errors(
+            r#"var loaded_tasks oftype dict = {"a": 1}
+            loaded_tasks.ssdsadhjkadsdsahkjsdakjhssss()"#,
+        );
+        assert!(
+            errors.iter().any(|msg| msg.contains(
+                "type `dict oftype (dynamic, dynamic)` has no method `ssdsadhjkadsdsahkjsdakjhssss`"
+            )),
+            "expected missing dict member error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn object_field_default_initializer_must_match_declared_type() {
+        let errors = check_errors(
+            r#"object StorageManager {
+                var tasks oftype list oftype string = {}
+            }"#,
+        );
+        assert!(
+            errors.iter().any(|msg| msg
+                .contains("expected `list oftype string`, found `dict oftype (dynamic, dynamic)`")),
+            "expected object field default type mismatch, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn builtin_receiver_methods_enforce_required_arguments() {
+        let errors = check_errors(
+            r#"var tasks oftype list oftype string = []
+            tasks.contains()"#,
+        );
+        assert!(
+            errors.iter().any(|msg| msg
+                .contains("not enough arguments for `contains`: 1 required but 0 provided")),
+            "expected builtin receiver arity error, got {errors:?}"
+        );
+    }
+
+    #[test]
     fn integer_literal_is_not_callable() {
         let errors = check_errors("var x = 1()");
         assert!(
@@ -713,6 +811,34 @@ var result = choose(true)
             var root = sqrt(4)"#,
             )
             .is_empty()
+        );
+    }
+
+    #[test]
+    fn imported_stdlib_free_function_requires_required_arguments() {
+        let errors = check_errors(
+            r#"use std.math.atan2
+            var angle = atan2(4.0)"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("not enough arguments for `std.math.atan2`")),
+            "expected std.math.atan2 arity error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn stdlib_namespace_call_requires_required_arguments() {
+        let errors = check_errors(
+            r#"use std.io
+            var text = io.readFile()"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("not enough arguments for `std.io.readFile`")),
+            "expected std.io.readFile arity error, got {errors:?}"
         );
     }
 

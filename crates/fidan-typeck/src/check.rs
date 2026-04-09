@@ -5,8 +5,8 @@ use fidan_ast::{
     AstArena, BinOp, Decorator, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp,
 };
 use fidan_config::{
-    BUILTIN_BINDINGS, BUILTIN_DECORATORS, BuiltinReturnKind, BuiltinSemantic, builtin_return_kind,
-    builtin_semantic,
+    BUILTIN_BINDINGS, BUILTIN_DECORATORS, BuiltinReturnKind, BuiltinSemantic, builtin_info,
+    builtin_return_kind, builtin_semantic,
 };
 use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
@@ -969,6 +969,30 @@ impl TypeChecker {
                 self.push_scope(ScopeKind::Object);
                 self.inject_this_and_parent(obj_ty, parent_ty, module.file);
 
+                for field in fields {
+                    let declared_field_ty = self
+                        .objects
+                        .get(name)
+                        .and_then(|object| object.fields.get(&field.name))
+                        .cloned()
+                        .unwrap_or_else(|| self.resolve_type_expr(&field.ty));
+                    if let Some(default_expr) = field.default {
+                        let actual = self.infer_expr(default_expr, module);
+                        if !declared_field_ty.is_assignable_from(&actual) {
+                            let expected_name = self.ty_name(&declared_field_ty);
+                            let actual_name = self.ty_name(&actual);
+                            let default_span = module.arena.get_expr(default_expr).span();
+                            self.emit_error(
+                                fidan_diagnostics::diag_code!("E0201"),
+                                format!(
+                                    "type mismatch: expected `{expected_name}`, found `{actual_name}`"
+                                ),
+                                default_span,
+                            );
+                        }
+                    }
+                }
+
                 for &mid in methods {
                     let method = module.arena.get_item(mid).clone();
                     self.check_item(&method, module);
@@ -1012,10 +1036,15 @@ impl TypeChecker {
                     self.deprecated_actions.insert(*name);
                 }
                 if self.has_marker_decorator(decorators, "extern") {
-                    if return_ty.is_none()
-                        && let Some(info) = self.actions.get_mut(name)
-                    {
-                        info.return_ty = FidanType::Nothing;
+                    if return_ty.is_none() {
+                        if let Some(FidanType::Object(owner)) = self.this_ty.clone()
+                            && let Some(obj) = self.objects.get_mut(&owner)
+                            && let Some(info) = obj.methods.get_mut(name)
+                        {
+                            info.return_ty = FidanType::Nothing;
+                        } else if let Some(info) = self.actions.get_mut(name) {
+                            info.return_ty = FidanType::Nothing;
+                        }
                     }
                     return;
                 }
@@ -1040,10 +1069,15 @@ impl TypeChecker {
                     },
                     module,
                 );
-                if return_ty.is_none()
-                    && let Some(info) = self.actions.get_mut(name)
-                {
-                    info.return_ty = inferred_return;
+                if return_ty.is_none() {
+                    if let Some(FidanType::Object(owner)) = self.this_ty.clone()
+                        && let Some(obj) = self.objects.get_mut(&owner)
+                        && let Some(info) = obj.methods.get_mut(name)
+                    {
+                        info.return_ty = inferred_return;
+                    } else if let Some(info) = self.actions.get_mut(name) {
+                        info.return_ty = inferred_return;
+                    }
                 }
             }
 
@@ -2648,6 +2682,230 @@ impl TypeChecker {
             .map(|return_kind| self.resolve_receiver_return_kind(ty, return_kind))
     }
 
+    fn builtin_method_arity_bounds(
+        &self,
+        ty: &FidanType,
+        field: Symbol,
+    ) -> Option<(usize, Option<usize>)> {
+        let receiver_kind = self.receiver_builtin_kind(ty)?;
+        let method_name = self.interner.resolve(field);
+        let canonical = fidan_stdlib::infer_receiver_member(receiver_kind, method_name.as_ref())?
+            .canonical_name;
+
+        match receiver_kind {
+            ReceiverBuiltinKind::Integer | ReceiverBuiltinKind::Float => match canonical {
+                "abs" | "sqrt" | "floor" | "ceil" | "round" | "toFloat" | "toInt" | "toString" => {
+                    Some((0, Some(0)))
+                }
+                _ => None,
+            },
+            ReceiverBuiltinKind::Boolean => match canonical {
+                "toString" => Some((0, Some(0))),
+                _ => None,
+            },
+            ReceiverBuiltinKind::String => match canonical {
+                "len" | "byteLen" | "lower" | "upper" | "capitalize" | "trim" | "trimStart"
+                | "trimEnd" | "lines" | "chars" => Some((0, Some(0))),
+                "split" | "join" | "contains" | "startsWith" | "endsWith" | "indexOf"
+                | "lastIndexOf" => Some((1, Some(1))),
+                "replace" | "replaceAll" => Some((2, Some(2))),
+                _ => None,
+            },
+            ReceiverBuiltinKind::List => match canonical {
+                "len" | "isEmpty" | "first" | "last" | "reverse" | "reversed" | "sort"
+                | "flatten" | "toString" => Some((0, Some(0))),
+                "get" | "contains" | "indexOf" | "find" | "firstWhere" | "forEach" | "map"
+                | "filter" | "remove" | "reduce" => Some((1, Some(1))),
+                "join" => Some((0, Some(1))),
+                "append" | "extend" => Some((1, None)),
+                "slice" => Some((0, Some(3))),
+                _ => None,
+            },
+            ReceiverBuiltinKind::Dict => match canonical {
+                "len" | "isEmpty" | "keys" | "values" | "entries" | "toString" => {
+                    Some((0, Some(0)))
+                }
+                "get" | "containsKey" | "remove" => Some((1, Some(1))),
+                "set" => Some((2, Some(2))),
+                _ => None,
+            },
+            ReceiverBuiltinKind::HashSet => match canonical {
+                "len" | "isEmpty" | "toList" | "toString" => Some((0, Some(0))),
+                "insert" | "remove" | "contains" | "union" | "intersect" | "diff" => {
+                    Some((1, Some(1)))
+                }
+                _ => None,
+            },
+            ReceiverBuiltinKind::Shared => match canonical {
+                "get" | "weak" => Some((0, Some(0))),
+                "set" => Some((1, Some(1))),
+                _ => None,
+            },
+            ReceiverBuiltinKind::WeakShared => match canonical {
+                "upgrade" | "isAlive" => Some((0, Some(0))),
+                _ => None,
+            },
+            ReceiverBuiltinKind::Function => match canonical {
+                "name" => Some((0, Some(0))),
+                _ => None,
+            },
+            ReceiverBuiltinKind::Handle
+            | ReceiverBuiltinKind::Nothing
+            | ReceiverBuiltinKind::Dynamic
+            | ReceiverBuiltinKind::Pending => None,
+        }
+    }
+
+    fn check_builtin_method_arguments(
+        &mut self,
+        ty: &FidanType,
+        field: Symbol,
+        args: &[CallArgInfo],
+        span: Span,
+    ) {
+        let Some((min_args, max_args)) = self.builtin_method_arity_bounds(ty, field) else {
+            return;
+        };
+
+        let method_name = self.interner.resolve(field).to_string();
+        if args.len() < min_args {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0301"),
+                format!(
+                    "not enough arguments for `{method_name}`: {} required but {} provided",
+                    min_args,
+                    args.len()
+                ),
+                span,
+            );
+        } else if let Some(max_args) = max_args
+            && args.len() > max_args
+        {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0305"),
+                format!(
+                    "expected {} argument{}, got {}",
+                    max_args,
+                    if max_args == 1 { "" } else { "s" },
+                    args.len()
+                ),
+                span,
+            );
+        }
+    }
+
+    fn check_stdlib_member_arguments(
+        &mut self,
+        module_name: &str,
+        member_name: &str,
+        args: &[CallArgInfo],
+        span: Span,
+    ) {
+        let Some(info) = fidan_stdlib::member_info(module_name, member_name) else {
+            return;
+        };
+        let Some((min_args, max_args)) = Self::parse_signature_arity(info.signature) else {
+            return;
+        };
+
+        if args.len() < min_args {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0301"),
+                format!(
+                    "not enough arguments for `std.{module_name}.{member_name}`: {} required but {} provided",
+                    min_args,
+                    args.len()
+                ),
+                span,
+            );
+        }
+
+        if let Some(max_args) = max_args
+            && args.len() > max_args
+        {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0305"),
+                format!(
+                    "expected {} argument{}, got {}",
+                    max_args,
+                    if max_args == 1 { "" } else { "s" },
+                    args.len()
+                ),
+                span,
+            );
+        }
+    }
+
+    fn check_builtin_arguments(&mut self, name: &str, args: &[CallArgInfo], span: Span) {
+        let Some(info) = builtin_info(name) else {
+            return;
+        };
+        let Some((min_args, max_args)) = Self::parse_signature_arity(info.signature) else {
+            return;
+        };
+
+        if args.len() < min_args {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0301"),
+                format!(
+                    "not enough arguments for `{name}`: {} required but {} provided",
+                    min_args,
+                    args.len()
+                ),
+                span,
+            );
+        }
+
+        if let Some(max_args) = max_args
+            && args.len() > max_args
+        {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0305"),
+                format!(
+                    "expected {} argument{}, got {}",
+                    max_args,
+                    if max_args == 1 { "" } else { "s" },
+                    args.len()
+                ),
+                span,
+            );
+        }
+    }
+
+    fn parse_signature_arity(signature: &str) -> Option<(usize, Option<usize>)> {
+        let open = signature.find('(')?;
+        let close = signature.rfind(')')?;
+        if close <= open {
+            return None;
+        }
+
+        let params = signature[open + 1..close].trim();
+        if params.is_empty() {
+            return Some((0, Some(0)));
+        }
+
+        let mut min_args = 0usize;
+        let mut max_args = 0usize;
+        let mut variadic = false;
+
+        for raw_param in params.split(',') {
+            let param = raw_param.trim();
+            if param.is_empty() {
+                continue;
+            }
+            if param.ends_with("...") {
+                variadic = true;
+                continue;
+            }
+            max_args += 1;
+            if !param.ends_with('?') {
+                min_args += 1;
+            }
+        }
+
+        Some((min_args, if variadic { None } else { Some(max_args) }))
+    }
+
     fn fidan_type_to_stdlib_spec(&self, ty: &FidanType) -> StdlibTypeSpec {
         match ty {
             FidanType::Integer => StdlibTypeSpec::Integer,
@@ -2985,12 +3243,16 @@ impl TypeChecker {
                     }
                 }
                 if let Some(return_kind) = builtin_return_kind(&name_str) {
+                    self.check_builtin_arguments(&name_str, args, span);
                     return self.builtin_return_kind_to_type(return_kind);
                 }
-                if let Some(import) = self.stdlib_imports.get(&name).copied()
-                    && let Some(return_ty) = self.stdlib_import_return_type(import, args, module)
-                {
-                    return return_ty;
+                if let Some(import) = self.stdlib_imports.get(&name).copied() {
+                    let module_name = self.interner.resolve(import.module).to_string();
+                    let member_name = self.interner.resolve(import.export).to_string();
+                    self.check_stdlib_member_arguments(&module_name, &member_name, args, span);
+                    if let Some(return_ty) = self.stdlib_import_return_type(import, args, module) {
+                        return return_ty;
+                    }
                 }
                 // Look up in symbol table: Object constructor, user action, or builtin.
                 match self.table.lookup(name).map(|i| i.kind) {
@@ -3062,11 +3324,16 @@ impl TypeChecker {
                     name: namespace, ..
                 } = module.arena.get_expr(object)
                     && let Some(module_sym) = self.stdlib_namespace_imports.get(namespace).copied()
-                    && let Some(return_ty) =
-                        self.stdlib_namespace_return_type(module_sym, field, args, module)
                 {
-                    self.referenced_names.insert(*namespace);
-                    return return_ty;
+                    let module_name = self.interner.resolve(module_sym).to_string();
+                    let member_name = self.interner.resolve(field).to_string();
+                    self.check_stdlib_member_arguments(&module_name, &member_name, args, span);
+                    if let Some(return_ty) =
+                        self.stdlib_namespace_return_type(module_sym, field, args, module)
+                    {
+                        self.referenced_names.insert(*namespace);
+                        return return_ty;
+                    }
                 }
 
                 let recv = self.infer_expr(object, module);
@@ -3157,6 +3424,7 @@ impl TypeChecker {
                     }
                     _ => {
                         if let Some(ret) = self.builtin_method_return(&recv, field) {
+                            self.check_builtin_method_arguments(&recv, field, args, span);
                             ret
                         } else if self.should_emit_member_error(&recv) {
                             self.emit_unknown_member_error(&recv, field, span, "method");
@@ -4128,10 +4396,17 @@ impl TypeChecker {
             "dynamic" | "any" | "flexible" => FidanType::Dynamic,
             // First-class action/callable type
             "action" | "callable" | "fn" => FidanType::Function,
-            // Bare container keywords without `oftype` — treat as dynamic rather than erroring
-            "list" | "dict" | "map" | "hashset" | "shared" | "weakshared" | "pending" | "tuple" => {
-                FidanType::Dynamic
+            // Bare container keywords default to dynamic-parameterized containers so
+            // member existence still validates even without a precise element type.
+            "list" => FidanType::List(Box::new(FidanType::Dynamic)),
+            "dict" | "map" => {
+                FidanType::Dict(Box::new(FidanType::Dynamic), Box::new(FidanType::Dynamic))
             }
+            "hashset" => FidanType::HashSet(Box::new(FidanType::Dynamic)),
+            "shared" => FidanType::Shared(Box::new(FidanType::Dynamic)),
+            "weakshared" => FidanType::WeakShared(Box::new(FidanType::Dynamic)),
+            "pending" => FidanType::Pending(Box::new(FidanType::Dynamic)),
+            "tuple" => FidanType::Tuple(vec![]),
             _ => {
                 // Might be a user-defined object type
                 if self.objects.contains_key(&sym) {

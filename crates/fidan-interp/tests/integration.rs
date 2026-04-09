@@ -1073,6 +1073,73 @@ fn hashset_runtime_source() -> &'static str {
 }
 
 #[test]
+fn class_type_values_construct_objects_via_dynamic_calls() {
+    let result = run_src(
+        r#"object StorageManager {
+    var path oftype string
+
+    new with (certain path oftype string) {
+        this.path = path
+    }
+
+    action get_path returns string {
+        return this.path
+    }
+}
+
+action build_with with (ctor, path oftype string) returns StorageManager {
+    return ctor(path)
+}
+
+var ctor = StorageManager
+var first = ctor("alpha")
+var second = build_with(StorageManager, "beta")
+
+assert_eq(first.path, "alpha")
+assert_eq(first.get_path(), "alpha")
+assert_eq(second.get_path(), "beta")"#,
+    );
+    if let Err(err) = result {
+        panic!("{}: {}", err.code, err.message);
+    }
+}
+
+#[test]
+fn object_field_defaults_apply_without_explicit_constructor() {
+    let result = run_src(
+        r#"object StorageManager {
+    var tasks oftype list oftype string = []
+}
+
+var storage = StorageManager()
+assert_eq(storage.tasks.isEmpty(), true)
+assert_eq(storage.tasks.len(), 0)"#,
+    );
+    if let Err(err) = result {
+        panic!("{}: {}", err.code, err.message);
+    }
+}
+
+#[test]
+fn object_field_defaults_apply_before_user_constructor_body() {
+    let result = run_src(
+        r#"object StorageManager {
+    var tasks oftype list oftype string = []
+
+    new with (certain name oftype string) {
+        assert_eq(this.tasks.isEmpty(), true)
+    }
+}
+
+var storage = StorageManager("alpha")
+assert_eq(storage.tasks.len(), 0)"#,
+    );
+    if let Err(err) = result {
+        panic!("{}: {}", err.code, err.message);
+    }
+}
+
+#[test]
 fn concurrent_block_ok() {
     assert!(
         run_src(
@@ -2161,6 +2228,24 @@ assert_eq(greet(), "Hello, World")
 assert_eq(greet(nothing), "Hello, World")
 # explicit value → uses that value
 assert_eq(greet("Alice"), "Hello, Alice")
+"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn param_optional_with_non_literal_default_fills_in() {
+    assert!(
+        run_src(
+            r#"
+action collect with (optional items oftype list oftype string = []) returns list oftype string {
+    return items
+}
+
+assert_eq(collect().isEmpty(), true)
+assert_eq(collect(nothing).len(), 0)
+assert_eq(collect(["a"]).len(), 1)
 "#
         )
         .is_ok()

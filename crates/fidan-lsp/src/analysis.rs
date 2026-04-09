@@ -3,7 +3,7 @@
 
 use crate::convert::span_to_range;
 use crate::{semantic, symbols};
-use fidan_ast::{Expr, Item, Module};
+use fidan_ast::{Expr, Item, Module, TypeExpr};
 use fidan_diagnostics::{Diagnostic as FidanDiag, Severity};
 use fidan_lexer::{Lexer, SymbolInterner, TokenKind};
 use fidan_source::{FileId, SourceFile, Span};
@@ -30,6 +30,40 @@ pub struct MemberAccessSite {
     pub member_span: Span,
     pub receiver_type: String,
     pub member_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DynamicVarCallSite {
+    pub var_name: String,
+    pub decl_span: Span,
+    pub receiver_type: String,
+    pub method_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct StdlibVarCallSite {
+    pub var_name: String,
+    pub decl_span: Span,
+    pub module_name: String,
+    pub member_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportedConstructorCallSite {
+    pub var_name: String,
+    pub decl_span: Span,
+    pub import_binding: String,
+    pub constructor_name: String,
+    pub is_namespace_alias: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct IdentifierReceiverMethodCallSite {
+    pub receiver_name: String,
+    pub receiver_offset: u32,
+    pub method_name: String,
+    pub arg_tys: Vec<String>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,11 +106,17 @@ pub struct AnalysisResult {
     /// Top-level `var x = recv.method()` where `method` resolved to Dynamic (cross-module).
     /// Stored as `(var_name, receiver_type_name, method_name)` so the server can patch
     /// the symbol-table entry after loading cross-module docs.
-    pub dynamic_var_call_sites: Vec<(String, String, String)>,
+    pub dynamic_var_call_sites: Vec<DynamicVarCallSite>,
     /// Top-level `var x = std_alias.member()` calls where the alias resolves to `std.<module>`.
     /// Stored as `(var_name, module_name, member_name)` so the server can patch the
     /// symbol-table entry using shared stdlib metadata.
-    pub stdlib_var_call_sites: Vec<(String, String, String)>,
+    pub stdlib_var_call_sites: Vec<StdlibVarCallSite>,
+    /// `var x = Foo()` or `var x = module.Foo()` sites that may resolve to an
+    /// imported object constructor once imported documents are loaded.
+    pub imported_constructor_call_sites: Vec<ImportedConstructorCallSite>,
+    /// Method calls on identifier receivers. Used after imported-constructor
+    /// variable patching so calls like `storage.addTask(...)` can be validated.
+    pub identifier_receiver_method_call_sites: Vec<IdentifierReceiverMethodCallSite>,
     /// Positions where the editor should display synthetic type labels.
     pub inlay_hint_sites: Vec<InlayHintSite>,
     /// Typed member-access spans used for hover on literal/computed receivers.
@@ -128,6 +168,10 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     // ── Dynamic var call sites (cross-module method return type patching) ──
     let dynamic_var_call_sites = extract_dynamic_var_calls(&module, &typed, &interner);
     let stdlib_var_call_sites = extract_stdlib_var_call_sites(&module, &interner, &stdlib_imports);
+    let imported_constructor_call_sites =
+        extract_imported_constructor_call_sites(&module, &interner);
+    let identifier_receiver_method_call_sites =
+        extract_identifier_receiver_method_call_sites(&module, &typed, &interner);
 
     // ── Inlay hints (untyped var declarations) ────────────────────────────────
     let inlay_hint_sites =
@@ -163,6 +207,8 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
         cross_module_call_sites,
         dynamic_var_call_sites,
         stdlib_var_call_sites,
+        imported_constructor_call_sites,
+        identifier_receiver_method_call_sites,
         inlay_hint_sites,
         member_access_sites,
     }
@@ -323,16 +369,19 @@ fn extract_dynamic_var_calls(
     module: &Module,
     typed: &fidan_typeck::TypedModule,
     interner: &SymbolInterner,
-) -> Vec<(String, String, String)> {
+) -> Vec<DynamicVarCallSite> {
     let mut out = Vec::new();
 
     for &iid in &module.items {
         match module.arena.get_item(iid) {
             Item::VarDecl {
                 name,
+                span,
                 init: Some(init_eid),
                 ..
-            } => maybe_push_dynamic_var_call(module, typed, interner, *name, *init_eid, &mut out),
+            } => maybe_push_dynamic_var_call(
+                module, typed, interner, *name, *span, *init_eid, &mut out,
+            ),
             Item::ActionDecl { body, .. }
             | Item::ExtensionAction { body, .. }
             | Item::TestDecl { body, .. } => {
@@ -359,8 +408,9 @@ fn maybe_push_dynamic_var_call(
     typed: &fidan_typeck::TypedModule,
     interner: &SymbolInterner,
     var_name_sym: fidan_lexer::Symbol,
+    decl_span: Span,
     init_eid: fidan_ast::ExprId,
-    out: &mut Vec<(String, String, String)>,
+    out: &mut Vec<DynamicVarCallSite>,
 ) {
     if !matches!(
         typed.expr_types.get(&init_eid),
@@ -372,11 +422,12 @@ fn maybe_push_dynamic_var_call(
         && let Expr::Field { object, field, .. } = module.arena.get_expr(*callee)
         && let Some(fidan_typeck::FidanType::Object(obj_sym)) = typed.expr_types.get(object)
     {
-        out.push((
-            interner.resolve(var_name_sym).to_string(),
-            interner.resolve(*obj_sym).to_string(),
-            interner.resolve(*field).to_string(),
-        ));
+        out.push(DynamicVarCallSite {
+            var_name: interner.resolve(var_name_sym).to_string(),
+            decl_span,
+            receiver_type: interner.resolve(*obj_sym).to_string(),
+            method_name: interner.resolve(*field).to_string(),
+        });
     }
 }
 
@@ -384,7 +435,7 @@ fn extract_stdlib_var_call_sites(
     module: &Module,
     interner: &SymbolInterner,
     stdlib_imports: &[(String, String)],
-) -> Vec<(String, String, String)> {
+) -> Vec<StdlibVarCallSite> {
     let stdlib_aliases: std::collections::HashMap<&str, &str> = stdlib_imports
         .iter()
         .map(|(alias, module_name)| (alias.as_str(), module_name.as_str()))
@@ -395,6 +446,7 @@ fn extract_stdlib_var_call_sites(
         match module.arena.get_item(iid) {
             Item::VarDecl {
                 name,
+                span,
                 init: Some(init_eid),
                 ..
             } => maybe_push_stdlib_var_call(
@@ -402,6 +454,7 @@ fn extract_stdlib_var_call_sites(
                 interner,
                 &stdlib_aliases,
                 *name,
+                *span,
                 *init_eid,
                 &mut out,
             ),
@@ -442,33 +495,16 @@ fn collect_stmt_dynamic_var_calls(
     stmts: &[fidan_ast::StmtId],
     typed: &fidan_typeck::TypedModule,
     interner: &SymbolInterner,
-    out: &mut Vec<(String, String, String)>,
+    out: &mut Vec<DynamicVarCallSite>,
 ) {
     for &sid in stmts {
         match module.arena.get_stmt(sid) {
             fidan_ast::Stmt::VarDecl {
                 name,
+                span,
                 init: Some(init_eid),
                 ..
-            } => {
-                if !matches!(
-                    typed.expr_types.get(init_eid),
-                    Some(fidan_typeck::FidanType::Dynamic) | None
-                ) {
-                    continue;
-                }
-                if let Expr::Call { callee, .. } = module.arena.get_expr(*init_eid)
-                    && let Expr::Field { object, field, .. } = module.arena.get_expr(*callee)
-                    && let Some(fidan_typeck::FidanType::Object(obj_sym)) =
-                        typed.expr_types.get(object)
-                {
-                    out.push((
-                        interner.resolve(*name).to_string(),
-                        interner.resolve(*obj_sym).to_string(),
-                        interner.resolve(*field).to_string(),
-                    ));
-                }
-            }
+            } => maybe_push_dynamic_var_call(module, typed, interner, *name, *span, *init_eid, out),
             fidan_ast::Stmt::If {
                 then_body,
                 else_ifs,
@@ -526,17 +562,24 @@ fn collect_stmt_stdlib_var_calls(
     stmts: &[fidan_ast::StmtId],
     interner: &SymbolInterner,
     stdlib_aliases: &std::collections::HashMap<&str, &str>,
-    out: &mut Vec<(String, String, String)>,
+    out: &mut Vec<StdlibVarCallSite>,
 ) {
     for &sid in stmts {
         match module.arena.get_stmt(sid) {
             fidan_ast::Stmt::VarDecl {
                 name,
+                span,
                 init: Some(init_eid),
                 ..
-            } => {
-                maybe_push_stdlib_var_call(module, interner, stdlib_aliases, *name, *init_eid, out)
-            }
+            } => maybe_push_stdlib_var_call(
+                module,
+                interner,
+                stdlib_aliases,
+                *name,
+                *span,
+                *init_eid,
+                out,
+            ),
             fidan_ast::Stmt::If {
                 then_body,
                 else_ifs,
@@ -612,8 +655,9 @@ fn maybe_push_stdlib_var_call(
     interner: &SymbolInterner,
     stdlib_aliases: &std::collections::HashMap<&str, &str>,
     var_name_sym: fidan_lexer::Symbol,
+    decl_span: Span,
     init_eid: fidan_ast::ExprId,
-    out: &mut Vec<(String, String, String)>,
+    out: &mut Vec<StdlibVarCallSite>,
 ) {
     if let Expr::Call { callee, .. } = module.arena.get_expr(init_eid)
         && let Expr::Field { object, field, .. } = module.arena.get_expr(*callee)
@@ -622,11 +666,657 @@ fn maybe_push_stdlib_var_call(
         } = module.arena.get_expr(*object)
         && let Some(module_name) = stdlib_aliases.get(interner.resolve(*recv_name).as_ref())
     {
-        out.push((
-            interner.resolve(var_name_sym).to_string(),
-            (*module_name).to_string(),
-            interner.resolve(*field).to_string(),
-        ));
+        out.push(StdlibVarCallSite {
+            var_name: interner.resolve(var_name_sym).to_string(),
+            decl_span,
+            module_name: (*module_name).to_string(),
+            member_name: interner.resolve(*field).to_string(),
+        });
+    }
+}
+
+fn extract_imported_constructor_call_sites(
+    module: &Module,
+    interner: &SymbolInterner,
+) -> Vec<ImportedConstructorCallSite> {
+    let mut out = Vec::new();
+
+    for &iid in &module.items {
+        match module.arena.get_item(iid) {
+            Item::VarDecl {
+                name,
+                span,
+                init: Some(init_eid),
+                ..
+            } => maybe_push_imported_constructor_call(
+                module, interner, *name, *span, *init_eid, &mut out,
+            ),
+            Item::ActionDecl { body, .. }
+            | Item::ExtensionAction { body, .. }
+            | Item::TestDecl { body, .. } => {
+                collect_stmt_imported_constructor_calls(module, body, interner, &mut out)
+            }
+            Item::Stmt(stmt_id) => {
+                collect_stmt_imported_constructor_calls(module, &[*stmt_id], interner, &mut out)
+            }
+            Item::ObjectDecl { methods, .. } => {
+                for &mid in methods {
+                    if let Item::ActionDecl { body, .. } = module.arena.get_item(mid) {
+                        collect_stmt_imported_constructor_calls(module, body, interner, &mut out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
+fn collect_stmt_imported_constructor_calls(
+    module: &Module,
+    stmts: &[fidan_ast::StmtId],
+    interner: &SymbolInterner,
+    out: &mut Vec<ImportedConstructorCallSite>,
+) {
+    for &sid in stmts {
+        match module.arena.get_stmt(sid) {
+            fidan_ast::Stmt::VarDecl {
+                name,
+                span,
+                init: Some(init_eid),
+                ..
+            } => {
+                maybe_push_imported_constructor_call(module, interner, *name, *span, *init_eid, out)
+            }
+            fidan_ast::Stmt::If {
+                then_body,
+                else_ifs,
+                else_body,
+                ..
+            } => {
+                collect_stmt_imported_constructor_calls(module, then_body, interner, out);
+                for else_if in else_ifs {
+                    collect_stmt_imported_constructor_calls(module, &else_if.body, interner, out);
+                }
+                if let Some(else_body) = else_body {
+                    collect_stmt_imported_constructor_calls(module, else_body, interner, out);
+                }
+            }
+            fidan_ast::Stmt::Check { arms, .. } => {
+                for arm in arms {
+                    collect_stmt_imported_constructor_calls(module, &arm.body, interner, out);
+                }
+            }
+            fidan_ast::Stmt::For { body, .. }
+            | fidan_ast::Stmt::While { body, .. }
+            | fidan_ast::Stmt::ParallelFor { body, .. } => {
+                collect_stmt_imported_constructor_calls(module, body, interner, out);
+            }
+            fidan_ast::Stmt::Attempt {
+                body,
+                catches,
+                otherwise,
+                finally,
+                ..
+            } => {
+                collect_stmt_imported_constructor_calls(module, body, interner, out);
+                for catch in catches {
+                    collect_stmt_imported_constructor_calls(module, &catch.body, interner, out);
+                }
+                if let Some(otherwise) = otherwise {
+                    collect_stmt_imported_constructor_calls(module, otherwise, interner, out);
+                }
+                if let Some(finally) = finally {
+                    collect_stmt_imported_constructor_calls(module, finally, interner, out);
+                }
+            }
+            fidan_ast::Stmt::ConcurrentBlock { tasks, .. } => {
+                for task in tasks {
+                    collect_stmt_imported_constructor_calls(module, &task.body, interner, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn maybe_push_imported_constructor_call(
+    module: &Module,
+    interner: &SymbolInterner,
+    var_name_sym: fidan_lexer::Symbol,
+    decl_span: Span,
+    init_eid: fidan_ast::ExprId,
+    out: &mut Vec<ImportedConstructorCallSite>,
+) {
+    let Expr::Call { callee, .. } = module.arena.get_expr(init_eid) else {
+        return;
+    };
+
+    match module.arena.get_expr(*callee) {
+        Expr::Ident { name, .. } => out.push(ImportedConstructorCallSite {
+            var_name: interner.resolve(var_name_sym).to_string(),
+            decl_span,
+            import_binding: interner.resolve(*name).to_string(),
+            constructor_name: interner.resolve(*name).to_string(),
+            is_namespace_alias: false,
+        }),
+        Expr::Field { object, field, .. }
+            if matches!(module.arena.get_expr(*object), Expr::Ident { .. }) =>
+        {
+            let Expr::Ident { name, .. } = module.arena.get_expr(*object) else {
+                return;
+            };
+            out.push(ImportedConstructorCallSite {
+                var_name: interner.resolve(var_name_sym).to_string(),
+                decl_span,
+                import_binding: interner.resolve(*name).to_string(),
+                constructor_name: interner.resolve(*field).to_string(),
+                is_namespace_alias: true,
+            });
+        }
+        _ => {}
+    }
+}
+
+fn extract_identifier_receiver_method_call_sites(
+    module: &Module,
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+) -> Vec<IdentifierReceiverMethodCallSite> {
+    let mut out = Vec::new();
+
+    for &iid in &module.items {
+        match module.arena.get_item(iid) {
+            Item::VarDecl {
+                init: Some(init), ..
+            } => {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *init, &mut out,
+                );
+            }
+            Item::ActionDecl {
+                params,
+                return_ty: _,
+                body,
+                decorators,
+                ..
+            }
+            | Item::ExtensionAction {
+                params,
+                return_ty: _,
+                body,
+                decorators,
+                ..
+            } => {
+                for param in params {
+                    if let Some(default) = param.default {
+                        collect_expr_identifier_receiver_method_call_sites(
+                            module, typed, interner, default, &mut out,
+                        );
+                    }
+                }
+                for decorator in decorators {
+                    for arg in &decorator.args {
+                        collect_expr_identifier_receiver_method_call_sites(
+                            module, typed, interner, arg.value, &mut out,
+                        );
+                    }
+                }
+                collect_stmt_identifier_receiver_method_call_sites(
+                    module, typed, interner, body, &mut out,
+                );
+            }
+            Item::TestDecl { body, .. } => {
+                collect_stmt_identifier_receiver_method_call_sites(
+                    module, typed, interner, body, &mut out,
+                );
+            }
+            Item::Stmt(stmt_id) => {
+                collect_stmt_identifier_receiver_method_call_sites(
+                    module,
+                    typed,
+                    interner,
+                    std::slice::from_ref(stmt_id),
+                    &mut out,
+                );
+            }
+            Item::ObjectDecl { methods, .. } => {
+                for &mid in methods {
+                    if let Item::ActionDecl {
+                        params,
+                        body,
+                        decorators,
+                        ..
+                    } = module.arena.get_item(mid)
+                    {
+                        for param in params {
+                            if let Some(default) = param.default {
+                                collect_expr_identifier_receiver_method_call_sites(
+                                    module, typed, interner, default, &mut out,
+                                );
+                            }
+                        }
+                        for decorator in decorators {
+                            for arg in &decorator.args {
+                                collect_expr_identifier_receiver_method_call_sites(
+                                    module, typed, interner, arg.value, &mut out,
+                                );
+                            }
+                        }
+                        collect_stmt_identifier_receiver_method_call_sites(
+                            module, typed, interner, body, &mut out,
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    out
+}
+
+fn collect_stmt_identifier_receiver_method_call_sites(
+    module: &Module,
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+    stmts: &[fidan_ast::StmtId],
+    out: &mut Vec<IdentifierReceiverMethodCallSite>,
+) {
+    for &sid in stmts {
+        match module.arena.get_stmt(sid) {
+            fidan_ast::Stmt::VarDecl { init, .. } => {
+                if let Some(init) = init {
+                    collect_expr_identifier_receiver_method_call_sites(
+                        module, typed, interner, *init, out,
+                    );
+                }
+            }
+            fidan_ast::Stmt::Destructure { value, .. }
+            | fidan_ast::Stmt::Return {
+                value: Some(value), ..
+            }
+            | fidan_ast::Stmt::Expr { expr: value, .. }
+            | fidan_ast::Stmt::Panic { value, .. } => {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *value, out,
+                );
+            }
+            fidan_ast::Stmt::Assign { target, value, .. } => {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *target, out,
+                );
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *value, out,
+                );
+            }
+            fidan_ast::Stmt::ActionDecl {
+                params,
+                body,
+                decorators,
+                ..
+            } => {
+                for param in params {
+                    if let Some(default) = param.default {
+                        collect_expr_identifier_receiver_method_call_sites(
+                            module, typed, interner, default, out,
+                        );
+                    }
+                }
+                for decorator in decorators {
+                    for arg in &decorator.args {
+                        collect_expr_identifier_receiver_method_call_sites(
+                            module, typed, interner, arg.value, out,
+                        );
+                    }
+                }
+                collect_stmt_identifier_receiver_method_call_sites(
+                    module, typed, interner, body, out,
+                );
+            }
+            fidan_ast::Stmt::If {
+                condition,
+                then_body,
+                else_ifs,
+                else_body,
+                ..
+            } => {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *condition, out,
+                );
+                collect_stmt_identifier_receiver_method_call_sites(
+                    module, typed, interner, then_body, out,
+                );
+                for else_if in else_ifs {
+                    collect_expr_identifier_receiver_method_call_sites(
+                        module,
+                        typed,
+                        interner,
+                        else_if.condition,
+                        out,
+                    );
+                    collect_stmt_identifier_receiver_method_call_sites(
+                        module,
+                        typed,
+                        interner,
+                        &else_if.body,
+                        out,
+                    );
+                }
+                if let Some(else_body) = else_body {
+                    collect_stmt_identifier_receiver_method_call_sites(
+                        module, typed, interner, else_body, out,
+                    );
+                }
+            }
+            fidan_ast::Stmt::Check {
+                scrutinee, arms, ..
+            } => {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *scrutinee, out,
+                );
+                for arm in arms {
+                    collect_expr_identifier_receiver_method_call_sites(
+                        module,
+                        typed,
+                        interner,
+                        arm.pattern,
+                        out,
+                    );
+                    collect_stmt_identifier_receiver_method_call_sites(
+                        module, typed, interner, &arm.body, out,
+                    );
+                }
+            }
+            fidan_ast::Stmt::For { iterable, body, .. }
+            | fidan_ast::Stmt::ParallelFor { iterable, body, .. } => {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *iterable, out,
+                );
+                collect_stmt_identifier_receiver_method_call_sites(
+                    module, typed, interner, body, out,
+                );
+            }
+            fidan_ast::Stmt::While {
+                condition, body, ..
+            } => {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *condition, out,
+                );
+                collect_stmt_identifier_receiver_method_call_sites(
+                    module, typed, interner, body, out,
+                );
+            }
+            fidan_ast::Stmt::Attempt {
+                body,
+                catches,
+                otherwise,
+                finally,
+                ..
+            } => {
+                collect_stmt_identifier_receiver_method_call_sites(
+                    module, typed, interner, body, out,
+                );
+                for catch in catches {
+                    collect_stmt_identifier_receiver_method_call_sites(
+                        module,
+                        typed,
+                        interner,
+                        &catch.body,
+                        out,
+                    );
+                }
+                if let Some(otherwise) = otherwise {
+                    collect_stmt_identifier_receiver_method_call_sites(
+                        module, typed, interner, otherwise, out,
+                    );
+                }
+                if let Some(finally) = finally {
+                    collect_stmt_identifier_receiver_method_call_sites(
+                        module, typed, interner, finally, out,
+                    );
+                }
+            }
+            fidan_ast::Stmt::ConcurrentBlock { tasks, .. } => {
+                for task in tasks {
+                    collect_stmt_identifier_receiver_method_call_sites(
+                        module, typed, interner, &task.body, out,
+                    );
+                }
+            }
+            fidan_ast::Stmt::Return { value: None, .. }
+            | fidan_ast::Stmt::Break { .. }
+            | fidan_ast::Stmt::Continue { .. }
+            | fidan_ast::Stmt::Error { .. } => {}
+        }
+    }
+}
+
+fn collect_expr_identifier_receiver_method_call_sites(
+    module: &Module,
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+    expr_id: fidan_ast::ExprId,
+    out: &mut Vec<IdentifierReceiverMethodCallSite>,
+) {
+    match module.arena.get_expr(expr_id) {
+        Expr::Call { callee, args, span } => {
+            if let Expr::Field { object, field, .. } = module.arena.get_expr(*callee)
+                && let Expr::Ident {
+                    name,
+                    span: recv_span,
+                } = module.arena.get_expr(*object)
+            {
+                let arg_tys = args
+                    .iter()
+                    .map(|arg| {
+                        typed
+                            .expr_types
+                            .get(&arg.value)
+                            .map(|ty| ty.display_name(&|sym| interner.resolve(sym).to_string()))
+                            .unwrap_or_else(|| "dynamic".to_string())
+                    })
+                    .collect();
+                out.push(IdentifierReceiverMethodCallSite {
+                    receiver_name: interner.resolve(*name).to_string(),
+                    receiver_offset: recv_span.start,
+                    method_name: interner.resolve(*field).to_string(),
+                    arg_tys,
+                    span: *span,
+                });
+            }
+            collect_expr_identifier_receiver_method_call_sites(
+                module, typed, interner, *callee, out,
+            );
+            for arg in args {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, arg.value, out,
+                );
+            }
+        }
+        Expr::Binary { lhs, rhs, .. }
+        | Expr::NullCoalesce { lhs, rhs, .. }
+        | Expr::Assign {
+            target: lhs,
+            value: rhs,
+            ..
+        }
+        | Expr::CompoundAssign {
+            target: lhs,
+            value: rhs,
+            ..
+        } => {
+            collect_expr_identifier_receiver_method_call_sites(module, typed, interner, *lhs, out);
+            collect_expr_identifier_receiver_method_call_sites(module, typed, interner, *rhs, out);
+        }
+        Expr::Unary { operand, .. }
+        | Expr::Spawn { expr: operand, .. }
+        | Expr::Await { expr: operand, .. }
+        | Expr::Field {
+            object: operand, ..
+        }
+        | Expr::Index {
+            object: operand, ..
+        } => {
+            collect_expr_identifier_receiver_method_call_sites(
+                module, typed, interner, *operand, out,
+            );
+            if let Expr::Index { index, .. } = module.arena.get_expr(expr_id) {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *index, out,
+                );
+            }
+        }
+        Expr::StringInterp { parts, .. } => {
+            for part in parts {
+                if let fidan_ast::InterpPart::Expr(expr_id) = part {
+                    collect_expr_identifier_receiver_method_call_sites(
+                        module, typed, interner, *expr_id, out,
+                    );
+                }
+            }
+        }
+        Expr::Ternary {
+            condition,
+            then_val,
+            else_val,
+            ..
+        } => {
+            collect_expr_identifier_receiver_method_call_sites(
+                module, typed, interner, *condition, out,
+            );
+            collect_expr_identifier_receiver_method_call_sites(
+                module, typed, interner, *then_val, out,
+            );
+            collect_expr_identifier_receiver_method_call_sites(
+                module, typed, interner, *else_val, out,
+            );
+        }
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+            for &element in elements {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, element, out,
+                );
+            }
+        }
+        Expr::Dict { entries, .. } => {
+            for &(key, value) in entries {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, key, out,
+                );
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, value, out,
+                );
+            }
+        }
+        Expr::Check {
+            scrutinee, arms, ..
+        } => {
+            collect_expr_identifier_receiver_method_call_sites(
+                module, typed, interner, *scrutinee, out,
+            );
+            for arm in arms {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module,
+                    typed,
+                    interner,
+                    arm.pattern,
+                    out,
+                );
+                collect_stmt_identifier_receiver_method_call_sites(
+                    module, typed, interner, &arm.body, out,
+                );
+            }
+        }
+        Expr::Slice {
+            target,
+            start,
+            end,
+            step,
+            ..
+        } => {
+            collect_expr_identifier_receiver_method_call_sites(
+                module, typed, interner, *target, out,
+            );
+            if let Some(start) = start {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *start, out,
+                );
+            }
+            if let Some(end) = end {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *end, out,
+                );
+            }
+            if let Some(step) = step {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *step, out,
+                );
+            }
+        }
+        Expr::ListComp {
+            element,
+            iterable,
+            filter,
+            ..
+        } => {
+            collect_expr_identifier_receiver_method_call_sites(
+                module, typed, interner, *element, out,
+            );
+            collect_expr_identifier_receiver_method_call_sites(
+                module, typed, interner, *iterable, out,
+            );
+            if let Some(filter) = filter {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *filter, out,
+                );
+            }
+        }
+        Expr::DictComp {
+            key,
+            value,
+            iterable,
+            filter,
+            ..
+        } => {
+            collect_expr_identifier_receiver_method_call_sites(module, typed, interner, *key, out);
+            collect_expr_identifier_receiver_method_call_sites(
+                module, typed, interner, *value, out,
+            );
+            collect_expr_identifier_receiver_method_call_sites(
+                module, typed, interner, *iterable, out,
+            );
+            if let Some(filter) = filter {
+                collect_expr_identifier_receiver_method_call_sites(
+                    module, typed, interner, *filter, out,
+                );
+            }
+        }
+        Expr::Lambda {
+            params,
+            return_ty: _,
+            body,
+            ..
+        } => {
+            for param in params {
+                if let Some(default) = param.default {
+                    collect_expr_identifier_receiver_method_call_sites(
+                        module, typed, interner, default, out,
+                    );
+                }
+            }
+            collect_stmt_identifier_receiver_method_call_sites(module, typed, interner, body, out);
+        }
+        Expr::Ident { .. }
+        | Expr::This { .. }
+        | Expr::Parent { .. }
+        | Expr::IntLit { .. }
+        | Expr::FloatLit { .. }
+        | Expr::StrLit { .. }
+        | Expr::BoolLit { .. }
+        | Expr::Nothing { .. }
+        | Expr::Error { .. } => {}
     }
 }
 
@@ -782,7 +1472,10 @@ fn collect_item_identifier_spans(
     out: &mut Vec<(Span, String)>,
 ) {
     match module.arena.get_item(item_id) {
-        Item::VarDecl { init, .. } => {
+        Item::VarDecl { ty, init, .. } => {
+            if let Some(ty) = ty {
+                collect_type_expr_identifier_spans(ty, interner, out);
+            }
             if let Some(init) = init {
                 collect_expr_identifier_spans(module, *init, interner, text, out);
             }
@@ -801,6 +1494,7 @@ fn collect_item_identifier_spans(
             fields, methods, ..
         } => {
             for field in fields {
+                collect_type_expr_identifier_spans(&field.ty, interner, out);
                 if let Some(default) = field.default {
                     collect_expr_identifier_spans(module, default, interner, text, out);
                 }
@@ -811,20 +1505,26 @@ fn collect_item_identifier_spans(
         }
         Item::ActionDecl {
             params,
+            return_ty,
             body,
             decorators,
             ..
         }
         | Item::ExtensionAction {
             params,
+            return_ty,
             body,
             decorators,
             ..
         } => {
             for param in params {
+                collect_type_expr_identifier_spans(&param.ty, interner, out);
                 if let Some(default) = param.default {
                     collect_expr_identifier_spans(module, default, interner, text, out);
                 }
+            }
+            if let Some(return_ty) = return_ty {
+                collect_type_expr_identifier_spans(return_ty, interner, out);
             }
             for decorator in decorators {
                 for arg in &decorator.args {
@@ -852,7 +1552,10 @@ fn collect_stmt_identifier_spans(
 ) {
     for &stmt_id in stmts {
         match module.arena.get_stmt(stmt_id) {
-            fidan_ast::Stmt::VarDecl { init, .. } => {
+            fidan_ast::Stmt::VarDecl { ty, init, .. } => {
+                if let Some(ty) = ty {
+                    collect_type_expr_identifier_spans(ty, interner, out);
+                }
                 if let Some(init) = init {
                     collect_expr_identifier_spans(module, *init, interner, text, out);
                 }
@@ -869,14 +1572,19 @@ fn collect_stmt_identifier_spans(
             }
             fidan_ast::Stmt::ActionDecl {
                 params,
+                return_ty,
                 body,
                 decorators,
                 ..
             } => {
                 for param in params {
+                    collect_type_expr_identifier_spans(&param.ty, interner, out);
                     if let Some(default) = param.default {
                         collect_expr_identifier_spans(module, default, interner, text, out);
                     }
+                }
+                if let Some(return_ty) = return_ty {
+                    collect_type_expr_identifier_spans(return_ty, interner, out);
                 }
                 for decorator in decorators {
                     for arg in &decorator.args {
@@ -954,6 +1662,28 @@ fn collect_stmt_identifier_spans(
             | fidan_ast::Stmt::Continue { .. }
             | fidan_ast::Stmt::Error { .. } => {}
         }
+    }
+}
+
+fn collect_type_expr_identifier_spans(
+    ty: &TypeExpr,
+    interner: &SymbolInterner,
+    out: &mut Vec<(Span, String)>,
+) {
+    match ty {
+        TypeExpr::Named { name, span } => {
+            out.push((*span, interner.resolve(*name).to_string()));
+        }
+        TypeExpr::Tuple { elements, .. } => {
+            for element in elements {
+                collect_type_expr_identifier_spans(element, interner, out);
+            }
+        }
+        TypeExpr::Oftype { base, param, .. } => {
+            collect_type_expr_identifier_spans(base, interner, out);
+            collect_type_expr_identifier_spans(param, interner, out);
+        }
+        TypeExpr::Dynamic { .. } | TypeExpr::Nothing { .. } => {}
     }
 }
 
@@ -1604,9 +2334,9 @@ action main {
             result
                 .stdlib_var_call_sites
                 .iter()
-                .any(|(var, module, member)| var == "rows"
-                    && module == "collections"
-                    && member == "enumerate")
+                .any(|site| site.var_name == "rows"
+                    && site.module_name == "collections"
+                    && site.member_name == "enumerate")
         );
     }
 
@@ -1619,10 +2349,9 @@ var argv = env.args()
 
         let result = analyze(src, "file:///stdlib_type_patch.fdn");
         assert!(
-            result
-                .stdlib_var_call_sites
-                .iter()
-                .any(|(var, module, member)| var == "argv" && module == "env" && member == "args"),
+            result.stdlib_var_call_sites.iter().any(|site| {
+                site.var_name == "argv" && site.module_name == "env" && site.member_name == "args"
+            }),
             "expected env.args() to be recorded for stdlib type patching"
         );
     }

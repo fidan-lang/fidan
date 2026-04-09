@@ -6,6 +6,7 @@ use fidan_runtime::{FidanDict, FidanList, FidanValue, OwnedRef};
 pub fn dispatch(d: OwnedRef<FidanDict>, method: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
     let operation = infer_receiver_member(ReceiverBuiltinKind::Dict, method)?.operation?;
     match operation {
+        ReceiverMethodOp::IsEmpty => Some(FidanValue::Boolean(d.borrow().is_empty())),
         ReceiverMethodOp::Get => {
             if let Some(key) = args.first() {
                 Some(
@@ -70,6 +71,9 @@ pub fn dispatch(d: OwnedRef<FidanDict>, method: &str, args: Vec<FidanValue>) -> 
                 Some(FidanValue::Nothing)
             }
         }
+        ReceiverMethodOp::ToString => Some(FidanValue::String(fidan_runtime::FidanString::new(
+            &fidan_runtime::display(&FidanValue::Dict(d.clone())),
+        ))),
         _ => None,
     }
 }
