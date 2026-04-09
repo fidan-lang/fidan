@@ -1152,11 +1152,109 @@ fn doc_comment_text_for_span(text: &str, span: Span) -> Option<String> {
     }
 }
 
+fn leading_doc_comment_text(text: &str) -> Option<String> {
+    let mut lines = Vec::new();
+    let mut started = false;
+
+    for raw_line in text.lines() {
+        let trimmed = raw_line.trim_end_matches('\r');
+        let trimmed_start = trimmed.trim_start();
+
+        if trimmed_start.is_empty() {
+            if started {
+                break;
+            }
+            continue;
+        }
+
+        let Some(doc_line) = trimmed_start.strip_prefix("#>") else {
+            break;
+        };
+
+        started = true;
+        lines.push(doc_line.strip_prefix(' ').unwrap_or(doc_line).to_string());
+    }
+
+    if lines.is_empty() {
+        None
+    } else {
+        Some(lines.join("\n"))
+    }
+}
+
+fn doc_comment_markdown(doc: &str) -> String {
+    doc.lines().collect::<Vec<_>>().join("  \n")
+}
+
 fn append_doc_comment_to_hover(detail: String, text: &str, span: Span) -> String {
     match doc_comment_text_for_span(text, span) {
-        Some(doc) => format!("{detail}\n\n---\n\n{doc}"),
+        Some(doc) => format!("{detail}\n\n---\n\n{}", doc_comment_markdown(&doc)),
         None => detail,
     }
+}
+
+fn append_module_doc_comment_to_hover(detail: String, text: &str) -> String {
+    match leading_doc_comment_text(text) {
+        Some(doc) => format!("{detail}\n\n---\n\n{}", doc_comment_markdown(&doc)),
+        None => detail,
+    }
+}
+
+fn user_module_import_hover_target_at_offset(
+    text: &str,
+    uri: &Url,
+    offset: usize,
+) -> Option<(Url, String)> {
+    let current_path = uri.to_file_path().ok()?;
+    let line_start = text[..offset.min(text.len())]
+        .rfind('\n')
+        .map(|idx| idx + 1)
+        .unwrap_or(0);
+    let line_end = text[offset.min(text.len())..]
+        .find('\n')
+        .map(|idx| offset.min(text.len()) + idx)
+        .unwrap_or(text.len());
+    let line = &text[line_start..line_end];
+    let trimmed = line.trim_start();
+    let indent = line.len().saturating_sub(trimmed.len());
+
+    let rest = if let Some(rest) = trimmed.strip_prefix("use ") {
+        rest
+    } else if let Some(rest) = trimmed.strip_prefix("export use ") {
+        rest
+    } else {
+        return None;
+    };
+
+    if rest.starts_with('"') || rest.starts_with("std.") || rest.is_empty() {
+        return None;
+    }
+
+    let grouped_end = rest.find(".{");
+    let alias_end = rest.find(" as ");
+    let whitespace_end = rest.find(char::is_whitespace);
+    let path_end = [grouped_end, alias_end, whitespace_end]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(rest.len());
+    let module_path = rest[..path_end].trim_end();
+    if module_path.is_empty() {
+        return None;
+    }
+
+    let module_start = line_start + indent;
+    let module_end = module_start + module_path.len();
+    if offset < module_start || offset > module_end {
+        return None;
+    }
+
+    let grouped = rest
+        .get(path_end..)
+        .is_some_and(|tail| tail.starts_with(".{"));
+    let segments: Vec<String> = module_path.split('.').map(str::to_string).collect();
+    let url = resolve_user_module_import_url(Some(&current_path), &segments, grouped)?;
+    Some((url, module_path.to_string()))
 }
 
 fn build_remove_unused_imports_edits_for_text(
@@ -1506,6 +1604,7 @@ impl LanguageServer for FidanLsp {
         // re-entrant shard locking with DashMap.
         enum HoverLookup {
             DocEntry(Url, SymbolEntry),
+            ModuleDoc(Url, String),
             Plain(String),            // detail string, ready to return
             CrossDoc(String, String), // (type_name, member_name) to search across docs
             ImportDoc(Url, String),   // (import_file_url, symbol_name) — for `module.Type`
@@ -1600,6 +1699,10 @@ impl LanguageServer for FidanLsp {
                     Some(detail) => HoverLookup::Plain(detail),
                     None => HoverLookup::NotFound,
                 }
+            } else if let Some((module_url, module_path)) =
+                user_module_import_hover_target_at_offset(doc.text.as_str(), uri, offset as usize)
+            {
+                HoverLookup::ModuleDoc(module_url, format!("```fidan\nuse {}\n```", module_path))
             } else if let Some(pn) = prev_name {
                 // `module.Type` — prev is a namespace alias for an imported file.
                 if let Some(import_url) = doc.imports.get(pn) {
@@ -1623,10 +1726,10 @@ impl LanguageServer for FidanLsp {
                     .and_then(|mut s| s.next_back())
                     .unwrap_or("?")
                     .to_owned();
-                HoverLookup::Plain(format!(
-                    "```fidan\nimport \"{}\" as {}\n```",
-                    file_name, cur_name
-                ))
+                HoverLookup::ModuleDoc(
+                    url.clone(),
+                    format!("```fidan\nimport \"{}\" as {}\n```", file_name, cur_name),
+                )
             } else if let Some(mod_name) = doc.stdlib_imports.get(cur_name.as_str()) {
                 match stdlib_module_hover_markdown(mod_name.as_str()) {
                     Some(detail) => HoverLookup::Plain(detail),
@@ -1656,6 +1759,13 @@ impl LanguageServer for FidanLsp {
                 }
                 None => entry.detail,
             },
+            HoverLookup::ModuleDoc(doc_uri, detail) => {
+                let _ = load_background_document(&self.store, &doc_uri);
+                match self.store.get(&doc_uri) {
+                    Some(doc) => append_module_doc_comment_to_hover(detail, &doc.text),
+                    None => detail,
+                }
+            }
             HoverLookup::Plain(d) => d,
             HoverLookup::CrossDoc(ty, member) => {
                 match self.resolve_member_cross_doc(&ty, &member) {
@@ -4639,6 +4749,21 @@ Holder.compass.
     }
 
     #[test]
+    fn leading_doc_comment_text_is_collected_from_start_of_file() {
+        let text = "\n#> First line\n#> Second line\n\nuse std.json\n";
+        let doc = leading_doc_comment_text(text).expect("module doc comment");
+
+        assert_eq!(doc, "First line\nSecond line");
+    }
+
+    #[test]
+    fn doc_comment_markdown_preserves_multiple_lines_for_hover_rendering() {
+        let rendered = doc_comment_markdown("First line\nSecond line");
+
+        assert_eq!(rendered, "First line  \nSecond line");
+    }
+
+    #[test]
     fn editor_format_defaults_are_loaded_from_initialize_options() {
         let params = InitializeParams {
             initialization_options: Some(json!({
@@ -4733,6 +4858,57 @@ Holder.compass.
                 panic!("expected markdown hover contents");
             };
             assert!(markup.value.contains("std.collections.enumerate(list) -> list"));
+        });
+    }
+
+    #[test]
+    fn hover_resolves_user_module_doc_comments_on_grouped_import_paths() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let main_uri = path_url(&import_test_path("main_grouped_module_hover.fdn"));
+            let imported_uri = path_url(&import_test_path("test_file_manager.fdn"));
+            backend.store.insert(
+                imported_uri.clone(),
+                background_doc(
+                    &imported_uri,
+                    "#> Some doccomment\n#> Blablabla\n\nobject StorageManager {}\n",
+                ),
+            );
+
+            let text = "use test_file_manager.{StorageManager}\n";
+            backend.refresh(&main_uri, 1, text).await;
+            let file = SourceFile::new(FileId(0), main_uri.as_str(), text);
+            let offset = text.find("test_file_manager").expect("module offset") as u32;
+            let pos = convert::span_to_range(&file, Span::new(FileId(0), offset, offset + 1)).start;
+
+            let hover = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier {
+                            uri: main_uri.clone(),
+                        },
+                        position: pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("hover result")
+            .expect("hover contents");
+
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markdown hover contents");
+            };
+            assert!(markup.value.contains("use test_file_manager"));
+            assert!(markup.value.contains("Some doccomment  \nBlablabla"));
         });
     }
 
