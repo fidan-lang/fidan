@@ -1,4 +1,4 @@
-use crate::{FidanDict, FidanList, FidanString, FidanValue, OwnedRef, display};
+use crate::{FidanDict, FidanHashSet, FidanList, FidanValue, OwnedRef, display};
 
 use super::common::{list_value, string_value};
 
@@ -13,14 +13,21 @@ fn compare_collection_values(left: &FidanValue, right: &FidanValue) -> Option<st
     }
 }
 
-fn as_key(v: &FidanValue) -> String {
-    match v {
-        FidanValue::String(s) => s.as_str().to_string(),
-        FidanValue::Integer(n) => n.to_string(),
-        FidanValue::Boolean(b) => b.to_string(),
-        FidanValue::Float(f) => f.to_string(),
-        _ => display(v),
+fn set_from_value(value: &FidanValue) -> Option<FidanHashSet> {
+    match value {
+        FidanValue::HashSet(set) => Some(set.borrow().clone()),
+        FidanValue::List(list) => FidanHashSet::from_values(list.borrow().iter().cloned()).ok(),
+        FidanValue::Nothing => Some(FidanHashSet::new()),
+        _ => None,
     }
+}
+
+fn set_to_list(set: &FidanHashSet) -> FidanValue {
+    let mut list = FidanList::new();
+    for value in set.values_sorted() {
+        list.append(value);
+    }
+    FidanValue::List(OwnedRef::new(list))
 }
 
 pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
@@ -55,21 +62,15 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             }
             Some(FidanValue::List(OwnedRef::new(list)))
         }
-        "Set" => {
-            let mut dict = FidanDict::new();
-            if let Some(FidanValue::List(l)) = args.first() {
-                for value in l.borrow().iter() {
-                    dict.insert(FidanString::new(&as_key(value)), FidanValue::Boolean(true));
-                }
-            }
-            Some(FidanValue::Dict(OwnedRef::new(dict)))
+        "hashset" => {
+            let source = args.first().cloned().unwrap_or(FidanValue::Nothing);
+            set_from_value(&source).map(|set| FidanValue::HashSet(OwnedRef::new(set)))
         }
         "setAdd" | "set_add" => {
             let set = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            if let FidanValue::Dict(d) = set {
+            if let FidanValue::HashSet(d) = set {
                 let value = args.into_iter().nth(1).unwrap_or(FidanValue::Nothing);
-                d.borrow_mut()
-                    .insert(FidanString::new(&as_key(&value)), FidanValue::Boolean(true));
+                let _ = d.borrow_mut().insert(value);
                 Some(FidanValue::Nothing)
             } else {
                 Some(FidanValue::Nothing)
@@ -77,9 +78,9 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "setRemove" | "set_remove" => {
             let set = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            if let FidanValue::Dict(d) = set {
+            if let FidanValue::HashSet(d) = set {
                 let value = args.into_iter().nth(1).unwrap_or(FidanValue::Nothing);
-                d.borrow_mut().remove(&FidanString::new(&as_key(&value)));
+                let _ = d.borrow_mut().remove(&value);
                 Some(FidanValue::Nothing)
             } else {
                 Some(FidanValue::Nothing)
@@ -87,74 +88,55 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "setContains" | "set_contains" => {
             let set = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            if let FidanValue::Dict(d) = set {
+            if let FidanValue::HashSet(d) = set {
                 let value = args.into_iter().nth(1).unwrap_or(FidanValue::Nothing);
                 Some(FidanValue::Boolean(
-                    d.borrow().get(&FidanString::new(&as_key(&value))).is_some(),
+                    d.borrow().contains(&value).unwrap_or(false),
                 ))
             } else {
                 Some(FidanValue::Boolean(false))
             }
         }
         "setToList" | "set_to_list" => {
-            if let Some(FidanValue::Dict(d)) = args.first() {
-                let mut list = FidanList::new();
-                for (key, _) in d.borrow().iter() {
-                    list.append(FidanValue::String(key.clone()));
-                }
-                Some(FidanValue::List(OwnedRef::new(list)))
+            if let Some(FidanValue::HashSet(d)) = args.first() {
+                Some(set_to_list(&d.borrow()))
             } else {
                 Some(FidanValue::Nothing)
             }
         }
         "setLen" | "set_len" => match args.first() {
-            Some(FidanValue::Dict(d)) => Some(FidanValue::Integer(d.borrow().len() as i64)),
+            Some(FidanValue::HashSet(d)) => Some(FidanValue::Integer(d.borrow().len() as i64)),
             _ => Some(FidanValue::Integer(0)),
         },
         "setUnion" | "set_union" => {
-            if let (Some(FidanValue::Dict(a)), Some(FidanValue::Dict(b))) =
+            if let (Some(FidanValue::HashSet(a)), Some(FidanValue::HashSet(b))) =
                 (args.first(), args.get(1))
             {
-                let mut result = FidanDict::new();
-                for (key, value) in a.borrow().iter() {
-                    result.insert(key.clone(), value.clone());
-                }
-                for (key, value) in b.borrow().iter() {
-                    result.insert(key.clone(), value.clone());
-                }
-                Some(FidanValue::Dict(OwnedRef::new(result)))
+                Some(FidanValue::HashSet(OwnedRef::new(
+                    a.borrow().union(&b.borrow()),
+                )))
             } else {
                 Some(FidanValue::Nothing)
             }
         }
         "setIntersect" | "set_intersect" => {
-            if let (Some(FidanValue::Dict(a)), Some(FidanValue::Dict(b))) =
+            if let (Some(FidanValue::HashSet(a)), Some(FidanValue::HashSet(b))) =
                 (args.first(), args.get(1))
             {
-                let b_ref = b.borrow();
-                let mut result = FidanDict::new();
-                for (key, value) in a.borrow().iter() {
-                    if b_ref.get(key).is_some() {
-                        result.insert(key.clone(), value.clone());
-                    }
-                }
-                Some(FidanValue::Dict(OwnedRef::new(result)))
+                Some(FidanValue::HashSet(OwnedRef::new(
+                    a.borrow().intersection(&b.borrow()),
+                )))
             } else {
                 Some(FidanValue::Nothing)
             }
         }
         "setDiff" | "set_diff" => {
-            if let (Some(FidanValue::Dict(a)), Some(FidanValue::Dict(b))) =
+            if let (Some(FidanValue::HashSet(a)), Some(FidanValue::HashSet(b))) =
                 (args.first(), args.get(1))
             {
-                let b_ref = b.borrow();
-                let mut result = FidanDict::new();
-                for (key, value) in a.borrow().iter() {
-                    if b_ref.get(key).is_none() {
-                        result.insert(key.clone(), value.clone());
-                    }
-                }
-                Some(FidanValue::Dict(OwnedRef::new(result)))
+                Some(FidanValue::HashSet(OwnedRef::new(
+                    a.borrow().difference(&b.borrow()),
+                )))
             } else {
                 Some(FidanValue::Nothing)
             }
@@ -341,13 +323,12 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             if let Some(FidanValue::List(list)) = args.first() {
                 let mut groups = FidanDict::new();
                 for value in list.borrow().iter().cloned() {
-                    let key = FidanString::new(&as_key(&value));
-                    match groups.get(&key).cloned() {
+                    match groups.get(&value).ok().flatten().cloned() {
                         Some(FidanValue::List(existing)) => existing.borrow_mut().append(value),
                         _ => {
                             let mut bucket = FidanList::new();
-                            bucket.append(value);
-                            groups.insert(key, FidanValue::List(OwnedRef::new(bucket)));
+                            bucket.append(value.clone());
+                            let _ = groups.insert(value, FidanValue::List(OwnedRef::new(bucket)));
                         }
                     }
                 }
@@ -358,11 +339,10 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "unique" | "dedup" => {
             if let Some(FidanValue::List(list)) = args.first() {
-                let mut seen = std::collections::HashSet::<String>::new();
+                let mut seen = FidanHashSet::new();
                 let mut result = FidanList::new();
                 for value in list.borrow().iter() {
-                    let key = as_key(value);
-                    if seen.insert(key) {
+                    if seen.insert(value.clone()).unwrap_or(false) {
                         result.append(value.clone());
                     }
                 }
@@ -450,9 +430,9 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         },
         "join" => {
             let list = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let sep = args.get(1).map(as_key).unwrap_or_default();
+            let sep = args.get(1).map(display).unwrap_or_default();
             if let FidanValue::List(list) = list {
-                let parts: Vec<String> = list.borrow().iter().map(as_key).collect();
+                let parts: Vec<String> = list.borrow().iter().map(display).collect();
                 Some(string_value(&parts.join(&sep)))
             } else {
                 Some(FidanValue::Nothing)
@@ -535,7 +515,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
 pub fn exported_names() -> &'static [&'static str] {
     &[
         "range",
-        "Set",
+        "hashset",
         "setAdd",
         "set_add",
         "setRemove",

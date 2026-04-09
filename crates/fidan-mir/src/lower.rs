@@ -295,6 +295,7 @@ fn fidan_ty_to_mir(ty: &FidanType) -> MirTy {
         FidanType::Dict(k, v) => {
             MirTy::Dict(Box::new(fidan_ty_to_mir(k)), Box::new(fidan_ty_to_mir(v)))
         }
+        FidanType::HashSet(inner) => MirTy::HashSet(Box::new(fidan_ty_to_mir(inner))),
         FidanType::Tuple(elems) => MirTy::Tuple(elems.iter().map(fidan_ty_to_mir).collect()),
         FidanType::Object(s) => MirTy::Object(*s),
         FidanType::Enum(s) => MirTy::Enum(*s),

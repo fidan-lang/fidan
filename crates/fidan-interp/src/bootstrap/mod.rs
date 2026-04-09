@@ -6,6 +6,7 @@
 //! extension-action dispatch fires first and these become unreachable.
 
 pub mod dict_methods;
+pub mod hashset_methods;
 pub mod list_methods;
 pub mod numeric_methods;
 pub mod range_methods;
@@ -26,6 +27,7 @@ pub fn call_bootstrap_method(
         FidanValue::String(s) => string_methods::dispatch(s, method, args),
         FidanValue::List(l) => list_methods::dispatch(l, method, args),
         FidanValue::Dict(d) => dict_methods::dispatch(d, method, args),
+        FidanValue::HashSet(s) => hashset_methods::dispatch(s, method, args),
         v @ (FidanValue::Integer(_) | FidanValue::Float(_)) => numeric_methods::dispatch(v, method),
         FidanValue::Range {
             start,

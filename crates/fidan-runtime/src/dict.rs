@@ -1,12 +1,11 @@
-use crate::FidanString;
-use crate::FidanValue;
+use crate::{FidanHashKey, FidanValue, HashKeyError};
 use std::collections::HashMap;
 use std::rc::Rc;
 
 /// Copy-on-Write dictionary.
 #[derive(Debug, Clone)]
 pub struct FidanDict {
-    inner: Rc<HashMap<FidanString, FidanValue>>,
+    inner: Rc<HashMap<FidanHashKey, (FidanValue, FidanValue)>>,
 }
 
 impl FidanDict {
@@ -15,15 +14,34 @@ impl FidanDict {
             inner: Rc::new(HashMap::new()),
         }
     }
-    pub fn get(&self, key: &FidanString) -> Option<&FidanValue> {
-        self.inner.get(key)
+
+    pub fn get(&self, key: &FidanValue) -> Result<Option<&FidanValue>, HashKeyError> {
+        let key = FidanHashKey::from_value(key)?;
+        Ok(self.inner.get(&key).map(|(_, value)| value))
     }
-    pub fn insert(&mut self, key: FidanString, value: FidanValue) {
-        Rc::make_mut(&mut self.inner).insert(key, value);
+
+    pub fn get_hashed(&self, key: &FidanHashKey) -> Option<&FidanValue> {
+        self.inner.get(key).map(|(_, value)| value)
     }
-    pub fn remove(&mut self, key: &FidanString) {
-        Rc::make_mut(&mut self.inner).remove(key);
+
+    pub fn insert(
+        &mut self,
+        key: FidanValue,
+        value: FidanValue,
+    ) -> Result<Option<FidanValue>, HashKeyError> {
+        let hashed = FidanHashKey::from_value(&key)?;
+        Ok(Rc::make_mut(&mut self.inner)
+            .insert(hashed, (key, value))
+            .map(|(_, previous)| previous))
     }
+
+    pub fn remove(&mut self, key: &FidanValue) -> Result<Option<FidanValue>, HashKeyError> {
+        let key = FidanHashKey::from_value(key)?;
+        Ok(Rc::make_mut(&mut self.inner)
+            .remove(&key)
+            .map(|(_, value)| value))
+    }
+
     pub fn len(&self) -> usize {
         self.inner.len()
     }
@@ -32,8 +50,21 @@ impl FidanDict {
     }
 
     /// Iterate over key-value pairs.
-    pub fn iter(&self) -> impl Iterator<Item = (&FidanString, &FidanValue)> {
-        self.inner.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&FidanValue, &FidanValue)> {
+        self.inner.values().map(|(key, value)| (key, value))
+    }
+
+    pub fn entries_sorted(&self) -> Vec<(FidanValue, FidanValue)> {
+        let mut entries: Vec<_> = self
+            .inner
+            .iter()
+            .map(|(hashed, (key, value))| (hashed.clone(), key.clone(), value.clone()))
+            .collect();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        entries
+            .into_iter()
+            .map(|(_, key, value)| (key, value))
+            .collect()
     }
 }
 

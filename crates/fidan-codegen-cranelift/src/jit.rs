@@ -35,7 +35,8 @@ use fidan_mir::{
 };
 use fidan_runtime::FidanValue;
 use fidan_stdlib::{
-    MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_stdlib_method, is_stdlib_module,
+    MathIntrinsic, ReceiverBuiltinKind, ReceiverMethodOp, StdlibIntrinsic, StdlibValueKind,
+    infer_receiver_member, infer_stdlib_method, is_stdlib_module,
 };
 use libffi::middle::{Cif, CodePtr, Type, arg};
 use std::cell::Cell;
@@ -180,6 +181,169 @@ unsafe extern "C" fn fdn_jit_tuple_pack_scoped(values_ptr: *const i64, values_co
 }
 
 #[unsafe(no_mangle)]
+extern "C" fn fdn_jit_dict_len_raw(dict: i64) -> i64 {
+    unsafe { fidan_runtime::ffi::fdn_dict_len(dict as *mut FidanValue) }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_hashset_len_raw(set: i64) -> i64 {
+    unsafe { fidan_runtime::ffi::fdn_len(set as *mut FidanValue) }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_dict_contains_key_raw(dict: i64, key: i64) -> i64 {
+    unsafe {
+        i64::from(fidan_runtime::ffi::fdn_dict_contains_key(
+            dict as *mut FidanValue,
+            key as *mut FidanValue,
+        ))
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_hashset_contains_raw(set: i64, value: i64) -> i64 {
+    unsafe {
+        i64::from(fidan_runtime::ffi::fdn_hashset_contains(
+            set as *mut FidanValue,
+            value as *mut FidanValue,
+        ))
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_dict_get_boxed_scoped(dict: i64, key: i64) -> i64 {
+    register_jit_abi_ptr(unsafe {
+        fidan_runtime::ffi::fdn_dict_get(dict as *mut FidanValue, key as *mut FidanValue)
+    })
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_dict_get_int(dict: i64, key: i64) -> i64 {
+    unsafe {
+        let value =
+            fidan_runtime::ffi::fdn_dict_get(dict as *mut FidanValue, key as *mut FidanValue);
+        let raw = fidan_runtime::ffi::fdn_unbox_int(value);
+        fidan_runtime::ffi::fdn_drop(value);
+        raw
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_dict_get_float(dict: i64, key: i64) -> i64 {
+    unsafe {
+        let value =
+            fidan_runtime::ffi::fdn_dict_get(dict as *mut FidanValue, key as *mut FidanValue);
+        let raw = fidan_runtime::ffi::fdn_unbox_float(value).to_bits() as i64;
+        fidan_runtime::ffi::fdn_drop(value);
+        raw
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_dict_get_bool(dict: i64, key: i64) -> i64 {
+    unsafe {
+        let value =
+            fidan_runtime::ffi::fdn_dict_get(dict as *mut FidanValue, key as *mut FidanValue);
+        let raw = i64::from(fidan_runtime::ffi::fdn_unbox_bool(value) != 0);
+        fidan_runtime::ffi::fdn_drop(value);
+        raw
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_dict_get_handle(dict: i64, key: i64) -> i64 {
+    unsafe {
+        let value =
+            fidan_runtime::ffi::fdn_dict_get(dict as *mut FidanValue, key as *mut FidanValue);
+        let raw = fidan_runtime::ffi::fdn_unbox_handle(value) as i64;
+        fidan_runtime::ffi::fdn_drop(value);
+        raw
+    }
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_dict_set_scoped(dict: i64, key: i64, value: i64) -> i64 {
+    unsafe {
+        fidan_runtime::ffi::fdn_dict_set(
+            dict as *mut FidanValue,
+            key as *mut FidanValue,
+            value as *mut FidanValue,
+        );
+    }
+    register_jit_abi_ptr(fidan_runtime::ffi::fdn_box_nothing())
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_dict_remove_scoped(dict: i64, key: i64) -> i64 {
+    unsafe {
+        fidan_runtime::ffi::fdn_dict_remove(dict as *mut FidanValue, key as *mut FidanValue);
+    }
+    register_jit_abi_ptr(fidan_runtime::ffi::fdn_box_nothing())
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_dict_keys_scoped(dict: i64) -> i64 {
+    register_jit_abi_ptr(unsafe { fidan_runtime::ffi::fdn_dict_keys(dict as *mut FidanValue) })
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_dict_values_scoped(dict: i64) -> i64 {
+    register_jit_abi_ptr(unsafe { fidan_runtime::ffi::fdn_dict_values(dict as *mut FidanValue) })
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_dict_entries_scoped(dict: i64) -> i64 {
+    register_jit_abi_ptr(unsafe { fidan_runtime::ffi::fdn_dict_entries(dict as *mut FidanValue) })
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_hashset_insert_scoped(set: i64, value: i64) -> i64 {
+    unsafe {
+        fidan_runtime::ffi::fdn_hashset_insert(set as *mut FidanValue, value as *mut FidanValue);
+    }
+    register_jit_abi_ptr(fidan_runtime::ffi::fdn_box_nothing())
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_hashset_remove_scoped(set: i64, value: i64) -> i64 {
+    unsafe {
+        fidan_runtime::ffi::fdn_hashset_remove(set as *mut FidanValue, value as *mut FidanValue);
+    }
+    register_jit_abi_ptr(fidan_runtime::ffi::fdn_box_nothing())
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_hashset_to_list_scoped(set: i64) -> i64 {
+    register_jit_abi_ptr(unsafe { fidan_runtime::ffi::fdn_hashset_to_list(set as *mut FidanValue) })
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_hashset_union_scoped(set: i64, other: i64) -> i64 {
+    register_jit_abi_ptr(unsafe {
+        fidan_runtime::ffi::fdn_hashset_union(set as *mut FidanValue, other as *mut FidanValue)
+    })
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_hashset_intersect_scoped(set: i64, other: i64) -> i64 {
+    register_jit_abi_ptr(unsafe {
+        fidan_runtime::ffi::fdn_hashset_intersect(set as *mut FidanValue, other as *mut FidanValue)
+    })
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_hashset_diff_scoped(set: i64, other: i64) -> i64 {
+    register_jit_abi_ptr(unsafe {
+        fidan_runtime::ffi::fdn_hashset_diff(set as *mut FidanValue, other as *mut FidanValue)
+    })
+}
+
+#[unsafe(no_mangle)]
+extern "C" fn fdn_jit_to_string_scoped(value: i64) -> i64 {
+    register_jit_abi_ptr(unsafe { fidan_runtime::ffi::fdn_to_string(value as *mut FidanValue) })
+}
+
+#[unsafe(no_mangle)]
 extern "C" fn fdn_jit_load_global_raw(global_id: i64) -> i64 {
     let hooks = active_jit_runtime_hooks();
     let ctx = active_jit_context();
@@ -288,6 +452,27 @@ pub struct JitCompiler {
     box_nothing_scoped_id: FuncId,
     box_str_scoped_id: FuncId,
     tuple_pack_scoped_id: FuncId,
+    dict_len_raw_id: FuncId,
+    hashset_len_raw_id: FuncId,
+    dict_contains_key_raw_id: FuncId,
+    hashset_contains_raw_id: FuncId,
+    dict_get_boxed_scoped_id: FuncId,
+    dict_get_int_id: FuncId,
+    dict_get_float_id: FuncId,
+    dict_get_bool_id: FuncId,
+    dict_get_handle_id: FuncId,
+    dict_set_scoped_id: FuncId,
+    dict_remove_scoped_id: FuncId,
+    dict_keys_scoped_id: FuncId,
+    dict_values_scoped_id: FuncId,
+    dict_entries_scoped_id: FuncId,
+    hashset_insert_scoped_id: FuncId,
+    hashset_remove_scoped_id: FuncId,
+    hashset_to_list_scoped_id: FuncId,
+    hashset_union_scoped_id: FuncId,
+    hashset_intersect_scoped_id: FuncId,
+    hashset_diff_scoped_id: FuncId,
+    to_string_scoped_id: FuncId,
     /// Counter used to generate unique function names.
     fn_counter: u32,
 }
@@ -349,6 +534,81 @@ impl JitCompiler {
             "fdn_jit_tuple_pack_scoped",
             fdn_jit_tuple_pack_scoped as *const u8,
         );
+        builder.symbol("fdn_jit_dict_len_raw", fdn_jit_dict_len_raw as *const u8);
+        builder.symbol(
+            "fdn_jit_hashset_len_raw",
+            fdn_jit_hashset_len_raw as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_dict_contains_key_raw",
+            fdn_jit_dict_contains_key_raw as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_hashset_contains_raw",
+            fdn_jit_hashset_contains_raw as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_dict_get_boxed_scoped",
+            fdn_jit_dict_get_boxed_scoped as *const u8,
+        );
+        builder.symbol("fdn_jit_dict_get_int", fdn_jit_dict_get_int as *const u8);
+        builder.symbol(
+            "fdn_jit_dict_get_float",
+            fdn_jit_dict_get_float as *const u8,
+        );
+        builder.symbol("fdn_jit_dict_get_bool", fdn_jit_dict_get_bool as *const u8);
+        builder.symbol(
+            "fdn_jit_dict_get_handle",
+            fdn_jit_dict_get_handle as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_dict_set_scoped",
+            fdn_jit_dict_set_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_dict_remove_scoped",
+            fdn_jit_dict_remove_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_dict_keys_scoped",
+            fdn_jit_dict_keys_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_dict_values_scoped",
+            fdn_jit_dict_values_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_dict_entries_scoped",
+            fdn_jit_dict_entries_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_hashset_insert_scoped",
+            fdn_jit_hashset_insert_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_hashset_remove_scoped",
+            fdn_jit_hashset_remove_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_hashset_to_list_scoped",
+            fdn_jit_hashset_to_list_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_hashset_union_scoped",
+            fdn_jit_hashset_union_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_hashset_intersect_scoped",
+            fdn_jit_hashset_intersect_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_hashset_diff_scoped",
+            fdn_jit_hashset_diff_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_to_string_scoped",
+            fdn_jit_to_string_scoped as *const u8,
+        );
         let mut module = JITModule::new(builder);
         let load_global_raw_id = {
             let mut sig = module.make_signature();
@@ -398,6 +658,104 @@ impl JitCompiler {
             &[I64, I64],
             Some(I64),
         );
+        let dict_len_raw_id =
+            declare_import_fn(&mut module, "fdn_jit_dict_len_raw", &[I64], Some(I64));
+        let hashset_len_raw_id =
+            declare_import_fn(&mut module, "fdn_jit_hashset_len_raw", &[I64], Some(I64));
+        let dict_contains_key_raw_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_dict_contains_key_raw",
+            &[I64, I64],
+            Some(I64),
+        );
+        let hashset_contains_raw_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_hashset_contains_raw",
+            &[I64, I64],
+            Some(I64),
+        );
+        let dict_get_boxed_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_dict_get_boxed_scoped",
+            &[I64, I64],
+            Some(I64),
+        );
+        let dict_get_int_id =
+            declare_import_fn(&mut module, "fdn_jit_dict_get_int", &[I64, I64], Some(I64));
+        let dict_get_float_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_dict_get_float",
+            &[I64, I64],
+            Some(I64),
+        );
+        let dict_get_bool_id =
+            declare_import_fn(&mut module, "fdn_jit_dict_get_bool", &[I64, I64], Some(I64));
+        let dict_get_handle_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_dict_get_handle",
+            &[I64, I64],
+            Some(I64),
+        );
+        let dict_set_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_dict_set_scoped",
+            &[I64, I64, I64],
+            Some(I64),
+        );
+        let dict_remove_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_dict_remove_scoped",
+            &[I64, I64],
+            Some(I64),
+        );
+        let dict_keys_scoped_id =
+            declare_import_fn(&mut module, "fdn_jit_dict_keys_scoped", &[I64], Some(I64));
+        let dict_values_scoped_id =
+            declare_import_fn(&mut module, "fdn_jit_dict_values_scoped", &[I64], Some(I64));
+        let dict_entries_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_dict_entries_scoped",
+            &[I64],
+            Some(I64),
+        );
+        let hashset_insert_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_hashset_insert_scoped",
+            &[I64, I64],
+            Some(I64),
+        );
+        let hashset_remove_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_hashset_remove_scoped",
+            &[I64, I64],
+            Some(I64),
+        );
+        let hashset_to_list_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_hashset_to_list_scoped",
+            &[I64],
+            Some(I64),
+        );
+        let hashset_union_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_hashset_union_scoped",
+            &[I64, I64],
+            Some(I64),
+        );
+        let hashset_intersect_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_hashset_intersect_scoped",
+            &[I64, I64],
+            Some(I64),
+        );
+        let hashset_diff_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_hashset_diff_scoped",
+            &[I64, I64],
+            Some(I64),
+        );
+        let to_string_scoped_id =
+            declare_import_fn(&mut module, "fdn_jit_to_string_scoped", &[I64], Some(I64));
         let ctx = module.make_context();
         let builder_ctx = FunctionBuilderContext::new();
         Self {
@@ -414,6 +772,27 @@ impl JitCompiler {
             box_nothing_scoped_id,
             box_str_scoped_id,
             tuple_pack_scoped_id,
+            dict_len_raw_id,
+            hashset_len_raw_id,
+            dict_contains_key_raw_id,
+            hashset_contains_raw_id,
+            dict_get_boxed_scoped_id,
+            dict_get_int_id,
+            dict_get_float_id,
+            dict_get_bool_id,
+            dict_get_handle_id,
+            dict_set_scoped_id,
+            dict_remove_scoped_id,
+            dict_keys_scoped_id,
+            dict_values_scoped_id,
+            dict_entries_scoped_id,
+            hashset_insert_scoped_id,
+            hashset_remove_scoped_id,
+            hashset_to_list_scoped_id,
+            hashset_union_scoped_id,
+            hashset_intersect_scoped_id,
+            hashset_diff_scoped_id,
+            to_string_scoped_id,
             fn_counter: 0,
         }
     }
@@ -543,6 +922,69 @@ impl JitCompiler {
                 tuple_pack_scoped_ref: self
                     .module
                     .declare_func_in_func(self.tuple_pack_scoped_id, builder.func),
+                dict_len_raw_ref: self
+                    .module
+                    .declare_func_in_func(self.dict_len_raw_id, builder.func),
+                hashset_len_raw_ref: self
+                    .module
+                    .declare_func_in_func(self.hashset_len_raw_id, builder.func),
+                dict_contains_key_raw_ref: self
+                    .module
+                    .declare_func_in_func(self.dict_contains_key_raw_id, builder.func),
+                hashset_contains_raw_ref: self
+                    .module
+                    .declare_func_in_func(self.hashset_contains_raw_id, builder.func),
+                dict_get_boxed_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.dict_get_boxed_scoped_id, builder.func),
+                dict_get_int_ref: self
+                    .module
+                    .declare_func_in_func(self.dict_get_int_id, builder.func),
+                dict_get_float_ref: self
+                    .module
+                    .declare_func_in_func(self.dict_get_float_id, builder.func),
+                dict_get_bool_ref: self
+                    .module
+                    .declare_func_in_func(self.dict_get_bool_id, builder.func),
+                dict_get_handle_ref: self
+                    .module
+                    .declare_func_in_func(self.dict_get_handle_id, builder.func),
+                dict_set_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.dict_set_scoped_id, builder.func),
+                dict_remove_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.dict_remove_scoped_id, builder.func),
+                dict_keys_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.dict_keys_scoped_id, builder.func),
+                dict_values_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.dict_values_scoped_id, builder.func),
+                dict_entries_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.dict_entries_scoped_id, builder.func),
+                hashset_insert_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.hashset_insert_scoped_id, builder.func),
+                hashset_remove_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.hashset_remove_scoped_id, builder.func),
+                hashset_to_list_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.hashset_to_list_scoped_id, builder.func),
+                hashset_union_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.hashset_union_scoped_id, builder.func),
+                hashset_intersect_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.hashset_intersect_scoped_id, builder.func),
+                hashset_diff_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.hashset_diff_scoped_id, builder.func),
+                to_string_scoped_ref: self
+                    .module
+                    .declare_func_in_func(self.to_string_scoped_id, builder.func),
             };
 
             // Declare Cranelift Variables for every MIR local.
@@ -626,16 +1068,32 @@ impl JitCompiler {
                         } => {
                             let val = match callee {
                                 Callee::Method { receiver, method } => {
-                                    let ns = stdlib_namespace(receiver, &namespace_locals)?;
                                     let mname = interner.resolve(*method);
-                                    emit_stdlib_method_call(
-                                        &mut builder,
-                                        &cl_vars,
-                                        &local_types,
-                                        ns.as_str(),
-                                        mname.as_ref(),
-                                        args,
-                                    )?
+                                    if let Some(ns) = stdlib_namespace(receiver, &namespace_locals)
+                                    {
+                                        emit_stdlib_method_call(
+                                            &mut builder,
+                                            &cl_vars,
+                                            &local_types,
+                                            ns.as_str(),
+                                            mname.as_ref(),
+                                            args,
+                                        )?
+                                    } else {
+                                        let dest_ty = dest
+                                            .and_then(|local| local_types.get(&local))
+                                            .unwrap_or(&MirTy::Nothing);
+                                        emit_container_method_call(
+                                            &mut builder,
+                                            &cl_vars,
+                                            &local_types,
+                                            &rt,
+                                            receiver,
+                                            mname.as_ref(),
+                                            args,
+                                            dest_ty,
+                                        )?
+                                    }
                                 }
                                 Callee::Fn(fid) => {
                                     let result_ty = dest
@@ -656,6 +1114,38 @@ impl JitCompiler {
                             if let Some(d) = dest {
                                 builder.def_var(cl_vars[d.0 as usize], val);
                             }
+                        }
+                        Instr::GetIndex {
+                            dest,
+                            object,
+                            index,
+                        } => {
+                            let dest_ty = local_types.get(dest).unwrap_or(&MirTy::Dynamic);
+                            let val = emit_container_get_index(
+                                &mut builder,
+                                &cl_vars,
+                                &local_types,
+                                &rt,
+                                object,
+                                index,
+                                dest_ty,
+                            )?;
+                            builder.def_var(cl_vars[dest.0 as usize], val);
+                        }
+                        Instr::SetIndex {
+                            object,
+                            index,
+                            value,
+                        } => {
+                            emit_container_set_index(
+                                &mut builder,
+                                &cl_vars,
+                                &local_types,
+                                &rt,
+                                object,
+                                index,
+                                value,
+                            )?;
                         }
                         Instr::StoreGlobal { global, value } => {
                             let native_value = load_operand(&mut builder, &cl_vars, value);
@@ -681,9 +1171,7 @@ impl JitCompiler {
                         | Instr::JoinAll { .. }
                         | Instr::ParallelIter { .. }
                         | Instr::SetField { .. }
-                        | Instr::GetField { .. }
-                        | Instr::SetIndex { .. }
-                        | Instr::GetIndex { .. } => return None,
+                        | Instr::GetField { .. } => return None,
 
                         Instr::CertainCheck { .. } => {}
                         Instr::Drop { .. } | Instr::Nop => {}
@@ -810,6 +1298,209 @@ struct JitRuntimeRefs {
     box_nothing_scoped_ref: cranelift_codegen::ir::FuncRef,
     box_str_scoped_ref: cranelift_codegen::ir::FuncRef,
     tuple_pack_scoped_ref: cranelift_codegen::ir::FuncRef,
+    dict_len_raw_ref: cranelift_codegen::ir::FuncRef,
+    hashset_len_raw_ref: cranelift_codegen::ir::FuncRef,
+    dict_contains_key_raw_ref: cranelift_codegen::ir::FuncRef,
+    hashset_contains_raw_ref: cranelift_codegen::ir::FuncRef,
+    dict_get_boxed_scoped_ref: cranelift_codegen::ir::FuncRef,
+    dict_get_int_ref: cranelift_codegen::ir::FuncRef,
+    dict_get_float_ref: cranelift_codegen::ir::FuncRef,
+    dict_get_bool_ref: cranelift_codegen::ir::FuncRef,
+    dict_get_handle_ref: cranelift_codegen::ir::FuncRef,
+    dict_set_scoped_ref: cranelift_codegen::ir::FuncRef,
+    dict_remove_scoped_ref: cranelift_codegen::ir::FuncRef,
+    dict_keys_scoped_ref: cranelift_codegen::ir::FuncRef,
+    dict_values_scoped_ref: cranelift_codegen::ir::FuncRef,
+    dict_entries_scoped_ref: cranelift_codegen::ir::FuncRef,
+    hashset_insert_scoped_ref: cranelift_codegen::ir::FuncRef,
+    hashset_remove_scoped_ref: cranelift_codegen::ir::FuncRef,
+    hashset_to_list_scoped_ref: cranelift_codegen::ir::FuncRef,
+    hashset_union_scoped_ref: cranelift_codegen::ir::FuncRef,
+    hashset_intersect_scoped_ref: cranelift_codegen::ir::FuncRef,
+    hashset_diff_scoped_ref: cranelift_codegen::ir::FuncRef,
+    to_string_scoped_ref: cranelift_codegen::ir::FuncRef,
+}
+
+fn operand_receiver_kind(
+    local_types: &HashMap<LocalId, MirTy>,
+    op: &Operand,
+) -> Option<ReceiverBuiltinKind> {
+    match op {
+        Operand::Local(local) => match local_types.get(local) {
+            Some(MirTy::Dict(_, _)) => Some(ReceiverBuiltinKind::Dict),
+            Some(MirTy::HashSet(_)) => Some(ReceiverBuiltinKind::HashSet),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn dict_get_ref_for_dest(rt: &JitRuntimeRefs, dest_ty: &MirTy) -> cranelift_codegen::ir::FuncRef {
+    match dest_ty {
+        MirTy::Integer => rt.dict_get_int_ref,
+        MirTy::Float => rt.dict_get_float_ref,
+        MirTy::Boolean => rt.dict_get_bool_ref,
+        MirTy::Handle => rt.dict_get_handle_ref,
+        _ => rt.dict_get_boxed_scoped_ref,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_container_method_call(
+    builder: &mut FunctionBuilder,
+    vars: &[Variable],
+    local_types: &HashMap<LocalId, MirTy>,
+    rt: &JitRuntimeRefs,
+    receiver: &Operand,
+    method_name: &str,
+    args: &[Operand],
+    dest_ty: &MirTy,
+) -> Option<Value> {
+    let receiver_kind = operand_receiver_kind(local_types, receiver)?;
+    let operation = infer_receiver_member(receiver_kind, method_name)?.operation?;
+    let recv = operand_to_abi_i64(builder, vars, local_types, receiver);
+    let raw = match (receiver_kind, operation) {
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Len) => {
+            call_runtime(builder, rt.dict_len_raw_ref, &[recv])?
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::IsEmpty) => {
+            let len = call_runtime(builder, rt.dict_len_raw_ref, &[recv])?;
+            let is_empty = builder.ins().icmp_imm(IntCC::Equal, len, 0);
+            builder.ins().uextend(I64, is_empty)
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Get) => {
+            let key = args.first()?;
+            let key = operand_to_abi_i64(builder, vars, local_types, key);
+            let func = dict_get_ref_for_dest(rt, dest_ty);
+            call_runtime(builder, func, &[recv, key])?
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Set) => {
+            let key = args.first()?;
+            let value = args.get(1)?;
+            let key = operand_to_abi_i64(builder, vars, local_types, key);
+            let value = operand_to_abi_i64(builder, vars, local_types, value);
+            call_runtime(builder, rt.dict_set_scoped_ref, &[recv, key, value])?
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Contains) => {
+            let Some(key) = args.first() else {
+                let zero = builder.ins().iconst(I64, 0);
+                return Some(abi_i64_to_native(builder, zero, dest_ty));
+            };
+            let key = operand_to_abi_i64(builder, vars, local_types, key);
+            call_runtime(builder, rt.dict_contains_key_raw_ref, &[recv, key])?
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Remove) => {
+            let key = args.first()?;
+            let key = operand_to_abi_i64(builder, vars, local_types, key);
+            call_runtime(builder, rt.dict_remove_scoped_ref, &[recv, key])?
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Keys) => {
+            call_runtime(builder, rt.dict_keys_scoped_ref, &[recv])?
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Values) => {
+            call_runtime(builder, rt.dict_values_scoped_ref, &[recv])?
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Entries) => {
+            call_runtime(builder, rt.dict_entries_scoped_ref, &[recv])?
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::ToString) => {
+            call_runtime(builder, rt.to_string_scoped_ref, &[recv])?
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Len) => {
+            call_runtime(builder, rt.hashset_len_raw_ref, &[recv])?
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::IsEmpty) => {
+            let len = call_runtime(builder, rt.hashset_len_raw_ref, &[recv])?;
+            let is_empty = builder.ins().icmp_imm(IntCC::Equal, len, 0);
+            builder.ins().uextend(I64, is_empty)
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Insert) => {
+            let value = args.first()?;
+            let value = operand_to_abi_i64(builder, vars, local_types, value);
+            call_runtime(builder, rt.hashset_insert_scoped_ref, &[recv, value])?
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Remove) => {
+            let value = args.first()?;
+            let value = operand_to_abi_i64(builder, vars, local_types, value);
+            call_runtime(builder, rt.hashset_remove_scoped_ref, &[recv, value])?
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Contains) => {
+            let Some(value) = args.first() else {
+                let zero = builder.ins().iconst(I64, 0);
+                return Some(abi_i64_to_native(builder, zero, dest_ty));
+            };
+            let value = operand_to_abi_i64(builder, vars, local_types, value);
+            call_runtime(builder, rt.hashset_contains_raw_ref, &[recv, value])?
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::ToList) => {
+            call_runtime(builder, rt.hashset_to_list_scoped_ref, &[recv])?
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Union) => {
+            let other = args.first()?;
+            let other = operand_to_abi_i64(builder, vars, local_types, other);
+            call_runtime(builder, rt.hashset_union_scoped_ref, &[recv, other])?
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Intersect) => {
+            let other = args.first()?;
+            let other = operand_to_abi_i64(builder, vars, local_types, other);
+            call_runtime(builder, rt.hashset_intersect_scoped_ref, &[recv, other])?
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Diff) => {
+            let other = args.first()?;
+            let other = operand_to_abi_i64(builder, vars, local_types, other);
+            call_runtime(builder, rt.hashset_diff_scoped_ref, &[recv, other])?
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::ToString) => {
+            call_runtime(builder, rt.to_string_scoped_ref, &[recv])?
+        }
+        _ => return None,
+    };
+
+    Some(abi_i64_to_native(builder, raw, dest_ty))
+}
+
+fn emit_container_get_index(
+    builder: &mut FunctionBuilder,
+    vars: &[Variable],
+    local_types: &HashMap<LocalId, MirTy>,
+    rt: &JitRuntimeRefs,
+    object: &Operand,
+    index: &Operand,
+    dest_ty: &MirTy,
+) -> Option<Value> {
+    if !matches!(
+        operand_receiver_kind(local_types, object),
+        Some(ReceiverBuiltinKind::Dict)
+    ) {
+        return None;
+    }
+    let object = operand_to_abi_i64(builder, vars, local_types, object);
+    let index = operand_to_abi_i64(builder, vars, local_types, index);
+    let func = dict_get_ref_for_dest(rt, dest_ty);
+    let raw = call_runtime(builder, func, &[object, index])?;
+    Some(abi_i64_to_native(builder, raw, dest_ty))
+}
+
+fn emit_container_set_index(
+    builder: &mut FunctionBuilder,
+    vars: &[Variable],
+    local_types: &HashMap<LocalId, MirTy>,
+    rt: &JitRuntimeRefs,
+    object: &Operand,
+    index: &Operand,
+    value: &Operand,
+) -> Option<()> {
+    if !matches!(
+        operand_receiver_kind(local_types, object),
+        Some(ReceiverBuiltinKind::Dict)
+    ) {
+        return None;
+    }
+    let object = operand_to_abi_i64(builder, vars, local_types, object);
+    let index = operand_to_abi_i64(builder, vars, local_types, index);
+    let value = operand_to_abi_i64(builder, vars, local_types, value);
+    let _ = call_runtime(builder, rt.dict_set_scoped_ref, &[object, index, value])?;
+    Some(())
 }
 
 fn emit_rvalue(
@@ -867,6 +1558,23 @@ fn emit_rvalue(
                 ns.as_ref(),
                 mname.as_ref(),
                 args,
+            )
+        }
+
+        Rvalue::Call {
+            callee: Callee::Method { receiver, method },
+            args,
+        } => {
+            let mname = ctx.interner.resolve(*method);
+            emit_container_method_call(
+                builder,
+                ctx.vars,
+                ctx.local_types,
+                ctx.rt,
+                receiver,
+                mname.as_ref(),
+                args,
+                dest_ty,
             )
         }
 

@@ -380,6 +380,7 @@ fn validate_operand(operand: &Operand, _backend: &BackendContext<'_>) -> Result<
 fn validate_type(ty: &MirTy, backend: &BackendContext<'_>) -> Result<()> {
     match ty {
         MirTy::List(inner)
+        | MirTy::HashSet(inner)
         | MirTy::Shared(inner)
         | MirTy::WeakShared(inner)
         | MirTy::Pending(inner) => validate_type(inner, backend),

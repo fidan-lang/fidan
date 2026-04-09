@@ -18,6 +18,7 @@ pub enum FidanType {
     // Composite
     List(Box<FidanType>),
     Dict(Box<FidanType>, Box<FidanType>),
+    HashSet(Box<FidanType>),
     /// Tuple: `(T1, T2, ...)`.  Empty vec = untyped/flexible tuple.
     Tuple(Vec<FidanType>),
     // User types
@@ -89,6 +90,7 @@ impl FidanType {
             (FidanType::Dict(sk, sv), FidanType::Dict(ok, ov)) => {
                 sk.is_assignable_from(ok) && sv.is_assignable_from(ov)
             }
+            (FidanType::HashSet(s), FidanType::HashSet(o)) => s.is_assignable_from(o),
             (FidanType::Shared(s), FidanType::Shared(o)) => s.is_assignable_from(o),
             (FidanType::WeakShared(s), FidanType::WeakShared(o)) => s.is_assignable_from(o),
             (FidanType::Pending(s), FidanType::Pending(o)) => s.is_assignable_from(o),
@@ -127,11 +129,16 @@ impl FidanType {
             FidanType::Unknown => "?".into(),
             FidanType::Error => "<error>".into(),
             FidanType::List(inner) => format!("list oftype {}", inner.display_name(resolve)),
-            FidanType::Dict(k, v) => format!(
-                "dict oftype {} oftype {}",
-                k.display_name(resolve),
-                v.display_name(resolve)
-            ),
+            FidanType::Dict(k, v) => {
+                format!(
+                    "dict oftype ({}, {})",
+                    k.display_name(resolve),
+                    v.display_name(resolve)
+                )
+            }
+            FidanType::HashSet(inner) => {
+                format!("hashset oftype {}", inner.display_name(resolve))
+            }
             FidanType::Tuple(elems) => {
                 if elems.is_empty() {
                     "tuple".into()

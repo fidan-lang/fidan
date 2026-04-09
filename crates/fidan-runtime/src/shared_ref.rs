@@ -9,6 +9,11 @@ impl<T> SharedRef<T> {
     pub fn new(val: T) -> Self {
         SharedRef(Arc::new(Mutex::new(val)))
     }
+
+    pub fn identity(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
     pub fn clone_ref(&self) -> Self {
         SharedRef(Arc::clone(&self.0))
     }
@@ -34,6 +39,10 @@ impl<T> WeakSharedRef<T> {
 
     pub fn upgrade(&self) -> Option<SharedRef<T>> {
         self.0.upgrade().map(SharedRef)
+    }
+
+    pub fn identity(&self) -> usize {
+        self.0.as_ptr() as usize
     }
 
     pub fn is_alive(&self) -> bool {

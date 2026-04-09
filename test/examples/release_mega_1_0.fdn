@@ -299,7 +299,7 @@ var squared_map = {x: x * x for x in list_values}
 assert_eq(len(doubled_values), 5)
 assert_eq(doubled_values[0], 2)
 assert_eq(filtered_values[1], 4)
-assert_eq(squared_map["4"], 16)
+assert_eq(squared_map[4], 16)
 
 var slicing_values = [1, 2, 3, 4, 5, 6, 7, 8]
 assert_eq(len(slicing_values[2..5]), 3)
@@ -481,8 +481,8 @@ assert_eq(len(ranged), 5)
 assert_eq(ranged[0], 1)
 assert_eq(ranged[4], 5)
 
-var set_a = collections.Set(["a", "b"])
-var set_b = collections.Set(["b", "c"])
+var set_a = collections.hashset(["a", "b"])
+var set_b = collections.hashset(["b", "c"])
 collections.setAdd(set_a, "d")
 collections.setRemove(set_a, "a")
 assert_eq(collections.setContains(set_a, "b"), true)
@@ -757,8 +757,9 @@ test "list comprehension basics" {
 test "dict comprehension basics" {
     var numbers = [1, 2, 3, 4]
     var by_square = {x: x * x for x in numbers}
-    assert_eq(by_square["1"], 1)
-    assert_eq(by_square["4"], 16)
+
+    assert_eq(by_square[1], 1)
+    assert_eq(by_square[4], 16)
 }
 
 test "slice syntax on lists" {
@@ -978,8 +979,8 @@ test "collections range and set operations" {
     assert_eq(len(backward), 3)
     assert_eq(backward[0], 5)
     assert_eq(backward[2], 1)
-    var set_a = collections.Set(["a", "b", "b"])
-    var set_b = collections.Set(["b", "c"])
+    var set_a = collections.hashset(["a", "b", "b"])
+    var set_b = collections.hashset(["b", "c"])
     assert(collections.setContains(set_a, "a"))
     assert_eq(collections.setLen(set_a), 2)
     var unioned = collections.setUnion(set_a, set_b)
@@ -1041,15 +1042,15 @@ test "collections list utilities" {
 }
 
 test "collections alias operations" {
-    var alias_set = collections.Set(["red", "blue"])
+    var alias_set = collections.hashset(["red", "blue"])
     collections.set_add(alias_set, "green")
     assert(collections.set_contains(alias_set, "green"))
     assert_eq(collections.set_len(alias_set), 3)
     collections.set_remove(alias_set, "green")
     assert(not collections.set_contains(alias_set, "green"))
-    var alias_union = collections.set_union(alias_set, collections.Set(["blue", "yellow"]))
-    var alias_intersection = collections.set_intersect(alias_set, collections.Set(["blue", "white"]))
-    var alias_diff = collections.set_diff(alias_set, collections.Set(["red"]))
+    var alias_union = collections.set_union(alias_set, collections.hashset(["blue", "yellow"]))
+    var alias_intersection = collections.set_intersect(alias_set, collections.hashset(["blue", "white"]))
+    var alias_diff = collections.set_diff(alias_set, collections.hashset(["red"]))
     assert(collections.set_contains(alias_union, "yellow"))
     assert(collections.set_contains(alias_intersection, "blue"))
     assert(collections.set_contains(alias_diff, "blue"))

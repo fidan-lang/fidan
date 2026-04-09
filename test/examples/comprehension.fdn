@@ -24,14 +24,16 @@ print(clamped)
 
 # ── Basic dict comprehension ──────────────────────────────────────────────────
 var sq_dict = {x: x * x for x in numbers}
-print(sq_dict["1"])
-print(sq_dict["4"])
-print(sq_dict["5"])
+
+print(sq_dict[1])
+print(sq_dict[4])
+print(sq_dict[5])
 
 # ── Dict comprehension with filter ───────────────────────────────────────────
 var even_dict = {x: x * 2 for x in numbers if x % 2 == 0}
-print(even_dict["2"])
-print(even_dict["4"])
+
+print(even_dict[2])
+print(even_dict[4])
 
 # ── Dict comprehension: name -> length ───────────────────────────────────────
 var names = ["alice", "bob", "charlie"]

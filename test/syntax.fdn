@@ -71,7 +71,7 @@ var t6 oftype flexible             # accepts any type — like TypeScript `any`
 
 # Composite types
 var nums   oftype list oftype integer
-var lookup oftype map oftype string        # `map` is the keyword for dictionary/hashmap
+var lookup oftype map oftype (string, integer)   # `map` is the keyword for dictionary/hashmap
 var matrix oftype list oftype list oftype integer
 var anothermatrix -> list -> list -> integer   # alternative arrow syntax for nested types
 

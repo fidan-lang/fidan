@@ -16,6 +16,7 @@ pub const BUILTIN_BINDINGS: &[&str] = &[
     "input",
     "len",
     "type",
+    "hashset",
     "string",
     "integer",
     "float",
@@ -37,6 +38,7 @@ pub const BUILTIN_FUNCTIONS: &[&str] = &[
     "input",
     "len",
     "type",
+    "hashset",
     "string",
     "integer",
     "float",
@@ -60,6 +62,25 @@ pub enum BuiltinReturnKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuiltinSemantic {
+    Print,
+    Eprint,
+    Input,
+    Len,
+    Type,
+    HashSetConstructor,
+    String,
+    Integer,
+    Float,
+    Boolean,
+    SharedConstructor,
+    WeakSharedConstructor,
+    Assert,
+    AssertEq,
+    AssertNe,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReceiverBuiltinKind {
     Integer,
     Float,
@@ -67,6 +88,7 @@ pub enum ReceiverBuiltinKind {
     String,
     List,
     Dict,
+    HashSet,
     Handle,
     Nothing,
     Dynamic,
@@ -84,6 +106,7 @@ pub enum ReceiverReturnKind {
     String,
     Dynamic,
     Nothing,
+    ReceiverSelf,
     ReceiverElement,
     DictValue,
     ListOfString,
@@ -98,8 +121,28 @@ pub enum ReceiverReturnKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReceiverMethodOp {
+    Len,
+    IsEmpty,
+    Get,
+    Set,
+    Contains,
+    Remove,
+    Keys,
+    Values,
+    Entries,
+    Insert,
+    ToList,
+    Union,
+    Intersect,
+    Diff,
+    ToString,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReceiverMemberInfo {
     pub canonical_name: &'static str,
+    pub operation: Option<ReceiverMethodOp>,
     pub field_return: Option<ReceiverReturnKind>,
     pub method_return: Option<ReceiverReturnKind>,
 }
@@ -116,10 +159,21 @@ const fn spec(
     field_return: Option<ReceiverReturnKind>,
     method_return: Option<ReceiverReturnKind>,
 ) -> ReceiverMemberSpec {
+    spec_with_op(names, canonical_name, None, field_return, method_return)
+}
+
+const fn spec_with_op(
+    names: &'static [&'static str],
+    canonical_name: &'static str,
+    operation: Option<ReceiverMethodOp>,
+    field_return: Option<ReceiverReturnKind>,
+    method_return: Option<ReceiverReturnKind>,
+) -> ReceiverMemberSpec {
     ReceiverMemberSpec {
         names,
         info: ReceiverMemberInfo {
             canonical_name,
+            operation,
             field_return,
             method_return,
         },
@@ -493,58 +547,146 @@ const LIST_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
 ];
 
 const DICT_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
-    spec(
+    spec_with_op(
         &["len", "length", "size"],
         "len",
+        Some(ReceiverMethodOp::Len),
         Some(ReceiverReturnKind::Integer),
         Some(ReceiverReturnKind::Integer),
     ),
-    spec(
+    spec_with_op(
         &["isEmpty", "is_empty"],
         "isEmpty",
+        Some(ReceiverMethodOp::IsEmpty),
         None,
         Some(ReceiverReturnKind::Boolean),
     ),
-    spec(&["get"], "get", None, Some(ReceiverReturnKind::DictValue)),
-    spec(
+    spec_with_op(
+        &["get"],
+        "get",
+        Some(ReceiverMethodOp::Get),
+        None,
+        Some(ReceiverReturnKind::DictValue),
+    ),
+    spec_with_op(
         &["set", "put", "insert"],
         "set",
+        Some(ReceiverMethodOp::Set),
         None,
         Some(ReceiverReturnKind::Nothing),
     ),
-    spec(
+    spec_with_op(
         &["contains", "has", "has_key", "containsKey", "contains_key"],
         "containsKey",
+        Some(ReceiverMethodOp::Contains),
         None,
         Some(ReceiverReturnKind::Boolean),
     ),
-    spec(
+    spec_with_op(
         &["remove", "delete"],
         "remove",
+        Some(ReceiverMethodOp::Remove),
         None,
         Some(ReceiverReturnKind::Nothing),
     ),
-    spec(
+    spec_with_op(
         &["keys"],
         "keys",
+        Some(ReceiverMethodOp::Keys),
         None,
         Some(ReceiverReturnKind::ListOfString),
     ),
-    spec(
+    spec_with_op(
         &["values"],
         "values",
+        Some(ReceiverMethodOp::Values),
         None,
         Some(ReceiverReturnKind::ListOfDictValue),
     ),
-    spec(
+    spec_with_op(
         &["entries", "items"],
         "entries",
+        Some(ReceiverMethodOp::Entries),
         None,
         Some(ReceiverReturnKind::ListOfDynamicPairs),
     ),
-    spec(
+    spec_with_op(
         &["toString", "to_string"],
         "toString",
+        Some(ReceiverMethodOp::ToString),
+        None,
+        Some(ReceiverReturnKind::String),
+    ),
+];
+
+const HASHSET_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
+    spec_with_op(
+        &["len", "length", "size"],
+        "len",
+        Some(ReceiverMethodOp::Len),
+        Some(ReceiverReturnKind::Integer),
+        Some(ReceiverReturnKind::Integer),
+    ),
+    spec_with_op(
+        &["isEmpty", "is_empty"],
+        "isEmpty",
+        Some(ReceiverMethodOp::IsEmpty),
+        None,
+        Some(ReceiverReturnKind::Boolean),
+    ),
+    spec_with_op(
+        &["insert", "add"],
+        "insert",
+        Some(ReceiverMethodOp::Insert),
+        None,
+        Some(ReceiverReturnKind::Nothing),
+    ),
+    spec_with_op(
+        &["remove", "delete"],
+        "remove",
+        Some(ReceiverMethodOp::Remove),
+        None,
+        Some(ReceiverReturnKind::Nothing),
+    ),
+    spec_with_op(
+        &["contains", "has"],
+        "contains",
+        Some(ReceiverMethodOp::Contains),
+        None,
+        Some(ReceiverReturnKind::Boolean),
+    ),
+    spec_with_op(
+        &["toList", "to_list"],
+        "toList",
+        Some(ReceiverMethodOp::ToList),
+        None,
+        Some(ReceiverReturnKind::ListOfReceiverElement),
+    ),
+    spec_with_op(
+        &["union"],
+        "union",
+        Some(ReceiverMethodOp::Union),
+        None,
+        Some(ReceiverReturnKind::ReceiverSelf),
+    ),
+    spec_with_op(
+        &["intersect", "intersection"],
+        "intersect",
+        Some(ReceiverMethodOp::Intersect),
+        None,
+        Some(ReceiverReturnKind::ReceiverSelf),
+    ),
+    spec_with_op(
+        &["diff", "difference"],
+        "diff",
+        Some(ReceiverMethodOp::Diff),
+        None,
+        Some(ReceiverReturnKind::ReceiverSelf),
+    ),
+    spec_with_op(
+        &["toString", "to_string"],
+        "toString",
+        Some(ReceiverMethodOp::ToString),
         None,
         Some(ReceiverReturnKind::String),
     ),
@@ -599,6 +741,7 @@ pub fn receiver_member_specs(receiver_kind: ReceiverBuiltinKind) -> &'static [Re
         Kind::String => STRING_MEMBER_SPECS,
         Kind::List => LIST_MEMBER_SPECS,
         Kind::Dict => DICT_MEMBER_SPECS,
+        Kind::HashSet => HASHSET_MEMBER_SPECS,
         Kind::Shared => SHARED_MEMBER_SPECS,
         Kind::WeakShared => WEAK_SHARED_MEMBER_SPECS,
         Kind::Function => FUNCTION_MEMBER_SPECS,
@@ -611,6 +754,7 @@ pub struct BuiltinInfo {
     pub name: &'static str,
     pub signature: &'static str,
     pub doc: &'static str,
+    pub semantic: Option<BuiltinSemantic>,
     pub return_kind: Option<BuiltinReturnKind>,
 }
 
@@ -626,84 +770,105 @@ pub const LANGUAGE_BUILTINS: &[BuiltinInfo] = &[
         name: "print",
         signature: "print(value...) -> nothing",
         doc: "Print values to stdout followed by a newline.",
+        semantic: Some(BuiltinSemantic::Print),
         return_kind: Some(BuiltinReturnKind::Nothing),
     },
     BuiltinInfo {
         name: "eprint",
         signature: "eprint(value...) -> nothing",
         doc: "Print values to stderr followed by a newline.",
+        semantic: Some(BuiltinSemantic::Eprint),
         return_kind: Some(BuiltinReturnKind::Nothing),
     },
     BuiltinInfo {
         name: "input",
         signature: "input(prompt?) -> string",
         doc: "Read one line of input, optionally after showing a prompt.",
+        semantic: Some(BuiltinSemantic::Input),
         return_kind: Some(BuiltinReturnKind::String),
     },
     BuiltinInfo {
         name: "len",
         signature: "len(value) -> integer",
         doc: "Return the length of a string, list, or other countable value.",
+        semantic: Some(BuiltinSemantic::Len),
         return_kind: Some(BuiltinReturnKind::Integer),
     },
     BuiltinInfo {
         name: "type",
         signature: "type(value) -> string",
         doc: "Return the runtime type name of a value as a string.",
+        semantic: Some(BuiltinSemantic::Type),
         return_kind: Some(BuiltinReturnKind::String),
+    },
+    BuiltinInfo {
+        name: "hashset",
+        signature: "hashset(items?) -> hashset",
+        doc: "Create a real hashset of unique, hashable values from a list or another hashset.",
+        semantic: Some(BuiltinSemantic::HashSetConstructor),
+        return_kind: None,
     },
     BuiltinInfo {
         name: "string",
         signature: "string(value) -> string",
         doc: "Convert a value to its string representation.",
+        semantic: Some(BuiltinSemantic::String),
         return_kind: Some(BuiltinReturnKind::String),
     },
     BuiltinInfo {
         name: "integer",
         signature: "integer(value) -> integer",
         doc: "Convert a value to an integer when possible.",
+        semantic: Some(BuiltinSemantic::Integer),
         return_kind: Some(BuiltinReturnKind::Integer),
     },
     BuiltinInfo {
         name: "float",
         signature: "float(value) -> float",
         doc: "Convert a value to a floating-point number when possible.",
+        semantic: Some(BuiltinSemantic::Float),
         return_kind: Some(BuiltinReturnKind::Float),
     },
     BuiltinInfo {
         name: "boolean",
         signature: "boolean(value) -> boolean",
         doc: "Convert a value to a boolean truth value.",
+        semantic: Some(BuiltinSemantic::Boolean),
         return_kind: Some(BuiltinReturnKind::Boolean),
     },
     BuiltinInfo {
         name: "Shared",
         signature: "Shared(value) -> Shared",
         doc: "Create a shared, thread-safe wrapper so values can be mutated safely across parallel work.",
+        semantic: Some(BuiltinSemantic::SharedConstructor),
         return_kind: None,
     },
     BuiltinInfo {
         name: "WeakShared",
         signature: "WeakShared(shared) -> WeakShared",
         doc: "Create a non-owning weak handle to an existing Shared value. Use `upgrade()` to recover a Shared while it is still alive.",
+        semantic: Some(BuiltinSemantic::WeakSharedConstructor),
         return_kind: None,
     },
     BuiltinInfo {
         name: "assert",
         signature: "assert(condition, message?) -> nothing",
         doc: "Fail immediately when the condition is not truthy.",
+        semantic: Some(BuiltinSemantic::Assert),
         return_kind: Some(BuiltinReturnKind::Nothing),
     },
     BuiltinInfo {
         name: "assert_eq",
         signature: "assert_eq(left, right, message?) -> nothing",
         doc: "Fail immediately when two values are not equal.",
+        semantic: Some(BuiltinSemantic::AssertEq),
         return_kind: Some(BuiltinReturnKind::Nothing),
     },
     BuiltinInfo {
         name: "assert_ne",
         signature: "assert_ne(left, right, message?) -> nothing",
         doc: "Fail immediately when two values are equal.",
+        semantic: Some(BuiltinSemantic::AssertNe),
         return_kind: Some(BuiltinReturnKind::Nothing),
     },
 ];
@@ -712,6 +877,7 @@ pub const LANGUAGE_TYPE_NAMES: &[BuiltinInfo] = &[BuiltinInfo {
     name: "handle",
     signature: "handle",
     doc: "Opaque native handle type used for extern interop and low-level OS or library handles.",
+    semantic: None,
     return_kind: None,
 }];
 
@@ -759,6 +925,10 @@ pub fn builtin_return_kind(name: &str) -> Option<BuiltinReturnKind> {
     builtin_info(name).and_then(|info| info.return_kind)
 }
 
+pub fn builtin_semantic(name: &str) -> Option<BuiltinSemantic> {
+    builtin_info(name).and_then(|info| info.semantic)
+}
+
 pub fn infer_receiver_member(
     receiver_kind: ReceiverBuiltinKind,
     name: &str,
@@ -785,8 +955,9 @@ pub fn is_type_like_name(name: &str) -> bool {
 mod tests {
     use super::{
         BUILTIN_BINDINGS, BUILTIN_DECORATORS, BUILTIN_FUNCTIONS, BUILTIN_VALUE_MODULE,
-        LANGUAGE_BUILTINS, LANGUAGE_DECORATORS, LANGUAGE_TYPE_NAMES, ReceiverBuiltinKind,
-        ReceiverReturnKind, builtin_info, builtin_return_kind, decorator_info, editor_symbol_info,
+        BuiltinSemantic, LANGUAGE_BUILTINS, LANGUAGE_DECORATORS, LANGUAGE_TYPE_NAMES,
+        ReceiverBuiltinKind, ReceiverMethodOp, ReceiverReturnKind, builtin_info,
+        builtin_return_kind, builtin_semantic, decorator_info, editor_symbol_info,
         infer_receiver_member, type_name_info,
     };
 
@@ -827,6 +998,18 @@ mod tests {
     }
 
     #[test]
+    fn builtin_semantics_are_centralized() {
+        assert_eq!(
+            builtin_semantic("hashset"),
+            Some(BuiltinSemantic::HashSetConstructor)
+        );
+        assert_eq!(
+            builtin_semantic("Shared"),
+            Some(BuiltinSemantic::SharedConstructor)
+        );
+    }
+
+    #[test]
     fn receiver_member_metadata_is_centralized() {
         let len =
             infer_receiver_member(ReceiverBuiltinKind::String, "len").expect("string len metadata");
@@ -841,6 +1024,12 @@ mod tests {
         let dict_contains = infer_receiver_member(ReceiverBuiltinKind::Dict, "has_key")
             .expect("dict contains alias metadata");
         assert_eq!(dict_contains.canonical_name, "containsKey");
+        assert_eq!(dict_contains.operation, Some(ReceiverMethodOp::Contains));
+
+        let hashset_insert = infer_receiver_member(ReceiverBuiltinKind::HashSet, "add")
+            .expect("hashset add alias metadata");
+        assert_eq!(hashset_insert.canonical_name, "insert");
+        assert_eq!(hashset_insert.operation, Some(ReceiverMethodOp::Insert));
 
         let list_append = infer_receiver_member(ReceiverBuiltinKind::List, "add")
             .expect("list append alias metadata");

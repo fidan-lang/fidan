@@ -9,7 +9,10 @@ use fidan_mir::{
     BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirExternAbi, MirFunction, MirLit,
     MirStringPart, MirTy, Operand, Rvalue, Terminator,
 };
-use fidan_stdlib::{MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_stdlib_method};
+use fidan_stdlib::{
+    MathIntrinsic, ReceiverBuiltinKind, ReceiverMethodOp, StdlibIntrinsic, StdlibValueKind,
+    infer_receiver_member, infer_stdlib_method,
+};
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
 use inkwell::OptimizationLevel;
@@ -1322,6 +1325,69 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             ),
         );
         self.declare_runtime_fn(
+            "fdn_dict_len",
+            self.i64_type.fn_type(&[self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_dict_contains_key",
+            self.i8_type
+                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_dict_remove",
+            self.context
+                .void_type()
+                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_dict_keys",
+            self.ptr_type.fn_type(&[self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_dict_values",
+            self.ptr_type.fn_type(&[self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_dict_entries",
+            self.ptr_type.fn_type(&[self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_hashset_insert",
+            self.context
+                .void_type()
+                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_hashset_remove",
+            self.context
+                .void_type()
+                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_hashset_contains",
+            self.i8_type
+                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_hashset_to_list",
+            self.ptr_type.fn_type(&[self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_hashset_union",
+            self.ptr_type
+                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_hashset_intersect",
+            self.ptr_type
+                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_hashset_diff",
+            self.ptr_type
+                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+        );
+        self.declare_runtime_fn(
             "fdn_println",
             self.context
                 .void_type()
@@ -1921,9 +1987,13 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 object,
                 index,
             } => {
+                let runtime_fn = match self.operand_type(object) {
+                    MirTy::Dict(_, _) => "fdn_dict_get",
+                    _ => "fdn_list_get",
+                };
                 let object = self.lower_operand(object)?;
                 let index = self.lower_operand(index)?;
-                let value = self.call_ptr("fdn_list_get", &[object.into(), index.into()])?;
+                let value = self.call_ptr(runtime_fn, &[object.into(), index.into()])?;
                 self.store_local_boxed(*dest, value)?;
                 self.namespace_locals.remove(dest);
                 Ok(())
@@ -1933,10 +2003,14 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 index,
                 value,
             } => {
+                let runtime_fn = match self.operand_type(object) {
+                    MirTy::Dict(_, _) => "fdn_dict_set",
+                    _ => "fdn_list_set",
+                };
                 let object = self.lower_operand(object)?;
                 let index = self.lower_operand(index)?;
                 let value = self.lower_operand(value)?;
-                self.call_void("fdn_list_set", &[object.into(), index.into(), value.into()])
+                self.call_void(runtime_fn, &[object.into(), index.into(), value.into()])
             }
             Instr::Drop { local } => {
                 let local_ty = self.local_type(*local);
@@ -2484,6 +2558,260 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
         }
     }
 
+    fn container_receiver_kind(&self, receiver: &Operand) -> Option<ReceiverBuiltinKind> {
+        match self.operand_type(receiver) {
+            MirTy::Dict(_, _) => Some(ReceiverBuiltinKind::Dict),
+            MirTy::HashSet(_) => Some(ReceiverBuiltinKind::HashSet),
+            _ => None,
+        }
+    }
+
+    fn lower_container_method_call(
+        &mut self,
+        receiver: &Operand,
+        method_name: &str,
+        args: &[Operand],
+    ) -> Result<Option<PointerValue<'ctx>>> {
+        let Some(receiver_kind) = self.container_receiver_kind(receiver) else {
+            return Ok(None);
+        };
+        let Some(operation) =
+            infer_receiver_member(receiver_kind, method_name).and_then(|info| info.operation)
+        else {
+            return Ok(None);
+        };
+
+        let receiver = self.lower_operand(receiver)?;
+        let boxed = match (receiver_kind, operation) {
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Len) => {
+                let len = self.call_i64("fdn_dict_len", &[receiver.into()])?;
+                self.call_ptr("fdn_box_int", &[len.into()])?
+            }
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::IsEmpty) => {
+                let len = self.call_i64("fdn_dict_len", &[receiver.into()])?;
+                let is_empty = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        len,
+                        self.i64_type.const_zero(),
+                        &self.temp("dict.is_empty"),
+                    )
+                    .map_err(|err| anyhow!("{err}"))?;
+                let is_empty = self
+                    .builder
+                    .build_int_z_extend(is_empty, self.i8_type, &self.temp("dict.is_empty.i8"))
+                    .map_err(|err| anyhow!("{err}"))?;
+                self.call_ptr("fdn_box_bool", &[is_empty.into()])?
+            }
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Get) => {
+                let Some(key) = args.first() else {
+                    return self.call_ptr("fdn_box_nothing", &[]).map(Some);
+                };
+                let key = self.lower_operand(key)?;
+                self.call_ptr("fdn_dict_get", &[receiver.into(), key.into()])?
+            }
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Set) => {
+                if let (Some(key), Some(value)) = (args.first(), args.get(1)) {
+                    let key = self.lower_operand(key)?;
+                    let value = self.lower_operand(value)?;
+                    self.call_void("fdn_dict_set", &[receiver.into(), key.into(), value.into()])?;
+                }
+                self.call_ptr("fdn_box_nothing", &[])?
+            }
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Contains) => {
+                let contains = if let Some(key) = args.first() {
+                    let key = self.lower_operand(key)?;
+                    self.call_i8("fdn_dict_contains_key", &[receiver.into(), key.into()])?
+                } else {
+                    self.i8_type.const_zero()
+                };
+                self.call_ptr("fdn_box_bool", &[contains.into()])?
+            }
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Remove) => {
+                if let Some(key) = args.first() {
+                    let key = self.lower_operand(key)?;
+                    self.call_void("fdn_dict_remove", &[receiver.into(), key.into()])?;
+                }
+                self.call_ptr("fdn_box_nothing", &[])?
+            }
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Keys) => {
+                self.call_ptr("fdn_dict_keys", &[receiver.into()])?
+            }
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Values) => {
+                self.call_ptr("fdn_dict_values", &[receiver.into()])?
+            }
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Entries) => {
+                self.call_ptr("fdn_dict_entries", &[receiver.into()])?
+            }
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::ToString) => {
+                self.call_ptr("fdn_to_string", &[receiver.into()])?
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Len) => {
+                let len = self.call_i64("fdn_len", &[receiver.into()])?;
+                self.call_ptr("fdn_box_int", &[len.into()])?
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::IsEmpty) => {
+                let len = self.call_i64("fdn_len", &[receiver.into()])?;
+                let is_empty = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        len,
+                        self.i64_type.const_zero(),
+                        &self.temp("hashset.is_empty"),
+                    )
+                    .map_err(|err| anyhow!("{err}"))?;
+                let is_empty = self
+                    .builder
+                    .build_int_z_extend(is_empty, self.i8_type, &self.temp("hashset.is_empty.i8"))
+                    .map_err(|err| anyhow!("{err}"))?;
+                self.call_ptr("fdn_box_bool", &[is_empty.into()])?
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Insert) => {
+                if let Some(value) = args.first() {
+                    let value = self.lower_operand(value)?;
+                    self.call_void("fdn_hashset_insert", &[receiver.into(), value.into()])?;
+                }
+                self.call_ptr("fdn_box_nothing", &[])?
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Remove) => {
+                if let Some(value) = args.first() {
+                    let value = self.lower_operand(value)?;
+                    self.call_void("fdn_hashset_remove", &[receiver.into(), value.into()])?;
+                }
+                self.call_ptr("fdn_box_nothing", &[])?
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Contains) => {
+                let contains = if let Some(value) = args.first() {
+                    let value = self.lower_operand(value)?;
+                    self.call_i8("fdn_hashset_contains", &[receiver.into(), value.into()])?
+                } else {
+                    self.i8_type.const_zero()
+                };
+                self.call_ptr("fdn_box_bool", &[contains.into()])?
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::ToList) => {
+                self.call_ptr("fdn_hashset_to_list", &[receiver.into()])?
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Union) => {
+                let Some(other) = args.first() else {
+                    return self.call_ptr("fdn_box_nothing", &[]).map(Some);
+                };
+                let other = self.lower_operand(other)?;
+                self.call_ptr("fdn_hashset_union", &[receiver.into(), other.into()])?
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Intersect) => {
+                let Some(other) = args.first() else {
+                    return self.call_ptr("fdn_box_nothing", &[]).map(Some);
+                };
+                let other = self.lower_operand(other)?;
+                self.call_ptr("fdn_hashset_intersect", &[receiver.into(), other.into()])?
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Diff) => {
+                let Some(other) = args.first() else {
+                    return self.call_ptr("fdn_box_nothing", &[]).map(Some);
+                };
+                let other = self.lower_operand(other)?;
+                self.call_ptr("fdn_hashset_diff", &[receiver.into(), other.into()])?
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::ToString) => {
+                self.call_ptr("fdn_to_string", &[receiver.into()])?
+            }
+            _ => return Ok(None),
+        };
+
+        Ok(Some(boxed))
+    }
+
+    fn lower_native_container_method_call(
+        &mut self,
+        receiver: &Operand,
+        method_name: &str,
+        args: &[Operand],
+        ty: &MirTy,
+    ) -> Result<Option<BasicValueEnum<'ctx>>> {
+        let Some(receiver_kind) = self.container_receiver_kind(receiver) else {
+            return Ok(None);
+        };
+        let Some(operation) =
+            infer_receiver_member(receiver_kind, method_name).and_then(|info| info.operation)
+        else {
+            return Ok(None);
+        };
+        let receiver = self.lower_operand(receiver)?;
+
+        match (receiver_kind, operation, ty) {
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Len, MirTy::Integer) => Ok(Some(
+                self.call_i64("fdn_dict_len", &[receiver.into()])?.into(),
+            )),
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::IsEmpty, MirTy::Boolean) => {
+                let len = self.call_i64("fdn_dict_len", &[receiver.into()])?;
+                let is_empty = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        len,
+                        self.i64_type.const_zero(),
+                        &self.temp("dict.is_empty.native"),
+                    )
+                    .map_err(|err| anyhow!("{err}"))?;
+                let is_empty = self
+                    .builder
+                    .build_int_z_extend(
+                        is_empty,
+                        self.i8_type,
+                        &self.temp("dict.is_empty.native.i8"),
+                    )
+                    .map_err(|err| anyhow!("{err}"))?;
+                Ok(Some(is_empty.into()))
+            }
+            (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Contains, MirTy::Boolean) => {
+                let contains = if let Some(key) = args.first() {
+                    let key = self.lower_operand(key)?;
+                    self.call_i8("fdn_dict_contains_key", &[receiver.into(), key.into()])?
+                } else {
+                    self.i8_type.const_zero()
+                };
+                Ok(Some(contains.into()))
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Len, MirTy::Integer) => {
+                Ok(Some(self.call_i64("fdn_len", &[receiver.into()])?.into()))
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::IsEmpty, MirTy::Boolean) => {
+                let len = self.call_i64("fdn_len", &[receiver.into()])?;
+                let is_empty = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        len,
+                        self.i64_type.const_zero(),
+                        &self.temp("hashset.is_empty.native"),
+                    )
+                    .map_err(|err| anyhow!("{err}"))?;
+                let is_empty = self
+                    .builder
+                    .build_int_z_extend(
+                        is_empty,
+                        self.i8_type,
+                        &self.temp("hashset.is_empty.native.i8"),
+                    )
+                    .map_err(|err| anyhow!("{err}"))?;
+                Ok(Some(is_empty.into()))
+            }
+            (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Contains, MirTy::Boolean) => {
+                let contains = if let Some(value) = args.first() {
+                    let value = self.lower_operand(value)?;
+                    self.call_i8("fdn_hashset_contains", &[receiver.into(), value.into()])?
+                } else {
+                    self.i8_type.const_zero()
+                };
+                Ok(Some(contains.into()))
+            }
+            _ => Ok(None),
+        }
+    }
+
     fn lower_call(&mut self, callee: &Callee, args: &[Operand]) -> Result<PointerValue<'ctx>> {
         match callee {
             Callee::Fn(function_id) => {
@@ -2536,6 +2864,11 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                         ],
                     );
                 }
+                if let Some(boxed) =
+                    self.lower_container_method_call(receiver, method_name.as_str(), args)?
+                {
+                    return Ok(boxed);
+                }
                 let receiver = self.lower_operand(receiver)?;
                 let args = args
                     .iter()
@@ -2578,16 +2911,16 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
     ) -> Result<Option<BasicValueEnum<'ctx>>> {
         match callee {
             Callee::Method { receiver, method } => {
-                let Some(namespace) = self.stdlib_namespace(receiver) else {
-                    return Ok(None);
-                };
                 let method_name = self.module.backend.symbol_name(*method)?.to_owned();
-                self.lower_native_stdlib_method_intrinsic(
-                    namespace.as_str(),
-                    method_name.as_str(),
-                    args,
-                    ty,
-                )
+                if let Some(namespace) = self.stdlib_namespace(receiver) {
+                    return self.lower_native_stdlib_method_intrinsic(
+                        namespace.as_str(),
+                        method_name.as_str(),
+                        args,
+                        ty,
+                    );
+                }
+                self.lower_native_container_method_call(receiver, method_name.as_str(), args, ty)
             }
             _ => Ok(None),
         }
@@ -3931,6 +4264,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             MirTy::String => StdlibValueKind::String,
             MirTy::List(_) => StdlibValueKind::List,
             MirTy::Dict(_, _) => StdlibValueKind::Dict,
+            MirTy::HashSet(_) => StdlibValueKind::HashSet,
             MirTy::Nothing => StdlibValueKind::Nothing,
             _ => StdlibValueKind::Dynamic,
         }

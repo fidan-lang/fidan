@@ -155,15 +155,15 @@ pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
 
         // collections
         "std.collections.range(start, end?)" => "list oftype integer",
-        "std.collections.Set(items?)" => "dict oftype string oftype boolean",
+        "std.collections.hashset(items?)" => "hashset oftype dynamic",
         "std.collections.setAdd(set, value)" => "nothing",
         "std.collections.setRemove(set, value)" => "nothing",
         "std.collections.setContains(set, value)" => "boolean",
-        "std.collections.setToList(set)" => "list oftype string",
+        "std.collections.setToList(set)" => "list oftype dynamic",
         "std.collections.setLen(set)" => "integer",
-        "std.collections.setUnion(left, right)" => "dict oftype string oftype boolean",
-        "std.collections.setIntersect(left, right)" => "dict oftype string oftype boolean",
-        "std.collections.setDiff(left, right)" => "dict oftype string oftype boolean",
+        "std.collections.setUnion(left, right)" => "hashset oftype dynamic",
+        "std.collections.setIntersect(left, right)" => "hashset oftype dynamic",
+        "std.collections.setDiff(left, right)" => "hashset oftype dynamic",
         "std.collections.Queue(items?)" => "list oftype dynamic",
         "std.collections.enqueue(queue, value)" => "nothing",
         "std.collections.dequeue(queue)" => "dynamic",
@@ -178,7 +178,7 @@ pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
         "std.collections.chunk(list, size)" => "list oftype list oftype dynamic",
         "std.collections.window(list, size)" => "list oftype list oftype dynamic",
         "std.collections.partition(list)" => "(list oftype dynamic, list oftype dynamic)",
-        "std.collections.groupBy(list)" => "dict oftype string oftype list oftype dynamic",
+        "std.collections.groupBy(list)" => "dict oftype (dynamic, list oftype dynamic)",
         "std.collections.unique(list)" => "list oftype dynamic",
         "std.collections.reverse(list)" => "list oftype dynamic",
         "std.collections.sort(list)" => "list oftype dynamic",
@@ -446,7 +446,8 @@ pub use metadata::{
 };
 
 pub use fidan_config::{
-    ReceiverBuiltinKind, ReceiverMemberInfo, ReceiverReturnKind, infer_receiver_member,
+    ReceiverBuiltinKind, ReceiverMemberInfo, ReceiverMethodOp, ReceiverReturnKind,
+    infer_receiver_member,
 };
 
 const ASYNC_MEMBER_INFOS: &[StdlibMemberInfo] = &[
@@ -484,9 +485,9 @@ const COLLECTIONS_MEMBER_INFOS: &[StdlibMemberInfo] = &[
         doc: "Create a numeric range as a list of integers.",
     },
     StdlibMemberInfo {
-        names: &["Set"],
-        signature: "std.collections.Set(items?)",
-        doc: "Create a set-like collection of unique values.",
+        names: &["hashset"],
+        signature: "std.collections.hashset(items?)",
+        doc: "Create a real hashset of unique, hashable values.",
     },
     StdlibMemberInfo {
         names: &["setAdd", "set_add"],

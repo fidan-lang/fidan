@@ -373,7 +373,57 @@ var grouped = collections.groupBy(["red", "blue", "red"])
         );
         assert_eq!(
             top_level_var_type(src, "grouped"),
-            "dict oftype string oftype list oftype string"
+            "dict oftype (string, list oftype string)"
+        );
+    }
+
+    #[test]
+    fn hashset_and_typed_dict_annotations_resolve_precisely() {
+        let src = r#"
+object User {
+    var id oftype integer
+}
+
+var tags oftype hashset oftype boolean set hashset([true, false])
+var scores oftype dict oftype (string, integer) set {"ada": 42}
+var alias oftype map oftype (boolean, integer) set {true: 7}
+var tuple_scores oftype dict oftype (User, integer) set {User(): 1}
+var tuple_alias oftype map oftype ((string, integer), integer) set {("key", 1): 2}
+"#;
+
+        assert_eq!(top_level_var_type(src, "tags"), "hashset oftype boolean");
+        assert_eq!(
+            top_level_var_type(src, "scores"),
+            "dict oftype (string, integer)"
+        );
+        assert_eq!(
+            top_level_var_type(src, "alias"),
+            "dict oftype (boolean, integer)"
+        );
+        assert_eq!(
+            top_level_var_type(src, "tuple_scores"),
+            "dict oftype (User, integer)"
+        );
+        assert_eq!(
+            top_level_var_type(src, "tuple_alias"),
+            "dict oftype ((string, integer), integer)"
+        );
+    }
+
+    #[test]
+    fn dict_annotations_reject_legacy_non_tuple_syntax() {
+        let errors = check_errors(
+            r#"
+var broken oftype dict oftype integer oftype string set {"ada": "ok"}
+var alias oftype map oftype string oftype integer set {"grace": 1}
+"#,
+        );
+
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("dict/map type annotations must use tuple syntax")),
+            "expected legacy dict syntax error, got {errors:?}"
         );
     }
 

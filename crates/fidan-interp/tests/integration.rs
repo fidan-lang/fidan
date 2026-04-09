@@ -703,6 +703,23 @@ fn len_invalid_type_returns_runtime_error() {
     );
 }
 
+#[test]
+fn hashset_invalid_dynamic_value_returns_runtime_error() {
+    let err = run_src(
+        r#"var source oftype dynamic = 42
+var bad = hashset(source)"#,
+    )
+    .expect_err("expected invalid hashset constructor to fail");
+    assert_eq!(err.code.0, "R0001");
+    assert!(
+        err.message
+            .contains("hashset(items) expects a list or hashset")
+            && err.message.contains("integer"),
+        "unexpected hashset constructor error: {}",
+        err.message
+    );
+}
+
 // ── Parallel execution ────────────────────────────────────────────────────────
 
 #[test]
@@ -947,6 +964,115 @@ fn receiver_aliases_work_through_interpreter_dispatch() {
 }
 
 #[test]
+fn hashset_runtime_and_legacy_collections_helpers_work() {
+    assert!(run_src(hashset_runtime_source()).is_ok());
+}
+
+#[test]
+fn hashset_runtime_and_tuple_dicts_work_with_jit() {
+    assert!(run_src_with_threshold(hashset_runtime_source(), 1).is_ok());
+}
+
+#[test]
+fn hashset_lowers_to_first_class_mir_type() {
+    let (mir, interner) = build_mir(hashset_runtime_source());
+    let local_types = fidan_mir::collect_effective_local_types(&mir.functions[0], &mir, |sym| {
+        Some(interner.resolve(sym).to_string())
+    });
+
+    assert!(
+        local_types
+            .values()
+            .any(|ty| matches!(ty, fidan_mir::MirTy::HashSet(inner) if **inner == fidan_mir::MirTy::Integer)),
+        "expected a hashset<int> local in MIR, got {local_types:?}"
+    );
+    assert!(
+        local_types.values().any(|ty| {
+            matches!(
+                ty,
+                fidan_mir::MirTy::Dict(key, value)
+                    if **key == fidan_mir::MirTy::String && **value == fidan_mir::MirTy::Integer
+            )
+        }),
+        "expected a dict<string, int> local in MIR, got {local_types:?}"
+    );
+}
+
+fn hashset_runtime_source() -> &'static str {
+    r#"use std.collections
+
+        object Box {
+            var id oftype integer
+
+            new with (certain id oftype integer) {
+                this.id = id
+            }
+        }
+
+        var numbers oftype hashset oftype integer set hashset([1, 2, 2, 3])
+        assert_eq(type(numbers), "hashset")
+        assert_eq(numbers.len(), 3)
+        assert_eq(numbers.contains(2), true)
+
+        numbers.insert(5)
+        numbers.remove(1)
+        assert_eq(numbers.contains(1), false)
+
+        var overlap set hashset([3, 4])
+        var merged set numbers.union(overlap)
+        var shared set numbers.intersect(overlap)
+        var only_numbers set numbers.diff(overlap)
+
+        assert_eq(merged.contains(4), true)
+        assert_eq(shared.contains(3), true)
+        assert_eq(only_numbers.contains(5), true)
+        assert_eq(len(merged.toList()), 4)
+
+        var legacy set hashset(["x", "x", "y"])
+        assert_eq(type(legacy), "hashset")
+        assert_eq(collections.setContains(legacy, "x"), true)
+        assert_eq(collections.setLen(legacy), 2)
+        assert_eq(len(collections.setToList(legacy)), 2)
+
+        var tuple_values oftype hashset oftype (integer, string) set hashset([(1, "a"), (1, "a"), (2, "b")])
+        assert_eq(tuple_values.len(), 2)
+        assert_eq(tuple_values.contains((2, "b")), true)
+
+        var first_box set Box(1)
+        var second_box set Box(1)
+        var object_values set hashset([first_box, first_box, second_box])
+        assert_eq(object_values.len(), 2)
+        assert_eq(object_values.contains(first_box), true)
+        assert_eq(object_values.contains(second_box), true)
+
+        var scores oftype dict oftype (string, integer) set {"ada": 42}
+        assert_eq(scores.get("ada"), 42)
+        assert_eq(scores["ada"], 42)
+        scores.set("grace", 99)
+        assert_eq(scores.containsKey("grace"), true)
+        assert_eq(scores["grace"], 99)
+        assert_eq(len(scores.keys()), 2)
+        assert_eq(len(scores.values()), 2)
+        assert_eq(len(scores.entries()), 2)
+        scores.remove("grace")
+        assert_eq(scores.containsKey("grace"), false)
+
+        var truthy_scores oftype dict oftype (boolean, integer) set {true: 7, false: 3}
+        assert_eq(truthy_scores.get(true), 7)
+        truthy_scores[false] = 11
+        assert_eq(truthy_scores[false], 11)
+
+        var tuple_scores oftype dict oftype ((string, integer), integer) set {("ada", 1): 42}
+        assert_eq(tuple_scores.get(("ada", 1)), 42)
+        tuple_scores[("grace", 2)] = 77
+        assert_eq(tuple_scores[("grace", 2)], 77)
+
+        var object_scores oftype dict oftype (Box, integer) set {first_box: 10, second_box: 20}
+        assert_eq(object_scores.get(first_box), 10)
+        assert_eq(object_scores.get(second_box), 20)"#
+}
+
+#[test]
 fn concurrent_block_ok() {
     assert!(
         run_src(
@@ -1145,6 +1271,36 @@ fn json_helpers_round_trip_string_and_file_values() {
 
     let result = run_src(&src);
     let _ = std::fs::remove_file(&path);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn json_helpers_preserve_typed_dict_keys_and_hashsets() {
+    let dict_path = std::env::temp_dir().join("fidan-interp-json-typed-dict.json");
+    let set_path = std::env::temp_dir().join("fidan-interp-json-hashset.json");
+    let escaped_dict_path = dict_path.display().to_string().replace('\\', "\\\\");
+    let escaped_set_path = set_path.display().to_string().replace('\\', "\\\\");
+    let src = format!(
+        r#"use std.json
+
+        var tuple_scores = {{(1, true): "ok", (2, false): "nope"}}
+        assert_eq(json.dump(tuple_scores, "{escaped_dict_path}"), true)
+        var loaded_scores = json.load("{escaped_dict_path}")
+        assert_eq(loaded_scores[(1, true)], "ok")
+        assert_eq(loaded_scores[(2, false)], "nope")
+
+        var tuple_values = hashset([(1, "a"), (1, "a"), (2, "b")])
+        assert_eq(json.dump(tuple_values, "{escaped_set_path}"), true)
+        var loaded_values = json.load("{escaped_set_path}")
+        assert_eq(type(loaded_values), "hashset")
+        assert_eq(loaded_values.len(), 2)
+        assert_eq(loaded_values.contains((2, "b")), true)
+        "#
+    );
+
+    let result = run_src(&src);
+    let _ = std::fs::remove_file(&dict_path);
+    let _ = std::fs::remove_file(&set_path);
     assert!(result.is_ok());
 }
 

@@ -1829,8 +1829,7 @@ impl MirMachine {
                 for (k, v) in pairs {
                     let key = self.eval_operand(k, frame);
                     let val = self.eval_operand(v, frame);
-                    let key_str = FidanString::new(&builtins::display(&key));
-                    dict.insert(key_str, val);
+                    let _ = dict.insert(key, val);
                 }
                 Ok(FidanValue::Dict(OwnedRef::new(dict)))
             }
@@ -2605,13 +2604,13 @@ impl MirMachine {
                     )
                 })
             }
-            (FidanValue::Dict(r), key) => {
-                let key_str = FidanString::new(&builtins::display(&key));
-                Ok(r.borrow()
-                    .get(&key_str)
-                    .cloned()
-                    .unwrap_or(FidanValue::Nothing))
-            }
+            (FidanValue::Dict(r), key) => Ok(r
+                .borrow()
+                .get(&key)
+                .ok()
+                .flatten()
+                .cloned()
+                .unwrap_or(FidanValue::Nothing)),
             (FidanValue::String(s), FidanValue::Integer(i)) => {
                 // Avoid materialising a Vec<char> — walk with an iterator instead.
                 let str_ref = s.as_str();
@@ -2690,8 +2689,7 @@ impl MirMachine {
                 }
             }
             (FidanValue::Dict(r), key) => {
-                let key_str = FidanString::new(&builtins::display(&key));
-                r.borrow_mut().insert(key_str, val);
+                let _ = r.borrow_mut().insert(key, val);
                 Ok(())
             }
             (obj, idx) => Err(MirSignal::Panic(format!(

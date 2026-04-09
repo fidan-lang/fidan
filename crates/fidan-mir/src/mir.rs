@@ -49,6 +49,7 @@ pub enum MirTy {
     Dynamic,
     List(Box<MirTy>),
     Dict(Box<MirTy>, Box<MirTy>),
+    HashSet(Box<MirTy>),
     Tuple(Vec<MirTy>),
     Object(Symbol),
     /// Enum type (variants declared in an `enum` block).

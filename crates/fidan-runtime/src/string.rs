@@ -1,5 +1,5 @@
 /// Copy-on-Write string. Clone is cheap; copy happens only on mutation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FidanString(pub std::sync::Arc<str>);
 
 impl FidanString {

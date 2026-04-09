@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use crate::parallel::FidanPending;
-use crate::{FidanDict, FidanList, FidanObject, FidanString, OwnedRef, SharedRef, WeakSharedRef};
+use crate::{
+    FidanDict, FidanHashSet, FidanList, FidanObject, FidanString, OwnedRef, SharedRef,
+    WeakSharedRef,
+};
 
 /// Opaque function identifier — same as fidan-mir's FunctionId but re-exported here
 /// so fidan-runtime doesn't depend on fidan-mir (no circular dep).
@@ -27,6 +30,7 @@ pub enum FidanValue {
     String(FidanString),
     List(OwnedRef<FidanList>),
     Dict(OwnedRef<FidanDict>),
+    HashSet(OwnedRef<FidanHashSet>),
     Object(OwnedRef<FidanObject>),
     /// `Shared oftype T` — explicit ARC, cross-thread safe.
     Shared(SharedRef<FidanValue>),
@@ -84,6 +88,7 @@ impl FidanValue {
             FidanValue::String(_) => "string",
             FidanValue::List(_) => "list",
             FidanValue::Dict(_) => "dict",
+            FidanValue::HashSet(_) => "hashset",
             FidanValue::Object(_) => "object",
             FidanValue::Shared(_) => "Shared",
             FidanValue::WeakShared(_) => "WeakShared",
@@ -112,6 +117,7 @@ impl FidanValue {
             FidanValue::Float(f) => *f != 0.0,
             FidanValue::Handle(h) => *h != 0,
             FidanValue::String(s) => !s.is_empty(),
+            FidanValue::HashSet(s) => !s.borrow().is_empty(),
             // A Range is truthy when it contains at least one element.
             FidanValue::Range {
                 start,
@@ -161,6 +167,12 @@ impl FidanValue {
             FidanValue::Dict(r) => {
                 let inner = r.borrow().clone(); // O(1): clones Arc<HashMap>
                 FidanValue::Dict(OwnedRef::new(inner))
+            }
+
+            // New Rc+RefCell wrapping the same inner Rc<HashSet> (CoW preserved).
+            FidanValue::HashSet(r) => {
+                let inner = r.borrow().clone();
+                FidanValue::HashSet(OwnedRef::new(inner))
             }
 
             // Field-by-field capture; Arc<FidanClass> is shared.
@@ -249,15 +261,20 @@ pub fn display(val: &FidanValue) -> String {
         FidanValue::Dict(d) => {
             let borrowed = d.borrow();
             // If the dict has a "__class__" entry it's an AOT object — display as <ClassName>.
-            let class_key = FidanString::new("__class__");
-            if let Some(FidanValue::String(cn)) = borrowed.get(&class_key) {
+            let class_key = FidanValue::String(FidanString::new("__class__"));
+            if let Ok(Some(FidanValue::String(cn))) = borrowed.get(&class_key) {
                 return format!("<{}>", cn.as_str());
             }
             let pairs: Vec<String> = borrowed
-                .iter()
-                .map(|(k, v)| format!("{}: {}", k.as_str(), display(v)))
+                .entries_sorted()
+                .into_iter()
+                .map(|(k, v)| format!("{}: {}", display(&k), display(&v)))
                 .collect();
             format!("{{{}}}", pairs.join(", "))
+        }
+        FidanValue::HashSet(set) => {
+            let items: Vec<String> = set.borrow().values_sorted().iter().map(display).collect();
+            format!("hashset({{{}}})", items.join(", "))
         }
         FidanValue::Tuple(items) => {
             let parts: Vec<String> = items.iter().map(display).collect();

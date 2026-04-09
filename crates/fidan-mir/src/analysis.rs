@@ -380,6 +380,7 @@ fn mir_ty_to_stdlib_kind(ty: MirTy) -> StdlibValueKind {
         MirTy::String => StdlibValueKind::String,
         MirTy::List(_) => StdlibValueKind::List,
         MirTy::Dict(_, _) => StdlibValueKind::Dict,
+        MirTy::HashSet(_) => StdlibValueKind::HashSet,
         MirTy::Nothing => StdlibValueKind::Nothing,
         _ => StdlibValueKind::Dynamic,
     }
@@ -393,6 +394,7 @@ fn stdlib_kind_to_mir_ty(kind: StdlibValueKind) -> MirTy {
         StdlibValueKind::String => MirTy::String,
         StdlibValueKind::List => MirTy::List(Box::new(MirTy::Dynamic)),
         StdlibValueKind::Dict => MirTy::Dict(Box::new(MirTy::Dynamic), Box::new(MirTy::Dynamic)),
+        StdlibValueKind::HashSet => MirTy::HashSet(Box::new(MirTy::Dynamic)),
         StdlibValueKind::Nothing => MirTy::Nothing,
         StdlibValueKind::Dynamic => MirTy::Dynamic,
     }

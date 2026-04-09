@@ -4,6 +4,7 @@ use std::sync::{OnceLock, RwLock};
 
 mod dict;
 pub mod ffi;
+mod hashset;
 mod list;
 mod object;
 mod owned_ref;
@@ -14,6 +15,7 @@ mod string;
 mod value;
 
 pub use dict::FidanDict;
+pub use hashset::{FidanHashKey, FidanHashSet, HashKeyError};
 pub use list::FidanList;
 pub use object::{FidanClass, FidanObject, FieldDef};
 pub use owned_ref::OwnedRef;

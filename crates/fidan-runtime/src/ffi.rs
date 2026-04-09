@@ -43,12 +43,14 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
 use crate::{
-    FidanDict, FidanList, FidanString, OwnedRef, SharedRef,
+    FidanDict, FidanHashSet, FidanList, FidanString, OwnedRef, SharedRef,
     parallel::{FidanPending, ParallelArgs, ParallelCapture},
     stdlib,
     value::{FidanValue, FunctionId, display},
 };
-use fidan_config::{ReceiverBuiltinKind, infer_receiver_member};
+use fidan_config::{
+    BuiltinSemantic, ReceiverBuiltinKind, ReceiverMethodOp, builtin_semantic, infer_receiver_member,
+};
 use std::io::BufRead;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -78,15 +80,14 @@ fn panic_missing_method(receiver: &FidanValue, method_name: &str) -> ! {
     unsafe { fdn_panic(msg_val) }
 }
 
-/// Coerce to `FidanString` if possible, otherwise stringify.
-#[inline]
-fn as_fidan_string(v: &FidanValue) -> FidanString {
-    match v {
-        FidanValue::String(s) => s.clone(),
-        other => FidanString::new(&display(other)),
-    }
+fn panic_runtime_message(message: impl Into<String>) -> ! {
+    let message = message.into();
+    let msg_val = into_raw(FidanValue::String(FidanString::new(&message)));
+    unsafe { fdn_panic(msg_val) }
 }
 
+/// Coerce to `FidanString` if possible, otherwise stringify.
+#[inline]
 fn is_truthy(v: &FidanValue) -> bool {
     match v {
         FidanValue::Nothing => false,
@@ -96,6 +97,7 @@ fn is_truthy(v: &FidanValue) -> bool {
         FidanValue::String(s) => !s.is_empty(),
         FidanValue::List(l) => !l.borrow().is_empty(),
         FidanValue::Dict(d) => !d.borrow().is_empty(),
+        FidanValue::HashSet(s) => !s.borrow().is_empty(),
         _ => true,
     }
 }
@@ -600,6 +602,7 @@ pub unsafe extern "C" fn fdn_len(ptr: *mut FidanValue) -> i64 {
         FidanValue::String(s) => s.len() as i64,
         FidanValue::List(l) => l.borrow().len() as i64,
         FidanValue::Dict(d) => d.borrow().len() as i64,
+        FidanValue::HashSet(s) => s.borrow().len() as i64,
         FidanValue::Range {
             start,
             end,
@@ -938,10 +941,13 @@ pub unsafe extern "C" fn fdn_list_get(
                 FidanValue::Nothing
             }
         }
-        FidanValue::Dict(d) => {
-            let key = FidanString::new(&as_str_val(idx_val));
-            d.borrow().get(&key).cloned().unwrap_or(FidanValue::Nothing)
-        }
+        FidanValue::Dict(d) => d
+            .borrow()
+            .get(idx_val)
+            .ok()
+            .flatten()
+            .cloned()
+            .unwrap_or(FidanValue::Nothing),
         _ => FidanValue::Nothing,
     };
     into_raw(result)
@@ -969,8 +975,7 @@ pub unsafe extern "C" fn fdn_list_set(
             }
         }
         FidanValue::Dict(d) => {
-            let key = FidanString::new(&as_str_val(idx_val));
-            d.borrow_mut().insert(key, borrow(val).clone());
+            let _ = d.borrow_mut().insert(idx_val.clone(), borrow(val).clone());
         }
         _ => {}
     }
@@ -1030,8 +1035,12 @@ pub unsafe extern "C" fn fdn_dict_get(
     key: *mut FidanValue,
 ) -> *mut FidanValue {
     let result = if let FidanValue::Dict(d) = borrow(dict) {
-        let k = as_fidan_string(borrow(key));
-        d.borrow().get(&k).cloned().unwrap_or(FidanValue::Nothing)
+        d.borrow()
+            .get(borrow(key))
+            .ok()
+            .flatten()
+            .cloned()
+            .unwrap_or(FidanValue::Nothing)
     } else {
         FidanValue::Nothing
     };
@@ -1046,8 +1055,9 @@ pub unsafe extern "C" fn fdn_dict_set(
     val: *mut FidanValue,
 ) {
     if let FidanValue::Dict(d) = borrow(dict) {
-        let k = as_fidan_string(borrow(key));
-        d.borrow_mut().insert(k, borrow(val).clone());
+        let _ = d
+            .borrow_mut()
+            .insert(borrow(key).clone(), borrow(val).clone());
     }
 }
 
@@ -1057,6 +1067,66 @@ pub unsafe extern "C" fn fdn_dict_len(dict: *mut FidanValue) -> i64 {
     match borrow(dict) {
         FidanValue::Dict(d) => d.borrow().len() as i64,
         _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_dict_contains_key(dict: *mut FidanValue, key: *mut FidanValue) -> i8 {
+    match borrow(dict) {
+        FidanValue::Dict(d) => i8::from(d.borrow().get(borrow(key)).ok().flatten().is_some()),
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_dict_remove(dict: *mut FidanValue, key: *mut FidanValue) {
+    if let FidanValue::Dict(d) = borrow(dict) {
+        let _ = d.borrow_mut().remove(borrow(key));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_dict_keys(dict: *mut FidanValue) -> *mut FidanValue {
+    match borrow(dict) {
+        FidanValue::Dict(d) => {
+            let mut list = FidanList::new();
+            for (key, _) in d.borrow().iter() {
+                list.append(key.clone());
+            }
+            into_raw(FidanValue::List(OwnedRef::new(list)))
+        }
+        _ => into_raw(FidanValue::Nothing),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_dict_values(dict: *mut FidanValue) -> *mut FidanValue {
+    match borrow(dict) {
+        FidanValue::Dict(d) => {
+            let mut list = FidanList::new();
+            for (_, value) in d.borrow().iter() {
+                list.append(value.clone());
+            }
+            into_raw(FidanValue::List(OwnedRef::new(list)))
+        }
+        _ => into_raw(FidanValue::Nothing),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_dict_entries(dict: *mut FidanValue) -> *mut FidanValue {
+    match borrow(dict) {
+        FidanValue::Dict(d) => {
+            let mut list = FidanList::new();
+            for (key, value) in d.borrow().iter() {
+                let mut pair = FidanList::new();
+                pair.append(key.clone());
+                pair.append(value.clone());
+                list.append(FidanValue::List(OwnedRef::new(pair)));
+            }
+            into_raw(FidanValue::List(OwnedRef::new(list)))
+        }
+        _ => into_raw(FidanValue::Nothing),
     }
 }
 
@@ -1070,8 +1140,8 @@ pub unsafe extern "C" fn fdn_obj_new(class_bytes: *const u8, class_len: i64) -> 
     let mut d = FidanDict::new();
     if !class_bytes.is_null() && class_len > 0 {
         let class_name = str_from_raw(class_bytes, class_len);
-        d.insert(
-            FidanString::new("__class__"),
+        let _ = d.insert(
+            FidanValue::String(FidanString::new("__class__")),
             FidanValue::String(FidanString::new(&class_name)),
         );
     }
@@ -1087,10 +1157,13 @@ pub unsafe extern "C" fn fdn_obj_get_field(
 ) -> *mut FidanValue {
     let field_name = str_from_raw(field_bytes, field_len);
     let result = match borrow(obj) {
-        FidanValue::Dict(d) => {
-            let key = FidanString::new(&field_name);
-            d.borrow().get(&key).cloned().unwrap_or(FidanValue::Nothing)
-        }
+        FidanValue::Dict(d) => d
+            .borrow()
+            .get(&FidanValue::String(FidanString::new(&field_name)))
+            .ok()
+            .flatten()
+            .cloned()
+            .unwrap_or(FidanValue::Nothing),
         FidanValue::EnumVariant { tag, .. } if field_name == "tag" => {
             FidanValue::String(FidanString::new(tag))
         }
@@ -1121,8 +1194,10 @@ pub unsafe extern "C" fn fdn_obj_set_field(
 ) {
     let field_name = str_from_raw(field_bytes, field_len);
     if let FidanValue::Dict(d) = borrow(obj) {
-        let key = FidanString::new(&field_name);
-        d.borrow_mut().insert(key, borrow(val).clone());
+        let _ = d.borrow_mut().insert(
+            FidanValue::String(FidanString::new(&field_name)),
+            borrow(val).clone(),
+        );
     }
 }
 
@@ -1178,8 +1253,9 @@ pub unsafe extern "C" fn fdn_obj_invoke(
         FidanValue::List(l) => dispatch_list_method(l, &method_name, extra),
         FidanValue::Dict(d) => {
             // Check for a user-defined method stored as `__method__<name>` in the dict.
-            let method_key = FidanString::new(&format!("__method__{}", method_name));
-            if let Some(method_fn) = d.borrow().get(&method_key).cloned() {
+            let method_key =
+                FidanValue::String(FidanString::new(&format!("__method__{}", method_name)));
+            if let Ok(Some(method_fn)) = d.borrow().get(&method_key).map(|value| value.cloned()) {
                 // Build call-arg list: self (obj ptr, borrowed) + original arg ptrs.
                 let mut call_ptrs: Vec<*mut FidanValue> =
                     Vec::with_capacity(1 + args_count as usize);
@@ -1195,6 +1271,7 @@ pub unsafe extern "C" fn fdn_obj_invoke(
             }
             dispatch_dict_method(d, &method_name, extra)
         }
+        FidanValue::HashSet(s) => dispatch_hashset_method(s, &method_name, extra),
         FidanValue::Range {
             start,
             end,
@@ -1958,21 +2035,22 @@ fn dispatch_dict_method(
     method: &str,
     args: Vec<FidanValue>,
 ) -> *mut FidanValue {
-    let Some(method) =
-        infer_receiver_member(ReceiverBuiltinKind::Dict, method).map(|info| info.canonical_name)
+    let Some(operation) =
+        infer_receiver_member(ReceiverBuiltinKind::Dict, method).and_then(|info| info.operation)
     else {
         eprintln!("AOT: dict method not found: .{}()", method);
         return into_raw(FidanValue::Nothing);
     };
-    match method {
-        "len" => into_raw(FidanValue::Integer(dict.borrow().len() as i64)),
-        "isEmpty" => into_raw(FidanValue::Boolean(dict.borrow().is_empty())),
-        "get" => {
+    match operation {
+        ReceiverMethodOp::Len => into_raw(FidanValue::Integer(dict.borrow().len() as i64)),
+        ReceiverMethodOp::IsEmpty => into_raw(FidanValue::Boolean(dict.borrow().is_empty())),
+        ReceiverMethodOp::Get => {
             if let Some(key_val) = args.first() {
-                let key = FidanString::new(&as_str_val(key_val));
                 into_raw(
                     dict.borrow()
-                        .get(&key)
+                        .get(key_val)
+                        .ok()
+                        .flatten()
                         .cloned()
                         .unwrap_or(FidanValue::Nothing),
                 )
@@ -1980,37 +2058,36 @@ fn dispatch_dict_method(
                 into_raw(FidanValue::Nothing)
             }
         }
-        "set" => {
+        ReceiverMethodOp::Set => {
             if let (Some(k), Some(v)) = (args.first(), args.get(1)) {
-                let key = FidanString::new(&as_str_val(k));
-                dict.borrow_mut().insert(key, v.clone());
+                let _ = dict.borrow_mut().insert(k.clone(), v.clone());
             }
             into_raw(FidanValue::Nothing)
         }
-        "containsKey" => {
+        ReceiverMethodOp::Contains => {
             if let Some(key_val) = args.first() {
-                let key = FidanString::new(&as_str_val(key_val));
-                into_raw(FidanValue::Boolean(dict.borrow().get(&key).is_some()))
+                into_raw(FidanValue::Boolean(
+                    dict.borrow().get(key_val).ok().flatten().is_some(),
+                ))
             } else {
                 into_raw(FidanValue::Boolean(false))
             }
         }
-        "remove" => {
+        ReceiverMethodOp::Remove => {
             if let Some(key_val) = args.first() {
-                let key = FidanString::new(&as_str_val(key_val));
-                dict.borrow_mut().remove(&key);
+                let _ = dict.borrow_mut().remove(key_val);
             }
             into_raw(FidanValue::Nothing)
         }
-        "keys" => {
+        ReceiverMethodOp::Keys => {
             let b = dict.borrow();
             let mut list = FidanList::new();
             for (key, _) in b.iter() {
-                list.append(FidanValue::String(key.clone()));
+                list.append(key.clone());
             }
             into_raw(FidanValue::List(OwnedRef::new(list)))
         }
-        "values" => {
+        ReceiverMethodOp::Values => {
             let b = dict.borrow();
             let mut list = FidanList::new();
             for (_, val) in b.iter() {
@@ -2018,20 +2095,174 @@ fn dispatch_dict_method(
             }
             into_raw(FidanValue::List(OwnedRef::new(list)))
         }
-        "entries" => {
+        ReceiverMethodOp::Entries => {
             let b = dict.borrow();
             let mut list = FidanList::new();
             for (k, v) in b.iter() {
                 let mut pair = FidanList::new();
-                pair.append(FidanValue::String(k.clone()));
+                pair.append(k.clone());
                 pair.append(v.clone());
                 list.append(FidanValue::List(OwnedRef::new(pair)));
             }
             into_raw(FidanValue::List(OwnedRef::new(list)))
         }
-        "toString" => into_raw(FidanValue::String(FidanString::new(&display(
+        ReceiverMethodOp::ToString => into_raw(FidanValue::String(FidanString::new(&display(
             &FidanValue::Dict(dict.clone()),
         )))),
+        _ => into_raw(FidanValue::Nothing),
+    }
+}
+
+fn dispatch_hashset_method(
+    set: &OwnedRef<FidanHashSet>,
+    method: &str,
+    args: Vec<FidanValue>,
+) -> *mut FidanValue {
+    let Some(operation) =
+        infer_receiver_member(ReceiverBuiltinKind::HashSet, method).and_then(|info| info.operation)
+    else {
+        eprintln!("AOT: hashset method not found: .{}()", method);
+        return into_raw(FidanValue::Nothing);
+    };
+
+    match operation {
+        ReceiverMethodOp::Len => into_raw(FidanValue::Integer(set.borrow().len() as i64)),
+        ReceiverMethodOp::IsEmpty => into_raw(FidanValue::Boolean(set.borrow().is_empty())),
+        ReceiverMethodOp::Insert => {
+            if let Some(value) = args.first() {
+                let _ = set.borrow_mut().insert(value.clone());
+            }
+            into_raw(FidanValue::Nothing)
+        }
+        ReceiverMethodOp::Remove => {
+            if let Some(value) = args.first() {
+                let _ = set.borrow_mut().remove(value);
+            }
+            into_raw(FidanValue::Nothing)
+        }
+        ReceiverMethodOp::Contains => {
+            if let Some(value) = args.first() {
+                into_raw(FidanValue::Boolean(
+                    set.borrow().contains(value).unwrap_or(false),
+                ))
+            } else {
+                into_raw(FidanValue::Boolean(false))
+            }
+        }
+        ReceiverMethodOp::ToList => {
+            let mut list = FidanList::new();
+            for value in set.borrow().values_sorted() {
+                list.append(value);
+            }
+            into_raw(FidanValue::List(OwnedRef::new(list)))
+        }
+        ReceiverMethodOp::Union => {
+            if let Some(FidanValue::HashSet(other)) = args.first() {
+                into_raw(FidanValue::HashSet(OwnedRef::new(
+                    set.borrow().union(&other.borrow()),
+                )))
+            } else {
+                into_raw(FidanValue::Nothing)
+            }
+        }
+        ReceiverMethodOp::Intersect => {
+            if let Some(FidanValue::HashSet(other)) = args.first() {
+                into_raw(FidanValue::HashSet(OwnedRef::new(
+                    set.borrow().intersection(&other.borrow()),
+                )))
+            } else {
+                into_raw(FidanValue::Nothing)
+            }
+        }
+        ReceiverMethodOp::Diff => {
+            if let Some(FidanValue::HashSet(other)) = args.first() {
+                into_raw(FidanValue::HashSet(OwnedRef::new(
+                    set.borrow().difference(&other.borrow()),
+                )))
+            } else {
+                into_raw(FidanValue::Nothing)
+            }
+        }
+        ReceiverMethodOp::ToString => into_raw(FidanValue::String(FidanString::new(&display(
+            &FidanValue::HashSet(set.clone()),
+        )))),
+        _ => into_raw(FidanValue::Nothing),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_hashset_insert(set: *mut FidanValue, value: *mut FidanValue) {
+    if let FidanValue::HashSet(inner) = borrow(set) {
+        let _ = inner.borrow_mut().insert(borrow(value).clone());
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_hashset_remove(set: *mut FidanValue, value: *mut FidanValue) {
+    if let FidanValue::HashSet(inner) = borrow(set) {
+        let _ = inner.borrow_mut().remove(borrow(value));
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_hashset_contains(set: *mut FidanValue, value: *mut FidanValue) -> i8 {
+    match borrow(set) {
+        FidanValue::HashSet(inner) => {
+            i8::from(inner.borrow().contains(borrow(value)).unwrap_or(false))
+        }
+        _ => 0,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_hashset_to_list(set: *mut FidanValue) -> *mut FidanValue {
+    match borrow(set) {
+        FidanValue::HashSet(inner) => {
+            let mut list = FidanList::new();
+            for value in inner.borrow().values_sorted() {
+                list.append(value);
+            }
+            into_raw(FidanValue::List(OwnedRef::new(list)))
+        }
+        _ => into_raw(FidanValue::Nothing),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_hashset_union(
+    set: *mut FidanValue,
+    other: *mut FidanValue,
+) -> *mut FidanValue {
+    match (borrow(set), borrow(other)) {
+        (FidanValue::HashSet(lhs), FidanValue::HashSet(rhs)) => into_raw(FidanValue::HashSet(
+            OwnedRef::new(lhs.borrow().union(&rhs.borrow())),
+        )),
+        _ => into_raw(FidanValue::Nothing),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_hashset_intersect(
+    set: *mut FidanValue,
+    other: *mut FidanValue,
+) -> *mut FidanValue {
+    match (borrow(set), borrow(other)) {
+        (FidanValue::HashSet(lhs), FidanValue::HashSet(rhs)) => into_raw(FidanValue::HashSet(
+            OwnedRef::new(lhs.borrow().intersection(&rhs.borrow())),
+        )),
+        _ => into_raw(FidanValue::Nothing),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_hashset_diff(
+    set: *mut FidanValue,
+    other: *mut FidanValue,
+) -> *mut FidanValue {
+    match (borrow(set), borrow(other)) {
+        (FidanValue::HashSet(lhs), FidanValue::HashSet(rhs)) => into_raw(FidanValue::HashSet(
+            OwnedRef::new(lhs.borrow().difference(&rhs.borrow())),
+        )),
         _ => into_raw(FidanValue::Nothing),
     }
 }
@@ -2081,6 +2312,81 @@ fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
         (FidanValue::Boolean(x), FidanValue::Boolean(y)) => x == y,
         (FidanValue::String(x), FidanValue::String(y)) => x.as_str() == y.as_str(),
         (FidanValue::Nothing, FidanValue::Nothing) => true,
+        (FidanValue::List(lhs), FidanValue::List(rhs)) => {
+            let lhs = lhs.borrow();
+            let rhs = rhs.borrow();
+            lhs.len() == rhs.len()
+                && lhs
+                    .iter()
+                    .zip(rhs.iter())
+                    .all(|(left, right)| values_equal(left, right))
+        }
+        (FidanValue::Tuple(lhs), FidanValue::Tuple(rhs)) => {
+            lhs.len() == rhs.len()
+                && lhs
+                    .iter()
+                    .zip(rhs.iter())
+                    .all(|(left, right)| values_equal(left, right))
+        }
+        (FidanValue::Dict(lhs), FidanValue::Dict(rhs)) => {
+            let lhs = lhs.borrow();
+            let rhs = rhs.borrow();
+            lhs.len() == rhs.len()
+                && lhs.iter().all(|(key, left)| {
+                    rhs.get(key)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|right| values_equal(left, right))
+                })
+        }
+        (FidanValue::HashSet(lhs), FidanValue::HashSet(rhs)) => {
+            let lhs = lhs.borrow();
+            let rhs = rhs.borrow();
+            lhs.len() == rhs.len() && lhs.iter().all(|value| rhs.contains(value).unwrap_or(false))
+        }
+        (FidanValue::Function(lhs), FidanValue::Function(rhs)) => lhs == rhs,
+        (
+            FidanValue::Closure {
+                fn_id: lhs,
+                captured: left,
+            },
+            FidanValue::Closure {
+                fn_id: rhs,
+                captured: right,
+            },
+        ) => {
+            lhs == rhs
+                && left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right.iter())
+                    .all(|(left, right)| values_equal(left, right))
+        }
+        (FidanValue::Namespace(lhs), FidanValue::Namespace(rhs)) => lhs == rhs,
+        (FidanValue::StdlibFn(lhs_mod, lhs_name), FidanValue::StdlibFn(rhs_mod, rhs_name)) => {
+            lhs_mod == rhs_mod && lhs_name == rhs_name
+        }
+        (FidanValue::ClassType(lhs), FidanValue::ClassType(rhs)) => lhs == rhs,
+        (FidanValue::EnumType(lhs), FidanValue::EnumType(rhs)) => lhs == rhs,
+        (FidanValue::Object(lhs), FidanValue::Object(rhs)) => lhs.identity() == rhs.identity(),
+        (FidanValue::Shared(lhs), FidanValue::Shared(rhs)) => lhs.identity() == rhs.identity(),
+        (FidanValue::WeakShared(lhs), FidanValue::WeakShared(rhs)) => {
+            lhs.identity() == rhs.identity()
+        }
+        (FidanValue::Pending(lhs), FidanValue::Pending(rhs)) => lhs.identity() == rhs.identity(),
+        (FidanValue::PendingTask(lhs), FidanValue::PendingTask(rhs)) => lhs == rhs,
+        (
+            FidanValue::Range {
+                start: lhs_start,
+                end: lhs_end,
+                inclusive: lhs_inclusive,
+            },
+            FidanValue::Range {
+                start: rhs_start,
+                end: rhs_end,
+                inclusive: rhs_inclusive,
+            },
+        ) => lhs_start == rhs_start && lhs_end == rhs_end && lhs_inclusive == rhs_inclusive,
         (
             FidanValue::EnumVariant {
                 tag: ta,
@@ -2190,42 +2496,148 @@ pub unsafe extern "C" fn fdn_stdlib_call(
 /// without keeping a second copy of the module list.
 /// To add a new stdlib module, add one arm here — nothing else needs changing.
 fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut FidanValue> {
-    match func {
-        "print" => {
-            let parts: Vec<String> = args.iter().map(display).collect();
-            println!("{}", parts.join(" "));
-            Some(into_raw(FidanValue::Nothing))
-        }
-        "eprint" => {
-            let parts: Vec<String> = args.iter().map(display).collect();
-            eprintln!("{}", parts.join(" "));
-            Some(into_raw(FidanValue::Nothing))
-        }
-        "input" => {
-            let prompt = args.first().map(display).unwrap_or_default();
-            if !prompt.is_empty() {
-                use std::io::Write;
-                print!("{}", prompt);
-                let _ = std::io::stdout().flush();
+    if let Some(semantic) = builtin_semantic(func) {
+        return match semantic {
+            BuiltinSemantic::Print => {
+                let parts: Vec<String> = args.iter().map(display).collect();
+                println!("{}", parts.join(" "));
+                Some(into_raw(FidanValue::Nothing))
             }
-            let stdin = std::io::stdin();
-            let mut line = String::new();
-            stdin.lock().read_line(&mut line).ok()?;
-            if line.ends_with('\n') {
-                line.pop();
-                if line.ends_with('\r') {
+            BuiltinSemantic::Eprint => {
+                let parts: Vec<String> = args.iter().map(display).collect();
+                eprintln!("{}", parts.join(" "));
+                Some(into_raw(FidanValue::Nothing))
+            }
+            BuiltinSemantic::Input => {
+                let prompt = args.first().map(display).unwrap_or_default();
+                if !prompt.is_empty() {
+                    use std::io::Write;
+                    print!("{}", prompt);
+                    let _ = std::io::stdout().flush();
+                }
+                let stdin = std::io::stdin();
+                let mut line = String::new();
+                stdin.lock().read_line(&mut line).ok()?;
+                if line.ends_with('\n') {
                     line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                }
+                Some(into_raw(FidanValue::String(FidanString::new(&line))))
+            }
+            BuiltinSemantic::String => {
+                let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                Some(into_raw(FidanValue::String(FidanString::new(&display(
+                    &value,
+                )))))
+            }
+            BuiltinSemantic::Integer => {
+                let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                let converted = match &value {
+                    FidanValue::Integer(n) => FidanValue::Integer(*n),
+                    FidanValue::Float(f) => FidanValue::Integer(*f as i64),
+                    FidanValue::Boolean(b) => FidanValue::Integer(if *b { 1 } else { 0 }),
+                    FidanValue::String(s) => s
+                        .as_str()
+                        .parse::<i64>()
+                        .map(FidanValue::Integer)
+                        .unwrap_or(FidanValue::Nothing),
+                    _ => FidanValue::Nothing,
+                };
+                Some(into_raw(converted))
+            }
+            BuiltinSemantic::Float => {
+                let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                let converted = match &value {
+                    FidanValue::Float(f) => FidanValue::Float(*f),
+                    FidanValue::Integer(n) => FidanValue::Float(*n as f64),
+                    FidanValue::String(s) => s
+                        .as_str()
+                        .parse::<f64>()
+                        .map(FidanValue::Float)
+                        .unwrap_or(FidanValue::Nothing),
+                    _ => FidanValue::Nothing,
+                };
+                Some(into_raw(converted))
+            }
+            BuiltinSemantic::Boolean => {
+                let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                Some(into_raw(FidanValue::Boolean(value.truthy())))
+            }
+            BuiltinSemantic::Len => {
+                let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                let length = match &value {
+                    FidanValue::String(s) => s.len() as i64,
+                    FidanValue::List(list) => list.borrow().len() as i64,
+                    FidanValue::Dict(dict) => dict.borrow().len() as i64,
+                    FidanValue::HashSet(set) => set.borrow().len() as i64,
+                    FidanValue::Tuple(tuple) => tuple.len() as i64,
+                    FidanValue::Range {
+                        start,
+                        end,
+                        inclusive,
+                    } => {
+                        if *inclusive {
+                            (end - start + 1).max(0)
+                        } else {
+                            (end - start).max(0)
+                        }
+                    }
+                    _ => return Some(into_raw(FidanValue::Nothing)),
+                };
+                Some(into_raw(FidanValue::Integer(length)))
+            }
+            BuiltinSemantic::Type => {
+                let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                Some(into_raw(FidanValue::String(FidanString::new(
+                    value.type_name(),
+                ))))
+            }
+            BuiltinSemantic::HashSetConstructor => {
+                let source = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                let set = match source {
+                    FidanValue::Nothing => FidanHashSet::new(),
+                    FidanValue::List(list) => {
+                        FidanHashSet::from_values(list.borrow().iter().cloned())
+                            .unwrap_or_else(|err| panic_runtime_message(err.to_string()))
+                    }
+                    FidanValue::HashSet(existing) => existing.borrow().clone(),
+                    other => panic_runtime_message(format!(
+                        "hashset(items) expects a list or hashset, got {}",
+                        other.type_name()
+                    )),
+                };
+                Some(into_raw(FidanValue::HashSet(OwnedRef::new(set))))
+            }
+            BuiltinSemantic::SharedConstructor => {
+                let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                Some(into_raw(FidanValue::Shared(SharedRef::new(inner))))
+            }
+            BuiltinSemantic::WeakSharedConstructor => {
+                let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                match inner {
+                    FidanValue::Shared(shared) => {
+                        Some(into_raw(FidanValue::WeakShared(shared.downgrade())))
+                    }
+                    FidanValue::WeakShared(weak) => Some(into_raw(FidanValue::WeakShared(weak))),
+                    _ => Some(into_raw(FidanValue::Nothing)),
                 }
             }
-            Some(into_raw(FidanValue::String(FidanString::new(&line))))
-        }
-        "string" | "str" => {
+            BuiltinSemantic::Assert | BuiltinSemantic::AssertEq | BuiltinSemantic::AssertNe => {
+                Some(dispatch_test(func, args))
+            }
+        };
+    }
+
+    match func {
+        "str" => {
             let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Some(into_raw(FidanValue::String(FidanString::new(&display(
                 &value,
             )))))
         }
-        "integer" | "int" => {
+        "int" => {
             let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             let converted = match &value {
                 FidanValue::Integer(n) => FidanValue::Integer(*n),
@@ -2240,67 +2652,11 @@ fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut Fid
             };
             Some(into_raw(converted))
         }
-        "float" => {
-            let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            let converted = match &value {
-                FidanValue::Float(f) => FidanValue::Float(*f),
-                FidanValue::Integer(n) => FidanValue::Float(*n as f64),
-                FidanValue::String(s) => s
-                    .as_str()
-                    .parse::<f64>()
-                    .map(FidanValue::Float)
-                    .unwrap_or(FidanValue::Nothing),
-                _ => FidanValue::Nothing,
-            };
-            Some(into_raw(converted))
-        }
-        "boolean" | "bool" => {
+        "bool" => {
             let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Some(into_raw(FidanValue::Boolean(value.truthy())))
         }
-        "len" => {
-            let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            let length = match &value {
-                FidanValue::String(s) => s.len() as i64,
-                FidanValue::List(list) => list.borrow().len() as i64,
-                FidanValue::Dict(dict) => dict.borrow().len() as i64,
-                FidanValue::Tuple(tuple) => tuple.len() as i64,
-                FidanValue::Range {
-                    start,
-                    end,
-                    inclusive,
-                } => {
-                    if *inclusive {
-                        (end - start + 1).max(0)
-                    } else {
-                        (end - start).max(0)
-                    }
-                }
-                _ => return Some(into_raw(FidanValue::Nothing)),
-            };
-            Some(into_raw(FidanValue::Integer(length)))
-        }
-        "type" => {
-            let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            Some(into_raw(FidanValue::String(FidanString::new(
-                value.type_name(),
-            ))))
-        }
-        "Shared" => {
-            let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            Some(into_raw(FidanValue::Shared(SharedRef::new(inner))))
-        }
-        "WeakShared" => {
-            let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            match inner {
-                FidanValue::Shared(shared) => {
-                    Some(into_raw(FidanValue::WeakShared(shared.downgrade())))
-                }
-                FidanValue::WeakShared(weak) => Some(into_raw(FidanValue::WeakShared(weak))),
-                _ => Some(into_raw(FidanValue::Nothing)),
-            }
-        }
-        "assertEq" | "assert_eq" | "assertNe" | "assert_ne" => Some(dispatch_test(func, args)),
+        "assertEq" | "assertNe" => Some(dispatch_test(func, args)),
         _ => None,
     }
 }
@@ -2315,6 +2671,7 @@ fn dispatch_stdlib_inline(
         "math" => Some(dispatch_math(func, args)),
         "string" => Some(dispatch_string_fn(func, args)),
         "io" => Some(dispatch_io(func, args)),
+        "json" => Some(dispatch_json(func, args)),
         "collections" => Some(dispatch_collections(func, args)),
         "async" => Some(dispatch_async(func, args)),
         "env" => Some(dispatch_env(func, args)),
@@ -2349,6 +2706,13 @@ fn dispatch_io(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
         .unwrap_or_else(|| into_raw(FidanValue::Nothing))
 }
 
+// ── json module ───────────────────────────────────────────────────────────────
+fn dispatch_json(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
+    stdlib::json::dispatch(func, args)
+        .map(into_raw)
+        .unwrap_or_else(|| into_raw(FidanValue::Nothing))
+}
+
 // ── collections module ────────────────────────────────────────────────────────
 fn dispatch_collections(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
     stdlib::collections::dispatch(func, args)
@@ -2370,14 +2734,11 @@ fn dispatch_regex(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
         .unwrap_or_else(|| into_raw(FidanValue::Nothing))
 }
 
-// ── parallel module ───────────────────────────────────────────────────────────//
-// These run sequentially in AOT (true parallelism would require extra runtime
-// infrastructure). Behaviour is identical to the interpreter's parallel module.
-
+// ── parallel module ───────────────────────────────────────────────────────────
+// These run sequentially in AOT. Behaviour matches the interpreter contract.
 fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
     match func {
         "parallelMap" | "parallel_map" => {
-            // parallelMap(list, fn) -> list
             let list = match args.first() {
                 Some(FidanValue::List(l)) => l.borrow().iter().cloned().collect::<Vec<_>>(),
                 _ => return into_raw(FidanValue::Nothing),
@@ -2401,7 +2762,6 @@ fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
             into_raw(FidanValue::List(OwnedRef::new(result)))
         }
         "parallelFilter" | "parallel_filter" => {
-            // parallelFilter(list, predicate) -> list
             let list = match args.first() {
                 Some(FidanValue::List(l)) => l.borrow().iter().cloned().collect::<Vec<_>>(),
                 _ => return into_raw(FidanValue::Nothing),
@@ -2429,7 +2789,6 @@ fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
             into_raw(FidanValue::List(OwnedRef::new(result)))
         }
         "parallelForEach" | "parallel_for_each" | "parallelEach" => {
-            // parallelForEach(list, fn) -> nothing
             let list = match args.first() {
                 Some(FidanValue::List(l)) => l.borrow().iter().cloned().collect::<Vec<_>>(),
                 _ => return into_raw(FidanValue::Nothing),
@@ -2438,9 +2797,10 @@ fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
             let fn_ptr = into_raw(fn_val);
             for item in list {
                 let item_ptr = into_raw(item);
-                let r = unsafe { fdn_call_dynamic(fn_ptr, &item_ptr as *const *mut FidanValue, 1) };
-                if !r.is_null() {
-                    unsafe { drop(Box::from_raw(r)) };
+                let result =
+                    unsafe { fdn_call_dynamic(fn_ptr, &item_ptr as *const *mut FidanValue, 1) };
+                if !result.is_null() {
+                    unsafe { drop(Box::from_raw(result)) };
                 }
                 unsafe { drop(Box::from_raw(item_ptr)) };
             }
@@ -2448,7 +2808,6 @@ fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
             into_raw(FidanValue::Nothing)
         }
         "parallelReduce" | "parallel_reduce" => {
-            // parallelReduce(list, initial, fn) -> value
             let list = match args.first() {
                 Some(FidanValue::List(l)) => l.borrow().iter().cloned().collect::<Vec<_>>(),
                 _ => return into_raw(FidanValue::Nothing),
@@ -2461,11 +2820,11 @@ fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
                 let acc_ptr = into_raw(acc);
                 let item_ptr = into_raw(item);
                 let call_args = [acc_ptr, item_ptr];
-                let r = unsafe { fdn_call_dynamic(fn_ptr, call_args.as_ptr(), 2) };
-                acc = if !r.is_null() {
-                    let v = unsafe { (*r).clone() };
-                    unsafe { drop(Box::from_raw(r)) };
-                    v
+                let result = unsafe { fdn_call_dynamic(fn_ptr, call_args.as_ptr(), 2) };
+                acc = if !result.is_null() {
+                    let value = unsafe { (*result).clone() };
+                    unsafe { drop(Box::from_raw(result)) };
+                    value
                 } else {
                     FidanValue::Nothing
                 };
@@ -2483,7 +2842,6 @@ fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
 }
 
 // ── test module ───────────────────────────────────────────────────────────────
-
 fn dispatch_test(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
     match stdlib::test_runner::dispatch(func, args) {
         Some(Ok(value)) => into_raw(value),

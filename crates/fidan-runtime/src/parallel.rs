@@ -467,6 +467,10 @@ impl FidanPending {
     pub fn join(&self) -> FidanValue {
         self.try_join().unwrap_or(FidanValue::Nothing)
     }
+
+    pub fn identity(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
 }
 
 impl std::fmt::Debug for FidanPending {

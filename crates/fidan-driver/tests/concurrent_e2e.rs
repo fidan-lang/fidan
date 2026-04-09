@@ -308,6 +308,104 @@ print("ok")
 "#
 }
 
+fn hashset_source() -> &'static str {
+    r#"use std.collections
+
+action main {
+    var numbers oftype hashset oftype integer set hashset([1, 2, 2, 3])
+    assert_eq(type(numbers), "hashset")
+    assert_eq(numbers.len(), 3)
+    assert_eq(numbers.contains(2), true)
+
+    numbers.insert(5)
+    numbers.remove(1)
+    assert_eq(numbers.contains(1), false)
+
+    var overlap set hashset([3, 4])
+    var merged set numbers.union(overlap)
+    var shared set numbers.intersect(overlap)
+    var only_numbers set numbers.diff(overlap)
+
+    assert_eq(merged.contains(4), true)
+    assert_eq(shared.contains(3), true)
+    assert_eq(only_numbers.contains(5), true)
+    assert_eq(len(merged.toList()), 4)
+
+    var legacy set hashset(["x", "x", "y"])
+    assert_eq(type(legacy), "hashset")
+    assert_eq(collections.setContains(legacy, "x"), true)
+    assert_eq(collections.setLen(legacy), 2)
+    assert_eq(len(collections.setToList(legacy)), 2)
+
+    var tuple_values oftype hashset oftype (integer, string) set hashset([(1, "a"), (1, "a"), (2, "b")])
+    assert_eq(tuple_values.len(), 2)
+    assert_eq(tuple_values.contains((2, "b")), true)
+
+    var scores oftype dict oftype (string, integer) set {"ada": 42}
+    assert_eq(scores.get("ada"), 42)
+    assert_eq(scores["ada"], 42)
+    scores.set("grace", 99)
+    assert_eq(scores.containsKey("grace"), true)
+    assert_eq(scores["grace"], 99)
+    assert_eq(len(scores.keys()), 2)
+    assert_eq(len(scores.values()), 2)
+    assert_eq(len(scores.entries()), 2)
+    scores.remove("grace")
+    assert_eq(scores.containsKey("grace"), false)
+
+    var truthy_scores oftype dict oftype (boolean, integer) set {true: 7, false: 3}
+    assert_eq(truthy_scores.get(true), 7)
+    truthy_scores[false] = 11
+    assert_eq(truthy_scores[false], 11)
+
+    var tuple_scores oftype dict oftype ((string, integer), integer) set {("ada", 1): 42}
+    assert_eq(tuple_scores.get(("ada", 1)), 42)
+    tuple_scores[("grace", 2)] = 77
+    assert_eq(tuple_scores[("grace", 2)], 77)
+    print("ok")
+
+}
+
+main()
+"#
+}
+
+fn invalid_hashset_constructor_source() -> &'static str {
+    r#"action main {
+    var source oftype dynamic = 42
+    var bad = hashset(source)
+    print(bad)
+}
+
+main()
+"#
+}
+
+fn json_roundtrip_source(dict_path: &str, set_path: &str) -> String {
+    format!(
+        r#"use std.json
+
+action main {{
+    var tuple_scores = {{(1, true): "ok", (2, false): "nope"}}
+    assert_eq(json.dump(tuple_scores, "{dict_path}"), true)
+    var loaded_scores = json.load("{dict_path}")
+    assert_eq(loaded_scores[(1, true)], "ok")
+    assert_eq(loaded_scores[(2, false)], "nope")
+
+    var tuple_values = hashset([(1, "a"), (1, "a"), (2, "b")])
+    assert_eq(json.dump(tuple_values, "{set_path}"), true)
+    var loaded_values = json.load("{set_path}")
+    assert_eq(type(loaded_values), "hashset")
+    assert_eq(loaded_values.len(), 2)
+    assert_eq(loaded_values.contains((2, "b")), true)
+    print("ok")
+}}
+
+main()
+"#
+    )
+}
+
 fn tuple_literal_source() -> &'static str {
     r#"var pair = (42, "ok")
 assert_eq(type(pair), "tuple")
@@ -536,6 +634,24 @@ fn run_compiled_binary_clean(bin: &Path, expected_stdout_fragment: &str) {
     assert!(
         stderr.trim().is_empty(),
         "expected compiled program stderr to stay empty, got:\n{}",
+        stderr,
+    );
+}
+
+fn run_compiled_binary_expect_failure(bin: &Path, expected_stderr_fragment: &str) {
+    let output = Command::new(bin)
+        .output()
+        .expect("run compiled concurrent smoke binary expecting failure");
+    assert!(
+        !output.status.success(),
+        "expected compiled concurrent smoke binary to fail:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(expected_stderr_fragment),
+        "expected compiled failure stderr to contain {expected_stderr_fragment:?}, got:\n{}",
         stderr,
     );
 }
@@ -958,6 +1074,127 @@ fn collections_helpers_llvm_aot_match_interpreter_contract() {
         sandbox.join("collections_smoke")
     };
     compile_program(collections_helpers_source(), Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn hashset_cranelift_aot_matches_interpreter_contract() {
+    let sandbox = temp_dir("fidan_hashset_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("hashset_smoke.exe")
+    } else {
+        sandbox.join("hashset_smoke")
+    };
+    compile_program(hashset_source(), Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn hashset_llvm_aot_matches_interpreter_contract() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM hashset AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_hashset_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("hashset_smoke.exe")
+    } else {
+        sandbox.join("hashset_smoke")
+    };
+    compile_program(hashset_source(), Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn hashset_constructor_cranelift_aot_reports_runtime_error_for_invalid_dynamic_input() {
+    let sandbox = temp_dir("fidan_hashset_invalid_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("hashset_invalid.exe")
+    } else {
+        sandbox.join("hashset_invalid")
+    };
+    compile_program(
+        invalid_hashset_constructor_source(),
+        Backend::Cranelift,
+        &output,
+    );
+    run_compiled_binary_expect_failure(
+        &output,
+        "hashset(items) expects a list or hashset, got integer",
+    );
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn hashset_constructor_llvm_aot_reports_runtime_error_for_invalid_dynamic_input() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM invalid hashset constructor smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_hashset_invalid_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("hashset_invalid.exe")
+    } else {
+        sandbox.join("hashset_invalid")
+    };
+    compile_program(invalid_hashset_constructor_source(), Backend::Llvm, &output);
+    run_compiled_binary_expect_failure(
+        &output,
+        "hashset(items) expects a list or hashset, got integer",
+    );
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn json_roundtrip_cranelift_aot_preserves_typed_dict_keys_and_hashsets() {
+    let sandbox = temp_dir("fidan_json_roundtrip_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("json_roundtrip.exe")
+    } else {
+        sandbox.join("json_roundtrip")
+    };
+    let dict_path = sandbox.join("typed_dict.json");
+    let set_path = sandbox.join("hashset.json");
+    let source = json_roundtrip_source(
+        &dict_path.display().to_string().replace('\\', "/"),
+        &set_path.display().to_string().replace('\\', "/"),
+    );
+    compile_program(&source, Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn json_roundtrip_llvm_aot_preserves_typed_dict_keys_and_hashsets() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM json roundtrip smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_json_roundtrip_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("json_roundtrip.exe")
+    } else {
+        sandbox.join("json_roundtrip")
+    };
+    let dict_path = sandbox.join("typed_dict.json");
+    let set_path = sandbox.join("hashset.json");
+    let source = json_roundtrip_source(
+        &dict_path.display().to_string().replace('\\', "/"),
+        &set_path.display().to_string().replace('\\', "/"),
+    );
+    compile_program(&source, Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
     fs::remove_dir_all(&sandbox).ok();
 }

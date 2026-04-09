@@ -219,6 +219,7 @@ fn display_mir_ty(ty: &MirTy) -> String {
         MirTy::Handle => "handle".to_string(),
         MirTy::List(inner) => format!("list<{}>", display_mir_ty(inner)),
         MirTy::Dict(k, v) => format!("dict<{}, {}>", display_mir_ty(k), display_mir_ty(v)),
+        MirTy::HashSet(inner) => format!("hashset<{}>", display_mir_ty(inner)),
         MirTy::Tuple(_) => "tuple".to_string(),
         MirTy::Object(_) => "object".to_string(),
         MirTy::Enum(_) => "enum".to_string(),

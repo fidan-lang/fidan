@@ -4,7 +4,10 @@ use crate::types::FidanType;
 use fidan_ast::{
     AstArena, BinOp, Decorator, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp,
 };
-use fidan_config::{BUILTIN_BINDINGS, BUILTIN_DECORATORS, BuiltinReturnKind, builtin_return_kind};
+use fidan_config::{
+    BUILTIN_BINDINGS, BUILTIN_DECORATORS, BuiltinReturnKind, BuiltinSemantic, builtin_return_kind,
+    builtin_semantic,
+};
 use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::{FileId, Span};
@@ -2364,11 +2367,35 @@ impl TypeChecker {
             }
 
             Expr::Dict { entries, .. } => {
+                let mut key_ty = FidanType::Nothing;
+                let mut value_ty = FidanType::Nothing;
+                let mut saw_entry = false;
                 for (k, v) in &entries {
-                    self.infer_expr(*k, module);
-                    self.infer_expr(*v, module);
+                    let inferred_key = self.infer_expr(*k, module);
+                    let inferred_value = self.infer_expr(*v, module);
+                    key_ty = if saw_entry {
+                        self.merge_two_types(&key_ty, &inferred_key)
+                    } else {
+                        inferred_key
+                    };
+                    value_ty = if saw_entry {
+                        self.merge_two_types(&value_ty, &inferred_value)
+                    } else {
+                        inferred_value
+                    };
+                    saw_entry = true;
                 }
-                FidanType::Dict(Box::new(FidanType::String), Box::new(FidanType::Dynamic))
+                let key_ty = if saw_entry {
+                    key_ty
+                } else {
+                    FidanType::Dynamic
+                };
+                let value_ty = if saw_entry {
+                    value_ty
+                } else {
+                    FidanType::Dynamic
+                };
+                FidanType::Dict(Box::new(key_ty), Box::new(value_ty))
             }
 
             Expr::Tuple { elements, .. } => {
@@ -2451,13 +2478,13 @@ impl TypeChecker {
                         const_value: None,
                     },
                 );
-                self.infer_expr(key, module);
-                self.infer_expr(value, module);
+                let key_ty = self.infer_expr(key, module);
+                let value_ty = self.infer_expr(value, module);
                 if let Some(f) = filter {
                     self.infer_expr(f, module);
                 }
                 self.pop_scope();
-                FidanType::Dynamic
+                FidanType::Dict(Box::new(key_ty), Box::new(value_ty))
             }
 
             Expr::Lambda {
@@ -2517,6 +2544,7 @@ impl TypeChecker {
             FidanType::String => ReceiverBuiltinKind::String,
             FidanType::List(_) => ReceiverBuiltinKind::List,
             FidanType::Dict(_, _) => ReceiverBuiltinKind::Dict,
+            FidanType::HashSet(_) => ReceiverBuiltinKind::HashSet,
             FidanType::Handle => ReceiverBuiltinKind::Handle,
             FidanType::Nothing => ReceiverBuiltinKind::Nothing,
             FidanType::Dynamic | FidanType::Unknown | FidanType::Error => {
@@ -2558,8 +2586,10 @@ impl TypeChecker {
             ReceiverReturnKind::String => FidanType::String,
             ReceiverReturnKind::Dynamic => FidanType::Dynamic,
             ReceiverReturnKind::Nothing => FidanType::Nothing,
+            ReceiverReturnKind::ReceiverSelf => receiver_ty.clone(),
             ReceiverReturnKind::ReceiverElement => match receiver_ty {
                 FidanType::List(inner) => (**inner).clone(),
+                FidanType::HashSet(inner) => (**inner).clone(),
                 _ => FidanType::Dynamic,
             },
             ReceiverReturnKind::DictValue => match receiver_ty {
@@ -2571,6 +2601,7 @@ impl TypeChecker {
             ReceiverReturnKind::ListOfDynamic => FidanType::List(Box::new(FidanType::Dynamic)),
             ReceiverReturnKind::ListOfReceiverElement => match receiver_ty {
                 FidanType::List(inner) => FidanType::List(inner.clone()),
+                FidanType::HashSet(inner) => FidanType::List(inner.clone()),
                 _ => FidanType::List(Box::new(FidanType::Dynamic)),
             },
             ReceiverReturnKind::ListOfDictValue => match receiver_ty {
@@ -2633,6 +2664,9 @@ impl TypeChecker {
                 Box::new(self.fidan_type_to_stdlib_spec(key)),
                 Box::new(self.fidan_type_to_stdlib_spec(value)),
             ),
+            FidanType::HashSet(inner) => {
+                StdlibTypeSpec::HashSet(Box::new(self.fidan_type_to_stdlib_spec(inner)))
+            }
             FidanType::Tuple(elements) => StdlibTypeSpec::Tuple(
                 elements
                     .iter()
@@ -2671,6 +2705,9 @@ impl TypeChecker {
                 Box::new(self.stdlib_spec_to_fidan_type(key)),
                 Box::new(self.stdlib_spec_to_fidan_type(value)),
             ),
+            StdlibTypeSpec::HashSet(inner) => {
+                FidanType::HashSet(Box::new(self.stdlib_spec_to_fidan_type(inner)))
+            }
             StdlibTypeSpec::Tuple(elements) => FidanType::Tuple(
                 elements
                     .iter()
@@ -2865,56 +2902,87 @@ impl TypeChecker {
                     self.referenced_names.insert(name);
                 }
                 let name_str = self.interner.resolve(name).to_string();
-                if name_str.as_str() == "Shared" {
-                    let inner = args
-                        .first()
-                        .map(|arg| self.infer_expr(arg.value, module))
-                        .unwrap_or(FidanType::Dynamic);
-                    return FidanType::Shared(Box::new(inner));
-                }
-                if name_str.as_str() == "WeakShared" {
-                    let inferred_args: Vec<FidanType> = args
-                        .iter()
-                        .map(|arg| self.infer_expr(arg.value, module))
-                        .collect();
-                    if inferred_args.is_empty() {
-                        self.emit_error(
-                            fidan_diagnostics::diag_code!("E0301"),
-                            "WeakShared(shared) requires a Shared argument",
-                            span,
-                        );
-                        return FidanType::WeakShared(Box::new(FidanType::Dynamic));
+                if let Some(semantic) = builtin_semantic(name_str.as_str()) {
+                    match semantic {
+                        BuiltinSemantic::SharedConstructor => {
+                            let inner = args
+                                .first()
+                                .map(|arg| self.infer_expr(arg.value, module))
+                                .unwrap_or(FidanType::Dynamic);
+                            return FidanType::Shared(Box::new(inner));
+                        }
+                        BuiltinSemantic::HashSetConstructor => {
+                            if args.is_empty() {
+                                return FidanType::HashSet(Box::new(FidanType::Dynamic));
+                            }
+                            let source_ty = self.infer_expr(args[0].value, module);
+                            return match source_ty {
+                                FidanType::List(inner) | FidanType::HashSet(inner) => {
+                                    FidanType::HashSet(inner)
+                                }
+                                FidanType::Nothing | FidanType::Dynamic | FidanType::Unknown => {
+                                    FidanType::HashSet(Box::new(FidanType::Dynamic))
+                                }
+                                FidanType::Error => FidanType::Error,
+                                other => {
+                                    self.emit_error(
+                                        fidan_diagnostics::diag_code!("E0302"),
+                                        format!(
+                                            "hashset(items) expects a list or hashset, found `{}`",
+                                            self.ty_name(&other)
+                                        ),
+                                        span,
+                                    );
+                                    FidanType::HashSet(Box::new(FidanType::Dynamic))
+                                }
+                            };
+                        }
+                        BuiltinSemantic::WeakSharedConstructor => {
+                            let inferred_args: Vec<FidanType> = args
+                                .iter()
+                                .map(|arg| self.infer_expr(arg.value, module))
+                                .collect();
+                            if inferred_args.is_empty() {
+                                self.emit_error(
+                                    fidan_diagnostics::diag_code!("E0301"),
+                                    "WeakShared(shared) requires a Shared argument",
+                                    span,
+                                );
+                                return FidanType::WeakShared(Box::new(FidanType::Dynamic));
+                            }
+                            if inferred_args.len() > 1 {
+                                self.emit_error(
+                                    fidan_diagnostics::diag_code!("E0302"),
+                                    "WeakShared(shared) accepts exactly one argument",
+                                    span,
+                                );
+                            }
+                            return match inferred_args.first() {
+                                Some(FidanType::Shared(inner)) => {
+                                    FidanType::WeakShared(Box::new((**inner).clone()))
+                                }
+                                Some(FidanType::WeakShared(inner)) => {
+                                    FidanType::WeakShared(Box::new((**inner).clone()))
+                                }
+                                Some(
+                                    FidanType::Dynamic | FidanType::Unknown | FidanType::Error,
+                                ) => FidanType::WeakShared(Box::new(FidanType::Dynamic)),
+                                Some(other) => {
+                                    self.emit_error(
+                                        fidan_diagnostics::diag_code!("E0302"),
+                                        format!(
+                                            "WeakShared(shared) expects a Shared value, found `{}`",
+                                            self.ty_name(other)
+                                        ),
+                                        span,
+                                    );
+                                    FidanType::WeakShared(Box::new(FidanType::Dynamic))
+                                }
+                                None => FidanType::WeakShared(Box::new(FidanType::Dynamic)),
+                            };
+                        }
+                        _ => {}
                     }
-                    if inferred_args.len() > 1 {
-                        self.emit_error(
-                            fidan_diagnostics::diag_code!("E0302"),
-                            "WeakShared(shared) accepts exactly one argument",
-                            span,
-                        );
-                    }
-                    return match inferred_args.first() {
-                        Some(FidanType::Shared(inner)) => {
-                            FidanType::WeakShared(Box::new((**inner).clone()))
-                        }
-                        Some(FidanType::WeakShared(inner)) => {
-                            FidanType::WeakShared(Box::new((**inner).clone()))
-                        }
-                        Some(FidanType::Dynamic | FidanType::Unknown | FidanType::Error) => {
-                            FidanType::WeakShared(Box::new(FidanType::Dynamic))
-                        }
-                        Some(other) => {
-                            self.emit_error(
-                                fidan_diagnostics::diag_code!("E0302"),
-                                format!(
-                                    "WeakShared(shared) expects a Shared value, found `{}`",
-                                    self.ty_name(other)
-                                ),
-                                span,
-                            );
-                            FidanType::WeakShared(Box::new(FidanType::Dynamic))
-                        }
-                        None => FidanType::WeakShared(Box::new(FidanType::Dynamic)),
-                    };
                 }
                 if let Some(return_kind) = builtin_return_kind(&name_str) {
                     return self.builtin_return_kind_to_type(return_kind);
@@ -3940,19 +4008,27 @@ impl TypeChecker {
                     ),
                     _ => return FidanType::Unknown,
                 };
-                let inner = self.resolve_type_expr(param);
                 match base_str.as_str() {
-                    "list" => FidanType::List(Box::new(inner)),
-                    "dict" | "map" => FidanType::Dict(Box::new(FidanType::String), Box::new(inner)),
-                    "shared" => FidanType::Shared(Box::new(inner)),
-                    "weakshared" => FidanType::WeakShared(Box::new(inner)),
-                    "pending" => FidanType::Pending(Box::new(inner)),
+                    "list" => FidanType::List(Box::new(self.resolve_type_expr(param))),
+                    "hashset" => FidanType::HashSet(Box::new(self.resolve_type_expr(param))),
+                    "dict" | "map" => self.resolve_dict_type_annotation(param, *span),
+                    "shared" => FidanType::Shared(Box::new(self.resolve_type_expr(param))),
+                    "weakshared" => FidanType::WeakShared(Box::new(self.resolve_type_expr(param))),
+                    "pending" => FidanType::Pending(Box::new(self.resolve_type_expr(param))),
                     _ => {
                         // Unknown container base (e.g. `lis oftype integer`)
                         if self.registering {
                             return FidanType::Error;
                         }
-                        let candidates = ["list", "dict", "map", "shared", "weakshared", "pending"];
+                        let candidates = [
+                            "list",
+                            "dict",
+                            "map",
+                            "hashset",
+                            "shared",
+                            "weakshared",
+                            "pending",
+                        ];
                         let mut diag = Diagnostic::error(
                             fidan_diagnostics::diag_code!("E0105"),
                             format!("undefined type `{base_str}`"),
@@ -3983,6 +4059,63 @@ impl TypeChecker {
         }
     }
 
+    fn resolve_dict_type_annotation(&mut self, param: &TypeExpr, span: Span) -> FidanType {
+        let (key_ty, value_ty) = match param {
+            TypeExpr::Tuple { elements, .. } if elements.len() == 2 => (
+                self.resolve_type_expr(&elements[0]),
+                self.resolve_type_expr(&elements[1]),
+            ),
+            TypeExpr::Oftype {
+                base: key_base,
+                param: value_param,
+                ..
+            } => {
+                let key_ty = self.resolve_type_expr(key_base);
+                let value_ty = self.resolve_type_expr(value_param);
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0302"),
+                    "dict/map type annotations must use tuple syntax: `dict oftype (KeyType, ValueType)`"
+                        .to_string(),
+                    span,
+                );
+                (key_ty, value_ty)
+            }
+            TypeExpr::Tuple { .. } => {
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0302"),
+                    "dict/map type annotations must use exactly two tuple elements: `dict oftype (KeyType, ValueType)`"
+                        .to_string(),
+                    span,
+                );
+                return FidanType::Dict(Box::new(FidanType::Dynamic), Box::new(FidanType::Dynamic));
+            }
+            _ => {
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0302"),
+                    "dict/map type annotations must use tuple syntax: `dict oftype (KeyType, ValueType)`"
+                        .to_string(),
+                    span,
+                );
+                return FidanType::Dict(
+                    Box::new(FidanType::Dynamic),
+                    Box::new(self.resolve_type_expr(param)),
+                );
+            }
+        };
+
+        if matches!(key_ty, FidanType::Unknown | FidanType::Error)
+            || matches!(value_ty, FidanType::Unknown | FidanType::Error)
+        {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0302"),
+                "dict/map type annotations must resolve both key and value types".to_string(),
+                span,
+            );
+        }
+
+        FidanType::Dict(Box::new(key_ty), Box::new(value_ty))
+    }
+
     fn resolve_named_type(&mut self, sym: Symbol, span: Span) -> FidanType {
         let s = self.interner.resolve(sym);
         match s.to_lowercase().as_str() {
@@ -3996,7 +4129,7 @@ impl TypeChecker {
             // First-class action/callable type
             "action" | "callable" | "fn" => FidanType::Function,
             // Bare container keywords without `oftype` — treat as dynamic rather than erroring
-            "list" | "dict" | "map" | "shared" | "weakshared" | "pending" | "tuple" => {
+            "list" | "dict" | "map" | "hashset" | "shared" | "weakshared" | "pending" | "tuple" => {
                 FidanType::Dynamic
             }
             _ => {
@@ -4026,6 +4159,7 @@ impl TypeChecker {
                     "list",
                     "dict",
                     "map",
+                    "hashset",
                     "shared",
                     "weakshared",
                     "pending",

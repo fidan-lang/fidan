@@ -244,6 +244,7 @@ fn fmt_ty(ty: &MirTy) -> String {
         MirTy::Handle => "handle".to_string(),
         MirTy::List(e) => format!("list<{}>", fmt_ty(e)),
         MirTy::Dict(k, v) => format!("dict<{}, {}>", fmt_ty(k), fmt_ty(v)),
+        MirTy::HashSet(e) => format!("hashset<{}>", fmt_ty(e)),
         MirTy::Tuple(ts) => format!("({})", ts.iter().map(fmt_ty).collect::<Vec<_>>().join(", ")),
         MirTy::Object(s) => sym_str(s.0),
         MirTy::Enum(s) => format!("enum({})", sym_str(s.0)),

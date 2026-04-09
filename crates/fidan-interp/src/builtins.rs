@@ -1,6 +1,7 @@
+use fidan_config::{BuiltinSemantic, builtin_semantic};
 use fidan_diagnostics::{DiagCode, diag_code};
 use fidan_runtime::display as runtime_display;
-use fidan_runtime::{FidanString, FidanValue, SharedRef};
+use fidan_runtime::{FidanHashSet, FidanString, FidanValue, OwnedRef, SharedRef};
 use std::io::BufRead;
 
 pub struct BuiltinError {
@@ -40,19 +41,23 @@ fn invalid_conversion(target: &str, value: &FidanValue) -> BuiltinError {
 /// Returns `Ok(Some(value))` if handled, `Ok(None)` if the name is not a built-in,
 /// or `Err(...)` if the built-in itself failed at runtime.
 pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanValue>, BuiltinError> {
-    match name {
+    let Some(semantic) = builtin_semantic(name) else {
+        return Ok(None);
+    };
+
+    match semantic {
         // ── I/O ──────────────────────────────────────────────────────────────
-        "print" => {
+        BuiltinSemantic::Print => {
             let parts: Vec<String> = args.iter().map(display).collect();
             println!("{}", parts.join(" "));
             Ok(Some(FidanValue::Nothing))
         }
-        "eprint" => {
+        BuiltinSemantic::Eprint => {
             let parts: Vec<String> = args.iter().map(display).collect();
             eprintln!("{}", parts.join(" "));
             Ok(Some(FidanValue::Nothing))
         }
-        "input" => {
+        BuiltinSemantic::Input => {
             let prompt = args.first().map(display).unwrap_or_default();
             if !prompt.is_empty() {
                 use std::io::Write;
@@ -76,11 +81,11 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanVal
         }
 
         // ── Type conversion ───────────────────────────────────────────────────
-        "string" => {
+        BuiltinSemantic::String => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Ok(Some(FidanValue::String(FidanString::new(&display(&v)))))
         }
-        "integer" => {
+        BuiltinSemantic::Integer => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Ok(Some(match &v {
                 FidanValue::Integer(n) => FidanValue::Integer(*n),
@@ -94,7 +99,7 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanVal
                 _ => return Err(invalid_conversion("integer", &v)),
             }))
         }
-        "float" => {
+        BuiltinSemantic::Float => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Ok(Some(match &v {
                 FidanValue::Float(f) => FidanValue::Float(*f),
@@ -107,18 +112,19 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanVal
                 _ => return Err(invalid_conversion("float", &v)),
             }))
         }
-        "boolean" => {
+        BuiltinSemantic::Boolean => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Ok(Some(FidanValue::Boolean(v.truthy())))
         }
 
         // ── Collections ───────────────────────────────────────────────────────
-        "len" => {
+        BuiltinSemantic::Len => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             let n = match &v {
                 FidanValue::String(s) => s.len() as i64,
                 FidanValue::List(l) => l.borrow().len() as i64,
                 FidanValue::Dict(d) => d.borrow().len() as i64,
+                FidanValue::HashSet(s) => s.borrow().len() as i64,
                 FidanValue::Tuple(t) => t.len() as i64,
                 FidanValue::Range {
                     start,
@@ -140,11 +146,16 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanVal
             };
             Ok(Some(FidanValue::Integer(n)))
         }
-        "type" => {
+        BuiltinSemantic::Type => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Ok(Some(FidanValue::String(FidanString::new(v.type_name()))))
         }
-        _ => Ok(None),
+        BuiltinSemantic::HashSetConstructor
+        | BuiltinSemantic::SharedConstructor
+        | BuiltinSemantic::WeakSharedConstructor
+        | BuiltinSemantic::Assert
+        | BuiltinSemantic::AssertEq
+        | BuiltinSemantic::AssertNe => Ok(None),
     }
 }
 
@@ -153,12 +164,28 @@ pub fn call_builtin_constructor(
     name: &str,
     args: Vec<FidanValue>,
 ) -> Result<Option<FidanValue>, BuiltinError> {
-    match name {
-        "Shared" => {
+    match builtin_semantic(name) {
+        Some(BuiltinSemantic::HashSetConstructor) => {
+            let source = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            let set = match source {
+                FidanValue::Nothing => FidanHashSet::new(),
+                FidanValue::List(list) => FidanHashSet::from_values(list.borrow().iter().cloned())
+                    .map_err(|err| BuiltinError::runtime(err.to_string()))?,
+                FidanValue::HashSet(existing) => existing.borrow().clone(),
+                other => {
+                    return Err(BuiltinError::runtime(format!(
+                        "hashset(items) expects a list or hashset, got {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            Ok(Some(FidanValue::HashSet(OwnedRef::new(set))))
+        }
+        Some(BuiltinSemantic::SharedConstructor) => {
             let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Ok(Some(FidanValue::Shared(SharedRef::new(inner))))
         }
-        "WeakShared" => {
+        Some(BuiltinSemantic::WeakSharedConstructor) => {
             let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             match inner {
                 FidanValue::Shared(shared) => Ok(Some(FidanValue::WeakShared(shared.downgrade()))),

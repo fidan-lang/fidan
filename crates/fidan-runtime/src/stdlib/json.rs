@@ -1,6 +1,121 @@
-use crate::{FidanDict, FidanString, FidanValue, OwnedRef, display};
+use crate::{FidanDict, FidanHashSet, FidanString, FidanValue, OwnedRef, display};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use super::common::{coerce_string, list_value, string_value};
+
+const FIDAN_TAG_KEY: &str = "$fidan";
+const FIDAN_DICT_TAG: &str = "dict";
+const FIDAN_HASHSET_TAG: &str = "hashset";
+const FIDAN_TUPLE_TAG: &str = "tuple";
+const FIDAN_ENTRIES_KEY: &str = "entries";
+const FIDAN_ITEMS_KEY: &str = "items";
+
+fn tagged_json_value(tag: &str, payload_key: &str, payload: JsonValue) -> JsonValue {
+    let mut map = JsonMap::new();
+    map.insert(
+        FIDAN_TAG_KEY.to_string(),
+        JsonValue::String(tag.to_string()),
+    );
+    map.insert(payload_key.to_string(), payload);
+    JsonValue::Object(map)
+}
+
+fn decode_tagged_dict(entries: &JsonValue) -> Option<FidanValue> {
+    let JsonValue::Array(items) = entries else {
+        return None;
+    };
+
+    let mut dict = FidanDict::new();
+    for item in items {
+        let JsonValue::Array(pair) = item else {
+            return None;
+        };
+        if pair.len() != 2 {
+            return None;
+        }
+
+        let key = json_to_fidan(pair[0].clone());
+        let value = json_to_fidan(pair[1].clone());
+        dict.insert(key, value).ok()?;
+    }
+
+    Some(FidanValue::Dict(OwnedRef::new(dict)))
+}
+
+fn decode_tagged_hashset(items: &JsonValue) -> Option<FidanValue> {
+    let JsonValue::Array(items) = items else {
+        return None;
+    };
+    let set = FidanHashSet::from_values(items.iter().cloned().map(json_to_fidan)).ok()?;
+    Some(FidanValue::HashSet(OwnedRef::new(set)))
+}
+
+fn decode_tagged_tuple(items: &JsonValue) -> Option<FidanValue> {
+    let JsonValue::Array(items) = items else {
+        return None;
+    };
+    Some(FidanValue::Tuple(
+        items.iter().cloned().map(json_to_fidan).collect(),
+    ))
+}
+
+fn decode_tagged_json_object(entries: &JsonMap<String, JsonValue>) -> Option<FidanValue> {
+    let tag = entries.get(FIDAN_TAG_KEY)?.as_str()?;
+    if entries.len() != 2 {
+        return None;
+    }
+
+    match tag {
+        FIDAN_DICT_TAG => decode_tagged_dict(entries.get(FIDAN_ENTRIES_KEY)?),
+        FIDAN_HASHSET_TAG => decode_tagged_hashset(entries.get(FIDAN_ITEMS_KEY)?),
+        FIDAN_TUPLE_TAG => decode_tagged_tuple(entries.get(FIDAN_ITEMS_KEY)?),
+        _ => None,
+    }
+}
+
+fn plain_json_object(dict: &FidanDict) -> Option<JsonMap<String, JsonValue>> {
+    let mut map = JsonMap::new();
+    for (key, value) in dict.entries_sorted() {
+        let FidanValue::String(key) = key else {
+            return None;
+        };
+        if key.as_str() == FIDAN_TAG_KEY {
+            return None;
+        }
+        map.insert(key.as_str().to_string(), fidan_to_json(&value));
+    }
+    Some(map)
+}
+
+fn fidan_dict_to_json(dict: &FidanDict) -> JsonValue {
+    if let Some(map) = plain_json_object(dict) {
+        return JsonValue::Object(map);
+    }
+
+    let entries = dict
+        .entries_sorted()
+        .into_iter()
+        .map(|(key, value)| JsonValue::Array(vec![fidan_to_json(&key), fidan_to_json(&value)]))
+        .collect();
+    tagged_json_value(FIDAN_DICT_TAG, FIDAN_ENTRIES_KEY, JsonValue::Array(entries))
+}
+
+fn fidan_hashset_to_json(set: &FidanHashSet) -> JsonValue {
+    let items = set
+        .values_sorted()
+        .into_iter()
+        .map(|value| fidan_to_json(&value))
+        .collect();
+    tagged_json_value(FIDAN_HASHSET_TAG, FIDAN_ITEMS_KEY, JsonValue::Array(items))
+}
+
+fn fidan_tuple_to_json(items: &[FidanValue]) -> JsonValue {
+    tagged_json_value(
+        FIDAN_TUPLE_TAG,
+        FIDAN_ITEMS_KEY,
+        JsonValue::Array(items.iter().map(fidan_to_json).collect()),
+    )
+}
 
 fn json_to_fidan(value: serde_json::Value) -> FidanValue {
     match value {
@@ -14,11 +129,16 @@ fn json_to_fidan(value: serde_json::Value) -> FidanValue {
         serde_json::Value::String(value) => string_value(&value),
         serde_json::Value::Array(values) => list_value(values.into_iter().map(json_to_fidan)),
         serde_json::Value::Object(entries) => {
-            let mut dict = FidanDict::new();
-            for (key, value) in entries {
-                dict.insert(FidanString::new(&key), json_to_fidan(value));
-            }
-            FidanValue::Dict(OwnedRef::new(dict))
+            decode_tagged_json_object(&entries).unwrap_or_else(|| {
+                let mut dict = FidanDict::new();
+                for (key, value) in entries {
+                    let _ = dict.insert(
+                        FidanValue::String(FidanString::new(&key)),
+                        json_to_fidan(value),
+                    );
+                }
+                FidanValue::Dict(OwnedRef::new(dict))
+            })
         }
     }
 }
@@ -35,13 +155,8 @@ fn fidan_to_json(value: &FidanValue) -> serde_json::Value {
         FidanValue::List(values) => {
             serde_json::Value::Array(values.borrow().iter().map(fidan_to_json).collect())
         }
-        FidanValue::Dict(entries) => {
-            let mut map = serde_json::Map::new();
-            for (key, value) in entries.borrow().iter() {
-                map.insert(key.as_str().to_string(), fidan_to_json(value));
-            }
-            serde_json::Value::Object(map)
-        }
+        FidanValue::Dict(entries) => fidan_dict_to_json(&entries.borrow()),
+        FidanValue::HashSet(set) => fidan_hashset_to_json(&set.borrow()),
         FidanValue::Shared(shared) => {
             let inner = shared.0.lock().expect("shared json lock poisoned");
             fidan_to_json(&inner)
@@ -53,9 +168,7 @@ fn fidan_to_json(value: &FidanValue) -> serde_json::Value {
                 fidan_to_json(&inner)
             })
             .unwrap_or(serde_json::Value::Null),
-        FidanValue::Tuple(values) => {
-            serde_json::Value::Array(values.iter().map(fidan_to_json).collect())
-        }
+        FidanValue::Tuple(values) => fidan_tuple_to_json(values),
         other => serde_json::Value::String(display(other)),
     }
 }
@@ -155,8 +268,9 @@ mod tests {
             panic!("expected json object to parse into dict");
         };
         assert!(matches!(
-            dict.borrow().get(&FidanString::new("ok")),
-            Some(FidanValue::Boolean(true))
+            dict.borrow()
+                .get(&FidanValue::String(FidanString::new("ok"))),
+            Ok(Some(FidanValue::Boolean(true)))
         ));
 
         let rendered =
@@ -165,6 +279,7 @@ mod tests {
             panic!("expected stringify to return string");
         };
         assert!(rendered.as_str().contains("\"items\""));
+        assert!(!rendered.as_str().contains(FIDAN_TAG_KEY));
     }
 
     #[test]
@@ -196,10 +311,73 @@ mod tests {
             panic!("expected load to return a dict");
         };
         assert!(matches!(
-            dict.borrow().get(&FidanString::new("name")),
-            Some(FidanValue::String(name)) if name.as_str() == "fidan"
+            dict.borrow().get(&FidanValue::String(FidanString::new("name"))),
+            Ok(Some(FidanValue::String(name))) if name.as_str() == "fidan"
         ));
 
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn tagged_round_trip_preserves_typed_dict_keys_and_hashsets() {
+        let mut dict = FidanDict::new();
+        let tuple_key = FidanValue::Tuple(vec![FidanValue::Integer(1), FidanValue::Boolean(true)]);
+        let _ = dict.insert(
+            tuple_key.clone(),
+            FidanValue::String(FidanString::new("ok")),
+        );
+
+        let mut set = FidanHashSet::new();
+        assert!(
+            set.insert(tuple_key.clone())
+                .expect("insert tuple into set")
+        );
+        assert!(
+            set.insert(FidanValue::Integer(7))
+                .expect("insert int into set")
+        );
+
+        let payload = FidanValue::Tuple(vec![
+            FidanValue::Dict(OwnedRef::new(dict)),
+            FidanValue::HashSet(OwnedRef::new(set)),
+        ]);
+
+        let rendered = dispatch("dumps", vec![payload]).expect("stringify tagged payload");
+        let FidanValue::String(rendered) = rendered else {
+            panic!("expected dumps to return string");
+        };
+        assert!(rendered.as_str().contains("\"$fidan\":\"dict\""));
+        assert!(rendered.as_str().contains("\"$fidan\":\"hashset\""));
+        assert!(rendered.as_str().contains("\"$fidan\":\"tuple\""));
+
+        let reparsed =
+            dispatch("loads", vec![FidanValue::String(rendered)]).expect("reparse payload");
+        let FidanValue::Tuple(items) = reparsed else {
+            panic!("expected tagged payload to round-trip as tuple");
+        };
+
+        let FidanValue::Dict(round_trip_dict) = &items[0] else {
+            panic!("expected first tuple item to be dict");
+        };
+        assert!(matches!(
+            round_trip_dict.borrow().get(&tuple_key),
+            Ok(Some(FidanValue::String(value))) if value.as_str() == "ok"
+        ));
+
+        let FidanValue::HashSet(round_trip_set) = &items[1] else {
+            panic!("expected second tuple item to be hashset");
+        };
+        assert!(
+            round_trip_set
+                .borrow()
+                .contains(&tuple_key)
+                .expect("contains tuple key")
+        );
+        assert!(
+            round_trip_set
+                .borrow()
+                .contains(&FidanValue::Integer(7))
+                .expect("contains integer key")
+        );
     }
 }

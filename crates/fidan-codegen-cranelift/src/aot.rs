@@ -42,8 +42,8 @@ use fidan_mir::{
     Terminator, collect_effective_local_types, collect_may_throw_functions,
 };
 use fidan_stdlib::{
-    MathIntrinsic, StdlibIntrinsic, StdlibValueKind, infer_stdlib_method, is_stdlib_module,
-    module_exports,
+    MathIntrinsic, ReceiverBuiltinKind, ReceiverMethodOp, StdlibIntrinsic, StdlibValueKind,
+    infer_receiver_member, infer_stdlib_method, is_stdlib_module, module_exports,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -519,6 +519,19 @@ struct RuntimeDecls {
     dict_new: cranelift_module::FuncId,
     dict_get: cranelift_module::FuncId,
     dict_set: cranelift_module::FuncId,
+    dict_len: cranelift_module::FuncId,
+    dict_contains_key: cranelift_module::FuncId,
+    dict_remove: cranelift_module::FuncId,
+    dict_keys: cranelift_module::FuncId,
+    dict_values: cranelift_module::FuncId,
+    dict_entries: cranelift_module::FuncId,
+    hashset_insert: cranelift_module::FuncId,
+    hashset_remove: cranelift_module::FuncId,
+    hashset_contains: cranelift_module::FuncId,
+    hashset_to_list: cranelift_module::FuncId,
+    hashset_union: cranelift_module::FuncId,
+    hashset_intersect: cranelift_module::FuncId,
+    hashset_diff: cranelift_module::FuncId,
     obj_new: cranelift_module::FuncId,
     obj_get_field: cranelift_module::FuncId,
     obj_set_field: cranelift_module::FuncId,
@@ -687,6 +700,19 @@ impl RuntimeDecls {
             dict_new: decl!("fdn_dict_new", sig!(() -> ptr)),
             dict_get: decl!("fdn_dict_get", sig!((p, p) -> ptr)),
             dict_set: decl!("fdn_dict_set", sig!((p, p, p) -> void)),
+            dict_len: decl!("fdn_dict_len", sig!((p) -> i64)),
+            dict_contains_key: decl!("fdn_dict_contains_key", sig!((p, p) -> i8)),
+            dict_remove: decl!("fdn_dict_remove", sig!((p, p) -> void)),
+            dict_keys: decl!("fdn_dict_keys", sig!((p) -> ptr)),
+            dict_values: decl!("fdn_dict_values", sig!((p) -> ptr)),
+            dict_entries: decl!("fdn_dict_entries", sig!((p) -> ptr)),
+            hashset_insert: decl!("fdn_hashset_insert", sig!((p, p) -> void)),
+            hashset_remove: decl!("fdn_hashset_remove", sig!((p, p) -> void)),
+            hashset_contains: decl!("fdn_hashset_contains", sig!((p, p) -> i8)),
+            hashset_to_list: decl!("fdn_hashset_to_list", sig!((p) -> ptr)),
+            hashset_union: decl!("fdn_hashset_union", sig!((p, p) -> ptr)),
+            hashset_intersect: decl!("fdn_hashset_intersect", sig!((p, p) -> ptr)),
+            hashset_diff: decl!("fdn_hashset_diff", sig!((p, p) -> ptr)),
             obj_new: decl!("fdn_obj_new", sig!((p, i64t) -> ptr)),
             obj_get_field: decl!("fdn_obj_get_field", sig!((p, p, i64t) -> ptr)),
             obj_set_field: decl!("fdn_obj_set_field", sig!((p, p, i64t, p) -> void)),
@@ -1522,7 +1548,11 @@ fn lower_instr(
         } => {
             let obj = lower_operand_as_ptr(builder, cl_vars, local_types, object, rt, module)?;
             let idx = lower_operand_boxed(builder, cl_vars, local_types, index, rt, module)?;
-            let r = call_rt(module, builder, rt.list_get, &[obj, idx])?
+            let access = match operand_mir_ty(local_types, object) {
+                MirTy::Dict(_, _) => rt.dict_get,
+                _ => rt.list_get,
+            };
+            let r = call_rt(module, builder, access, &[obj, idx])?
                 .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
             builder.def_var(cl_vars[dest.0 as usize], r);
         }
@@ -1535,7 +1565,11 @@ fn lower_instr(
             let obj = lower_operand_as_ptr(builder, cl_vars, local_types, object, rt, module)?;
             let idx = lower_operand_boxed(builder, cl_vars, local_types, index, rt, module)?;
             let val = lower_operand_boxed(builder, cl_vars, local_types, value, rt, module)?;
-            call_rt(module, builder, rt.list_set, &[obj, idx, val])?;
+            let access = match operand_mir_ty(local_types, object) {
+                MirTy::Dict(_, _) => rt.dict_set,
+                _ => rt.list_set,
+            };
+            call_rt(module, builder, access, &[obj, idx, val])?;
         }
 
         Instr::Drop { local } => {
@@ -2700,9 +2734,9 @@ fn emit_call(
         }
 
         Callee::Method { receiver, method } => {
-            if let Some(ns) = stdlib_namespace(receiver, namespace_locals) {
-                let method_name = interner.resolve(*method);
-                if let Some(val) = emit_stdlib_method_call(
+            let method_name = interner.resolve(*method);
+            if let Some(ns) = stdlib_namespace(receiver, namespace_locals)
+                && let Some(val) = emit_stdlib_method_call(
                     module,
                     rt,
                     builder,
@@ -2712,13 +2746,27 @@ fn emit_call(
                     method_name.as_ref(),
                     args,
                     result_ty,
-                )? {
-                    return Ok(Some(val));
-                }
+                )?
+            {
+                return Ok(Some(val));
+            }
+
+            if let Some(val) = emit_container_method_call(
+                module,
+                rt,
+                builder,
+                cl_vars,
+                local_types,
+                receiver,
+                method_name.as_ref(),
+                args,
+                result_ty,
+            )? {
+                return Ok(Some(val));
             }
 
             let recv = lower_operand_as_ptr(builder, cl_vars, local_types, receiver, rt, module)?;
-            let (mp, ml) = str_const(module, builder, interner.resolve(*method).as_ref())?;
+            let (mp, ml) = str_const(module, builder, method_name.as_ref())?;
             let (arr, cnt) =
                 build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
             let boxed = call_rt(module, builder, rt.obj_invoke, &[recv, mp, ml, arr, cnt])?;
@@ -2767,6 +2815,242 @@ fn coerce_boxed_call_result(
     }
 
     Ok(value)
+}
+
+fn box_container_scalar_result(
+    module: &mut ObjectModule,
+    rt: &RuntimeDecls,
+    builder: &mut FunctionBuilder<'_>,
+    value: cranelift_codegen::ir::Value,
+    scalar_ty: &MirTy,
+    result_ty: &MirTy,
+) -> Result<cranelift_codegen::ir::Value> {
+    let boxed = match scalar_ty {
+        MirTy::Integer => call_rt(module, builder, rt.box_int, &[value])?.unwrap_or(value),
+        MirTy::Float => call_rt(module, builder, rt.box_float, &[value])?.unwrap_or(value),
+        MirTy::Boolean => call_rt(module, builder, rt.box_bool, &[value])?.unwrap_or(value),
+        MirTy::Handle => call_rt(module, builder, rt.box_handle, &[value])?.unwrap_or(value),
+        _ => value,
+    };
+    coerce_boxed_call_result(module, rt, builder, boxed, result_ty)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_container_method_call(
+    module: &mut ObjectModule,
+    rt: &RuntimeDecls,
+    builder: &mut FunctionBuilder<'_>,
+    cl_vars: &[Variable],
+    local_types: &HashMap<u32, MirTy>,
+    receiver: &Operand,
+    method_name: &str,
+    args: &[Operand],
+    result_ty: &MirTy,
+) -> Result<Option<cranelift_codegen::ir::Value>> {
+    let receiver_kind = match operand_mir_ty(local_types, receiver) {
+        MirTy::Dict(_, _) => ReceiverBuiltinKind::Dict,
+        MirTy::HashSet(_) => ReceiverBuiltinKind::HashSet,
+        _ => return Ok(None),
+    };
+    let Some(operation) =
+        infer_receiver_member(receiver_kind, method_name).and_then(|info| info.operation)
+    else {
+        return Ok(None);
+    };
+
+    let recv = lower_operand_as_ptr(builder, cl_vars, local_types, receiver, rt, module)?;
+    let boxed = match (receiver_kind, operation) {
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Len) => {
+            let len = call_rt(module, builder, rt.dict_len, &[recv])?.unwrap_or(recv);
+            return box_container_scalar_result(
+                module,
+                rt,
+                builder,
+                len,
+                &MirTy::Integer,
+                result_ty,
+            )
+            .map(Some);
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::IsEmpty) => {
+            let len = call_rt(module, builder, rt.dict_len, &[recv])?.unwrap_or(recv);
+            let is_empty = builder.ins().icmp_imm(IntCC::Equal, len, 0);
+            let is_empty = builder.ins().uextend(I8, is_empty);
+            return box_container_scalar_result(
+                module,
+                rt,
+                builder,
+                is_empty,
+                &MirTy::Boolean,
+                result_ty,
+            )
+            .map(Some);
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Get) => {
+            let Some(key) = args.first() else {
+                return Ok(Some(
+                    call_rt(module, builder, rt.box_nothing, &[])?.unwrap(),
+                ));
+            };
+            let key = lower_operand_boxed(builder, cl_vars, local_types, key, rt, module)?;
+            call_rt(module, builder, rt.dict_get, &[recv, key])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Set) => {
+            if let (Some(key), Some(value)) = (args.first(), args.get(1)) {
+                let key = lower_operand_boxed(builder, cl_vars, local_types, key, rt, module)?;
+                let value = lower_operand_boxed(builder, cl_vars, local_types, value, rt, module)?;
+                call_rt(module, builder, rt.dict_set, &[recv, key, value])?;
+            }
+            call_rt(module, builder, rt.box_nothing, &[])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Contains) => {
+            let Some(key) = args.first() else {
+                let zero = builder.ins().iconst(I8, 0);
+                return box_container_scalar_result(
+                    module,
+                    rt,
+                    builder,
+                    zero,
+                    &MirTy::Boolean,
+                    result_ty,
+                )
+                .map(Some);
+            };
+            let key = lower_operand_boxed(builder, cl_vars, local_types, key, rt, module)?;
+            let contains = call_rt(module, builder, rt.dict_contains_key, &[recv, key])?
+                .unwrap_or_else(|| builder.ins().iconst(I8, 0));
+            return box_container_scalar_result(
+                module,
+                rt,
+                builder,
+                contains,
+                &MirTy::Boolean,
+                result_ty,
+            )
+            .map(Some);
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Remove) => {
+            if let Some(key) = args.first() {
+                let key = lower_operand_boxed(builder, cl_vars, local_types, key, rt, module)?;
+                call_rt(module, builder, rt.dict_remove, &[recv, key])?;
+            }
+            call_rt(module, builder, rt.box_nothing, &[])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Keys) => {
+            call_rt(module, builder, rt.dict_keys, &[recv])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Values) => {
+            call_rt(module, builder, rt.dict_values, &[recv])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Entries) => {
+            call_rt(module, builder, rt.dict_entries, &[recv])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::Dict, ReceiverMethodOp::ToString) => {
+            call_rt(module, builder, rt.to_string, &[recv])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Len) => {
+            let len = call_rt(module, builder, rt.len_fn, &[recv])?.unwrap_or(recv);
+            return box_container_scalar_result(
+                module,
+                rt,
+                builder,
+                len,
+                &MirTy::Integer,
+                result_ty,
+            )
+            .map(Some);
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::IsEmpty) => {
+            let len = call_rt(module, builder, rt.len_fn, &[recv])?.unwrap_or(recv);
+            let is_empty = builder.ins().icmp_imm(IntCC::Equal, len, 0);
+            let is_empty = builder.ins().uextend(I8, is_empty);
+            return box_container_scalar_result(
+                module,
+                rt,
+                builder,
+                is_empty,
+                &MirTy::Boolean,
+                result_ty,
+            )
+            .map(Some);
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Insert) => {
+            if let Some(value) = args.first() {
+                let value = lower_operand_boxed(builder, cl_vars, local_types, value, rt, module)?;
+                call_rt(module, builder, rt.hashset_insert, &[recv, value])?;
+            }
+            call_rt(module, builder, rt.box_nothing, &[])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Remove) => {
+            if let Some(value) = args.first() {
+                let value = lower_operand_boxed(builder, cl_vars, local_types, value, rt, module)?;
+                call_rt(module, builder, rt.hashset_remove, &[recv, value])?;
+            }
+            call_rt(module, builder, rt.box_nothing, &[])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Contains) => {
+            let Some(value) = args.first() else {
+                let zero = builder.ins().iconst(I8, 0);
+                return box_container_scalar_result(
+                    module,
+                    rt,
+                    builder,
+                    zero,
+                    &MirTy::Boolean,
+                    result_ty,
+                )
+                .map(Some);
+            };
+            let value = lower_operand_boxed(builder, cl_vars, local_types, value, rt, module)?;
+            let contains = call_rt(module, builder, rt.hashset_contains, &[recv, value])?
+                .unwrap_or_else(|| builder.ins().iconst(I8, 0));
+            return box_container_scalar_result(
+                module,
+                rt,
+                builder,
+                contains,
+                &MirTy::Boolean,
+                result_ty,
+            )
+            .map(Some);
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::ToList) => {
+            call_rt(module, builder, rt.hashset_to_list, &[recv])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Union) => {
+            let Some(other) = args.first() else {
+                return Ok(Some(
+                    call_rt(module, builder, rt.box_nothing, &[])?.unwrap(),
+                ));
+            };
+            let other = lower_operand_boxed(builder, cl_vars, local_types, other, rt, module)?;
+            call_rt(module, builder, rt.hashset_union, &[recv, other])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Intersect) => {
+            let Some(other) = args.first() else {
+                return Ok(Some(
+                    call_rt(module, builder, rt.box_nothing, &[])?.unwrap(),
+                ));
+            };
+            let other = lower_operand_boxed(builder, cl_vars, local_types, other, rt, module)?;
+            call_rt(module, builder, rt.hashset_intersect, &[recv, other])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Diff) => {
+            let Some(other) = args.first() else {
+                return Ok(Some(
+                    call_rt(module, builder, rt.box_nothing, &[])?.unwrap(),
+                ));
+            };
+            let other = lower_operand_boxed(builder, cl_vars, local_types, other, rt, module)?;
+            call_rt(module, builder, rt.hashset_diff, &[recv, other])?.unwrap_or(recv)
+        }
+        (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::ToString) => {
+            call_rt(module, builder, rt.to_string, &[recv])?.unwrap_or(recv)
+        }
+        _ => return Ok(None),
+    };
+
+    coerce_boxed_call_result(module, rt, builder, boxed, result_ty).map(Some)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3699,6 +3983,7 @@ fn widen_to_i8(
         | MirTy::String
         | MirTy::List(_)
         | MirTy::Dict(_, _)
+        | MirTy::HashSet(_)
         | MirTy::Tuple(_)
         | MirTy::Object(_)
         | MirTy::Enum(_)
@@ -4448,6 +4733,7 @@ fn mir_ty_to_stdlib_kind(ty: MirTy) -> StdlibValueKind {
         MirTy::String => StdlibValueKind::String,
         MirTy::List(_) => StdlibValueKind::List,
         MirTy::Dict(_, _) => StdlibValueKind::Dict,
+        MirTy::HashSet(_) => StdlibValueKind::HashSet,
         MirTy::Nothing => StdlibValueKind::Nothing,
         _ => StdlibValueKind::Dynamic,
     }

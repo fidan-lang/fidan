@@ -11,6 +11,11 @@ impl<T> OwnedRef<T> {
     pub fn new(val: T) -> Self {
         OwnedRef(Rc::new(RefCell::new(val)))
     }
+
+    pub fn identity(&self) -> usize {
+        Rc::as_ptr(&self.0) as usize
+    }
+
     pub fn borrow(&self) -> std::cell::Ref<'_, T> {
         self.0.borrow()
     }

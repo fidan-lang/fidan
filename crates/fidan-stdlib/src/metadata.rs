@@ -1,3 +1,5 @@
+use fidan_config::{ReceiverBuiltinKind, ReceiverReturnKind, infer_receiver_member};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdlibValueKind {
     Integer,
@@ -6,6 +8,7 @@ pub enum StdlibValueKind {
     String,
     List,
     Dict,
+    HashSet,
     Dynamic,
     Nothing,
 }
@@ -41,6 +44,7 @@ pub enum StdlibTypeSpec {
     Nothing,
     List(Box<StdlibTypeSpec>),
     Dict(Box<StdlibTypeSpec>, Box<StdlibTypeSpec>),
+    HashSet(Box<StdlibTypeSpec>),
     Tuple(Vec<StdlibTypeSpec>),
     Shared(Box<StdlibTypeSpec>),
     WeakShared(Box<StdlibTypeSpec>),
@@ -60,6 +64,13 @@ impl StdlibTypeSpec {
     pub fn list_item_type(&self) -> Option<StdlibTypeSpec> {
         match self {
             Self::List(inner) => Some((**inner).clone()),
+            _ => None,
+        }
+    }
+
+    pub fn hashset_item_type(&self) -> Option<StdlibTypeSpec> {
+        match self {
+            Self::HashSet(inner) => Some((**inner).clone()),
             _ => None,
         }
     }
@@ -91,6 +102,7 @@ impl StdlibTypeSpec {
             (Self::Dict(lhs_k, lhs_v), Self::Dict(rhs_k, rhs_v)) => {
                 Self::Dict(Box::new(lhs_k.merge(rhs_k)), Box::new(lhs_v.merge(rhs_v)))
             }
+            (Self::HashSet(lhs), Self::HashSet(rhs)) => Self::HashSet(Box::new(lhs.merge(rhs))),
             (Self::Tuple(lhs), Self::Tuple(rhs)) if lhs.len() == rhs.len() => Self::Tuple(
                 lhs.iter()
                     .zip(rhs.iter())
@@ -178,13 +190,28 @@ pub fn parse_stdlib_type_spec(ty: &str) -> Option<StdlibTypeSpec> {
                 return parse_stdlib_type_spec(inner)
                     .map(|inner| StdlibTypeSpec::List(Box::new(inner)));
             }
-            if let Some(rest) = ty.strip_prefix("dict oftype ")
-                && let Some((key_ty, value_ty)) = split_oftype_pair(rest)
-            {
-                return Some(StdlibTypeSpec::Dict(
-                    Box::new(parse_stdlib_type_spec(key_ty)?),
-                    Box::new(parse_stdlib_type_spec(value_ty)?),
-                ));
+            if let Some(rest) = ty.strip_prefix("dict oftype ") {
+                if rest.starts_with('(') && rest.ends_with(')') {
+                    let inner = &rest[1..rest.len() - 1];
+                    let parts = split_tuple_types(inner)?;
+                    if parts.len() != 2 {
+                        return None;
+                    }
+                    return Some(StdlibTypeSpec::Dict(
+                        Box::new(parse_stdlib_type_spec(parts[0])?),
+                        Box::new(parse_stdlib_type_spec(parts[1])?),
+                    ));
+                }
+                if let Some((key_ty, value_ty)) = split_oftype_pair(rest) {
+                    return Some(StdlibTypeSpec::Dict(
+                        Box::new(parse_stdlib_type_spec(key_ty)?),
+                        Box::new(parse_stdlib_type_spec(value_ty)?),
+                    ));
+                }
+            }
+            if let Some(inner) = ty.strip_prefix("hashset oftype ") {
+                return parse_stdlib_type_spec(inner)
+                    .map(|inner| StdlibTypeSpec::HashSet(Box::new(inner)));
             }
             if let Some(inner) = ty.strip_prefix("Shared oftype ") {
                 return parse_stdlib_type_spec(inner)
@@ -250,13 +277,35 @@ pub fn infer_precise_stdlib_return_type(
             ))))
         }
         ("collections", "range") => Some(StdlibTypeSpec::List(Box::new(StdlibTypeSpec::Integer))),
-        ("collections", "Set")
-        | ("collections", "setUnion")
-        | ("collections", "setIntersect")
-        | ("collections", "setDiff") => Some(StdlibTypeSpec::Dict(
-            Box::new(StdlibTypeSpec::String),
-            Box::new(StdlibTypeSpec::Boolean),
-        )),
+        ("collections", "hashset") => {
+            let elem_ty = args
+                .first()
+                .and_then(StdlibTypeSpec::list_item_type)
+                .or_else(|| args.first().and_then(StdlibTypeSpec::hashset_item_type))
+                .unwrap_or(StdlibTypeSpec::Dynamic);
+            Some(StdlibTypeSpec::HashSet(Box::new(elem_ty)))
+        }
+        ("collections", "setUnion") | ("collections", "setIntersect") => {
+            let left_ty = args
+                .first()
+                .and_then(StdlibTypeSpec::hashset_item_type)
+                .unwrap_or(StdlibTypeSpec::Dynamic);
+            let right_ty = args
+                .get(1)
+                .and_then(StdlibTypeSpec::hashset_item_type)
+                .unwrap_or(StdlibTypeSpec::Dynamic);
+            Some(StdlibTypeSpec::HashSet(Box::new(left_ty.merge(&right_ty))))
+        }
+        ("collections", "setDiff") => Some(StdlibTypeSpec::HashSet(Box::new(
+            args.first()
+                .and_then(StdlibTypeSpec::hashset_item_type)
+                .unwrap_or(StdlibTypeSpec::Dynamic),
+        ))),
+        ("collections", "setToList") => Some(StdlibTypeSpec::List(Box::new(
+            args.first()
+                .and_then(StdlibTypeSpec::hashset_item_type)
+                .unwrap_or(StdlibTypeSpec::Dynamic),
+        ))),
         ("collections", "Queue") | ("collections", "Stack") => {
             let elem_ty = args
                 .first()
@@ -321,7 +370,7 @@ pub fn infer_precise_stdlib_return_type(
                 .and_then(StdlibTypeSpec::list_item_type)
                 .unwrap_or(StdlibTypeSpec::Dynamic);
             Some(StdlibTypeSpec::Dict(
-                Box::new(StdlibTypeSpec::String),
+                Box::new(elem_ty.clone()),
                 Box::new(StdlibTypeSpec::List(Box::new(elem_ty))),
             ))
         }
@@ -433,43 +482,61 @@ pub fn infer_receiver_method(
     name: &str,
     _arg_kinds: &[StdlibValueKind],
 ) -> Option<StdlibMethodInfo> {
-    use StdlibValueKind as Kind;
-
-    let info = |return_kind| StdlibMethodInfo {
-        return_kind,
+    let receiver_kind = stdlib_kind_to_receiver_kind(receiver_kind)?;
+    let info = infer_receiver_member(receiver_kind, name)?;
+    let return_kind = info.method_return.or(info.field_return)?;
+    Some(StdlibMethodInfo {
+        return_kind: receiver_return_to_stdlib_kind(receiver_kind, return_kind),
         intrinsic: None,
-    };
+    })
+}
 
-    match receiver_kind {
-        Kind::String => match name {
-            "upper" | "to_upper" | "lower" | "to_lower" | "trim" | "trim_start" | "ltrim"
-            | "trim_end" | "rtrim" | "replace" | "substr" | "slice" | "char_at" | "reverse"
-            | "reversed" => Some(info(Kind::String)),
-            "len" | "length" | "find" | "index_of" => Some(info(Kind::Integer)),
-            "contains" | "starts_with" | "startsWith" | "ends_with" | "endsWith" => {
-                Some(info(Kind::Boolean))
-            }
-            "split" => Some(info(Kind::List)),
-            _ => None,
+fn stdlib_kind_to_receiver_kind(kind: StdlibValueKind) -> Option<ReceiverBuiltinKind> {
+    match kind {
+        StdlibValueKind::Integer => Some(ReceiverBuiltinKind::Integer),
+        StdlibValueKind::Float => Some(ReceiverBuiltinKind::Float),
+        StdlibValueKind::Boolean => Some(ReceiverBuiltinKind::Boolean),
+        StdlibValueKind::String => Some(ReceiverBuiltinKind::String),
+        StdlibValueKind::List => Some(ReceiverBuiltinKind::List),
+        StdlibValueKind::Dict => Some(ReceiverBuiltinKind::Dict),
+        StdlibValueKind::HashSet => Some(ReceiverBuiltinKind::HashSet),
+        StdlibValueKind::Dynamic => Some(ReceiverBuiltinKind::Dynamic),
+        StdlibValueKind::Nothing => Some(ReceiverBuiltinKind::Nothing),
+    }
+}
+
+fn receiver_return_to_stdlib_kind(
+    receiver_kind: ReceiverBuiltinKind,
+    return_kind: ReceiverReturnKind,
+) -> StdlibValueKind {
+    match return_kind {
+        ReceiverReturnKind::Integer => StdlibValueKind::Integer,
+        ReceiverReturnKind::Float => StdlibValueKind::Float,
+        ReceiverReturnKind::Boolean => StdlibValueKind::Boolean,
+        ReceiverReturnKind::String => StdlibValueKind::String,
+        ReceiverReturnKind::Dynamic
+        | ReceiverReturnKind::ReceiverElement
+        | ReceiverReturnKind::DictValue
+        | ReceiverReturnKind::SharedInnerValue
+        | ReceiverReturnKind::SharedOfInner
+        | ReceiverReturnKind::WeakSharedOfInner => StdlibValueKind::Dynamic,
+        ReceiverReturnKind::Nothing => StdlibValueKind::Nothing,
+        ReceiverReturnKind::ReceiverSelf => match receiver_kind {
+            ReceiverBuiltinKind::Integer => StdlibValueKind::Integer,
+            ReceiverBuiltinKind::Float => StdlibValueKind::Float,
+            ReceiverBuiltinKind::Boolean => StdlibValueKind::Boolean,
+            ReceiverBuiltinKind::String => StdlibValueKind::String,
+            ReceiverBuiltinKind::List => StdlibValueKind::List,
+            ReceiverBuiltinKind::Dict => StdlibValueKind::Dict,
+            ReceiverBuiltinKind::HashSet => StdlibValueKind::HashSet,
+            _ => StdlibValueKind::Dynamic,
         },
-        Kind::List => match name {
-            "append" | "push" | "add" | "insert" | "reverse" | "sort" => Some(info(Kind::Nothing)),
-            "len" | "length" | "find" | "index_of" => Some(info(Kind::Integer)),
-            "contains" => Some(info(Kind::Boolean)),
-            "join" => Some(info(Kind::String)),
-            "reversed" => Some(info(Kind::List)),
-            "get" | "pop" | "remove" => Some(info(Kind::Dynamic)),
-            _ => None,
-        },
-        Kind::Dict => match name {
-            "set" | "insert" => Some(info(Kind::Nothing)),
-            "len" | "length" => Some(info(Kind::Integer)),
-            "keys" | "values" => Some(info(Kind::List)),
-            "contains" | "has_key" => Some(info(Kind::Boolean)),
-            "get" => Some(info(Kind::Dynamic)),
-            _ => None,
-        },
-        _ => None,
+        ReceiverReturnKind::ListOfString
+        | ReceiverReturnKind::ListOfInteger
+        | ReceiverReturnKind::ListOfDynamic
+        | ReceiverReturnKind::ListOfReceiverElement
+        | ReceiverReturnKind::ListOfDictValue
+        | ReceiverReturnKind::ListOfDynamicPairs => StdlibValueKind::List,
     }
 }
 
