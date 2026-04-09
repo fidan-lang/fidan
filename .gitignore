@@ -27,6 +27,7 @@
 .fleet/
 *.sublime-project
 *.sublime-workspace
+/A*.md
 
 # ── OS artefacts ─────────────────────────────────────────────────────────────
 .DS_Store

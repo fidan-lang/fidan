@@ -2589,18 +2589,22 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             }
             (ReceiverBuiltinKind::Dict, ReceiverMethodOp::IsEmpty) => {
                 let len = self.call_i64("fdn_dict_len", &[receiver.into()])?;
+                let cmp_name = self.temp("dict.is_empty");
                 let is_empty = self
+                    .module
                     .builder
                     .build_int_compare(
                         IntPredicate::EQ,
                         len,
-                        self.i64_type.const_zero(),
-                        &self.temp("dict.is_empty"),
+                        self.module.i64_type.const_zero(),
+                        &cmp_name,
                     )
                     .map_err(|err| anyhow!("{err}"))?;
+                let extend_name = self.temp("dict.is_empty.i8");
                 let is_empty = self
+                    .module
                     .builder
-                    .build_int_z_extend(is_empty, self.i8_type, &self.temp("dict.is_empty.i8"))
+                    .build_int_z_extend(is_empty, self.module.i8_type, &extend_name)
                     .map_err(|err| anyhow!("{err}"))?;
                 self.call_ptr("fdn_box_bool", &[is_empty.into()])?
             }
@@ -2624,7 +2628,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     let key = self.lower_operand(key)?;
                     self.call_i8("fdn_dict_contains_key", &[receiver.into(), key.into()])?
                 } else {
-                    self.i8_type.const_zero()
+                    self.module.i8_type.const_zero()
                 };
                 self.call_ptr("fdn_box_bool", &[contains.into()])?
             }
@@ -2653,18 +2657,22 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             }
             (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::IsEmpty) => {
                 let len = self.call_i64("fdn_len", &[receiver.into()])?;
+                let cmp_name = self.temp("hashset.is_empty");
                 let is_empty = self
+                    .module
                     .builder
                     .build_int_compare(
                         IntPredicate::EQ,
                         len,
-                        self.i64_type.const_zero(),
-                        &self.temp("hashset.is_empty"),
+                        self.module.i64_type.const_zero(),
+                        &cmp_name,
                     )
                     .map_err(|err| anyhow!("{err}"))?;
+                let extend_name = self.temp("hashset.is_empty.i8");
                 let is_empty = self
+                    .module
                     .builder
-                    .build_int_z_extend(is_empty, self.i8_type, &self.temp("hashset.is_empty.i8"))
+                    .build_int_z_extend(is_empty, self.module.i8_type, &extend_name)
                     .map_err(|err| anyhow!("{err}"))?;
                 self.call_ptr("fdn_box_bool", &[is_empty.into()])?
             }
@@ -2687,7 +2695,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     let value = self.lower_operand(value)?;
                     self.call_i8("fdn_hashset_contains", &[receiver.into(), value.into()])?
                 } else {
-                    self.i8_type.const_zero()
+                    self.module.i8_type.const_zero()
                 };
                 self.call_ptr("fdn_box_bool", &[contains.into()])?
             }
@@ -2747,22 +2755,22 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             )),
             (ReceiverBuiltinKind::Dict, ReceiverMethodOp::IsEmpty, MirTy::Boolean) => {
                 let len = self.call_i64("fdn_dict_len", &[receiver.into()])?;
+                let cmp_name = self.temp("dict.is_empty.native");
                 let is_empty = self
+                    .module
                     .builder
                     .build_int_compare(
                         IntPredicate::EQ,
                         len,
-                        self.i64_type.const_zero(),
-                        &self.temp("dict.is_empty.native"),
+                        self.module.i64_type.const_zero(),
+                        &cmp_name,
                     )
                     .map_err(|err| anyhow!("{err}"))?;
+                let extend_name = self.temp("dict.is_empty.native.i8");
                 let is_empty = self
+                    .module
                     .builder
-                    .build_int_z_extend(
-                        is_empty,
-                        self.i8_type,
-                        &self.temp("dict.is_empty.native.i8"),
-                    )
+                    .build_int_z_extend(is_empty, self.module.i8_type, &extend_name)
                     .map_err(|err| anyhow!("{err}"))?;
                 Ok(Some(is_empty.into()))
             }
@@ -2771,7 +2779,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     let key = self.lower_operand(key)?;
                     self.call_i8("fdn_dict_contains_key", &[receiver.into(), key.into()])?
                 } else {
-                    self.i8_type.const_zero()
+                    self.module.i8_type.const_zero()
                 };
                 Ok(Some(contains.into()))
             }
@@ -2780,22 +2788,22 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             }
             (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::IsEmpty, MirTy::Boolean) => {
                 let len = self.call_i64("fdn_len", &[receiver.into()])?;
+                let cmp_name = self.temp("hashset.is_empty.native");
                 let is_empty = self
+                    .module
                     .builder
                     .build_int_compare(
                         IntPredicate::EQ,
                         len,
-                        self.i64_type.const_zero(),
-                        &self.temp("hashset.is_empty.native"),
+                        self.module.i64_type.const_zero(),
+                        &cmp_name,
                     )
                     .map_err(|err| anyhow!("{err}"))?;
+                let extend_name = self.temp("hashset.is_empty.native.i8");
                 let is_empty = self
+                    .module
                     .builder
-                    .build_int_z_extend(
-                        is_empty,
-                        self.i8_type,
-                        &self.temp("hashset.is_empty.native.i8"),
-                    )
+                    .build_int_z_extend(is_empty, self.module.i8_type, &extend_name)
                     .map_err(|err| anyhow!("{err}"))?;
                 Ok(Some(is_empty.into()))
             }
@@ -2804,7 +2812,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     let value = self.lower_operand(value)?;
                     self.call_i8("fdn_hashset_contains", &[receiver.into(), value.into()])?
                 } else {
-                    self.i8_type.const_zero()
+                    self.module.i8_type.const_zero()
                 };
                 Ok(Some(contains.into()))
             }
