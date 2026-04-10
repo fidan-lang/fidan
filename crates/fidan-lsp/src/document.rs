@@ -2,6 +2,7 @@
 
 use crate::analysis::InlayHintSite;
 use crate::analysis::MemberAccessSite;
+use crate::analysis::StdlibCallSite;
 use crate::symbols::SymbolTable;
 use fidan_source::Span;
 use std::collections::HashMap;
@@ -34,6 +35,8 @@ pub struct Document {
     pub stdlib_imports: HashMap<String, String>,
     /// Grouped stdlib import binding → `(module_name, member_name)`.
     pub stdlib_direct_imports: HashMap<String, (String, String)>,
+    /// Typed stdlib call sites used for precise hover/signature rendering.
+    pub stdlib_call_sites: Vec<StdlibCallSite>,
     /// Inlay hint positions computed during the last analysis pass.
     pub inlay_hint_sites: Vec<InlayHintSite>,
     /// Typed member-access spans for hover on literal/computed receivers.

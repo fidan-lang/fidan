@@ -10,8 +10,9 @@ use fidan_config::{
 use fidan_fmt::{FormatOptions, format_source, load_format_options_for_path};
 use fidan_source::{FileId, SourceFile, Span};
 use fidan_stdlib::{
-    STDLIB_MODULES, member_doc as stdlib_member_doc,
-    member_return_type as stdlib_member_return_type, module_info as stdlib_module_info,
+    STDLIB_MODULES, StdlibTypeSpec, infer_precise_stdlib_return_type,
+    member_info as stdlib_member_info, member_return_type as stdlib_member_return_type,
+    module_info as stdlib_module_info, parse_stdlib_type_spec,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -155,8 +156,47 @@ fn stdlib_module_hover_markdown(mod_name: &str) -> Option<String> {
     Some(format!("```fidan\nuse std.{mod_name}\n```\n\n{}", info.doc))
 }
 
-fn stdlib_member_hover_markdown(mod_name: &str, member_name: &str) -> Option<String> {
-    stdlib_member_doc(mod_name, member_name)
+fn stdlib_precise_return_label(
+    mod_name: &str,
+    member_name: &str,
+    arg_tys: &[String],
+) -> Option<String> {
+    let args = arg_tys
+        .iter()
+        .map(|ty| parse_stdlib_type_spec(ty).unwrap_or(StdlibTypeSpec::Dynamic))
+        .collect::<Vec<_>>();
+    infer_precise_stdlib_return_type(mod_name, member_name, &args).map(|spec| spec.to_string())
+}
+
+fn stdlib_member_hover_markdown(
+    mod_name: &str,
+    member_name: &str,
+    arg_tys: Option<&[String]>,
+) -> Option<String> {
+    let info = stdlib_member_info(mod_name, member_name)?;
+    let signature = arg_tys
+        .and_then(|tys| stdlib_precise_return_label(mod_name, member_name, tys))
+        .or_else(|| stdlib_member_return_type(mod_name, member_name).map(str::to_string))
+        .map(|ret_type| format!("{} -> {}", info.signature, ret_type))
+        .unwrap_or_else(|| info.signature.to_string());
+    Some(format!("```fidan\n{}\n```\n\n{}", signature, info.doc))
+}
+
+fn stdlib_call_args_at_offset<'a>(
+    doc: &'a Document,
+    offset: u32,
+    mod_name: &str,
+    member_name: &str,
+) -> Option<&'a [String]> {
+    doc.stdlib_call_sites
+        .iter()
+        .find(|site| {
+            site.module_name == mod_name
+                && site.member_name == member_name
+                && offset >= site.callee_span.start
+                && offset < site.callee_span.end
+        })
+        .map(|site| site.arg_tys.as_slice())
 }
 
 fn decorator_hover_markdown(name: &str) -> Option<String> {
@@ -329,6 +369,7 @@ impl FidanLsp {
                 wildcard_imports: resolved_imports.wildcard_imports.clone(),
                 stdlib_imports: stdlib_import_map,
                 stdlib_direct_imports: stdlib_direct_import_map,
+                stdlib_call_sites: result.stdlib_call_sites,
                 inlay_hint_sites: result.inlay_hint_sites,
                 member_access_sites: result.member_access_sites,
             },
@@ -387,6 +428,7 @@ impl FidanLsp {
                         wildcard_imports: background_imports.wildcard_imports,
                         stdlib_imports: background_stdlib_imports,
                         stdlib_direct_imports: background_stdlib_direct_imports,
+                        stdlib_call_sites: r.stdlib_call_sites,
                         inlay_hint_sites: vec![], // not shown for background docs
                         member_access_sites: r.member_access_sites,
                     },
@@ -891,6 +933,7 @@ fn load_background_document(store: &DocumentStore, url: &Url) -> Option<()> {
                 .into_iter()
                 .map(|(binding, module_name, member_name)| (binding, (module_name, member_name)))
                 .collect(),
+            stdlib_call_sites: analysis.stdlib_call_sites,
             inlay_hint_sites: vec![],
             member_access_sites: analysis.member_access_sites,
         },
@@ -1700,8 +1743,11 @@ impl LanguageServer for FidanLsp {
                 HoverLookup::Plain(detail)
             } else if let Some(pn) = prev_name
                 && let Some(mod_name) = doc.stdlib_imports.get(pn)
-                && let Some(detail) =
-                    stdlib_member_hover_markdown(mod_name.as_str(), cur_name.as_str())
+                && let Some(detail) = stdlib_member_hover_markdown(
+                    mod_name.as_str(),
+                    cur_name.as_str(),
+                    stdlib_call_args_at_offset(&doc, offset, mod_name.as_str(), cur_name.as_str()),
+                )
             {
                 HoverLookup::Plain(detail)
             } else if prev_name == Some("std") {
@@ -1747,8 +1793,16 @@ impl LanguageServer for FidanLsp {
                 }
             } else if let Some((mod_name, member_name)) =
                 doc.stdlib_direct_imports.get(cur_name.as_str())
-                && let Some(detail) =
-                    stdlib_member_hover_markdown(mod_name.as_str(), member_name.as_str())
+                && let Some(detail) = stdlib_member_hover_markdown(
+                    mod_name.as_str(),
+                    member_name.as_str(),
+                    stdlib_call_args_at_offset(
+                        &doc,
+                        offset,
+                        mod_name.as_str(),
+                        member_name.as_str(),
+                    ),
+                )
             {
                 HoverLookup::Plain(detail)
             } else if let Some((url, import_name)) = doc.direct_imports.get(cur_name.as_str()) {
@@ -2479,7 +2533,7 @@ impl LanguageServer for FidanLsp {
                         .map(|name| CompletionItem {
                             label: name.to_string(),
                             kind: Some(CompletionItemKind::FUNCTION),
-                            documentation: stdlib_member_hover_markdown(&mod_name, name).map(
+                            documentation: stdlib_member_hover_markdown(&mod_name, name, None).map(
                                 |value| {
                                     Documentation::MarkupContent(MarkupContent {
                                         kind: MarkupKind::Markdown,
@@ -2575,7 +2629,7 @@ impl LanguageServer for FidanLsp {
                         .map(|name| CompletionItem {
                             label: name.to_string(),
                             kind: Some(CompletionItemKind::FUNCTION),
-                            documentation: stdlib_member_hover_markdown(&mod_name, name).map(
+                            documentation: stdlib_member_hover_markdown(&mod_name, name, None).map(
                                 |value| {
                                     Documentation::MarkupContent(MarkupContent {
                                         kind: MarkupKind::Markdown,
@@ -2685,6 +2739,11 @@ impl LanguageServer for FidanLsp {
                 detail: String,
                 active_param: u32,
             },
+            Stdlib {
+                detail: String,
+                param_labels: Vec<String>,
+                active_param: u32,
+            },
             /// Entry not found locally; try cross-doc resolution.
             CrossDoc {
                 recv_ty: String,
@@ -2758,107 +2817,162 @@ impl LanguageServer for FidanLsp {
                 }
             }
 
-            // Try local lookup: direct, then receiver-qualified ("TRex.roar").
-            let local_entry = doc
-                .symbol_table
-                .lookup_visible(fn_span.start, fn_name.as_str())
-                .cloned()
-                .or_else(|| {
-                    if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
-                        let recv = doc
-                            .identifier_spans
-                            .iter()
-                            .rev()
-                            .find(|(span, _)| (span.end as usize) < fn_start)?;
-                        let ty = doc
-                            .symbol_table
-                            .lookup_visible(fn_span.start, recv.1.as_str())
-                            .and_then(|e| e.ty_name.as_deref())?
-                            .to_string();
-                        doc.symbol_table
-                            .get(&format!("{}.{}", ty, fn_name))
-                            .cloned()
-                    } else {
-                        None
-                    }
-                });
-
-            if let Some(entry) = local_entry {
-                if entry.param_types.is_empty() {
-                    SignatureLookup::NotFound
-                } else {
-                    SignatureLookup::Found {
-                        fn_name,
-                        param_types: entry.param_types.clone(),
-                        detail: entry.detail.clone(),
-                        active_param,
-                    }
-                }
-            } else if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
-                // Cross-doc: identify receiver type.
-                let recv_ty = doc
-                    .identifier_spans
-                    .iter()
-                    .rev()
-                    .find(|(span, _)| (span.end as usize) < fn_start)
-                    .and_then(|(_, rn)| {
-                        doc.symbol_table
-                            .get(rn.as_str())
-                            .and_then(|e| e.ty_name.clone())
-                    });
-                match recv_ty {
-                    Some(ty) => SignatureLookup::CrossDoc {
-                        recv_ty: ty,
-                        method_name: fn_name,
-                        active_param,
-                    },
-                    None => SignatureLookup::NotFound,
+            if let Some(site) = doc
+                .stdlib_call_sites
+                .iter()
+                .find(|site| site.callee_span.start == fn_span.start)
+            {
+                let detail = match stdlib_member_hover_markdown(
+                    &site.module_name,
+                    &site.member_name,
+                    Some(&site.arg_tys),
+                ) {
+                    Some(detail) => detail,
+                    None => return Ok(None),
+                };
+                let sig_label = signature_line_from_detail(&detail).unwrap_or_default();
+                SignatureLookup::Stdlib {
+                    detail,
+                    param_labels: extract_param_labels_from_signature(&sig_label),
+                    active_param,
                 }
             } else {
-                SignatureLookup::NotFound
+                // Try local lookup: direct, then receiver-qualified ("TRex.roar").
+                let local_entry = doc
+                    .symbol_table
+                    .lookup_visible(fn_span.start, fn_name.as_str())
+                    .cloned()
+                    .or_else(|| {
+                        if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
+                            let recv = doc
+                                .identifier_spans
+                                .iter()
+                                .rev()
+                                .find(|(span, _)| (span.end as usize) < fn_start)?;
+                            let ty = doc
+                                .symbol_table
+                                .lookup_visible(fn_span.start, recv.1.as_str())
+                                .and_then(|e| e.ty_name.as_deref())?
+                                .to_string();
+                            doc.symbol_table
+                                .get(&format!("{}.{}", ty, fn_name))
+                                .cloned()
+                        } else {
+                            None
+                        }
+                    });
+
+                if let Some(entry) = local_entry {
+                    if entry.param_types.is_empty() {
+                        SignatureLookup::NotFound
+                    } else {
+                        SignatureLookup::Found {
+                            fn_name,
+                            param_types: entry.param_types.clone(),
+                            detail: entry.detail.clone(),
+                            active_param,
+                        }
+                    }
+                } else if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
+                    // Cross-doc: identify receiver type.
+                    let recv_ty = doc
+                        .identifier_spans
+                        .iter()
+                        .rev()
+                        .find(|(span, _)| (span.end as usize) < fn_start)
+                        .and_then(|(_, rn)| {
+                            doc.symbol_table
+                                .get(rn.as_str())
+                                .and_then(|e| e.ty_name.clone())
+                        });
+                    match recv_ty {
+                        Some(ty) => SignatureLookup::CrossDoc {
+                            recv_ty: ty,
+                            method_name: fn_name,
+                            active_param,
+                        },
+                        None => SignatureLookup::NotFound,
+                    }
+                } else {
+                    SignatureLookup::NotFound
+                }
             }
             // doc dropped here
         };
 
         // Phase 2: finalise response (cross-doc lookup if needed).
-        let (fn_name, param_types, detail, active_param) = match signature_lookup {
+        let (sig_label, sig_params, active_param) = match signature_lookup {
             SignatureLookup::Found {
                 fn_name,
                 param_types,
                 detail,
                 active_param,
-            } => (fn_name, param_types, detail, active_param),
+            } => {
+                let sig_params: Vec<ParameterInformation> = param_types
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, ty)| {
+                        let label = extract_param_label_from_detail(&detail, idx)
+                            .unwrap_or_else(|| format!("param{} -> {}", idx + 1, ty));
+                        ParameterInformation {
+                            label: ParameterLabel::Simple(label),
+                            documentation: None,
+                        }
+                    })
+                    .collect();
+                (
+                    build_signature_label(&fn_name, &detail),
+                    sig_params,
+                    active_param,
+                )
+            }
+            SignatureLookup::Stdlib {
+                detail,
+                param_labels,
+                active_param,
+            } => {
+                let sig_params = param_labels
+                    .into_iter()
+                    .map(|label| ParameterInformation {
+                        label: ParameterLabel::Simple(label),
+                        documentation: None,
+                    })
+                    .collect();
+                (
+                    signature_line_from_detail(&detail).unwrap_or_default(),
+                    sig_params,
+                    active_param,
+                )
+            }
             SignatureLookup::CrossDoc {
                 recv_ty,
                 method_name,
                 active_param,
             } => match self.resolve_member_cross_doc(&recv_ty, &method_name) {
-                Some((_, entry)) if !entry.param_types.is_empty() => (
-                    method_name,
-                    entry.param_types.clone(),
-                    entry.detail.clone(),
-                    active_param,
-                ),
+                Some((_, entry)) if !entry.param_types.is_empty() => {
+                    let sig_params: Vec<ParameterInformation> = entry
+                        .param_types
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, ty)| {
+                            let label = extract_param_label_from_detail(&entry.detail, idx)
+                                .unwrap_or_else(|| format!("param{} -> {}", idx + 1, ty));
+                            ParameterInformation {
+                                label: ParameterLabel::Simple(label),
+                                documentation: None,
+                            }
+                        })
+                        .collect();
+                    (
+                        build_signature_label(&method_name, &entry.detail),
+                        sig_params,
+                        active_param,
+                    )
+                }
                 _ => return Ok(None),
             },
             SignatureLookup::NotFound => return Ok(None),
         };
-
-        // Build parameter labels from the detail string or param_types.
-        let sig_params: Vec<ParameterInformation> = param_types
-            .iter()
-            .enumerate()
-            .map(|(idx, ty)| {
-                let label = extract_param_label_from_detail(&detail, idx)
-                    .unwrap_or_else(|| format!("param{} -> {}", idx + 1, ty));
-                ParameterInformation {
-                    label: ParameterLabel::Simple(label),
-                    documentation: None,
-                }
-            })
-            .collect();
-
-        let sig_label = build_signature_label(&fn_name, &detail);
         Ok(Some(SignatureHelp {
             signatures: vec![SignatureInformation {
                 label: sig_label,
@@ -3471,6 +3585,51 @@ fn extract_param_label_from_detail(detail: &str, idx: usize) -> Option<String> {
     Some(param.trim().to_string())
 }
 
+fn signature_line_from_detail(detail: &str) -> Option<String> {
+    let mut in_code_block = false;
+    for line in detail.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if in_code_block && !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+fn extract_param_labels_from_signature(signature: &str) -> Vec<String> {
+    let Some(open) = signature.find('(') else {
+        return Vec::new();
+    };
+    let Some(close) = signature.rfind(')') else {
+        return Vec::new();
+    };
+    let params = signature[open + 1..close].trim();
+    if params.is_empty() {
+        return Vec::new();
+    }
+
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut labels = Vec::new();
+    for (idx, ch) in params.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                labels.push(params[start..idx].trim().to_string());
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    labels.push(params[start..].trim().to_string());
+    labels
+}
+
 /// Build a concise one-line signature label from the hover detail.
 fn build_signature_label(fn_name: &str, detail: &str) -> String {
     // The detail is a markdown block: ```fidan\naction foo ...\n```
@@ -3970,6 +4129,7 @@ mod tests {
             wildcard_imports: vec![],
             stdlib_imports: HashMap::new(),
             stdlib_direct_imports: HashMap::new(),
+            stdlib_call_sites: analysis.stdlib_call_sites,
             inlay_hint_sites: vec![],
             member_access_sites: analysis.member_access_sites,
         }
@@ -4136,6 +4296,7 @@ action greet with (certain name oftype string) returns string {
             wildcard_imports: vec![],
             stdlib_imports: HashMap::new(),
             stdlib_direct_imports: HashMap::new(),
+            stdlib_call_sites: analysis.stdlib_call_sites,
             inlay_hint_sites: analysis.inlay_hint_sites,
             member_access_sites: analysis.member_access_sites,
         };
@@ -4243,6 +4404,7 @@ action greet with (certain name oftype string) returns string {
                 wildcard_imports: vec![],
                 stdlib_imports: HashMap::new(),
                 stdlib_direct_imports: HashMap::new(),
+                stdlib_call_sites: analysis.stdlib_call_sites.clone(),
                 inlay_hint_sites: analysis.inlay_hint_sites,
                 member_access_sites: analysis.member_access_sites,
             };
@@ -4875,19 +5037,34 @@ Holder.compass.
 
     #[test]
     fn stdlib_member_hover_docs_cover_recent_exports() {
-        let sleep =
-            stdlib_member_hover_markdown("time", "sleep").expect("missing std.time.sleep doc");
+        let sleep = stdlib_member_hover_markdown("time", "sleep", None)
+            .expect("missing std.time.sleep doc");
         assert!(sleep.contains("std.time.sleep(ms) -> nothing"));
 
-        let wait_any = stdlib_member_hover_markdown("async", "waitAny")
+        let wait_any = stdlib_member_hover_markdown("async", "waitAny", None)
             .expect("missing std.async.waitAny doc");
         assert!(
             wait_any.contains("std.async.waitAny(handles) -> Pending oftype (integer, dynamic)")
         );
 
-        let parse =
-            stdlib_member_hover_markdown("json", "parse").expect("missing std.json.parse doc");
+        let parse = stdlib_member_hover_markdown("json", "parse", None)
+            .expect("missing std.json.parse doc");
         assert!(parse.contains("std.json.parse(text) -> dynamic"));
+    }
+
+    #[test]
+    fn stdlib_member_hover_uses_precise_callsite_return_types() {
+        let max = stdlib_member_hover_markdown(
+            "math",
+            "max",
+            Some(&["integer".to_string(), "float".to_string()]),
+        )
+        .expect("missing std.math.max doc");
+        assert!(max.contains("std.math.max(a, b) -> float"));
+
+        let abs = stdlib_member_hover_markdown("math", "abs", Some(&["integer".to_string()]))
+            .expect("missing std.math.abs doc");
+        assert!(abs.contains("std.math.abs(x) -> integer"));
     }
 
     #[test]

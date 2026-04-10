@@ -1,4 +1,5 @@
 use fidan_config::{ReceiverBuiltinKind, ReceiverReturnKind, infer_receiver_member};
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StdlibValueKind {
@@ -115,6 +116,37 @@ impl StdlibTypeSpec {
             }
             (Self::Pending(lhs), Self::Pending(rhs)) => Self::Pending(Box::new(lhs.merge(rhs))),
             _ => Self::Dynamic,
+        }
+    }
+}
+
+impl fmt::Display for StdlibTypeSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StdlibTypeSpec::Integer => write!(f, "integer"),
+            StdlibTypeSpec::Float => write!(f, "float"),
+            StdlibTypeSpec::Boolean => write!(f, "boolean"),
+            StdlibTypeSpec::String => write!(f, "string"),
+            StdlibTypeSpec::Handle => write!(f, "handle"),
+            StdlibTypeSpec::Dynamic => write!(f, "dynamic"),
+            StdlibTypeSpec::Nothing => write!(f, "nothing"),
+            StdlibTypeSpec::List(inner) => write!(f, "list oftype {inner}"),
+            StdlibTypeSpec::Dict(key, value) => write!(f, "dict oftype ({key}, {value})"),
+            StdlibTypeSpec::HashSet(inner) => write!(f, "hashset oftype {inner}"),
+            StdlibTypeSpec::Tuple(elements) => {
+                write!(f, "(")?;
+                for (index, element) in elements.iter().enumerate() {
+                    if index > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{element}")?;
+                }
+                write!(f, ")")
+            }
+            StdlibTypeSpec::Shared(inner) => write!(f, "Shared oftype {inner}"),
+            StdlibTypeSpec::WeakShared(inner) => write!(f, "WeakShared oftype {inner}"),
+            StdlibTypeSpec::Pending(inner) => write!(f, "Pending oftype {inner}"),
+            StdlibTypeSpec::Function => write!(f, "action"),
         }
     }
 }

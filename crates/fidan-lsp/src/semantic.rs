@@ -5,12 +5,13 @@
 //!   0 = function   (action declarations and call sites)
 //!   1 = method     (method calls after `.`)
 //!   2 = class      (object declarations, type references, constructors)
-//!   3 = enumMember (enum variants like `Direction.Up`)
-//!   4 = variable   (var/const declarations and general identifier usages)
-//!   5 = parameter  (action parameter declarations)
-//!   6 = property   (field accesses after `.`)
-//!   7 = type       (built-in type names after `oftype` / `->`)
-//!   8 = keyword    (word-alias synonym tokens: `also`, `sep`)
+//!   3 = namespace  (module imports and namespace alias usages, rendered with class colouring)
+//!   4 = enumMember (enum variants like `Direction.Up`)
+//!   5 = variable   (var/const declarations and general identifier usages)
+//!   6 = parameter  (action parameter declarations)
+//!   7 = property   (field accesses after `.`)
+//!   8 = type       (built-in type names after `oftype` / `->`)
+//!   9 = keyword    (word-alias synonym tokens: `also`, `sep`)
 //!
 //! Token modifiers (bitmask):
 //!   bit 0 = declaration
@@ -30,12 +31,13 @@ use tower_lsp::lsp_types::{
 pub const TT_FUNCTION: u32 = 0;
 pub const TT_METHOD: u32 = 1;
 pub const TT_CLASS: u32 = 2;
-pub const TT_ENUM_MEMBER: u32 = 3;
-pub const TT_VARIABLE: u32 = 4;
-pub const TT_PARAMETER: u32 = 5;
-pub const TT_PROPERTY: u32 = 6;
-pub const TT_TYPE: u32 = 7;
-pub const TT_KEYWORD: u32 = 8;
+pub const TT_NAMESPACE: u32 = 3;
+pub const TT_ENUM_MEMBER: u32 = 4;
+pub const TT_VARIABLE: u32 = 5;
+pub const TT_PARAMETER: u32 = 6;
+pub const TT_PROPERTY: u32 = 7;
+pub const TT_TYPE: u32 = 8;
+pub const TT_KEYWORD: u32 = 9;
 
 pub const TM_DECLARATION: u32 = 1 << 0;
 pub const TM_READONLY: u32 = 1 << 1;
@@ -46,15 +48,19 @@ pub const TM_READONLY: u32 = 1 << 1;
 pub fn legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
         token_types: vec![
-            SemanticTokenType::FUNCTION,    // 0
-            SemanticTokenType::METHOD,      // 1
-            SemanticTokenType::CLASS,       // 2
-            SemanticTokenType::ENUM_MEMBER, // 3
-            SemanticTokenType::VARIABLE,    // 4
-            SemanticTokenType::PARAMETER,   // 5
-            SemanticTokenType::PROPERTY,    // 6
-            SemanticTokenType::TYPE,        // 7
-            SemanticTokenType::KEYWORD,     // 8
+            SemanticTokenType::FUNCTION, // 0
+            SemanticTokenType::METHOD,   // 1
+            SemanticTokenType::CLASS,    // 2
+            // Keep a dedicated module slot in the stream, but map it to the
+            // class palette so imported namespaces match the editor colour the
+            // language already uses for type-like symbols.
+            SemanticTokenType::CLASS,       // 3
+            SemanticTokenType::ENUM_MEMBER, // 4
+            SemanticTokenType::VARIABLE,    // 5
+            SemanticTokenType::PARAMETER,   // 6
+            SemanticTokenType::PROPERTY,    // 7
+            SemanticTokenType::TYPE,        // 8
+            SemanticTokenType::KEYWORD,     // 9
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION, // bit 0
@@ -74,6 +80,13 @@ pub fn compute(
     module: &Module,
     symbol_table: &SymbolTable,
 ) -> Vec<SemanticToken> {
+    // Preserve line boundaries for import scanning so `use std.io` cannot
+    // accidentally absorb identifiers from following lines.
+    let contextual: Vec<&Token> = tokens
+        .iter()
+        .filter(|t| !matches!(t.kind, TokenKind::Eof | TokenKind::Unknown(_)))
+        .collect();
+
     // Only consider tokens that carry semantic meaning (skip whitespace noise).
     let meaningful: Vec<&Token> = tokens
         .iter()
@@ -93,6 +106,7 @@ pub fn compute(
     // than TT_FUNCTION (blue) when the callee is an action-typed parameter.
     let mut param_syms = std::collections::HashSet::<Symbol>::new();
     let mut import_namespace_syms = std::collections::HashSet::<Symbol>::new();
+    let mut import_namespace_decl_starts = std::collections::HashSet::<u32>::new();
     for i in 0..n {
         let sym = match &meaningful[i].kind {
             TokenKind::Ident(s) => *s,
@@ -122,8 +136,8 @@ pub fn compute(
     }
 
     let mut idx = 0usize;
-    while idx < n {
-        if !matches!(meaningful[idx].kind, TokenKind::Use) {
+    while idx < contextual.len() {
+        if !matches!(contextual[idx].kind, TokenKind::Use) {
             idx += 1;
             continue;
         }
@@ -132,22 +146,28 @@ pub fn compute(
         let mut grouped = false;
         let mut last_segment: Option<Symbol> = None;
         let mut alias: Option<Symbol> = None;
+        let mut alias_start: Option<u32> = None;
+        let mut segments = Vec::new();
+        let mut expecting_alias = false;
 
-        while idx < n {
-            match &meaningful[idx].kind {
+        while idx < contextual.len() {
+            match &contextual[idx].kind {
                 TokenKind::Ident(sym) => {
-                    last_segment = Some(*sym);
+                    if expecting_alias {
+                        alias = Some(*sym);
+                        alias_start = Some(contextual[idx].span.start);
+                        expecting_alias = false;
+                    } else {
+                        last_segment = Some(*sym);
+                        segments.push(contextual[idx].span.start);
+                    }
                     idx += 1;
                 }
                 TokenKind::Dot | TokenKind::Comma => {
                     idx += 1;
                 }
                 TokenKind::As => {
-                    if idx + 1 < n
-                        && let TokenKind::Ident(sym) = meaningful[idx + 1].kind
-                    {
-                        alias = Some(sym);
-                    }
+                    expecting_alias = true;
                     idx += 1;
                 }
                 TokenKind::LBrace => {
@@ -163,13 +183,25 @@ pub fn compute(
             }
         }
 
+        let namespace_len = if alias.is_some() || grouped || segments.len() <= 2 {
+            segments.len()
+        } else {
+            segments.len().saturating_sub(1)
+        };
+        for start in segments.into_iter().take(namespace_len) {
+            import_namespace_decl_starts.insert(start);
+        }
+        if let Some(start) = alias_start {
+            import_namespace_decl_starts.insert(start);
+        }
+
         if !grouped && let Some(bound) = alias.or(last_segment) {
             import_namespace_syms.insert(bound);
         }
 
-        while idx < n
+        while idx < contextual.len()
             && !matches!(
-                meaningful[idx].kind,
+                contextual[idx].kind,
                 TokenKind::Newline | TokenKind::Semicolon | TokenKind::Eof
             )
         {
@@ -239,6 +271,21 @@ pub fn compute(
             None
         };
 
+        if import_namespace_decl_starts.contains(&tok.span.start) {
+            let (line1, col1) = file.line_col(tok.span.start);
+            let line = line1.saturating_sub(1);
+            let start = col1.saturating_sub(1);
+            let len = tok.span.end - tok.span.start;
+            let mods = if matches!(prev, Some(TokenKind::As)) {
+                TM_DECLARATION
+            } else {
+                0
+            };
+            raw.push((line, start, len, TT_NAMESPACE, mods));
+            prev_emitted_tt = Some(TT_NAMESPACE);
+            continue;
+        }
+
         // `returns TYPE` — `returns` is kept as Ident by the lexer (contextual
         // keyword), so we check the previous token's string to detect the type
         // position that classify() cannot see through a bare TokenKind.
@@ -273,12 +320,18 @@ pub fn compute(
                 (TT_TYPE, 0)
             }
         } else if import_namespace_syms.contains(&sym) && matches!(next, Some(TokenKind::Dot)) {
-            (TT_CLASS, 0)
+            (TT_NAMESPACE, 0)
         } else if param_syms.contains(&sym) && matches!(next, Some(TokenKind::LParen)) {
             // An action-typed parameter being invoked — keep the parameter
             // colour (red) instead of falling through to the blue function-call
             // classification.  E.g. `fn()` inside `action register with (fn oftype action)`.
             (TT_PARAMETER, 0)
+        } else if matches!(prev, Some(TokenKind::Dot))
+            && prev_emitted_tt == Some(TT_NAMESPACE)
+            && qualified_kind.is_none()
+            && matches!(next, Some(TokenKind::Dot))
+        {
+            (TT_NAMESPACE, 0)
         } else if matches!(prev, Some(TokenKind::Dot))
             && prev_emitted_tt == Some(TT_CLASS)
             && qualified_kind.is_none()
@@ -383,17 +436,15 @@ fn classify(
         return (TT_VARIABLE, TM_DECLARATION);
     }
 
-    // ── `use MODULE.PATH` — colour the first segment after `use` as a class
-    // (yellow). The outer-loop `prev_emitted_tt` chain propagates TT_CLASS
-    // through subsequent dotted segments automatically.
+    // ── `use MODULE.PATH` — colour the first segment after `use` as a namespace.
     if matches!(prev, Some(TokenKind::Use)) {
-        return (TT_CLASS, 0);
+        return (TT_NAMESPACE, 0);
     }
 
     // ── Import alias `use ... as NAME` ───────────────────────────────────────
-    // Always a namespace/module alias — colour it like a class (yellow).
+    // Always a namespace/module alias.
     if matches!(prev, Some(TokenKind::As)) {
-        return (TT_CLASS, TM_DECLARATION);
+        return (TT_NAMESPACE, TM_DECLARATION);
     }
 
     // ── `extends TYPE` ────────────────────────────────────────────────────────
@@ -496,21 +547,108 @@ mod tests {
             .collect()
     }
 
+    fn semantic_token_text_types_for(src: &str) -> Vec<(String, u32)> {
+        let interner = Arc::new(SymbolInterner::new());
+        let file = SourceFile::new(FileId(0), "<semantic>", src);
+        let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        let (module, diags) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+        assert!(diags.is_empty(), "parser diagnostics: {diags:#?}");
+        let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+        let symbol_table = crate::symbols::build(&module, &typed, &interner);
+        let semantic_tokens = compute(&tokens, &file, &interner, &module, &symbol_table);
+        let lines: Vec<&str> = src.lines().collect();
+        let mut line = 0usize;
+        let mut start = 0usize;
+
+        semantic_tokens
+            .into_iter()
+            .map(|token| {
+                line += token.delta_line as usize;
+                start = if token.delta_line == 0 {
+                    start + token.delta_start as usize
+                } else {
+                    token.delta_start as usize
+                };
+                let text = lines[line][start..start + token.length as usize].to_string();
+                (text, token.token_type)
+            })
+            .collect()
+    }
+
     #[test]
     fn namespace_import_usage_keeps_class_coloring() {
         let token_types = semantic_token_types_for("use std.math\nvar x = math.round(3.5)\n");
         assert!(
-            token_types.iter().filter(|&&tt| tt == TT_CLASS).count() >= 2,
-            "expected namespace import declaration and usage to be class-colored: {token_types:?}"
+            token_types.iter().filter(|&&tt| tt == TT_NAMESPACE).count() >= 2,
+            "expected namespace import declaration and usage to be namespace-colored: {token_types:?}"
         );
+    }
+
+    #[test]
+    fn consecutive_import_lines_keep_stdlib_usage_namespace_colored() {
+        let token_text_types = semantic_token_text_types_for(
+            "use std.io\nuse std.math\nvar x = io.join(math.round(3.5))\n",
+        );
+        let io_types: Vec<u32> = token_text_types
+            .iter()
+            .filter(|(text, _)| text == "io")
+            .map(|(_, token_type)| *token_type)
+            .collect();
+        let math_types: Vec<u32> = token_text_types
+            .iter()
+            .filter(|(text, _)| text == "math")
+            .map(|(_, token_type)| *token_type)
+            .collect();
+
+        assert_eq!(io_types, vec![TT_NAMESPACE, TT_NAMESPACE]);
+        assert_eq!(math_types, vec![TT_NAMESPACE, TT_NAMESPACE]);
     }
 
     #[test]
     fn namespace_import_alias_usage_keeps_class_coloring() {
         let token_types = semantic_token_types_for("use std.math as m\nvar x = m.round(3.5)\n");
         assert!(
-            token_types.iter().filter(|&&tt| tt == TT_CLASS).count() >= 3,
-            "expected namespace alias declaration and usage to be class-colored: {token_types:?}"
+            token_types.iter().filter(|&&tt| tt == TT_NAMESPACE).count() >= 3,
+            "expected namespace alias declaration and usage to be namespace-colored: {token_types:?}"
+        );
+    }
+
+    #[test]
+    fn user_module_namespace_usage_keeps_namespace_coloring() {
+        let token_types = semantic_token_types_for("use task_store\nvar x = task_store.load()\n");
+        assert!(
+            token_types.iter().filter(|&&tt| tt == TT_NAMESPACE).count() >= 2,
+            "expected user-module import declaration and usage to be namespace-colored: {token_types:?}"
+        );
+    }
+
+    #[test]
+    fn consecutive_import_lines_keep_user_module_usage_namespace_colored() {
+        let token_text_types = semantic_token_text_types_for(
+            "use task_store\nuse helpers\nvar x = task_store.load() + helpers.run()\n",
+        );
+        let task_store_types: Vec<u32> = token_text_types
+            .iter()
+            .filter(|(text, _)| text == "task_store")
+            .map(|(_, token_type)| *token_type)
+            .collect();
+        let helpers_types: Vec<u32> = token_text_types
+            .iter()
+            .filter(|(text, _)| text == "helpers")
+            .map(|(_, token_type)| *token_type)
+            .collect();
+
+        assert_eq!(task_store_types, vec![TT_NAMESPACE, TT_NAMESPACE]);
+        assert_eq!(helpers_types, vec![TT_NAMESPACE, TT_NAMESPACE]);
+    }
+
+    #[test]
+    fn namespace_slot_uses_class_palette_in_legend() {
+        let legend = legend();
+        assert_eq!(
+            legend.token_types[TT_NAMESPACE as usize],
+            SemanticTokenType::CLASS,
+            "expected module namespace slot to render with class colouring"
         );
     }
 

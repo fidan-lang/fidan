@@ -49,6 +49,14 @@ pub struct StdlibVarCallSite {
 }
 
 #[derive(Debug, Clone)]
+pub struct StdlibCallSite {
+    pub callee_span: Span,
+    pub module_name: String,
+    pub member_name: String,
+    pub arg_tys: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ImportedConstructorCallSite {
     pub var_name: String,
     pub decl_span: Span,
@@ -111,6 +119,8 @@ pub struct AnalysisResult {
     /// Stored as `(var_name, module_name, member_name)` so the server can patch the
     /// symbol-table entry using shared stdlib metadata.
     pub stdlib_var_call_sites: Vec<StdlibVarCallSite>,
+    /// All stdlib call sites with typed argument metadata.
+    pub stdlib_call_sites: Vec<StdlibCallSite>,
     /// `var x = Foo()` or `var x = module.Foo()` sites that may resolve to an
     /// imported object constructor once imported documents are loaded.
     pub imported_constructor_call_sites: Vec<ImportedConstructorCallSite>,
@@ -168,6 +178,14 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     // ── Dynamic var call sites (cross-module method return type patching) ──
     let dynamic_var_call_sites = extract_dynamic_var_calls(&module, &typed, &interner);
     let stdlib_var_call_sites = extract_stdlib_var_call_sites(&module, &interner, &stdlib_imports);
+    let stdlib_call_sites = extract_stdlib_call_sites(
+        &module,
+        &typed,
+        &interner,
+        text,
+        &stdlib_imports,
+        &stdlib_direct_imports,
+    );
     let imported_constructor_call_sites =
         extract_imported_constructor_call_sites(&module, &interner);
     let identifier_receiver_method_call_sites =
@@ -207,6 +225,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
         cross_module_call_sites,
         dynamic_var_call_sites,
         stdlib_var_call_sites,
+        stdlib_call_sites,
         imported_constructor_call_sites,
         identifier_receiver_method_call_sites,
         inlay_hint_sites,
@@ -488,6 +507,362 @@ fn extract_stdlib_var_call_sites(
     }
 
     out
+}
+
+fn extract_stdlib_call_sites(
+    module: &Module,
+    typed: &fidan_typeck::TypedModule,
+    interner: &SymbolInterner,
+    text: &str,
+    stdlib_imports: &[(String, String)],
+    stdlib_direct_imports: &[(String, String, String)],
+) -> Vec<StdlibCallSite> {
+    let stdlib_aliases: std::collections::HashMap<&str, &str> = stdlib_imports
+        .iter()
+        .map(|(alias, module_name)| (alias.as_str(), module_name.as_str()))
+        .collect();
+    let stdlib_direct_bindings: std::collections::HashMap<&str, (&str, &str)> =
+        stdlib_direct_imports
+            .iter()
+            .map(|(binding, module_name, member_name)| {
+                (
+                    binding.as_str(),
+                    (module_name.as_str(), member_name.as_str()),
+                )
+            })
+            .collect();
+    let mut collector = StdlibCallSiteCollector {
+        module,
+        typed,
+        interner,
+        text,
+        stdlib_aliases,
+        stdlib_direct_bindings,
+        out: Vec::new(),
+    };
+
+    for &iid in &module.items {
+        match module.arena.get_item(iid) {
+            Item::VarDecl {
+                init: Some(init_eid),
+                ..
+            } => collector.collect_expr(*init_eid),
+            Item::ActionDecl { body, .. }
+            | Item::ExtensionAction { body, .. }
+            | Item::TestDecl { body, .. } => collector.collect_stmts(body),
+            Item::Stmt(stmt_id) => collector.collect_stmts(&[*stmt_id]),
+            Item::ObjectDecl { methods, .. } => {
+                for &mid in methods {
+                    if let Item::ActionDecl { body, .. } = module.arena.get_item(mid) {
+                        collector.collect_stmts(body);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    collector.out
+}
+
+struct StdlibCallSiteCollector<'a> {
+    module: &'a Module,
+    typed: &'a fidan_typeck::TypedModule,
+    interner: &'a SymbolInterner,
+    text: &'a str,
+    stdlib_aliases: std::collections::HashMap<&'a str, &'a str>,
+    stdlib_direct_bindings: std::collections::HashMap<&'a str, (&'a str, &'a str)>,
+    out: Vec<StdlibCallSite>,
+}
+
+impl StdlibCallSiteCollector<'_> {
+    fn collect_stmts(&mut self, stmts: &[fidan_ast::StmtId]) {
+        for &sid in stmts {
+            match self.module.arena.get_stmt(sid) {
+                fidan_ast::Stmt::VarDecl { init, .. } => {
+                    if let Some(init_eid) = init {
+                        self.collect_expr(*init_eid);
+                    }
+                }
+                fidan_ast::Stmt::Destructure { value, .. }
+                | fidan_ast::Stmt::Return {
+                    value: Some(value), ..
+                }
+                | fidan_ast::Stmt::Expr { expr: value, .. }
+                | fidan_ast::Stmt::Panic { value, .. } => {
+                    self.collect_expr(*value);
+                }
+                fidan_ast::Stmt::Assign { target, value, .. } => {
+                    self.collect_expr(*target);
+                    self.collect_expr(*value);
+                }
+                fidan_ast::Stmt::ActionDecl {
+                    params,
+                    body,
+                    decorators,
+                    ..
+                } => {
+                    for param in params {
+                        if let Some(default) = param.default {
+                            self.collect_expr(default);
+                        }
+                    }
+                    for decorator in decorators {
+                        for arg in &decorator.args {
+                            self.collect_expr(arg.value);
+                        }
+                    }
+                    self.collect_stmts(body);
+                }
+                fidan_ast::Stmt::If {
+                    condition,
+                    then_body,
+                    else_ifs,
+                    else_body,
+                    ..
+                } => {
+                    self.collect_expr(*condition);
+                    self.collect_stmts(then_body);
+                    for else_if in else_ifs {
+                        self.collect_expr(else_if.condition);
+                        self.collect_stmts(&else_if.body);
+                    }
+                    if let Some(else_body) = else_body {
+                        self.collect_stmts(else_body);
+                    }
+                }
+                fidan_ast::Stmt::Check {
+                    scrutinee, arms, ..
+                } => {
+                    self.collect_expr(*scrutinee);
+                    for arm in arms {
+                        self.collect_expr(arm.pattern);
+                        self.collect_stmts(&arm.body);
+                    }
+                }
+                fidan_ast::Stmt::For { iterable, body, .. }
+                | fidan_ast::Stmt::ParallelFor { iterable, body, .. } => {
+                    self.collect_expr(*iterable);
+                    self.collect_stmts(body);
+                }
+                fidan_ast::Stmt::While {
+                    condition, body, ..
+                } => {
+                    self.collect_expr(*condition);
+                    self.collect_stmts(body);
+                }
+                fidan_ast::Stmt::Attempt {
+                    body,
+                    catches,
+                    otherwise,
+                    finally,
+                    ..
+                } => {
+                    self.collect_stmts(body);
+                    for catch in catches {
+                        self.collect_stmts(&catch.body);
+                    }
+                    if let Some(otherwise) = otherwise {
+                        self.collect_stmts(otherwise);
+                    }
+                    if let Some(finally) = finally {
+                        self.collect_stmts(finally);
+                    }
+                }
+                fidan_ast::Stmt::ConcurrentBlock { tasks, .. } => {
+                    for task in tasks {
+                        self.collect_stmts(&task.body);
+                    }
+                }
+                fidan_ast::Stmt::Return { value: None, .. }
+                | fidan_ast::Stmt::Break { .. }
+                | fidan_ast::Stmt::Continue { .. }
+                | fidan_ast::Stmt::Error { .. } => {}
+            }
+        }
+    }
+
+    fn collect_expr(&mut self, expr_id: fidan_ast::ExprId) {
+        match self.module.arena.get_expr(expr_id) {
+            Expr::Call { callee, args, .. } => {
+                let arg_tys = args
+                    .iter()
+                    .map(|arg| {
+                        self.typed
+                            .expr_types
+                            .get(&arg.value)
+                            .map(|ty| {
+                                ty.display_name(&|sym| self.interner.resolve(sym).to_string())
+                            })
+                            .unwrap_or_else(|| "dynamic".to_string())
+                    })
+                    .collect::<Vec<_>>();
+
+                if let Expr::Ident {
+                    name,
+                    span: callee_span,
+                } = self.module.arena.get_expr(*callee)
+                {
+                    if let Some((module_name, member_name)) = self
+                        .stdlib_direct_bindings
+                        .get(self.interner.resolve(*name).as_ref())
+                    {
+                        self.out.push(StdlibCallSite {
+                            callee_span: *callee_span,
+                            module_name: (*module_name).to_string(),
+                            member_name: (*member_name).to_string(),
+                            arg_tys: arg_tys.clone(),
+                        });
+                    }
+                } else if let Expr::Field {
+                    object,
+                    field,
+                    span: field_span,
+                } = self.module.arena.get_expr(*callee)
+                    && let Expr::Ident { name, .. } = self.module.arena.get_expr(*object)
+                {
+                    let alias_name = self.interner.resolve(*name);
+                    if let Some(module_name) = self.stdlib_aliases.get(alias_name.as_ref()) {
+                        let member_name = self.interner.resolve(*field).to_string();
+                        let callee_span =
+                            find_identifier_span_in_range(self.text, *field_span, &member_name)
+                                .unwrap_or(*field_span);
+                        self.out.push(StdlibCallSite {
+                            callee_span,
+                            module_name: (*module_name).to_string(),
+                            member_name,
+                            arg_tys: arg_tys.clone(),
+                        });
+                    }
+                }
+
+                self.collect_expr(*callee);
+                for arg in args {
+                    self.collect_expr(arg.value);
+                }
+            }
+            Expr::Binary { lhs, rhs, .. }
+            | Expr::NullCoalesce { lhs, rhs, .. }
+            | Expr::Assign {
+                target: lhs,
+                value: rhs,
+                ..
+            }
+            | Expr::CompoundAssign {
+                target: lhs,
+                value: rhs,
+                ..
+            } => {
+                self.collect_expr(*lhs);
+                self.collect_expr(*rhs);
+            }
+            Expr::Unary { operand, .. }
+            | Expr::Spawn { expr: operand, .. }
+            | Expr::Await { expr: operand, .. } => self.collect_expr(*operand),
+            Expr::Field { object, .. } => self.collect_expr(*object),
+            Expr::Index { object, index, .. } => {
+                self.collect_expr(*object);
+                self.collect_expr(*index);
+            }
+            Expr::StringInterp { parts, .. } => {
+                for part in parts {
+                    if let fidan_ast::InterpPart::Expr(expr_id) = part {
+                        self.collect_expr(*expr_id);
+                    }
+                }
+            }
+            Expr::Ternary {
+                condition,
+                then_val,
+                else_val,
+                ..
+            } => {
+                self.collect_expr(*condition);
+                self.collect_expr(*then_val);
+                self.collect_expr(*else_val);
+            }
+            Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
+                for &element in elements {
+                    self.collect_expr(element);
+                }
+            }
+            Expr::Dict { entries, .. } => {
+                for &(key, value) in entries {
+                    self.collect_expr(key);
+                    self.collect_expr(value);
+                }
+            }
+            Expr::Check {
+                scrutinee, arms, ..
+            } => {
+                self.collect_expr(*scrutinee);
+                for arm in arms {
+                    self.collect_expr(arm.pattern);
+                }
+            }
+            Expr::Slice {
+                target,
+                start,
+                end,
+                step,
+                ..
+            } => {
+                self.collect_expr(*target);
+                if let Some(start) = start {
+                    self.collect_expr(*start);
+                }
+                if let Some(end) = end {
+                    self.collect_expr(*end);
+                }
+                if let Some(step) = step {
+                    self.collect_expr(*step);
+                }
+            }
+            Expr::ListComp {
+                element,
+                iterable,
+                filter,
+                ..
+            } => {
+                self.collect_expr(*element);
+                self.collect_expr(*iterable);
+                if let Some(filter) = filter {
+                    self.collect_expr(*filter);
+                }
+            }
+            Expr::DictComp {
+                key,
+                value,
+                iterable,
+                filter,
+                ..
+            } => {
+                self.collect_expr(*key);
+                self.collect_expr(*value);
+                self.collect_expr(*iterable);
+                if let Some(filter) = filter {
+                    self.collect_expr(*filter);
+                }
+            }
+            Expr::Lambda { params, body, .. } => {
+                for param in params {
+                    if let Some(default) = param.default {
+                        self.collect_expr(default);
+                    }
+                }
+                self.collect_stmts(body);
+            }
+            Expr::IntLit { .. }
+            | Expr::FloatLit { .. }
+            | Expr::StrLit { .. }
+            | Expr::BoolLit { .. }
+            | Expr::Nothing { .. }
+            | Expr::Ident { .. }
+            | Expr::This { .. }
+            | Expr::Parent { .. }
+            | Expr::Error { .. } => {}
+        }
+    }
 }
 
 fn collect_stmt_dynamic_var_calls(
@@ -2489,6 +2864,21 @@ use nested.tools as tools
             &src[site.member_span.start as usize..site.member_span.end as usize],
             "split"
         );
+    }
+
+    #[test]
+    fn analyze_collects_precise_stdlib_call_sites_for_namespace_and_direct_imports() {
+        let src = "use std.math\nuse std.math.{abs}\nvar left = math.max(1, 2.0)\nvar right = abs(-4.0)\n";
+        let result = analyze(src, "file:///stdlib_calls.fdn");
+
+        assert!(result.stdlib_call_sites.iter().any(|site| {
+            site.module_name == "math"
+                && site.member_name == "max"
+                && site.arg_tys == ["integer", "float"]
+        }));
+        assert!(result.stdlib_call_sites.iter().any(|site| {
+            site.module_name == "math" && site.member_name == "abs" && site.arg_tys == ["float"]
+        }));
     }
 
     #[test]
