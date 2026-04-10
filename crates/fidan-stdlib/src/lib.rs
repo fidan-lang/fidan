@@ -26,6 +26,8 @@ pub mod string;
 pub mod test_runner;
 pub mod time;
 
+use fidan_diagnostics::DiagCode;
+
 /// A dispatched stdlib call result.
 pub use sandbox::{SandboxPolicy, SandboxViolation};
 
@@ -228,9 +230,9 @@ pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
         "std.io.isatty(stream?)" => "boolean",
 
         // json
-        "std.json.loads(text)" => "dynamic",
-        "std.json.parse(text)" => "dynamic",
-        "std.json.load(path)" => "dynamic",
+        "std.json.loads(text, soft?)" => "dynamic",
+        "std.json.parse(text, soft?)" => "dynamic",
+        "std.json.load(path, soft?)" => "dynamic",
         "std.json.dumps(value)" => "string",
         "std.json.stringify(value)" => "string",
         "std.json.dump(value, path)" => "boolean",
@@ -374,6 +376,11 @@ pub enum StdlibResult {
     NeedsCallbackDispatch(parallel::ParallelOp),
 }
 
+pub struct StdlibError {
+    pub code: DiagCode,
+    pub message: String,
+}
+
 /// Dispatch a stdlib function call.
 ///
 /// `module` is the canonical module name (e.g. `"io"`, `"math"`, `"string"`).
@@ -387,15 +394,17 @@ pub fn dispatch_stdlib(
     module: &str,
     name: &str,
     args: Vec<fidan_runtime::FidanValue>,
-) -> Option<StdlibResult> {
+) -> Option<Result<StdlibResult, StdlibError>> {
     match module {
-        "async" => async_std::dispatch(name, args).map(|result| match result {
-            async_std::AsyncDispatch::Value(v) => StdlibResult::Value(v),
-            async_std::AsyncDispatch::Op(op) => StdlibResult::NeedsAsyncDispatch(op),
+        "async" => async_std::dispatch(name, args).map(|result| {
+            Ok(match result {
+                async_std::AsyncDispatch::Value(v) => StdlibResult::Value(v),
+                async_std::AsyncDispatch::Op(op) => StdlibResult::NeedsAsyncDispatch(op),
+            })
         }),
         "test" => {
             test_runner::dispatch(name, args).map(|res| {
-                match res {
+                Ok(match res {
                     Ok(v) => StdlibResult::Value(v),
                     // Assertion failures are converted to Nothing here; the MIR
                     // interpreter should check for assertion failure panics via
@@ -403,18 +412,32 @@ pub fn dispatch_stdlib(
                     Err(msg) => StdlibResult::Value(fidan_runtime::FidanValue::String(
                         fidan_runtime::FidanString::new(&format!("__test_fail__: {msg}")),
                     )),
-                }
+                })
             })
         }
-        "parallel" => parallel::dispatch_op(name, args).map(|res| match res {
-            Ok(Some(op)) => StdlibResult::NeedsCallbackDispatch(op),
-            Ok(None) => StdlibResult::Value(fidan_runtime::FidanValue::Nothing),
-            Err(msg) => StdlibResult::Value(fidan_runtime::FidanValue::String(
-                fidan_runtime::FidanString::new(&format!("__error__: {msg}")),
-            )),
+        "parallel" => parallel::dispatch_op(name, args).map(|res| {
+            Ok(match res {
+                Ok(Some(op)) => StdlibResult::NeedsCallbackDispatch(op),
+                Ok(None) => StdlibResult::Value(fidan_runtime::FidanValue::Nothing),
+                Err(msg) => StdlibResult::Value(fidan_runtime::FidanValue::String(
+                    fidan_runtime::FidanString::new(&format!("__error__: {msg}")),
+                )),
+            })
+        }),
+        "io" => fidan_runtime::stdlib::dispatch_io_module(name, args).map(|res| {
+            res.map(StdlibResult::Value).map_err(|err| StdlibError {
+                code: err.code,
+                message: err.message,
+            })
+        }),
+        "json" => fidan_runtime::stdlib::dispatch_json_module(name, args).map(|res| {
+            res.map(StdlibResult::Value).map_err(|err| StdlibError {
+                code: err.code,
+                message: err.message,
+            })
         }),
         _ => fidan_runtime::stdlib::dispatch_value_module(module, name, args)
-            .map(StdlibResult::Value),
+            .map(|value| Ok(StdlibResult::Value(value))),
     }
 }
 
@@ -713,27 +736,27 @@ const IO_MEMBER_INFOS: &[StdlibMemberInfo] = &[
     StdlibMemberInfo {
         names: &["readFile", "read_file"],
         signature: "std.io.readFile(path)",
-        doc: "Read an entire text file into a string.",
+        doc: "Read an entire text file into a string. Raises `R3001`/`R3002` on file access failure and `R3004` on permission-denied access.",
     },
     StdlibMemberInfo {
         names: &["readLines", "read_lines"],
         signature: "std.io.readLines(path)",
-        doc: "Read a text file into a list of lines.",
+        doc: "Read a text file into a list of lines. Raises `R3001`/`R3002` on file access failure and `R3004` on permission-denied access.",
     },
     StdlibMemberInfo {
         names: &["writeFile", "write_file"],
         signature: "std.io.writeFile(path, content)",
-        doc: "Write a string to a file, replacing existing contents.",
+        doc: "Write a string to a file, replacing existing contents. Raises `R3003` on write failure and `R3004` on permission-denied access.",
     },
     StdlibMemberInfo {
         names: &["appendFile", "append_file"],
         signature: "std.io.appendFile(path, content)",
-        doc: "Append a string to the end of a file, creating it when needed.",
+        doc: "Append a string to the end of a file, creating it when needed. Raises `R3003` on write failure and `R3004` on permission-denied access.",
     },
     StdlibMemberInfo {
         names: &["deleteFile", "delete_file"],
         signature: "std.io.deleteFile(path)",
-        doc: "Delete a file from disk.",
+        doc: "Delete a file from disk. Raises `R3009` on deletion failure and `R3004` on permission-denied access.",
     },
     StdlibMemberInfo {
         names: &["fileExists", "file_exists", "exists"],
@@ -753,22 +776,22 @@ const IO_MEMBER_INFOS: &[StdlibMemberInfo] = &[
     StdlibMemberInfo {
         names: &["makeDir", "make_dir", "mkdir", "createDir", "create_dir"],
         signature: "std.io.makeDir(path)",
-        doc: "Create a directory and any missing parent directories.",
+        doc: "Create a directory and any missing parent directories. Raises `R3010` on creation failure and `R3004` on permission-denied access.",
     },
     StdlibMemberInfo {
         names: &["listDir", "list_dir", "readDir", "read_dir"],
         signature: "std.io.listDir(path)",
-        doc: "List directory entry names as strings.",
+        doc: "List directory entry names as strings. Raises `R3006` on directory-read failure and `R3004` on permission-denied access.",
     },
     StdlibMemberInfo {
         names: &["copyFile", "copy_file"],
         signature: "std.io.copyFile(from, to)",
-        doc: "Copy a file from one path to another.",
+        doc: "Copy a file from one path to another. Raises `R3007` on copy failure and `R3004` on permission-denied access.",
     },
     StdlibMemberInfo {
         names: &["renameFile", "rename_file", "moveFile", "move_file"],
         signature: "std.io.renameFile(from, to)",
-        doc: "Rename or move a file on disk.",
+        doc: "Rename or move a file on disk. Raises `R3008` on rename failure and `R3004` on permission-denied access.",
     },
     StdlibMemberInfo {
         names: &["join", "joinPath", "join_path"],
@@ -830,18 +853,18 @@ const IO_MEMBER_INFOS: &[StdlibMemberInfo] = &[
 const JSON_MEMBER_INFOS: &[StdlibMemberInfo] = &[
     StdlibMemberInfo {
         names: &["loads"],
-        signature: "std.json.loads(text)",
-        doc: "Parse JSON text into Fidan dynamic values using dict, list, string, number, boolean, and nothing.",
+        signature: "std.json.loads(text, soft?)",
+        doc: "Parse JSON text into Fidan dynamic values using dict, list, string, number, boolean, and nothing. Raises `R3005` on invalid JSON unless `soft` is true, in which case it returns `nothing`.",
     },
     StdlibMemberInfo {
         names: &["parse"],
-        signature: "std.json.parse(text)",
-        doc: "Parse JSON text into Fidan dynamic values using dict, list, string, number, boolean, and nothing. `parse` is a compatibility alias for `loads`.",
+        signature: "std.json.parse(text, soft?)",
+        doc: "Parse JSON text into Fidan dynamic values using dict, list, string, number, boolean, and nothing. `parse` is a compatibility alias for `loads`. Raises `R3005` on invalid JSON unless `soft` is true, in which case it returns `nothing`.",
     },
     StdlibMemberInfo {
         names: &["load", "readFile", "read_file"],
-        signature: "std.json.load(path)",
-        doc: "Read a JSON file from disk and parse it into Fidan dynamic values.",
+        signature: "std.json.load(path, soft?)",
+        doc: "Read a JSON file from disk and parse it into Fidan dynamic values. Raises `R3001`/`R3002` on file access failure and `R3005` on invalid JSON unless `soft` is true, in which case it returns `nothing`.",
     },
     StdlibMemberInfo {
         names: &["dumps"],

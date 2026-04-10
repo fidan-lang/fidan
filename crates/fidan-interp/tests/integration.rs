@@ -728,6 +728,321 @@ fn len_invalid_type_returns_runtime_error() {
 }
 
 #[test]
+fn json_load_missing_file_returns_r3001() {
+    let missing = std::env::temp_dir().join("fidan-json-missing-runtime-error.json");
+    let missing = missing.to_string_lossy().replace('\\', "\\\\");
+    let err = run_src(&format!(
+        r#"use std.json
+var value = json.load("{missing}")"#
+    ))
+    .expect_err("expected missing json file to produce runtime error");
+    assert_eq!(err.code.0, "R3001");
+    assert!(err.message.contains("failed to open file"));
+}
+
+#[test]
+fn json_load_missing_file_soft_returns_nothing() {
+    let missing = std::env::temp_dir().join("fidan-json-missing-soft.json");
+    let missing = missing.to_string_lossy().replace('\\', "\\\\");
+    assert!(
+        run_src(&format!(
+            r#"use std.json
+var value = json.load("{missing}", true)
+assert_eq(value, nothing)"#
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn json_load_invalid_json_returns_r3005() {
+    let path = std::env::temp_dir().join("fidan-json-invalid-runtime-error.json");
+    std::fs::write(&path, "{not json").expect("write invalid json fixture");
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+
+    let err = run_src(&format!(
+        r#"use std.json
+var value = json.load("{path_str}")"#
+    ))
+    .expect_err("expected invalid json file to produce runtime error");
+    assert_eq!(err.code.0, "R3005");
+    assert!(err.message.contains("failed to parse JSON"));
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn json_load_invalid_json_soft_returns_nothing() {
+    let path = std::env::temp_dir().join("fidan-json-invalid-soft.json");
+    std::fs::write(&path, "{not json").expect("write invalid json fixture");
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+
+    let result = run_src(&format!(
+        r#"use std.json
+var value = json.load("{path_str}", true)
+assert_eq(value, nothing)"#
+    ));
+
+    let _ = std::fs::remove_file(path);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn io_read_file_missing_returns_r3001() {
+    let missing = std::env::temp_dir().join("fidan-io-missing-runtime-error.txt");
+    let missing = missing.to_string_lossy().replace('\\', "\\\\");
+    let err = run_src(&format!(
+        r#"use std.io
+var value = io.readFile("{missing}")"#
+    ))
+    .expect_err("expected missing io file to produce runtime error");
+    assert_eq!(err.code.0, "R3001");
+    assert!(err.message.contains("failed to open file"));
+}
+
+#[test]
+fn io_read_lines_missing_returns_r3001() {
+    let missing = std::env::temp_dir().join("fidan-io-missing-lines-runtime-error.txt");
+    let missing = missing.to_string_lossy().replace('\\', "\\\\");
+    let err = run_src(&format!(
+        r#"use std.io
+var value = io.readLines("{missing}")"#
+    ))
+    .expect_err("expected missing io file to produce runtime error");
+    assert_eq!(err.code.0, "R3001");
+    assert!(err.message.contains("failed to open file"));
+}
+
+#[test]
+fn io_read_file_and_lines_return_contents() {
+    let path = std::env::temp_dir().join("fidan-io-read-file-success.txt");
+    std::fs::write(&path, "one\ntwo\n").expect("write io fixture");
+    let path_str = path.to_string_lossy().replace('\\', "\\\\");
+
+    let result = run_src(&format!(
+        r#"use std.io
+assert_eq(io.readFile("{path_str}"), "one\ntwo\n")
+var lines = io.readLines("{path_str}")
+assert_eq(len(lines), 2)
+assert_eq(lines[0], "one")
+assert_eq(lines[1], "two")"#
+    ));
+
+    let _ = std::fs::remove_file(path);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn io_mutating_helpers_complete_file_lifecycle() {
+    let root = std::env::temp_dir().join("fidan-io-mutating-lifecycle");
+    let root_file = root.join("alpha.txt");
+    let copied = root.join("beta.txt");
+    let renamed = root.join("gamma.txt");
+    let nested = root.join("nested");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create root fixture dir");
+
+    let root_str = root.to_string_lossy().replace('\\', "\\\\");
+    let file_str = root_file.to_string_lossy().replace('\\', "\\\\");
+    let copy_str = copied.to_string_lossy().replace('\\', "\\\\");
+    let rename_str = renamed.to_string_lossy().replace('\\', "\\\\");
+    let nested_str = nested.to_string_lossy().replace('\\', "\\\\");
+
+    let result = run_src(&format!(
+        r#"use std.io
+assert_eq(io.writeFile("{file_str}", "hello"), true)
+assert_eq(io.appendFile("{file_str}", " world"), true)
+assert_eq(io.readFile("{file_str}"), "hello world")
+assert_eq(io.copyFile("{file_str}", "{copy_str}"), true)
+assert_eq(io.renameFile("{copy_str}", "{rename_str}"), true)
+assert_eq(io.makeDir("{nested_str}"), true)
+var names = io.listDir("{root_str}")
+assert_eq(names.contains("alpha.txt"), true)
+assert_eq(names.contains("gamma.txt"), true)
+assert_eq(names.contains("nested"), true)
+assert_eq(io.deleteFile("{rename_str}"), true)
+assert_eq(io.fileExists("{rename_str}"), false)"#
+    ));
+
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn io_write_file_missing_parent_returns_r3003() {
+    let path = std::env::temp_dir()
+        .join("fidan-io-write-missing-parent")
+        .join("out.txt");
+    let escaped = path.to_string_lossy().replace('\\', "\\\\");
+    let err = run_src(&format!(
+        r#"use std.io
+var ok = io.writeFile("{escaped}", "hello")"#
+    ))
+    .expect_err("expected writeFile failure to produce runtime error");
+    assert_eq!(err.code.0, "R3003");
+    assert!(err.message.contains("failed to write file"));
+}
+
+#[test]
+fn io_list_dir_missing_returns_r3006() {
+    let path = std::env::temp_dir().join("fidan-io-list-missing-dir");
+    let _ = std::fs::remove_dir_all(&path);
+    let escaped = path.to_string_lossy().replace('\\', "\\\\");
+    let err = run_src(&format!(
+        r#"use std.io
+var entries = io.listDir("{escaped}")"#
+    ))
+    .expect_err("expected listDir failure to produce runtime error");
+    assert_eq!(err.code.0, "R3006");
+    assert!(err.message.contains("failed to list directory"));
+}
+
+#[test]
+fn io_copy_file_missing_source_returns_r3007() {
+    let root = std::env::temp_dir().join("fidan-io-copy-missing-source");
+    let source = root.join("missing.txt");
+    let dest = root.join("dest.txt");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create root dir");
+    let src = source.to_string_lossy().replace('\\', "\\\\");
+    let dst = dest.to_string_lossy().replace('\\', "\\\\");
+    let err = run_src(&format!(
+        r#"use std.io
+var ok = io.copyFile("{src}", "{dst}")"#
+    ))
+    .expect_err("expected copyFile failure to produce runtime error");
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(err.code.0, "R3007");
+    assert!(err.message.contains("failed to copy"));
+}
+
+#[test]
+fn io_rename_file_missing_source_returns_r3008() {
+    let root = std::env::temp_dir().join("fidan-io-rename-missing-source");
+    let source = root.join("missing.txt");
+    let dest = root.join("dest.txt");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create root dir");
+    let src = source.to_string_lossy().replace('\\', "\\\\");
+    let dst = dest.to_string_lossy().replace('\\', "\\\\");
+    let err = run_src(&format!(
+        r#"use std.io
+var ok = io.renameFile("{src}", "{dst}")"#
+    ))
+    .expect_err("expected renameFile failure to produce runtime error");
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(err.code.0, "R3008");
+    assert!(err.message.contains("failed to rename"));
+}
+
+#[test]
+fn io_delete_file_missing_returns_r3009() {
+    let path = std::env::temp_dir().join("fidan-io-delete-missing-file.txt");
+    let _ = std::fs::remove_file(&path);
+    let escaped = path.to_string_lossy().replace('\\', "\\\\");
+    let err = run_src(&format!(
+        r#"use std.io
+var ok = io.deleteFile("{escaped}")"#
+    ))
+    .expect_err("expected deleteFile failure to produce runtime error");
+    assert_eq!(err.code.0, "R3009");
+    assert!(err.message.contains("failed to delete file"));
+}
+
+#[test]
+fn io_make_dir_invalid_parent_returns_r3010() {
+    let root = std::env::temp_dir().join("fidan-io-mkdir-invalid-parent");
+    let parent_file = root.join("parent.txt");
+    let child = parent_file.join("child");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).expect("create root dir");
+    std::fs::write(&parent_file, "x").expect("write parent file");
+    let escaped = child.to_string_lossy().replace('\\', "\\\\");
+    let err = run_src(&format!(
+        r#"use std.io
+var ok = io.makeDir("{escaped}")"#
+    ))
+    .expect_err("expected makeDir failure to produce runtime error");
+    let _ = std::fs::remove_dir_all(&root);
+    assert_eq!(err.code.0, "R3010");
+    assert!(err.message.contains("failed to create directory"));
+}
+
+#[test]
+fn json_runtime_error_is_catchable() {
+    let missing = std::env::temp_dir().join("fidan-json-catchable-runtime-error.json");
+    let missing = missing.to_string_lossy().replace('\\', "\\\\");
+    assert!(
+        run_src(&format!(
+            r#"use std.json
+var handled = false
+attempt {{
+    var value = json.load("{missing}")
+}} catch err {{
+    handled = true
+    assert_eq(type(err), "string")
+    assert_eq(err.contains("R3001"), true)
+    assert_eq(err.contains("failed to open file"), true)
+}}
+assert_eq(handled, true)"#
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn io_runtime_error_is_catchable() {
+    let missing = std::env::temp_dir().join("fidan-io-catchable-runtime-error.txt");
+    let missing = missing.to_string_lossy().replace('\\', "\\\\");
+    assert!(
+        run_src(&format!(
+            r#"use std.io
+var handled = false
+attempt {{
+    var value = io.readFile("{missing}")
+}} catch err {{
+    handled = true
+    assert_eq(type(err), "string")
+    assert_eq(err.contains("R3001"), true)
+    assert_eq(err.contains("failed to open file"), true)
+}}
+assert_eq(handled, true)"#
+        ))
+        .is_ok()
+    );
+}
+
+#[test]
+fn sandbox_violation_is_catchable() {
+    let root = std::env::temp_dir().join("fidan-sandbox-catchable-runtime-error");
+    let source_dir = root.join("source");
+    std::fs::create_dir_all(&source_dir).expect("create source dir");
+    let source_path = source_dir.join("input.txt");
+    std::fs::write(&source_path, "hello").expect("write source file");
+    let escaped_source = source_path.to_string_lossy().replace('\\', "\\\\");
+
+    let result = run_src_with_sandbox(
+        &format!(
+            r#"use std.io
+var handled = false
+attempt {{
+    var value = io.readFile("{escaped_source}")
+}} catch err {{
+    handled = true
+    assert_eq(type(err), "string")
+    assert_eq(err.contains("R4001"), true)
+    assert_eq(err.contains("sandbox violation"), true)
+}}
+assert_eq(handled, true)"#
+        ),
+        fidan_stdlib::SandboxPolicy::default(),
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(result.is_ok());
+}
+
+#[test]
 fn hashset_invalid_dynamic_value_returns_runtime_error() {
     let err = run_src(
         r#"var source oftype dynamic = 42

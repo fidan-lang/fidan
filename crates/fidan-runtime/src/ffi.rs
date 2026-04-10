@@ -2703,18 +2703,42 @@ fn dispatch_string_fn(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
         .unwrap_or_else(|| into_raw(FidanValue::Nothing))
 }
 
+fn runtime_error_to_exception_ptr(
+    prefix: &str,
+    code: fidan_diagnostics::DiagCode,
+    message: String,
+) -> *mut FidanValue {
+    into_raw(FidanValue::String(FidanString::new(&format!(
+        "{prefix} [{code}]: {message}"
+    ))))
+}
+
 // ── io module ─────────────────────────────────────────────────────────────────
 fn dispatch_io(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    stdlib::io::dispatch(func, args)
-        .map(into_raw)
-        .unwrap_or_else(|| into_raw(FidanValue::Nothing))
+    match stdlib::io::dispatch_result(func, args) {
+        Some(Ok(value)) => into_raw(value),
+        Some(Err(err)) => unsafe {
+            let exn = runtime_error_to_exception_ptr("error", err.code, err.message);
+            fdn_store_exception(exn);
+            drop(Box::from_raw(exn));
+            into_raw(FidanValue::Nothing)
+        },
+        None => into_raw(FidanValue::Nothing),
+    }
 }
 
 // ── json module ───────────────────────────────────────────────────────────────
 fn dispatch_json(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    stdlib::json::dispatch(func, args)
-        .map(into_raw)
-        .unwrap_or_else(|| into_raw(FidanValue::Nothing))
+    match stdlib::json::dispatch_result(func, args) {
+        Some(Ok(value)) => into_raw(value),
+        Some(Err(err)) => unsafe {
+            let exn = runtime_error_to_exception_ptr("error", err.code, err.message);
+            fdn_store_exception(exn);
+            drop(Box::from_raw(exn));
+            into_raw(FidanValue::Nothing)
+        },
+        None => into_raw(FidanValue::Nothing),
+    }
 }
 
 // ── collections module ────────────────────────────────────────────────────────
@@ -3451,6 +3475,17 @@ pub unsafe extern "C" fn fdn_call_dynamic(
 mod tests {
     use super::*;
 
+    fn drain_exception() -> Option<FidanValue> {
+        unsafe {
+            if fdn_has_exception() == 0 {
+                None
+            } else {
+                let ptr = fdn_catch_exception();
+                Some(*Box::from_raw(ptr))
+            }
+        }
+    }
+
     #[test]
     fn tuple_pack_and_index_round_trip() {
         unsafe {
@@ -3485,6 +3520,59 @@ mod tests {
             drop(Box::from_raw(first_value));
             drop(Box::from_raw(second_value));
             drop(Box::from_raw(tuple));
+        }
+    }
+
+    #[test]
+    fn dispatch_io_sets_exception_slot_for_runtime_errors() {
+        let path = std::env::temp_dir().join("fidan-aot-ffi-io-missing.txt");
+        let _ = std::fs::remove_file(&path);
+        let result = dispatch_io(
+            "readFile",
+            vec![FidanValue::String(FidanString::new(
+                &path.to_string_lossy(),
+            ))],
+        );
+
+        assert!(matches!(unsafe { borrow(result) }, FidanValue::Nothing));
+        let exception = drain_exception().expect("expected stored exception");
+        match exception {
+            FidanValue::String(text) => {
+                assert!(text.as_str().contains("R3001"));
+                assert!(text.as_str().contains("failed to open file"));
+            }
+            other => panic!("expected string exception, got {other:?}"),
+        }
+
+        unsafe {
+            drop(Box::from_raw(result));
+        }
+    }
+
+    #[test]
+    fn dispatch_json_sets_exception_slot_for_runtime_errors() {
+        let path = std::env::temp_dir().join("fidan-aot-ffi-json-invalid.json");
+        std::fs::write(&path, "{not json").expect("write invalid json fixture");
+        let result = dispatch_json(
+            "load",
+            vec![FidanValue::String(FidanString::new(
+                &path.to_string_lossy(),
+            ))],
+        );
+
+        assert!(matches!(unsafe { borrow(result) }, FidanValue::Nothing));
+        let exception = drain_exception().expect("expected stored exception");
+        match exception {
+            FidanValue::String(text) => {
+                assert!(text.as_str().contains("R3005"));
+                assert!(text.as_str().contains("failed to parse JSON"));
+            }
+            other => panic!("expected string exception, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_file(path);
+        unsafe {
+            drop(Box::from_raw(result));
         }
     }
 }

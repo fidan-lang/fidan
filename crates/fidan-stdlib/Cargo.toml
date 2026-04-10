@@ -8,6 +8,7 @@ repository.workspace = true
 
 [dependencies]
 fidan-config = { workspace = true }
+fidan-diagnostics = { workspace = true }
 fidan-source = { workspace = true }
 fidan-runtime = { workspace = true }
 regex = { workspace = true }

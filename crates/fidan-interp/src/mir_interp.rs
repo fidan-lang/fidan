@@ -70,6 +70,36 @@ fn canonical_receiver_method_name(
     infer_receiver_member(receiver_kind, method).map(|info| info.canonical_name)
 }
 
+fn catchable_signal_value(signal: MirSignal) -> Result<FidanValue, MirSignal> {
+    match signal {
+        MirSignal::Throw(value) => Ok(value),
+        MirSignal::RuntimeError(code, message) => Ok(FidanValue::String(FidanString::new(
+            &format!("error [{code}]: {message}"),
+        ))),
+        MirSignal::SandboxViolation(code, message) => Ok(FidanValue::String(FidanString::new(
+            &format!("sandbox violation [{code}]: {message}"),
+        ))),
+        other => Err(other),
+    }
+}
+
+fn route_signal_to_catch(
+    frame: &mut CallFrame,
+    signal: MirSignal,
+) -> Result<Option<(BlockId, FidanValue)>, MirSignal> {
+    let Some(catch_bb) = frame.catch_stack.pop() else {
+        return Err(signal);
+    };
+
+    match catchable_signal_value(signal) {
+        Ok(value) => Ok(Some((catch_bb, value))),
+        Err(other) => {
+            frame.catch_stack.push(catch_bb);
+            Err(other)
+        }
+    }
+}
+
 // ── Object class table ────────────────────────────────────────────────────────
 
 /// Build `Arc<FidanClass>` instances from `MirObjectInfo` metadata.
@@ -1286,18 +1316,16 @@ impl MirMachine {
                 match self.exec_instr(instr, frame) {
                     Ok(Some(ret)) => return Ok(Some(ret)),
                     Ok(None) => {}
-                    // A callee threw — route through the *caller's* catch stack.
-                    Err(MirSignal::Throw(v)) => {
-                        if let Some(catch_bb) = frame.catch_stack.pop() {
-                            frame.current_exception = Some(v);
+                    Err(signal) => match route_signal_to_catch(frame, signal) {
+                        Ok(Some((catch_bb, value))) => {
+                            frame.current_exception = Some(value);
                             prev_bb = Some(bb_id);
                             bb_id = catch_bb;
                             continue 'outer;
-                        } else {
-                            return Err(MirSignal::Throw(v));
                         }
-                    }
-                    Err(e) => return Err(e),
+                        Ok(None) => {}
+                        Err(e) => return Err(e),
+                    },
                 }
             }
 
@@ -2270,7 +2298,7 @@ impl MirMachine {
             }
         }
         match fidan_stdlib::dispatch_stdlib(module, name, args) {
-            Some(StdlibResult::Value(v)) => {
+            Some(Ok(StdlibResult::Value(v))) => {
                 // Check for test assertion failures encoded as `__test_fail__: msg`.
                 if let FidanValue::String(ref s) = v {
                     let s_str = s.as_str();
@@ -2280,8 +2308,9 @@ impl MirMachine {
                 }
                 Ok(v)
             }
-            Some(StdlibResult::NeedsAsyncDispatch(op)) => self.exec_async_op(op),
-            Some(StdlibResult::NeedsCallbackDispatch(op)) => self.exec_parallel_op(op),
+            Some(Ok(StdlibResult::NeedsAsyncDispatch(op))) => self.exec_async_op(op),
+            Some(Ok(StdlibResult::NeedsCallbackDispatch(op))) => self.exec_parallel_op(op),
+            Some(Err(err)) => Err(MirSignal::RuntimeError(err.code, err.message)),
             None => Err(MirSignal::Panic(format!(
                 "no function `{}` in stdlib module `{}`",
                 name, module

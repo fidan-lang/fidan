@@ -296,6 +296,36 @@ pub static CODES: &[DiagnosticCode] = &[
         title: "permission denied",
         category: "io",
     },
+    DiagnosticCode {
+        code: "R3005",
+        title: "invalid JSON input",
+        category: "io",
+    },
+    DiagnosticCode {
+        code: "R3006",
+        title: "failed to list directory",
+        category: "io",
+    },
+    DiagnosticCode {
+        code: "R3007",
+        title: "failed to copy file",
+        category: "io",
+    },
+    DiagnosticCode {
+        code: "R3008",
+        title: "failed to rename path",
+        category: "io",
+    },
+    DiagnosticCode {
+        code: "R3009",
+        title: "failed to delete file",
+        category: "io",
+    },
+    DiagnosticCode {
+        code: "R3010",
+        title: "failed to create directory",
+        category: "io",
+    },
     // ── Runtime: sandbox / security ──────────────────────────────────────────
     DiagnosticCode {
         code: "R4001",
@@ -411,6 +441,12 @@ mod tests {
     // These `const` assertions fail to compile if the code is removed from CODES.
 
     const _R0001: DiagCode = diag_code!("R0001");
+    const _R3005: DiagCode = diag_code!("R3005");
+    const _R3006: DiagCode = diag_code!("R3006");
+    const _R3007: DiagCode = diag_code!("R3007");
+    const _R3008: DiagCode = diag_code!("R3008");
+    const _R3009: DiagCode = diag_code!("R3009");
+    const _R3010: DiagCode = diag_code!("R3010");
     const _R9001: DiagCode = diag_code!("R9001");
     const _E0000: DiagCode = diag_code!("E0000");
     const _E0401: DiagCode = diag_code!("E0401");

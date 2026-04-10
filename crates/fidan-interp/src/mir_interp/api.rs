@@ -18,7 +18,7 @@ use fidan_mir::{BlockId, FunctionId, LocalId, MirProgram, Terminator};
 use fidan_runtime::FidanValue;
 use fidan_source::SourceMap;
 
-use super::{CallFrame, MirMachine, MirSignal, RunError, TestResult};
+use super::{CallFrame, MirMachine, MirSignal, RunError, TestResult, route_signal_to_catch};
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -263,18 +263,17 @@ impl MirMachine {
                 match self.exec_instr(instr, frame) {
                     Ok(Some(ret)) => return Ok(Some(ret)),
                     Ok(None) => {}
-                    Err(MirSignal::Throw(v)) => {
-                        if let Some(catch_bb) = frame.catch_stack.pop() {
-                            frame.current_exception = Some(v);
+                    Err(signal) => match route_signal_to_catch(frame, signal) {
+                        Ok(Some((catch_bb, value))) => {
+                            frame.current_exception = Some(value);
                             prev_bb = Some(bb_id);
                             bb_id = catch_bb;
                             is_first_block = false;
                             continue 'outer;
-                        } else {
-                            return Err(MirSignal::Throw(v));
                         }
-                    }
-                    Err(e) => return Err(e),
+                        Ok(None) => {}
+                        Err(e) => return Err(e),
+                    },
                 }
             }
 
@@ -373,17 +372,16 @@ impl MirMachine {
                     match self.exec_instr(instr, frame) {
                         Ok(Some(ret)) => return Ok(Some(ret)),
                         Ok(None) => {}
-                        Err(MirSignal::Throw(v)) => {
-                            if let Some(catch_bb) = frame.catch_stack.pop() {
-                                frame.current_exception = Some(v);
+                        Err(signal) => match route_signal_to_catch(frame, signal) {
+                            Ok(Some((catch_bb, value))) => {
+                                frame.current_exception = Some(value);
                                 prev_bb = Some(bb_id);
                                 bb_id = catch_bb;
                                 continue 'outer;
-                            } else {
-                                return Err(MirSignal::Throw(v));
                             }
-                        }
-                        Err(e) => return Err(e),
+                            Ok(None) => {}
+                            Err(e) => return Err(e),
+                        },
                     }
                 }
                 // Body starts at ns_instr_count; skip already-executed body instrs.
@@ -397,17 +395,16 @@ impl MirMachine {
                 match self.exec_instr(instr, frame) {
                     Ok(Some(ret)) => return Ok(Some(ret)),
                     Ok(None) => {}
-                    Err(MirSignal::Throw(v)) => {
-                        if let Some(catch_bb) = frame.catch_stack.pop() {
-                            frame.current_exception = Some(v);
+                    Err(signal) => match route_signal_to_catch(frame, signal) {
+                        Ok(Some((catch_bb, value))) => {
+                            frame.current_exception = Some(value);
                             prev_bb = Some(bb_id);
                             bb_id = catch_bb;
                             continue 'outer;
-                        } else {
-                            return Err(MirSignal::Throw(v));
                         }
-                    }
-                    Err(e) => return Err(e),
+                        Ok(None) => {}
+                        Err(e) => return Err(e),
+                    },
                 }
             }
 

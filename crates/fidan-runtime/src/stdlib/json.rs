@@ -1,6 +1,8 @@
 use crate::{FidanDict, FidanHashSet, FidanString, FidanValue, OwnedRef, display};
+use fidan_diagnostics::diag_code;
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
+use super::StdlibRuntimeError;
 use super::common::{coerce_string, list_value, string_value};
 
 const FIDAN_TAG_KEY: &str = "$fidan";
@@ -173,10 +175,16 @@ fn fidan_to_json(value: &FidanValue) -> serde_json::Value {
     }
 }
 
-fn parse_json_text(text: &str) -> FidanValue {
+fn soft_arg(args: &[FidanValue], index: usize) -> bool {
+    args.get(index).is_some_and(FidanValue::truthy)
+}
+
+fn parse_json_text(text: &str) -> Result<FidanValue, StdlibRuntimeError> {
     serde_json::from_str::<serde_json::Value>(text)
         .map(json_to_fidan)
-        .unwrap_or(FidanValue::Nothing)
+        .map_err(|err| {
+            StdlibRuntimeError::new(diag_code!("R3005"), format!("failed to parse JSON: {err}"))
+        })
 }
 
 fn render_json_text(value: &FidanValue, pretty: bool) -> String {
@@ -188,48 +196,91 @@ fn render_json_text(value: &FidanValue, pretty: bool) -> String {
     }
 }
 
-fn load_json_file(path: &str) -> FidanValue {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|text| parse_json_text(&text))
-        .unwrap_or(FidanValue::Nothing)
+fn read_json_file_text(path: &str) -> Result<String, StdlibRuntimeError> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).map_err(|err| {
+        let code = if err.kind() == std::io::ErrorKind::PermissionDenied {
+            diag_code!("R3004")
+        } else {
+            diag_code!("R3001")
+        };
+        StdlibRuntimeError::new(code, format!("failed to open file `{path}`: {err}"))
+    })?;
+
+    let mut text = String::new();
+    file.read_to_string(&mut text).map_err(|err| {
+        let code = if err.kind() == std::io::ErrorKind::PermissionDenied {
+            diag_code!("R3004")
+        } else {
+            diag_code!("R3002")
+        };
+        StdlibRuntimeError::new(code, format!("failed to read file `{path}`: {err}"))
+    })?;
+
+    Ok(text)
+}
+
+fn load_json_file(path: &str, soft: bool) -> Result<FidanValue, StdlibRuntimeError> {
+    match read_json_file_text(path) {
+        Ok(text) => match parse_json_text(&text) {
+            Ok(value) => Ok(value),
+            Err(_) if soft => Ok(FidanValue::Nothing),
+            Err(err) => Err(err),
+        },
+        Err(_) if soft => Ok(FidanValue::Nothing),
+        Err(err) => Err(err),
+    }
 }
 
 fn dump_json_file(path: &str, value: &FidanValue, pretty: bool) -> bool {
     std::fs::write(path, render_json_text(value, pretty)).is_ok()
 }
 
-pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
+pub fn dispatch_result(
+    name: &str,
+    args: Vec<FidanValue>,
+) -> Option<Result<FidanValue, StdlibRuntimeError>> {
     match name {
         "parse" | "loads" => {
             let text = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
-            Some(parse_json_text(&text))
+            let soft = soft_arg(&args, 1);
+            Some(match parse_json_text(&text) {
+                Ok(value) => Ok(value),
+                Err(_) if soft => Ok(FidanValue::Nothing),
+                Err(err) => Err(err),
+            })
         }
         "load" | "readFile" | "read_file" => {
             let path = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
-            Some(load_json_file(&path))
+            let soft = soft_arg(&args, 1);
+            Some(load_json_file(&path, soft))
         }
         "stringify" | "dumps" => {
             let value = args.first().unwrap_or(&FidanValue::Nothing);
-            Some(string_value(&render_json_text(value, false)))
+            Some(Ok(string_value(&render_json_text(value, false))))
         }
         "dump" | "writeFile" | "write_file" => {
             let value = args.first().unwrap_or(&FidanValue::Nothing);
             let path = coerce_string(args.get(1).unwrap_or(&FidanValue::Nothing));
-            Some(FidanValue::Boolean(dump_json_file(&path, value, false)))
+            Some(Ok(FidanValue::Boolean(dump_json_file(&path, value, false))))
         }
         "pretty" | "prettyPrint" | "pretty_print" => {
             let value = args.first().unwrap_or(&FidanValue::Nothing);
-            Some(string_value(&render_json_text(value, true)))
+            Some(Ok(string_value(&render_json_text(value, true))))
         }
         "isValid" | "is_valid" => {
             let text = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
-            Some(FidanValue::Boolean(
+            Some(Ok(FidanValue::Boolean(
                 serde_json::from_str::<serde_json::Value>(&text).is_ok(),
-            ))
+            )))
         }
         _ => None,
     }
+}
+
+pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
+    dispatch_result(name, args)?.ok()
 }
 
 pub fn exported_names() -> &'static [&'static str] {
@@ -283,15 +334,66 @@ mod tests {
     }
 
     #[test]
-    fn invalid_json_returns_nothing_and_false() {
+    fn invalid_json_soft_mode_returns_nothing_and_false() {
         assert!(matches!(
-            dispatch("loads", vec![string_value("{not json")]),
+            dispatch(
+                "loads",
+                vec![string_value("{not json"), FidanValue::Boolean(true)],
+            ),
             Some(FidanValue::Nothing)
         ));
         assert!(matches!(
             dispatch("isValid", vec![string_value("{not json")]),
             Some(FidanValue::Boolean(false))
         ));
+    }
+
+    #[test]
+    fn invalid_json_raises_runtime_error_without_soft_flag() {
+        let err = dispatch_result("loads", vec![string_value("{not json")])
+            .expect("loads result")
+            .expect_err("expected invalid json error");
+        assert_eq!(err.code, diag_code!("R3005"));
+        assert!(err.message.contains("failed to parse JSON"));
+    }
+
+    #[test]
+    fn invalid_json_soft_flag_returns_nothing() {
+        let value = dispatch_result(
+            "loads",
+            vec![string_value("{not json"), FidanValue::Boolean(true)],
+        )
+        .expect("loads result")
+        .expect("expected soft parse to return a value");
+        assert!(matches!(value, FidanValue::Nothing));
+    }
+
+    #[test]
+    fn missing_json_file_raises_runtime_error_without_soft_flag() {
+        let path = std::env::temp_dir().join("fidan-runtime-json-missing-file.json");
+        let path_str = path.to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&path);
+
+        let err = dispatch_result("load", vec![string_value(&path_str)])
+            .expect("load result")
+            .expect_err("expected missing file error");
+        assert_eq!(err.code, diag_code!("R3001"));
+        assert!(err.message.contains("failed to open file"));
+    }
+
+    #[test]
+    fn missing_json_file_soft_flag_returns_nothing() {
+        let path = std::env::temp_dir().join("fidan-runtime-json-missing-soft.json");
+        let path_str = path.to_string_lossy().to_string();
+        let _ = std::fs::remove_file(&path);
+
+        let value = dispatch_result(
+            "load",
+            vec![string_value(&path_str), FidanValue::Boolean(true)],
+        )
+        .expect("load result")
+        .expect("expected soft load to return a value");
+        assert!(matches!(value, FidanValue::Nothing));
     }
 
     #[test]

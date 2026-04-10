@@ -449,6 +449,41 @@ print("ok")
 "#
 }
 
+fn io_runtime_error_catch_source(path: &str) -> String {
+    format!(
+        r#"use std.io
+
+action main {{
+    attempt {{
+        var value = io.readFile("{path}")
+        print("unexpected: {{value}}")
+    }} catch err {{
+        assert_eq(type(err), "string")
+        assert_eq(err.contains("R3001"), true)
+        assert_eq(err.contains("failed to open file"), true)
+        print("io-caught")
+    }}
+}}
+
+main()
+"#
+    )
+}
+
+fn json_runtime_error_unhandled_source(path: &str) -> String {
+    format!(
+        r#"use std.json
+
+action main {{
+    var value = json.load("{path}")
+    print("unexpected: {{value}}")
+}}
+
+main()
+"#
+    )
+}
+
 fn raw_string_source() -> &'static str {
     r#"assert_eq(r"literal \n {value}", "literal \\n \{value\}")
 print("ok")
@@ -1196,6 +1231,82 @@ fn json_roundtrip_llvm_aot_preserves_typed_dict_keys_and_hashsets() {
     );
     compile_program(&source, Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn io_runtime_error_cranelift_aot_is_catchable() {
+    let sandbox = temp_dir("fidan_io_runtime_error_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("io_runtime_error_smoke.exe")
+    } else {
+        sandbox.join("io_runtime_error_smoke")
+    };
+    let missing = sandbox.join("missing.txt");
+    let source = io_runtime_error_catch_source(&missing.display().to_string().replace('\\', "/"));
+    compile_program(&source, Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "io-caught");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn io_runtime_error_llvm_aot_is_catchable() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM IO runtime error smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_io_runtime_error_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("io_runtime_error_smoke.exe")
+    } else {
+        sandbox.join("io_runtime_error_smoke")
+    };
+    let missing = sandbox.join("missing.txt");
+    let source = io_runtime_error_catch_source(&missing.display().to_string().replace('\\', "/"));
+    compile_program(&source, Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "io-caught");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn json_runtime_error_cranelift_aot_reports_unhandled_failure() {
+    let sandbox = temp_dir("fidan_json_runtime_error_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("json_runtime_error_smoke.exe")
+    } else {
+        sandbox.join("json_runtime_error_smoke")
+    };
+    let missing = sandbox.join("missing.json");
+    let source =
+        json_runtime_error_unhandled_source(&missing.display().to_string().replace('\\', "/"));
+    compile_program(&source, Backend::Cranelift, &output);
+    run_compiled_binary_expect_failure(&output, "R3001");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn json_runtime_error_llvm_aot_reports_unhandled_failure() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM JSON runtime error smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_json_runtime_error_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("json_runtime_error_smoke.exe")
+    } else {
+        sandbox.join("json_runtime_error_smoke")
+    };
+    let missing = sandbox.join("missing.json");
+    let source =
+        json_runtime_error_unhandled_source(&missing.display().to_string().replace('\\', "/"));
+    compile_program(&source, Backend::Llvm, &output);
+    run_compiled_binary_expect_failure(&output, "R3001");
     fs::remove_dir_all(&sandbox).ok();
 }
 

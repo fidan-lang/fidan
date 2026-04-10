@@ -11,6 +11,22 @@ pub mod test_runner;
 pub mod time;
 
 use crate::FidanValue;
+use fidan_diagnostics::DiagCode;
+
+#[derive(Debug, Clone)]
+pub struct StdlibRuntimeError {
+    pub code: DiagCode,
+    pub message: String,
+}
+
+impl StdlibRuntimeError {
+    pub fn new(code: DiagCode, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
 
 #[derive(Clone, Copy)]
 struct ValueModuleInfo {
@@ -76,6 +92,20 @@ pub fn dispatch_value_module(
 ) -> Option<FidanValue> {
     let info = value_module(module)?;
     (info.dispatch)(name, args)
+}
+
+pub fn dispatch_json_module(
+    name: &str,
+    args: Vec<FidanValue>,
+) -> Option<Result<FidanValue, StdlibRuntimeError>> {
+    json::dispatch_result(name, args)
+}
+
+pub fn dispatch_io_module(
+    name: &str,
+    args: Vec<FidanValue>,
+) -> Option<Result<FidanValue, StdlibRuntimeError>> {
+    io::dispatch_result(name, args)
 }
 
 pub fn module_exports(module: &str) -> &'static [&'static str] {

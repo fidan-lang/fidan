@@ -1043,6 +1043,77 @@ appropriate privileges.
 "#,
         ),
 
+        "R3005" => Some(
+            r#"A JSON parsing helper received text that is not valid JSON.
+
+This can happen when the file contents are malformed, truncated, or contain a
+different format than expected.
+
+Example:
+
+    use std.json
+    var value = std.json.loads("{not json}")   # runtime error: invalid JSON
+
+Fix: validate or sanitize the input first, or use the optional `soft` flag when
+you explicitly want invalid JSON to produce `nothing` instead of a runtime
+error:
+
+    var maybe_value = std.json.loads(text, true)
+    var maybe_file = std.json.load("config.json", true)
+"#,
+        ),
+
+        "R3006" => Some(
+            r#"The program tried to enumerate the contents of a directory, but the
+operating system rejected the request.
+
+Common causes include a missing directory, a path that points to a file instead
+of a directory, or a permission problem.
+
+Use `attempt / catch` when directory listing is optional.
+"#,
+        ),
+
+        "R3007" => Some(
+            r#"A file copy operation failed.
+
+This can happen when the source file does not exist, the destination cannot be
+created, or the current user lacks the required permissions.
+
+Use `attempt / catch` to recover gracefully.
+"#,
+        ),
+
+        "R3008" => Some(
+            r#"A rename or move operation failed.
+
+This can happen when the source path does not exist, the destination is
+invalid, or the operating system denies the write.
+
+Use `attempt / catch` when rename failures are expected and recoverable.
+"#,
+        ),
+
+        "R3009" => Some(
+            r#"A file deletion operation failed.
+
+Common causes include a missing file, a locked file, or insufficient
+permissions.
+
+Use `attempt / catch` to handle optional cleanup paths.
+"#,
+        ),
+
+        "R3010" => Some(
+            r#"Creating a directory failed.
+
+This can happen when part of the target path is invalid, a parent component is
+actually a file, or the operating system denies the write.
+
+Use `attempt / catch` to recover from optional directory setup steps.
+"#,
+        ),
+
         // ── Runtime: sandbox / security ──────────────────────────────────────
         "R4001" => Some(
             r#"A file-system **read** operation was blocked by the active sandbox policy.
