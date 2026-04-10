@@ -2484,7 +2484,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 self.store_local_native(phi.result, value)?;
             } else {
                 let value = match incoming {
-                    Some(operand) => self.lower_operand(&operand)?,
+                    Some(operand) => self.lower_owned_operand(&operand)?,
                     None => self.call_ptr("fdn_box_nothing", &[])?,
                 };
                 self.store_local_boxed(phi.result, value)?;
@@ -2834,7 +2834,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     Vec::<BasicMetadataValueEnum<'ctx>>::with_capacity(mir_function.params.len());
                 for (index, param) in mir_function.params.iter().enumerate() {
                     let value = if let Some(arg) = args.get(index) {
-                        self.lower_operand(arg)?
+                        self.lower_owned_operand(arg)?
                     } else {
                         self.module
                             .trampoline_default_value(param.default.as_ref())?
@@ -3704,6 +3704,16 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 }
             }
             Operand::Const(literal) => self.lower_literal(literal),
+        }
+    }
+
+    fn lower_owned_operand(&mut self, operand: &Operand) -> Result<PointerValue<'ctx>> {
+        let value = self.lower_operand(operand)?;
+        match operand {
+            Operand::Local(local) if !is_native_scalar_ty(&self.local_type(*local)) => {
+                self.call_ptr("fdn_clone", &[value.into()])
+            }
+            _ => Ok(value),
         }
     }
 

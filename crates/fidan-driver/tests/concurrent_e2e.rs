@@ -4,8 +4,9 @@ use fidan_driver::{
     StripMode, compile, compile_file_to_mir,
 };
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn temp_dir(prefix: &str) -> PathBuf {
@@ -548,6 +549,31 @@ print("ok")
 "#
 }
 
+fn branching_input_loop_source() -> &'static str {
+    r#"action main {
+    while true {
+        const var command = input("cmd: ")
+        if command == "add" {
+            const var description = input("desc: ")
+            print(description)
+        } otherwise when command == "list" {
+            print("list")
+        } otherwise when command == "remove" {
+            const var description = input("remove: ")
+            print(description)
+        } otherwise when command == "exit" {
+            print("bye")
+            break
+        } else {
+            print("bad")
+        }
+    }
+}
+
+main()
+"#
+}
+
 fn top_level_scalar_globals_source() -> &'static str {
     r#"var a = 120000000
 var b = 60000000
@@ -701,6 +727,47 @@ fn run_compiled_binary_clean(bin: &Path, expected_stdout_fragment: &str) {
         "expected compiled program output to contain {expected_stdout_fragment:?}, got:\n{}",
         stdout,
     );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.trim().is_empty(),
+        "expected compiled program stderr to stay empty, got:\n{}",
+        stderr,
+    );
+}
+
+fn run_compiled_binary_with_input_clean(
+    bin: &Path,
+    input: &str,
+    expected_stdout_fragments: &[&str],
+) {
+    let mut child = Command::new(bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn compiled concurrent smoke binary with input");
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(input.as_bytes())
+            .expect("write stdin for compiled concurrent smoke binary");
+    }
+    let output = child
+        .wait_with_output()
+        .expect("wait for compiled concurrent smoke binary with input");
+    assert!(
+        output.status.success(),
+        "compiled concurrent smoke binary failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for fragment in expected_stdout_fragments {
+        assert!(
+            stdout.contains(fragment),
+            "expected compiled program output to contain {fragment:?}, got:\n{}",
+            stdout,
+        );
+    }
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.trim().is_empty(),
@@ -1113,6 +1180,39 @@ fn repeated_cranelift_aot_runs_keep_dynamic_asserts_stable() {
     };
     compile_program(repeated_assert_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean_n_times(&output, "ok", 12);
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn branching_input_loop_cranelift_aot_survives_invalid_then_exit() {
+    let sandbox = temp_dir("fidan_branch_input_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("branch_input.exe")
+    } else {
+        sandbox.join("branch_input")
+    };
+    compile_program(branching_input_loop_source(), Backend::Cranelift, &output);
+    run_compiled_binary_with_input_clean(&output, "bad\nexit\n", &["bad", "bye"]);
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn branching_input_loop_llvm_aot_survives_invalid_then_exit() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM branch-input AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_branch_input_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("branch_input.exe")
+    } else {
+        sandbox.join("branch_input")
+    };
+    compile_program(branching_input_loop_source(), Backend::Llvm, &output);
+    run_compiled_binary_with_input_clean(&output, "bad\nexit\n", &["bad", "bye"]);
     fs::remove_dir_all(&sandbox).ok();
 }
 

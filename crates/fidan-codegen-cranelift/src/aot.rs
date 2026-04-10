@@ -1178,6 +1178,10 @@ fn lower_function(
     // ── Entry block: bind function params to local variables ──────────────────
     builder.switch_to_block(cl_blocks[0]);
     {
+        for (index, var) in cl_vars.iter().enumerate() {
+            let zero = zero_value_for_local(&mut builder, local_types.get(&(index as u32)));
+            builder.def_var(*var, zero);
+        }
         let params: Vec<cranelift_codegen::ir::Value> = builder.block_params(cl_blocks[0]).to_vec();
         for (idx, param) in mf.params.iter().enumerate() {
             builder.def_var(cl_vars[param.local.0 as usize], params[idx]);
@@ -3683,8 +3687,13 @@ fn collect_phi_args(
         // Get the raw value and its MIR type.
         let (val, op_mir_ty) = match op {
             Some(Operand::Local(lid)) => {
-                let v = builder.use_var(cl_vars[lid.0 as usize]);
                 let ty = local_types.get(&lid.0).cloned().unwrap_or(MirTy::Dynamic);
+                let raw = builder.use_var(cl_vars[lid.0 as usize]);
+                let v = if !matches!(ty, MirTy::Error) && !is_scalar(&ty) {
+                    call_rt(module, builder, rt.clone_any, &[raw])?.unwrap_or(raw)
+                } else {
+                    raw
+                };
                 (v, ty)
             }
             Some(Operand::Const(MirLit::Int(n))) => (builder.ins().iconst(I64, n), MirTy::Integer),
@@ -3838,6 +3847,23 @@ fn lower_operand_boxed(
     }
 }
 
+fn lower_owned_boxed_operand(
+    builder: &mut FunctionBuilder<'_>,
+    cl_vars: &[Variable],
+    local_types: &HashMap<u32, MirTy>,
+    op: &Operand,
+    rt: &RuntimeDecls,
+    module: &mut ObjectModule,
+) -> Result<cranelift_codegen::ir::Value> {
+    let boxed = lower_operand_boxed(builder, cl_vars, local_types, op, rt, module)?;
+    match op {
+        Operand::Local(local) if matches!(local_types.get(&local.0), Some(ty) if !matches!(ty, MirTy::Error) && !is_scalar(ty)) => {
+            Ok(call_rt(module, builder, rt.clone_any, &[boxed])?.unwrap_or(boxed))
+        }
+        _ => Ok(boxed),
+    }
+}
+
 fn store_local_from_boxed(
     builder: &mut FunctionBuilder<'_>,
     cl_vars: &[Variable],
@@ -3937,7 +3963,7 @@ fn lower_operand_coerced(
             Ok(raw)
         }
     } else {
-        lower_operand_boxed(builder, cl_vars, local_types, op, rt, module)
+        lower_owned_boxed_operand(builder, cl_vars, local_types, op, rt, module)
     }
 }
 
