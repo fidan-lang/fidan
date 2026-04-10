@@ -12,6 +12,39 @@ compiler releases.
 
 ---
 
+## [1.0.9] — 2026-04-10
+
+### Added
+- Owned operand handling across the evaluator, improving correctness of value ownership and usage in expressions and input loops.
+- Support for constant object fields via `const var` syntax, including parser support and enforcement in type checking.
+- Extended standard library capabilities for file and JSON handling:
+  - File operations now include structured error handling for read, write, append, delete, and directory management.
+  - JSON parsing and file loading support soft error handling, returning `nothing` when enabled.
+  - Dispatch functions now return `Result<FidanValue, StdlibRuntimeError>` for more explicit error propagation.
+- Improved diagnostics and language tooling:
+  - `HashSet` support in receiver chain diagnostics and completions.
+  - Enhanced hover rendering with richer type name markdown.
+  - Improved method arity validation for built-in types.
+- Expanded test coverage for object field semantics, standard library argument validation, and diagnostics.
+
+### Changed
+- Parser and type checker now distinguish between mutable and constant object fields, preventing reassignment and enforcing stricter type guarantees.
+- Standard library parameter validation now handles optional and variadic arguments more consistently across functions.
+- Completion and diagnostic pipelines now include `HashSet` members and methods, improving editor feedback and correctness.
+- Internal refactoring of diagnostic and hover-related utilities to improve maintainability and clarity.
+
+### Fixed
+- Cross-module hover resolution in VSCode now correctly handles nested member access.
+- `HashSet` iteration behavior corrected to ensure consistent runtime semantics.
+
+### Tests
+- Added tests for constant object field declarations and invalid assignment scenarios.
+- Added tests for standard library argument type validation across multiple literal and parameter configurations.
+- Added tests for `HashSet` diagnostics, completions, and method handling.
+- Added tests for file and JSON handling, including error propagation and soft-failure modes.
+
+---
+
 ## [1.0.8] — 2026-04-10
 
 ### Added
@@ -46,6 +79,8 @@ compiler releases.
 - Runtime and stdlib edge cases around dict/hashset/string/time/io helpers,
   external value handling, and release-smoke filesystem flows now have aligned
   behavior and regression coverage.
+
+---
 
 ## [1.0.7] — 2026-04-08
 
@@ -274,7 +309,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.8...HEAD
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.9...HEAD
+[1.0.9]: https://github.com/fidan-lang/fidan/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/fidan-lang/fidan/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/fidan-lang/fidan/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/fidan-lang/fidan/compare/v1.0.5...v1.0.6
