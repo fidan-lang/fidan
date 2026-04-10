@@ -1775,7 +1775,18 @@ impl LanguageServer for FidanLsp {
             ModuleDoc(Url, String),
             Plain(String),            // detail string, ready to return
             CrossDoc(String, String), // (type_name, member_name) to search across docs
-            ImportDoc(Url, String),   // (import_file_url, symbol_name) — for `module.Type`
+            MemberAccess {
+                receiver_type: String,
+                member_name: String,
+                receiver_chain: Option<(Vec<String>, u32, crate::symbols::SymbolTable)>,
+            },
+            ReceiverChain {
+                segments: Vec<String>,
+                visible_offset: u32,
+                symbol_table: crate::symbols::SymbolTable,
+                member_name: String,
+            },
+            ImportDoc(Url, String), // (import_file_url, symbol_name) — for `module.Type`
             WildcardImport(Vec<Url>, String),
             NotFound,
         }
@@ -1852,7 +1863,41 @@ impl LanguageServer for FidanLsp {
                 {
                     HoverLookup::DocEntry(uri.clone(), entry.clone())
                 } else {
-                    HoverLookup::CrossDoc(site.receiver_type.clone(), site.member_name.clone())
+                    let receiver_chain = if cur_span.start > 0
+                        && doc.text.as_bytes().get(cur_span.start as usize - 1) == Some(&b'.')
+                    {
+                        let dot_pos = cur_span.start - 1;
+                        let segments =
+                            dotted_receiver_segments(&doc.identifier_spans, &doc.text, dot_pos);
+                        if segments.is_empty() {
+                            None
+                        } else {
+                            Some((segments, dot_pos, doc.symbol_table.clone()))
+                        }
+                    } else {
+                        None
+                    };
+                    HoverLookup::MemberAccess {
+                        receiver_type: site.receiver_type.clone(),
+                        member_name: site.member_name.clone(),
+                        receiver_chain,
+                    }
+                }
+            } else if cur_span.start > 0
+                && doc.text.as_bytes().get(cur_span.start as usize - 1) == Some(&b'.')
+            {
+                let dot_pos = cur_span.start - 1;
+                let recv_chain =
+                    dotted_receiver_segments(&doc.identifier_spans, &doc.text, dot_pos);
+                if !recv_chain.is_empty() {
+                    HoverLookup::ReceiverChain {
+                        segments: recv_chain,
+                        visible_offset: dot_pos,
+                        symbol_table: doc.symbol_table.clone(),
+                        member_name: cur_name.clone(),
+                    }
+                } else {
+                    HoverLookup::NotFound
                 }
             } else if is_type_name_context(doc.text.as_str(), *cur_span)
                 && let Some(detail) = type_name_hover_markdown(cur_name.as_str())
@@ -1959,6 +2004,73 @@ impl LanguageServer for FidanLsp {
                         None => entry.detail,
                     },
                     None => return Ok(None),
+                }
+            }
+            HoverLookup::MemberAccess {
+                receiver_type,
+                member_name,
+                receiver_chain,
+            } => match self.resolve_member_cross_doc(&receiver_type, &member_name) {
+                Some((doc_uri, entry)) => match self.store.get(&doc_uri) {
+                    Some(doc) => {
+                        append_doc_comment_to_hover(entry.detail.clone(), &doc.text, entry.span)
+                    }
+                    None => entry.detail,
+                },
+                None => {
+                    let Some((segments, visible_offset, symbol_table)) = receiver_chain else {
+                        return Ok(None);
+                    };
+                    let receiver_ty = match self.resolve_receiver_chain_type_name(
+                        &symbol_table,
+                        &segments,
+                        visible_offset,
+                    ) {
+                        Some(ty) => ty,
+                        None => return Ok(None),
+                    };
+                    match self.resolve_member_cross_doc(&receiver_ty, &member_name) {
+                        Some((doc_uri, entry)) => match self.store.get(&doc_uri) {
+                            Some(doc) => append_doc_comment_to_hover(
+                                entry.detail.clone(),
+                                &doc.text,
+                                entry.span,
+                            ),
+                            None => entry.detail,
+                        },
+                        None => return Ok(None),
+                    }
+                }
+            },
+            HoverLookup::ReceiverChain {
+                segments,
+                visible_offset,
+                symbol_table,
+                member_name,
+            } => {
+                let receiver_ty = match self.resolve_receiver_chain_type_name(
+                    &symbol_table,
+                    &segments,
+                    visible_offset,
+                ) {
+                    Some(ty) => ty,
+                    None => return Ok(None),
+                };
+
+                if let Some(entry) = symbol_table.get(&format!("{}.{}", receiver_ty, member_name)) {
+                    entry.detail.clone()
+                } else {
+                    match self.resolve_member_cross_doc(&receiver_ty, &member_name) {
+                        Some((doc_uri, entry)) => match self.store.get(&doc_uri) {
+                            Some(doc) => append_doc_comment_to_hover(
+                                entry.detail.clone(),
+                                &doc.text,
+                                entry.span,
+                            ),
+                            None => entry.detail,
+                        },
+                        None => return Ok(None),
+                    }
                 }
             }
             HoverLookup::ImportDoc(url, name) => {
@@ -5903,6 +6015,243 @@ Holder.compass.
 
             assert!(items.iter().any(|item| item.label == "contains"));
             assert!(items.iter().any(|item| item.label == "insert"));
+        });
+    }
+
+    #[test]
+    fn hover_resolves_hashset_members_through_local_object_fields() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let uri = Url::parse("file:///hashset_nested_hover.fdn").expect("document uri");
+            let text = "object StorageManager {\n    var tasks oftype hashset oftype string = hashset()\n}\n\naction main {\n    var storage = StorageManager()\n    storage.tasks.isEmpty()\n}\n";
+            backend.refresh(&uri, 1, text).await;
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+            let offset = text.find("isEmpty").expect("isEmpty offset") as u32;
+            let position =
+                convert::span_to_range(&file, Span::new(FileId(0), offset, offset + 1)).start;
+
+            let hover = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("hover result")
+            .expect("hover contents");
+
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markdown hover contents");
+            };
+            assert!(markup.value.contains("hashset.isEmpty() -> boolean"));
+        });
+    }
+
+    #[test]
+    fn hover_resolves_object_fields_through_local_object_fields() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let uri = Url::parse("file:///field_nested_hover.fdn").expect("document uri");
+            let text = "object StorageManager {\n    var tasks oftype hashset oftype string = hashset()\n}\n\naction main {\n    var storage = StorageManager()\n    storage.tasks.isEmpty()\n}\n";
+            backend.refresh(&uri, 1, text).await;
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+            let offset = text.find("tasks.isEmpty").expect("tasks offset") as u32;
+            let position =
+                convert::span_to_range(&file, Span::new(FileId(0), offset, offset + 1)).start;
+
+            let hover = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("hover result")
+            .expect("hover contents");
+
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markdown hover contents");
+            };
+            assert!(markup.value.contains("StorageManager.tasks: hashset oftype string"));
+        });
+    }
+
+    #[test]
+    fn hover_resolves_hashset_members_through_imported_object_fields() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let storage_uri = Url::parse("file:///storage_manager_hover.fdn").expect("storage uri");
+            let storage_text =
+                "object StorageManager {\n    var tasks oftype hashset oftype string = hashset()\n}\n";
+            backend
+                .store
+                .insert(storage_uri.clone(), background_doc(&storage_uri, storage_text));
+
+            let main_uri = Url::parse("file:///storage_main_hover.fdn").expect("main uri");
+            let main_text = "use storage_manager_hover as storage_mod\n\naction main {\n    var storage = storage_mod.StorageManager()\n    storage.tasks.isEmpty()\n}\n";
+            let analysis = analysis::analyze(main_text, main_uri.as_str());
+            let mut doc = Document {
+                version: 1,
+                text: main_text.to_string(),
+                diagnostics: analysis.diagnostics.clone(),
+                semantic_tokens: analysis.semantic_tokens,
+                symbol_table: analysis.symbol_table,
+                identifier_spans: analysis.identifier_spans,
+                imports: HashMap::from([("storage_mod".to_string(), storage_uri.clone())]),
+                direct_imports: HashMap::new(),
+                wildcard_imports: vec![],
+                stdlib_imports: HashMap::new(),
+                stdlib_direct_imports: HashMap::new(),
+                stdlib_call_sites: analysis.stdlib_call_sites.clone(),
+                inlay_hint_sites: analysis.inlay_hint_sites,
+                member_access_sites: analysis.member_access_sites,
+            };
+
+            for site in &analysis.imported_constructor_call_sites {
+                let ret_type = imported_constructor_type_name(
+                    &backend.store,
+                    &doc.imports,
+                    &doc.direct_imports,
+                    site,
+                )
+                .expect("imported constructor type");
+                patch_var_inferred_type(&mut doc, &site.var_name, site.decl_span, &ret_type, true);
+            }
+
+            backend.store.insert(main_uri.clone(), doc);
+
+            let file = SourceFile::new(FileId(0), main_uri.as_str(), main_text);
+            let offset = main_text.find("isEmpty").expect("isEmpty offset") as u32;
+            let position =
+                convert::span_to_range(&file, Span::new(FileId(0), offset, offset + 1)).start;
+
+            let hover = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: main_uri.clone() },
+                        position,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("hover result")
+            .expect("hover contents");
+
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markdown hover contents");
+            };
+            assert!(markup.value.contains("hashset.isEmpty() -> boolean"));
+        });
+    }
+
+    #[test]
+    fn hover_resolves_object_fields_through_imported_object_fields() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let storage_uri =
+                Url::parse("file:///storage_manager_field_hover.fdn").expect("storage uri");
+            let storage_text =
+                "object StorageManager {\n    var tasks oftype hashset oftype string = hashset()\n}\n";
+            backend
+                .store
+                .insert(storage_uri.clone(), background_doc(&storage_uri, storage_text));
+
+            let main_uri = Url::parse("file:///storage_main_field_hover.fdn").expect("main uri");
+            let main_text = "use storage_manager_field_hover as storage_mod\n\naction main {\n    var storage = storage_mod.StorageManager()\n    storage.tasks.isEmpty()\n}\n";
+            let analysis = analysis::analyze(main_text, main_uri.as_str());
+            let mut doc = Document {
+                version: 1,
+                text: main_text.to_string(),
+                diagnostics: analysis.diagnostics.clone(),
+                semantic_tokens: analysis.semantic_tokens,
+                symbol_table: analysis.symbol_table,
+                identifier_spans: analysis.identifier_spans,
+                imports: HashMap::from([("storage_mod".to_string(), storage_uri.clone())]),
+                direct_imports: HashMap::new(),
+                wildcard_imports: vec![],
+                stdlib_imports: HashMap::new(),
+                stdlib_direct_imports: HashMap::new(),
+                stdlib_call_sites: analysis.stdlib_call_sites.clone(),
+                inlay_hint_sites: analysis.inlay_hint_sites,
+                member_access_sites: analysis.member_access_sites,
+            };
+
+            for site in &analysis.imported_constructor_call_sites {
+                let ret_type = imported_constructor_type_name(
+                    &backend.store,
+                    &doc.imports,
+                    &doc.direct_imports,
+                    site,
+                )
+                .expect("imported constructor type");
+                patch_var_inferred_type(&mut doc, &site.var_name, site.decl_span, &ret_type, true);
+            }
+
+            backend.store.insert(main_uri.clone(), doc);
+
+            let file = SourceFile::new(FileId(0), main_uri.as_str(), main_text);
+            let offset = main_text.find("tasks.isEmpty").expect("tasks offset") as u32;
+            let position =
+                convert::span_to_range(&file, Span::new(FileId(0), offset, offset + 1)).start;
+
+            let hover = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier {
+                            uri: main_uri.clone(),
+                        },
+                        position,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("hover result")
+            .expect("hover contents");
+
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markdown hover contents");
+            };
+            assert!(markup.value.contains("StorageManager.tasks: hashset oftype string"));
         });
     }
 
