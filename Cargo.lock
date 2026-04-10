@@ -1239,7 +1239,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-llvm-helper"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "anyhow",
  "clap",
