@@ -383,6 +383,55 @@ fn cli_trace_modes_have_distinct_output_shapes() {
 }
 
 #[test]
+fn full_trace_prefers_failing_inner_call_location() {
+    let file = make_temp_program(
+        "trace_inner_callsite",
+        r#"object StorageManager {
+  var tasks oftype hashset oftype string = hashset()
+
+  action loadData returns boolean {
+        var dyn oftype dynamic = this.tasks
+        return dyn.noSuchMethod()
+  }
+}
+
+action main {
+  var sm = StorageManager()
+  sm.loadData()
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("run")
+        .arg(&file)
+        .args(["--trace", "full"])
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan inner-call trace demo");
+    std::fs::remove_file(&file).ok();
+
+    assert!(!output.status.success(), "trace demo should fail");
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let file_text = file.display().to_string();
+    assert!(
+        stderr.contains("loadData(this = <StorageManager>)"),
+        "full trace should render the failing inner frame:\n{stderr}"
+    );
+    assert!(
+        stderr.contains(&format!("{file_text}:6:")),
+        "full trace should point the innermost frame at the failing call inside loadData:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("main()"),
+        "full trace should still preserve caller frames:\n{stderr}"
+    );
+}
+
+#[test]
 fn interpreted_env_args_exclude_host_cli_args() {
     let file = make_temp_program(
         "env_args_empty",

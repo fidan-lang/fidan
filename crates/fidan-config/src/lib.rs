@@ -997,6 +997,72 @@ pub fn infer_receiver_member(
         .map(|spec| spec.info)
 }
 
+pub fn receiver_method_arity_bounds(
+    receiver_kind: ReceiverBuiltinKind,
+    name: &str,
+) -> Option<(usize, Option<usize>)> {
+    let canonical = infer_receiver_member(receiver_kind, name)?.canonical_name;
+
+    match receiver_kind {
+        ReceiverBuiltinKind::Integer | ReceiverBuiltinKind::Float => match canonical {
+            "abs" | "sqrt" | "floor" | "ceil" | "round" | "toFloat" | "toInt" | "toString" => {
+                Some((0, Some(0)))
+            }
+            _ => None,
+        },
+        ReceiverBuiltinKind::Boolean => match canonical {
+            "toString" => Some((0, Some(0))),
+            _ => None,
+        },
+        ReceiverBuiltinKind::String => match canonical {
+            "len" | "byteLen" | "lower" | "upper" | "capitalize" | "trim" | "trimStart"
+            | "trimEnd" | "lines" | "chars" => Some((0, Some(0))),
+            "split" | "join" | "contains" | "startsWith" | "endsWith" | "indexOf"
+            | "lastIndexOf" => Some((1, Some(1))),
+            "replace" | "replaceAll" => Some((2, Some(2))),
+            _ => None,
+        },
+        ReceiverBuiltinKind::List => match canonical {
+            "len" | "isEmpty" | "first" | "last" | "reverse" | "reversed" | "sort" | "flatten"
+            | "toString" => Some((0, Some(0))),
+            "get" | "contains" | "indexOf" | "find" | "firstWhere" | "forEach" | "map"
+            | "filter" | "remove" | "reduce" => Some((1, Some(1))),
+            "join" => Some((0, Some(1))),
+            "append" | "extend" => Some((1, None)),
+            "slice" => Some((0, Some(3))),
+            _ => None,
+        },
+        ReceiverBuiltinKind::Dict => match canonical {
+            "len" | "isEmpty" | "keys" | "values" | "entries" | "toString" => Some((0, Some(0))),
+            "get" | "containsKey" | "remove" => Some((1, Some(1))),
+            "set" => Some((2, Some(2))),
+            _ => None,
+        },
+        ReceiverBuiltinKind::HashSet => match canonical {
+            "len" | "isEmpty" | "toList" | "toString" => Some((0, Some(0))),
+            "insert" | "remove" | "contains" | "union" | "intersect" | "diff" => Some((1, Some(1))),
+            _ => None,
+        },
+        ReceiverBuiltinKind::Shared => match canonical {
+            "get" | "weak" => Some((0, Some(0))),
+            "set" => Some((1, Some(1))),
+            _ => None,
+        },
+        ReceiverBuiltinKind::WeakShared => match canonical {
+            "upgrade" | "isAlive" => Some((0, Some(0))),
+            _ => None,
+        },
+        ReceiverBuiltinKind::Function => match canonical {
+            "name" => Some((0, Some(0))),
+            _ => None,
+        },
+        ReceiverBuiltinKind::Handle
+        | ReceiverBuiltinKind::Nothing
+        | ReceiverBuiltinKind::Dynamic
+        | ReceiverBuiltinKind::Pending => None,
+    }
+}
+
 pub fn type_name_info(name: &str) -> Option<&'static BuiltinInfo> {
     LANGUAGE_TYPE_NAMES.iter().find(|info| info.name == name)
 }
@@ -1016,7 +1082,7 @@ mod tests {
         BuiltinSemantic, LANGUAGE_BUILTINS, LANGUAGE_DECORATORS, LANGUAGE_TYPE_NAMES,
         ReceiverBuiltinKind, ReceiverMethodOp, ReceiverReturnKind, builtin_info,
         builtin_return_kind, builtin_semantic, decorator_info, editor_symbol_info,
-        infer_receiver_member, type_name_info,
+        infer_receiver_member, receiver_method_arity_bounds, type_name_info,
     };
 
     #[test]
@@ -1098,6 +1164,22 @@ mod tests {
         assert_eq!(list_reversed.canonical_name, "reversed");
 
         assert!(infer_receiver_member(ReceiverBuiltinKind::String, "filter").is_none());
+    }
+
+    #[test]
+    fn receiver_method_arity_bounds_follow_canonical_aliases() {
+        assert_eq!(
+            receiver_method_arity_bounds(ReceiverBuiltinKind::HashSet, "add"),
+            Some((1, Some(1)))
+        );
+        assert_eq!(
+            receiver_method_arity_bounds(ReceiverBuiltinKind::List, "add"),
+            Some((1, None))
+        );
+        assert_eq!(
+            receiver_method_arity_bounds(ReceiverBuiltinKind::Dict, "has"),
+            Some((1, Some(1)))
+        );
     }
 
     #[test]

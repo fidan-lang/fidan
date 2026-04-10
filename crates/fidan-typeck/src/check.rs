@@ -6,7 +6,7 @@ use fidan_ast::{
 };
 use fidan_config::{
     BUILTIN_BINDINGS, BUILTIN_DECORATORS, BuiltinReturnKind, BuiltinSemantic, builtin_info,
-    builtin_return_kind, builtin_semantic,
+    builtin_return_kind, builtin_semantic, receiver_method_arity_bounds,
 };
 use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
@@ -2688,72 +2688,7 @@ impl TypeChecker {
         field: Symbol,
     ) -> Option<(usize, Option<usize>)> {
         let receiver_kind = self.receiver_builtin_kind(ty)?;
-        let method_name = self.interner.resolve(field);
-        let canonical = fidan_stdlib::infer_receiver_member(receiver_kind, method_name.as_ref())?
-            .canonical_name;
-
-        match receiver_kind {
-            ReceiverBuiltinKind::Integer | ReceiverBuiltinKind::Float => match canonical {
-                "abs" | "sqrt" | "floor" | "ceil" | "round" | "toFloat" | "toInt" | "toString" => {
-                    Some((0, Some(0)))
-                }
-                _ => None,
-            },
-            ReceiverBuiltinKind::Boolean => match canonical {
-                "toString" => Some((0, Some(0))),
-                _ => None,
-            },
-            ReceiverBuiltinKind::String => match canonical {
-                "len" | "byteLen" | "lower" | "upper" | "capitalize" | "trim" | "trimStart"
-                | "trimEnd" | "lines" | "chars" => Some((0, Some(0))),
-                "split" | "join" | "contains" | "startsWith" | "endsWith" | "indexOf"
-                | "lastIndexOf" => Some((1, Some(1))),
-                "replace" | "replaceAll" => Some((2, Some(2))),
-                _ => None,
-            },
-            ReceiverBuiltinKind::List => match canonical {
-                "len" | "isEmpty" | "first" | "last" | "reverse" | "reversed" | "sort"
-                | "flatten" | "toString" => Some((0, Some(0))),
-                "get" | "contains" | "indexOf" | "find" | "firstWhere" | "forEach" | "map"
-                | "filter" | "remove" | "reduce" => Some((1, Some(1))),
-                "join" => Some((0, Some(1))),
-                "append" | "extend" => Some((1, None)),
-                "slice" => Some((0, Some(3))),
-                _ => None,
-            },
-            ReceiverBuiltinKind::Dict => match canonical {
-                "len" | "isEmpty" | "keys" | "values" | "entries" | "toString" => {
-                    Some((0, Some(0)))
-                }
-                "get" | "containsKey" | "remove" => Some((1, Some(1))),
-                "set" => Some((2, Some(2))),
-                _ => None,
-            },
-            ReceiverBuiltinKind::HashSet => match canonical {
-                "len" | "isEmpty" | "toList" | "toString" => Some((0, Some(0))),
-                "insert" | "remove" | "contains" | "union" | "intersect" | "diff" => {
-                    Some((1, Some(1)))
-                }
-                _ => None,
-            },
-            ReceiverBuiltinKind::Shared => match canonical {
-                "get" | "weak" => Some((0, Some(0))),
-                "set" => Some((1, Some(1))),
-                _ => None,
-            },
-            ReceiverBuiltinKind::WeakShared => match canonical {
-                "upgrade" | "isAlive" => Some((0, Some(0))),
-                _ => None,
-            },
-            ReceiverBuiltinKind::Function => match canonical {
-                "name" => Some((0, Some(0))),
-                _ => None,
-            },
-            ReceiverBuiltinKind::Handle
-            | ReceiverBuiltinKind::Nothing
-            | ReceiverBuiltinKind::Dynamic
-            | ReceiverBuiltinKind::Pending => None,
-        }
+        receiver_method_arity_bounds(receiver_kind, self.interner.resolve(field).as_ref())
     }
 
     fn check_builtin_method_arguments(

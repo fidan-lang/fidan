@@ -47,7 +47,9 @@ use fidan_codegen_cranelift::{
 pub struct TraceFrame {
     /// Function name with argument values: `inner(msg = "iteration 42")`
     pub label: String,
-    /// Source location of the call site (`"file.fdn:2:5"`), if known.
+    /// Best-known source location for this frame.
+    /// For the innermost frame this prefers the failing instruction span; for
+    /// callers it remains the call site (`"file.fdn:2:5"`).
     pub location: Option<String>,
 }
 
@@ -97,6 +99,13 @@ fn route_signal_to_catch(
             frame.catch_stack.push(catch_bb);
             Err(other)
         }
+    }
+}
+
+fn instruction_trace_span(instr: &Instr) -> Option<Span> {
+    match instr {
+        Instr::Call { span, .. } => Some(*span),
+        _ => None,
     }
 }
 
@@ -262,6 +271,10 @@ pub struct MirMachine {
     /// Span of the `Instr::Call` currently being dispatched — consumed by the
     /// next `call_function` invocation to annotate its stack frame.
     pending_call_span: Option<Span>,
+    /// Best-known source span of the first uncaught signal currently bubbling
+    /// up the stack. Used to annotate the innermost frame with the precise
+    /// failing call location instead of the function entry callsite.
+    panic_site_span: Option<Span>,
     /// Call stack snapshot at the point of the first uncaught panic/throw,
     /// innermost first.  Populated once and never overwritten.
     panic_trace: Vec<TraceFrame>,
@@ -528,6 +541,7 @@ impl MirMachine {
             source_map,
             call_stack: Vec::new(),
             pending_call_span: None,
+            panic_site_span: None,
             panic_trace: Vec::new(),
             stdlib_free_fns: Arc::new(stdlib_free_fns),
             stdlib_modules: Arc::new(stdlib_modules),
@@ -592,6 +606,14 @@ impl MirMachine {
         Ok(())
     }
 
+    fn format_trace_location(&self, span: Option<Span>) -> Option<String> {
+        span.map(|s| {
+            let file = self.source_map.get(s.file);
+            let (line, col) = file.line_col(s.start);
+            format!("{}:{}:{}", file.name, line, col)
+        })
+    }
+
     fn prepare_call_args(
         &self,
         func: &MirFunction,
@@ -651,6 +673,7 @@ impl MirMachine {
             source_map: Arc::clone(&self.source_map),
             call_stack: Vec::new(),
             pending_call_span: None,
+            panic_site_span: None,
             panic_trace: Vec::new(),
             stdlib_free_fns: self.stdlib_free_fns.clone(),
             stdlib_modules: self.stdlib_modules.clone(),
@@ -1207,13 +1230,15 @@ impl MirMachine {
         // since it is not a user-visible named function.
         // Labels are formatted HERE — only on the error path.
         if result.is_err() && self.panic_trace.is_empty() {
+            let innermost_index = self.call_stack.len().saturating_sub(1);
+            let panic_site_span = self.panic_site_span;
             self.panic_trace = self
                 .call_stack
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| *i > 0) // skip entry function at index 0
                 .rev()
-                .map(|(_, (call_fn_id, span, call_args))| {
+                .map(|(i, (call_fn_id, span, call_args))| {
                     let func = self.program.function(*call_fn_id);
                     let fn_name = self.sym_str(func.name).to_string();
                     let arg_parts: Vec<String> = func
@@ -1236,14 +1261,16 @@ impl MirMachine {
                     } else {
                         format!("{fn_name}({})", arg_parts.join(", "))
                     };
-                    let location = span.map(|s| {
-                        let file = self.source_map.get(s.file);
-                        let (line, col) = file.line_col(s.start);
-                        format!("{}:{}:{}", file.name, line, col)
-                    });
+                    let effective_span = if i == innermost_index {
+                        panic_site_span.or(*span)
+                    } else {
+                        *span
+                    };
+                    let location = self.format_trace_location(effective_span);
                     TraceFrame { label, location }
                 })
                 .collect();
+            self.panic_site_span = None;
         }
 
         self.call_stack.pop();
@@ -1313,19 +1340,26 @@ impl MirMachine {
 
             for i in 0..instr_count {
                 let instr = &program.function(fn_id).block(bb_id).instructions[i];
+                let signal_span = instruction_trace_span(instr);
                 match self.exec_instr(instr, frame) {
                     Ok(Some(ret)) => return Ok(Some(ret)),
                     Ok(None) => {}
-                    Err(signal) => match route_signal_to_catch(frame, signal) {
-                        Ok(Some((catch_bb, value))) => {
-                            frame.current_exception = Some(value);
-                            prev_bb = Some(bb_id);
-                            bb_id = catch_bb;
-                            continue 'outer;
+                    Err(signal) => {
+                        if self.panic_site_span.is_none() {
+                            self.panic_site_span = signal_span;
                         }
-                        Ok(None) => {}
-                        Err(e) => return Err(e),
-                    },
+                        match route_signal_to_catch(frame, signal) {
+                            Ok(Some((catch_bb, value))) => {
+                                self.panic_site_span = None;
+                                frame.current_exception = Some(value);
+                                prev_bb = Some(bb_id);
+                                bb_id = catch_bb;
+                                continue 'outer;
+                            }
+                            Ok(None) => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
                 }
             }
 

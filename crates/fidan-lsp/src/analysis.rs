@@ -66,8 +66,8 @@ pub struct ImportedConstructorCallSite {
 }
 
 #[derive(Debug, Clone)]
-pub struct IdentifierReceiverMethodCallSite {
-    pub receiver_name: String,
+pub struct ReceiverChainMethodCallSite {
+    pub receiver_segments: Vec<String>,
     pub receiver_offset: u32,
     pub method_name: String,
     pub arg_tys: Vec<String>,
@@ -124,9 +124,9 @@ pub struct AnalysisResult {
     /// `var x = Foo()` or `var x = module.Foo()` sites that may resolve to an
     /// imported object constructor once imported documents are loaded.
     pub imported_constructor_call_sites: Vec<ImportedConstructorCallSite>,
-    /// Method calls on identifier receivers. Used after imported-constructor
-    /// variable patching so calls like `storage.addTask(...)` can be validated.
-    pub identifier_receiver_method_call_sites: Vec<IdentifierReceiverMethodCallSite>,
+    /// Method calls on receiver chains. Used after imported-constructor
+    /// variable patching so calls like `storage.tasks.contains(...)` can be validated.
+    pub receiver_chain_method_call_sites: Vec<ReceiverChainMethodCallSite>,
     /// Positions where the editor should display synthetic type labels.
     pub inlay_hint_sites: Vec<InlayHintSite>,
     /// Typed member-access spans used for hover on literal/computed receivers.
@@ -153,6 +153,8 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
         .iter()
         .filter_map(|tok| match &tok.kind {
             TokenKind::Ident(sym) => Some((tok.span, interner.resolve(*sym).to_string())),
+            TokenKind::This => Some((tok.span, "this".to_string())),
+            TokenKind::Parent => Some((tok.span, "parent".to_string())),
             TokenKind::Shared => Some((tok.span, "Shared".to_string())),
             TokenKind::Pending => Some((tok.span, "Pending".to_string())),
             TokenKind::Weak => Some((tok.span, "WeakShared".to_string())),
@@ -188,8 +190,8 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     );
     let imported_constructor_call_sites =
         extract_imported_constructor_call_sites(&module, &interner);
-    let identifier_receiver_method_call_sites =
-        extract_identifier_receiver_method_call_sites(&module, &typed, &interner);
+    let receiver_chain_method_call_sites =
+        extract_receiver_chain_method_call_sites(&module, &typed, &interner);
 
     // ── Inlay hints (untyped var declarations) ────────────────────────────────
     let inlay_hint_sites =
@@ -227,7 +229,7 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
         stdlib_var_call_sites,
         stdlib_call_sites,
         imported_constructor_call_sites,
-        identifier_receiver_method_call_sites,
+        receiver_chain_method_call_sites,
         inlay_hint_sites,
         member_access_sites,
     }
@@ -1194,11 +1196,11 @@ fn maybe_push_imported_constructor_call(
     }
 }
 
-fn extract_identifier_receiver_method_call_sites(
+fn extract_receiver_chain_method_call_sites(
     module: &Module,
     typed: &fidan_typeck::TypedModule,
     interner: &SymbolInterner,
-) -> Vec<IdentifierReceiverMethodCallSite> {
+) -> Vec<ReceiverChainMethodCallSite> {
     let mut out = Vec::new();
 
     for &iid in &module.items {
@@ -1206,49 +1208,47 @@ fn extract_identifier_receiver_method_call_sites(
             Item::VarDecl {
                 init: Some(init), ..
             } => {
-                collect_expr_identifier_receiver_method_call_sites(
+                collect_expr_receiver_chain_method_call_sites(
                     module, typed, interner, *init, &mut out,
                 );
             }
             Item::ActionDecl {
                 params,
-                return_ty: _,
                 body,
                 decorators,
                 ..
             }
             | Item::ExtensionAction {
                 params,
-                return_ty: _,
                 body,
                 decorators,
                 ..
             } => {
                 for param in params {
                     if let Some(default) = param.default {
-                        collect_expr_identifier_receiver_method_call_sites(
+                        collect_expr_receiver_chain_method_call_sites(
                             module, typed, interner, default, &mut out,
                         );
                     }
                 }
                 for decorator in decorators {
                     for arg in &decorator.args {
-                        collect_expr_identifier_receiver_method_call_sites(
+                        collect_expr_receiver_chain_method_call_sites(
                             module, typed, interner, arg.value, &mut out,
                         );
                     }
                 }
-                collect_stmt_identifier_receiver_method_call_sites(
+                collect_stmt_receiver_chain_method_call_sites(
                     module, typed, interner, body, &mut out,
                 );
             }
             Item::TestDecl { body, .. } => {
-                collect_stmt_identifier_receiver_method_call_sites(
+                collect_stmt_receiver_chain_method_call_sites(
                     module, typed, interner, body, &mut out,
                 );
             }
             Item::Stmt(stmt_id) => {
-                collect_stmt_identifier_receiver_method_call_sites(
+                collect_stmt_receiver_chain_method_call_sites(
                     module,
                     typed,
                     interner,
@@ -1267,19 +1267,19 @@ fn extract_identifier_receiver_method_call_sites(
                     {
                         for param in params {
                             if let Some(default) = param.default {
-                                collect_expr_identifier_receiver_method_call_sites(
+                                collect_expr_receiver_chain_method_call_sites(
                                     module, typed, interner, default, &mut out,
                                 );
                             }
                         }
                         for decorator in decorators {
                             for arg in &decorator.args {
-                                collect_expr_identifier_receiver_method_call_sites(
+                                collect_expr_receiver_chain_method_call_sites(
                                     module, typed, interner, arg.value, &mut out,
                                 );
                             }
                         }
-                        collect_stmt_identifier_receiver_method_call_sites(
+                        collect_stmt_receiver_chain_method_call_sites(
                             module, typed, interner, body, &mut out,
                         );
                     }
@@ -1292,18 +1292,18 @@ fn extract_identifier_receiver_method_call_sites(
     out
 }
 
-fn collect_stmt_identifier_receiver_method_call_sites(
+fn collect_stmt_receiver_chain_method_call_sites(
     module: &Module,
     typed: &fidan_typeck::TypedModule,
     interner: &SymbolInterner,
     stmts: &[fidan_ast::StmtId],
-    out: &mut Vec<IdentifierReceiverMethodCallSite>,
+    out: &mut Vec<ReceiverChainMethodCallSite>,
 ) {
     for &sid in stmts {
         match module.arena.get_stmt(sid) {
             fidan_ast::Stmt::VarDecl { init, .. } => {
                 if let Some(init) = init {
-                    collect_expr_identifier_receiver_method_call_sites(
+                    collect_expr_receiver_chain_method_call_sites(
                         module, typed, interner, *init, out,
                     );
                 }
@@ -1314,17 +1314,13 @@ fn collect_stmt_identifier_receiver_method_call_sites(
             }
             | fidan_ast::Stmt::Expr { expr: value, .. }
             | fidan_ast::Stmt::Panic { value, .. } => {
-                collect_expr_identifier_receiver_method_call_sites(
-                    module, typed, interner, *value, out,
-                );
+                collect_expr_receiver_chain_method_call_sites(module, typed, interner, *value, out);
             }
             fidan_ast::Stmt::Assign { target, value, .. } => {
-                collect_expr_identifier_receiver_method_call_sites(
+                collect_expr_receiver_chain_method_call_sites(
                     module, typed, interner, *target, out,
                 );
-                collect_expr_identifier_receiver_method_call_sites(
-                    module, typed, interner, *value, out,
-                );
+                collect_expr_receiver_chain_method_call_sites(module, typed, interner, *value, out);
             }
             fidan_ast::Stmt::ActionDecl {
                 params,
@@ -1334,21 +1330,19 @@ fn collect_stmt_identifier_receiver_method_call_sites(
             } => {
                 for param in params {
                     if let Some(default) = param.default {
-                        collect_expr_identifier_receiver_method_call_sites(
+                        collect_expr_receiver_chain_method_call_sites(
                             module, typed, interner, default, out,
                         );
                     }
                 }
                 for decorator in decorators {
                     for arg in &decorator.args {
-                        collect_expr_identifier_receiver_method_call_sites(
+                        collect_expr_receiver_chain_method_call_sites(
                             module, typed, interner, arg.value, out,
                         );
                     }
                 }
-                collect_stmt_identifier_receiver_method_call_sites(
-                    module, typed, interner, body, out,
-                );
+                collect_stmt_receiver_chain_method_call_sites(module, typed, interner, body, out);
             }
             fidan_ast::Stmt::If {
                 condition,
@@ -1357,21 +1351,21 @@ fn collect_stmt_identifier_receiver_method_call_sites(
                 else_body,
                 ..
             } => {
-                collect_expr_identifier_receiver_method_call_sites(
+                collect_expr_receiver_chain_method_call_sites(
                     module, typed, interner, *condition, out,
                 );
-                collect_stmt_identifier_receiver_method_call_sites(
+                collect_stmt_receiver_chain_method_call_sites(
                     module, typed, interner, then_body, out,
                 );
                 for else_if in else_ifs {
-                    collect_expr_identifier_receiver_method_call_sites(
+                    collect_expr_receiver_chain_method_call_sites(
                         module,
                         typed,
                         interner,
                         else_if.condition,
                         out,
                     );
-                    collect_stmt_identifier_receiver_method_call_sites(
+                    collect_stmt_receiver_chain_method_call_sites(
                         module,
                         typed,
                         interner,
@@ -1380,7 +1374,7 @@ fn collect_stmt_identifier_receiver_method_call_sites(
                     );
                 }
                 if let Some(else_body) = else_body {
-                    collect_stmt_identifier_receiver_method_call_sites(
+                    collect_stmt_receiver_chain_method_call_sites(
                         module, typed, interner, else_body, out,
                     );
                 }
@@ -1388,40 +1382,36 @@ fn collect_stmt_identifier_receiver_method_call_sites(
             fidan_ast::Stmt::Check {
                 scrutinee, arms, ..
             } => {
-                collect_expr_identifier_receiver_method_call_sites(
+                collect_expr_receiver_chain_method_call_sites(
                     module, typed, interner, *scrutinee, out,
                 );
                 for arm in arms {
-                    collect_expr_identifier_receiver_method_call_sites(
+                    collect_expr_receiver_chain_method_call_sites(
                         module,
                         typed,
                         interner,
                         arm.pattern,
                         out,
                     );
-                    collect_stmt_identifier_receiver_method_call_sites(
+                    collect_stmt_receiver_chain_method_call_sites(
                         module, typed, interner, &arm.body, out,
                     );
                 }
             }
             fidan_ast::Stmt::For { iterable, body, .. }
             | fidan_ast::Stmt::ParallelFor { iterable, body, .. } => {
-                collect_expr_identifier_receiver_method_call_sites(
+                collect_expr_receiver_chain_method_call_sites(
                     module, typed, interner, *iterable, out,
                 );
-                collect_stmt_identifier_receiver_method_call_sites(
-                    module, typed, interner, body, out,
-                );
+                collect_stmt_receiver_chain_method_call_sites(module, typed, interner, body, out);
             }
             fidan_ast::Stmt::While {
                 condition, body, ..
             } => {
-                collect_expr_identifier_receiver_method_call_sites(
+                collect_expr_receiver_chain_method_call_sites(
                     module, typed, interner, *condition, out,
                 );
-                collect_stmt_identifier_receiver_method_call_sites(
-                    module, typed, interner, body, out,
-                );
+                collect_stmt_receiver_chain_method_call_sites(module, typed, interner, body, out);
             }
             fidan_ast::Stmt::Attempt {
                 body,
@@ -1430,11 +1420,9 @@ fn collect_stmt_identifier_receiver_method_call_sites(
                 finally,
                 ..
             } => {
-                collect_stmt_identifier_receiver_method_call_sites(
-                    module, typed, interner, body, out,
-                );
+                collect_stmt_receiver_chain_method_call_sites(module, typed, interner, body, out);
                 for catch in catches {
-                    collect_stmt_identifier_receiver_method_call_sites(
+                    collect_stmt_receiver_chain_method_call_sites(
                         module,
                         typed,
                         interner,
@@ -1443,19 +1431,19 @@ fn collect_stmt_identifier_receiver_method_call_sites(
                     );
                 }
                 if let Some(otherwise) = otherwise {
-                    collect_stmt_identifier_receiver_method_call_sites(
+                    collect_stmt_receiver_chain_method_call_sites(
                         module, typed, interner, otherwise, out,
                     );
                 }
                 if let Some(finally) = finally {
-                    collect_stmt_identifier_receiver_method_call_sites(
+                    collect_stmt_receiver_chain_method_call_sites(
                         module, typed, interner, finally, out,
                     );
                 }
             }
             fidan_ast::Stmt::ConcurrentBlock { tasks, .. } => {
                 for task in tasks {
-                    collect_stmt_identifier_receiver_method_call_sites(
+                    collect_stmt_receiver_chain_method_call_sites(
                         module, typed, interner, &task.body, out,
                     );
                 }
@@ -1468,20 +1456,35 @@ fn collect_stmt_identifier_receiver_method_call_sites(
     }
 }
 
-fn collect_expr_identifier_receiver_method_call_sites(
+fn receiver_chain_segments(
+    module: &Module,
+    interner: &SymbolInterner,
+    expr_id: fidan_ast::ExprId,
+) -> Option<(Vec<String>, u32)> {
+    match module.arena.get_expr(expr_id) {
+        Expr::Ident { name, span } => Some((vec![interner.resolve(*name).to_string()], span.start)),
+        Expr::This { span } => Some((vec!["this".to_string()], span.start)),
+        Expr::Field { object, field, .. } => {
+            let (mut segments, offset) = receiver_chain_segments(module, interner, *object)?;
+            segments.push(interner.resolve(*field).to_string());
+            Some((segments, offset))
+        }
+        _ => None,
+    }
+}
+
+fn collect_expr_receiver_chain_method_call_sites(
     module: &Module,
     typed: &fidan_typeck::TypedModule,
     interner: &SymbolInterner,
     expr_id: fidan_ast::ExprId,
-    out: &mut Vec<IdentifierReceiverMethodCallSite>,
+    out: &mut Vec<ReceiverChainMethodCallSite>,
 ) {
     match module.arena.get_expr(expr_id) {
         Expr::Call { callee, args, span } => {
             if let Expr::Field { object, field, .. } = module.arena.get_expr(*callee)
-                && let Expr::Ident {
-                    name,
-                    span: recv_span,
-                } = module.arena.get_expr(*object)
+                && let Some((receiver_segments, receiver_offset)) =
+                    receiver_chain_segments(module, interner, *object)
             {
                 let arg_tys = args
                     .iter()
@@ -1493,19 +1496,17 @@ fn collect_expr_identifier_receiver_method_call_sites(
                             .unwrap_or_else(|| "dynamic".to_string())
                     })
                     .collect();
-                out.push(IdentifierReceiverMethodCallSite {
-                    receiver_name: interner.resolve(*name).to_string(),
-                    receiver_offset: recv_span.start,
+                out.push(ReceiverChainMethodCallSite {
+                    receiver_segments,
+                    receiver_offset,
                     method_name: interner.resolve(*field).to_string(),
                     arg_tys,
                     span: *span,
                 });
             }
-            collect_expr_identifier_receiver_method_call_sites(
-                module, typed, interner, *callee, out,
-            );
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *callee, out);
             for arg in args {
-                collect_expr_identifier_receiver_method_call_sites(
+                collect_expr_receiver_chain_method_call_sites(
                     module, typed, interner, arg.value, out,
                 );
             }
@@ -1522,8 +1523,8 @@ fn collect_expr_identifier_receiver_method_call_sites(
             value: rhs,
             ..
         } => {
-            collect_expr_identifier_receiver_method_call_sites(module, typed, interner, *lhs, out);
-            collect_expr_identifier_receiver_method_call_sites(module, typed, interner, *rhs, out);
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *lhs, out);
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *rhs, out);
         }
         Expr::Unary { operand, .. }
         | Expr::Spawn { expr: operand, .. }
@@ -1534,19 +1535,15 @@ fn collect_expr_identifier_receiver_method_call_sites(
         | Expr::Index {
             object: operand, ..
         } => {
-            collect_expr_identifier_receiver_method_call_sites(
-                module, typed, interner, *operand, out,
-            );
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *operand, out);
             if let Expr::Index { index, .. } = module.arena.get_expr(expr_id) {
-                collect_expr_identifier_receiver_method_call_sites(
-                    module, typed, interner, *index, out,
-                );
+                collect_expr_receiver_chain_method_call_sites(module, typed, interner, *index, out);
             }
         }
         Expr::StringInterp { parts, .. } => {
             for part in parts {
                 if let fidan_ast::InterpPart::Expr(expr_id) = part {
-                    collect_expr_identifier_receiver_method_call_sites(
+                    collect_expr_receiver_chain_method_call_sites(
                         module, typed, interner, *expr_id, out,
                     );
                 }
@@ -1558,48 +1555,36 @@ fn collect_expr_identifier_receiver_method_call_sites(
             else_val,
             ..
         } => {
-            collect_expr_identifier_receiver_method_call_sites(
-                module, typed, interner, *condition, out,
-            );
-            collect_expr_identifier_receiver_method_call_sites(
-                module, typed, interner, *then_val, out,
-            );
-            collect_expr_identifier_receiver_method_call_sites(
-                module, typed, interner, *else_val, out,
-            );
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *condition, out);
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *then_val, out);
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *else_val, out);
         }
         Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
             for &element in elements {
-                collect_expr_identifier_receiver_method_call_sites(
+                collect_expr_receiver_chain_method_call_sites(
                     module, typed, interner, element, out,
                 );
             }
         }
         Expr::Dict { entries, .. } => {
             for &(key, value) in entries {
-                collect_expr_identifier_receiver_method_call_sites(
-                    module, typed, interner, key, out,
-                );
-                collect_expr_identifier_receiver_method_call_sites(
-                    module, typed, interner, value, out,
-                );
+                collect_expr_receiver_chain_method_call_sites(module, typed, interner, key, out);
+                collect_expr_receiver_chain_method_call_sites(module, typed, interner, value, out);
             }
         }
         Expr::Check {
             scrutinee, arms, ..
         } => {
-            collect_expr_identifier_receiver_method_call_sites(
-                module, typed, interner, *scrutinee, out,
-            );
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *scrutinee, out);
             for arm in arms {
-                collect_expr_identifier_receiver_method_call_sites(
+                collect_expr_receiver_chain_method_call_sites(
                     module,
                     typed,
                     interner,
                     arm.pattern,
                     out,
                 );
-                collect_stmt_identifier_receiver_method_call_sites(
+                collect_stmt_receiver_chain_method_call_sites(
                     module, typed, interner, &arm.body, out,
                 );
             }
@@ -1611,23 +1596,15 @@ fn collect_expr_identifier_receiver_method_call_sites(
             step,
             ..
         } => {
-            collect_expr_identifier_receiver_method_call_sites(
-                module, typed, interner, *target, out,
-            );
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *target, out);
             if let Some(start) = start {
-                collect_expr_identifier_receiver_method_call_sites(
-                    module, typed, interner, *start, out,
-                );
+                collect_expr_receiver_chain_method_call_sites(module, typed, interner, *start, out);
             }
             if let Some(end) = end {
-                collect_expr_identifier_receiver_method_call_sites(
-                    module, typed, interner, *end, out,
-                );
+                collect_expr_receiver_chain_method_call_sites(module, typed, interner, *end, out);
             }
             if let Some(step) = step {
-                collect_expr_identifier_receiver_method_call_sites(
-                    module, typed, interner, *step, out,
-                );
+                collect_expr_receiver_chain_method_call_sites(module, typed, interner, *step, out);
             }
         }
         Expr::ListComp {
@@ -1636,14 +1613,10 @@ fn collect_expr_identifier_receiver_method_call_sites(
             filter,
             ..
         } => {
-            collect_expr_identifier_receiver_method_call_sites(
-                module, typed, interner, *element, out,
-            );
-            collect_expr_identifier_receiver_method_call_sites(
-                module, typed, interner, *iterable, out,
-            );
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *element, out);
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *iterable, out);
             if let Some(filter) = filter {
-                collect_expr_identifier_receiver_method_call_sites(
+                collect_expr_receiver_chain_method_call_sites(
                     module, typed, interner, *filter, out,
                 );
             }
@@ -1655,33 +1628,24 @@ fn collect_expr_identifier_receiver_method_call_sites(
             filter,
             ..
         } => {
-            collect_expr_identifier_receiver_method_call_sites(module, typed, interner, *key, out);
-            collect_expr_identifier_receiver_method_call_sites(
-                module, typed, interner, *value, out,
-            );
-            collect_expr_identifier_receiver_method_call_sites(
-                module, typed, interner, *iterable, out,
-            );
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *key, out);
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *value, out);
+            collect_expr_receiver_chain_method_call_sites(module, typed, interner, *iterable, out);
             if let Some(filter) = filter {
-                collect_expr_identifier_receiver_method_call_sites(
+                collect_expr_receiver_chain_method_call_sites(
                     module, typed, interner, *filter, out,
                 );
             }
         }
-        Expr::Lambda {
-            params,
-            return_ty: _,
-            body,
-            ..
-        } => {
+        Expr::Lambda { params, body, .. } => {
             for param in params {
                 if let Some(default) = param.default {
-                    collect_expr_identifier_receiver_method_call_sites(
+                    collect_expr_receiver_chain_method_call_sites(
                         module, typed, interner, default, out,
                     );
                 }
             }
-            collect_stmt_identifier_receiver_method_call_sites(module, typed, interner, body, out);
+            collect_stmt_receiver_chain_method_call_sites(module, typed, interner, body, out);
         }
         Expr::Ident { .. }
         | Expr::This { .. }

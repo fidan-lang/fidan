@@ -5,7 +5,8 @@ use crate::{
     symbols::SymbolEntry,
 };
 use fidan_config::{
-    BUILTIN_FUNCTIONS, BuiltinReturnKind, builtin_return_kind, decorator_info, editor_symbol_info,
+    BUILTIN_FUNCTIONS, BuiltinReturnKind, ReceiverBuiltinKind, builtin_return_kind, decorator_info,
+    editor_symbol_info, infer_receiver_member, receiver_method_arity_bounds, type_name_info,
 };
 use fidan_fmt::{FormatOptions, format_source, load_format_options_for_path};
 use fidan_source::{FileId, SourceFile, Span};
@@ -59,6 +60,7 @@ const COMPLETION_KEYWORDS: &[&str] = &[
     "Shared",
     "Pending",
     "WeakShared",
+    "hashset",
     "test",
     "enum",
     "tuple",
@@ -215,6 +217,26 @@ fn decorator_hover_markdown(name: &str) -> Option<String> {
 fn builtin_hover_markdown(name: &str) -> Option<String> {
     let info = editor_symbol_info(name)?;
     Some(format!("```fidan\n{}\n```\n\n{}", info.signature, info.doc))
+}
+
+fn type_name_hover_markdown(name: &str) -> Option<String> {
+    let info = type_name_info(name)?;
+    Some(format!("```fidan\n{}\n```\n\n{}", info.signature, info.doc))
+}
+
+fn is_type_name_context(text: &str, span: Span) -> bool {
+    let bytes = text.as_bytes();
+    let mut cursor = (span.start as usize).min(bytes.len());
+    while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+
+    let end = cursor;
+    while cursor > 0 && is_ident_byte(bytes[cursor - 1]) {
+        cursor -= 1;
+    }
+
+    matches!(text.get(cursor..end), Some("oftype" | "returns"))
 }
 
 fn is_ident_byte(byte: u8) -> bool {
@@ -482,11 +504,11 @@ impl FidanLsp {
             .get(uri)
             .map(|doc| doc.symbol_table.clone())
             .map(|symbol_table| {
-                self.check_identifier_receiver_method_diagnostics(
+                self.check_receiver_chain_method_diagnostics(
                     text,
                     uri,
                     &symbol_table,
-                    &result.identifier_receiver_method_call_sites,
+                    &result.receiver_chain_method_call_sites,
                 )
             })
             .unwrap_or_default();
@@ -525,12 +547,95 @@ impl FidanLsp {
             if let Some(result) = self.store.find_in_any_doc(&key) {
                 return Some(result);
             }
+            if let Some(result) = self.resolve_builtin_member_alias(&cur_type, member_name) {
+                return Some(result);
+            }
             // Follow the parent chain: get the Object entry for `cur_type`
             // from any open document and check its recorded parent class.
+            if builtin_receiver_info(&cur_type).is_some() {
+                return None;
+            }
             let (_, type_entry) = self.store.find_in_any_doc(&cur_type)?;
             cur_type = type_entry.parent_type_name?;
         }
         None
+    }
+
+    fn resolve_builtin_member_alias(
+        &self,
+        type_name: &str,
+        member_name: &str,
+    ) -> Option<(Url, SymbolEntry)> {
+        let (receiver_kind, canonical_type_name) = builtin_receiver_info(type_name)?;
+        let member = infer_receiver_member(receiver_kind, member_name)?;
+        let key = format!("{}.{}", canonical_type_name, member.canonical_name);
+        self.store.find_in_any_doc(&key)
+    }
+
+    fn type_name_is_known(&self, type_name: &str) -> bool {
+        self.store.find_in_any_doc(type_name).is_some() || type_name_info(type_name).is_some()
+    }
+
+    fn member_arity_bounds(
+        &self,
+        type_name: &str,
+        member_name: &str,
+        entry: &SymbolEntry,
+    ) -> (usize, Option<usize>) {
+        if let Some((receiver_kind, _)) = builtin_receiver_info(type_name)
+            && let Some(bounds) = receiver_method_arity_bounds(receiver_kind, member_name)
+        {
+            return bounds;
+        }
+
+        (
+            entry
+                .param_required
+                .iter()
+                .filter(|&&required| required)
+                .count(),
+            Some(entry.param_types.len()),
+        )
+    }
+
+    fn member_entry_result_type_name(
+        &self,
+        member_name: &str,
+        entry: &SymbolEntry,
+    ) -> Option<String> {
+        match &entry.kind {
+            SymKind::Object | SymKind::Enum => Some(member_name.to_string()),
+            SymKind::EnumVariant => entry.return_type.clone().or_else(|| entry.ty_name.clone()),
+            _ => entry.ty_name.clone(),
+        }
+    }
+
+    fn resolve_receiver_chain_type_name(
+        &self,
+        symbol_table: &crate::symbols::SymbolTable,
+        segments: &[String],
+        visible_offset: u32,
+    ) -> Option<String> {
+        let first = segments.first()?;
+        let mut current_type = {
+            let entry = symbol_table.lookup_visible(visible_offset, first.as_str())?;
+            match &entry.kind {
+                SymKind::Object | SymKind::Enum => first.clone(),
+                _ => entry.ty_name.clone()?,
+            }
+        };
+
+        for segment in segments.iter().skip(1) {
+            if let Some(entry) = symbol_table.get(&format!("{}.{}", current_type, segment)) {
+                current_type = self.member_entry_result_type_name(segment, entry)?;
+                continue;
+            }
+
+            let (_, entry) = self.resolve_member_cross_doc(&current_type, segment)?;
+            current_type = self.member_entry_result_type_name(segment, &entry)?;
+        }
+
+        Some(current_type)
     }
     /// Check cross-module field accesses and method calls that the single-file
     /// type checker couldn't verify because the parent / receiver type lives in
@@ -549,7 +654,7 @@ impl FidanLsp {
         for (type_name, member_name, span) in field_accesses {
             // Only emit when the type is loaded somewhere (avoids false
             // positives when the imported file hasn't been analysed yet).
-            if self.store.find_in_any_doc(type_name).is_none() {
+            if !self.type_name_is_known(type_name) {
                 continue;
             }
             if self
@@ -577,7 +682,7 @@ impl FidanLsp {
                 None => {
                     // Method doesn't exist anywhere — emit E0204 if the
                     // receiver type is known (i.e. we have definitive info).
-                    if self.store.find_in_any_doc(&site.receiver_ty).is_some() {
+                    if self.type_name_is_known(&site.receiver_ty) {
                         diags.push(Diagnostic {
                             range: convert::span_to_range(&file, site.span),
                             severity: Some(DiagnosticSeverity::ERROR),
@@ -592,8 +697,8 @@ impl FidanLsp {
                     }
                 }
                 Some((_, entry)) => {
-                    // Check that all required parameters are provided (E0301).
-                    let required_count = entry.param_required.iter().filter(|&&r| r).count();
+                    let (required_count, max_args) =
+                        self.member_arity_bounds(&site.receiver_ty, &site.method_name, &entry);
                     if site.arg_tys.len() < required_count {
                         diags.push(Diagnostic {
                             range: convert::span_to_range(&file, site.span),
@@ -608,7 +713,9 @@ impl FidanLsp {
                             ),
                             ..Default::default()
                         });
-                    } else if site.arg_tys.len() > entry.param_types.len() {
+                    } else if let Some(max_args) = max_args
+                        && site.arg_tys.len() > max_args
+                    {
                         diags.push(Diagnostic {
                             range: convert::span_to_range(&file, site.span),
                             severity: Some(DiagnosticSeverity::ERROR),
@@ -616,12 +723,8 @@ impl FidanLsp {
                             source: Some("fidan".into()),
                             message: format!(
                                 "expected {} argument{}, got {}",
-                                entry.param_types.len(),
-                                if entry.param_types.len() == 1 {
-                                    ""
-                                } else {
-                                    "s"
-                                },
+                                max_args,
+                                if max_args == 1 { "" } else { "s" },
                                 site.arg_tys.len()
                             ),
                             ..Default::default()
@@ -660,23 +763,22 @@ impl FidanLsp {
         diags
     }
 
-    fn check_identifier_receiver_method_diagnostics(
+    fn check_receiver_chain_method_diagnostics(
         &self,
         doc_text: &str,
         file_uri: &Url,
         symbol_table: &crate::symbols::SymbolTable,
-        call_sites: &[analysis::IdentifierReceiverMethodCallSite],
+        call_sites: &[analysis::ReceiverChainMethodCallSite],
     ) -> Vec<Diagnostic> {
         let file = SourceFile::new(FileId(0), file_uri.as_str(), doc_text);
         let mut diags = Vec::new();
 
         for site in call_sites {
-            let Some(receiver_entry) =
-                symbol_table.lookup_visible(site.receiver_offset, &site.receiver_name)
-            else {
-                continue;
-            };
-            let Some(receiver_ty) = receiver_entry.ty_name.as_ref() else {
+            let Some(receiver_ty) = self.resolve_receiver_chain_type_name(
+                symbol_table,
+                &site.receiver_segments,
+                site.receiver_offset,
+            ) else {
                 continue;
             };
             if symbol_table
@@ -686,9 +788,9 @@ impl FidanLsp {
                 continue;
             }
 
-            match self.resolve_member_cross_doc(receiver_ty, &site.method_name) {
+            match self.resolve_member_cross_doc(&receiver_ty, &site.method_name) {
                 None => {
-                    if self.store.find_in_any_doc(receiver_ty).is_some() {
+                    if self.type_name_is_known(&receiver_ty) {
                         diags.push(Diagnostic {
                             range: convert::span_to_range(&file, site.span),
                             severity: Some(DiagnosticSeverity::ERROR),
@@ -703,11 +805,8 @@ impl FidanLsp {
                     }
                 }
                 Some((_, entry)) => {
-                    let required_count = entry
-                        .param_required
-                        .iter()
-                        .filter(|&&required| required)
-                        .count();
+                    let (required_count, max_args) =
+                        self.member_arity_bounds(&receiver_ty, &site.method_name, &entry);
                     if site.arg_tys.len() < required_count {
                         diags.push(Diagnostic {
                             range: convert::span_to_range(&file, site.span),
@@ -722,7 +821,9 @@ impl FidanLsp {
                             ),
                             ..Default::default()
                         });
-                    } else if site.arg_tys.len() > entry.param_types.len() {
+                    } else if let Some(max_args) = max_args
+                        && site.arg_tys.len() > max_args
+                    {
                         diags.push(Diagnostic {
                             range: convert::span_to_range(&file, site.span),
                             severity: Some(DiagnosticSeverity::ERROR),
@@ -730,12 +831,8 @@ impl FidanLsp {
                             source: Some("fidan".into()),
                             message: format!(
                                 "expected {} argument{}, got {}",
-                                entry.param_types.len(),
-                                if entry.param_types.len() == 1 {
-                                    ""
-                                } else {
-                                    "s"
-                                },
+                                max_args,
+                                if max_args == 1 { "" } else { "s" },
                                 site.arg_tys.len()
                             ),
                             ..Default::default()
@@ -791,6 +888,24 @@ impl FidanLsp {
 
         build_remove_unused_imports_edits_for_text(uri.as_str(), &text, &diags)
     }
+}
+
+fn builtin_receiver_info(type_name: &str) -> Option<(ReceiverBuiltinKind, &'static str)> {
+    Some(match type_name {
+        "integer" => (ReceiverBuiltinKind::Integer, "integer"),
+        "float" => (ReceiverBuiltinKind::Float, "float"),
+        "boolean" => (ReceiverBuiltinKind::Boolean, "boolean"),
+        "string" => (ReceiverBuiltinKind::String, "string"),
+        "list" => (ReceiverBuiltinKind::List, "list"),
+        "dict" | "map" => (ReceiverBuiltinKind::Dict, "dict"),
+        "hashset" => (ReceiverBuiltinKind::HashSet, "hashset"),
+        "Shared" => (ReceiverBuiltinKind::Shared, "Shared"),
+        "WeakShared" => (ReceiverBuiltinKind::WeakShared, "WeakShared"),
+        "Pending" => (ReceiverBuiltinKind::Pending, "Pending"),
+        "action" => (ReceiverBuiltinKind::Function, "action"),
+        "nothing" => (ReceiverBuiltinKind::Nothing, "nothing"),
+        _ => return None,
+    })
 }
 
 struct ResolvedImports {
@@ -1739,6 +1854,10 @@ impl LanguageServer for FidanLsp {
                 } else {
                     HoverLookup::CrossDoc(site.receiver_type.clone(), site.member_name.clone())
                 }
+            } else if is_type_name_context(doc.text.as_str(), *cur_span)
+                && let Some(detail) = type_name_hover_markdown(cur_name.as_str())
+            {
+                HoverLookup::Plain(detail)
             } else if let Some(detail) = builtin_hover_markdown(cur_name.as_str()) {
                 HoverLookup::Plain(detail)
             } else if let Some(pn) = prev_name
@@ -2088,8 +2207,14 @@ impl LanguageServer for FidanLsp {
         // DashMap `Ref` (`doc`) is dropped before any cross-document call.
 
         enum DotResolution {
-            /// Receiver is a variable/object — use `collect_type_members`.
+            /// Receiver type was inferred locally without cross-document lookup.
             TypeName(String),
+            /// Receiver is a dotted chain that may need imported-doc lookup.
+            ReceiverChain {
+                segments: Vec<String>,
+                visible_offset: u32,
+                symbol_table: crate::symbols::SymbolTable,
+            },
             /// Receiver is a file-module alias import — show its top-level exports.
             ModuleAlias(Url),
             /// Receiver is a stdlib module alias — show its exported member names.
@@ -2230,22 +2355,18 @@ impl LanguageServer for FidanLsp {
                         } else if let Some(mod_name) = doc.stdlib_imports.get(first.as_str()) {
                             Some(DotResolution::StdLibModule(mod_name.clone()))
                         } else {
-                            resolve_dotted_receiver_type_name(
-                                &doc.symbol_table,
-                                &doc.identifier_spans,
-                                &doc.text,
-                                dot_pos,
-                            )
-                            .map(DotResolution::TypeName)
+                            Some(DotResolution::ReceiverChain {
+                                segments: recv_chain,
+                                visible_offset: dot_pos,
+                                symbol_table: doc.symbol_table.clone(),
+                            })
                         }
                     } else {
-                        resolve_dotted_receiver_type_name(
-                            &doc.symbol_table,
-                            &doc.identifier_spans,
-                            &doc.text,
-                            dot_pos,
-                        )
-                        .map(DotResolution::TypeName)
+                        Some(DotResolution::ReceiverChain {
+                            segments: recv_chain,
+                            visible_offset: dot_pos,
+                            symbol_table: doc.symbol_table.clone(),
+                        })
                     }
                 } else {
                     None
@@ -2556,6 +2677,59 @@ impl LanguageServer for FidanLsp {
                 DotResolution::TypeName(ty) => {
                     let members = self.store.collect_type_members(&ty);
                     let items: Vec<CompletionItem> = members
+                        .into_iter()
+                        .filter(|(name, _)| {
+                            member_prefix.is_empty() || name.starts_with(member_prefix)
+                        })
+                        .filter(|(name, _)| name != "new")
+                        .map(|(member, entry)| {
+                            let kind = Some(match &entry.kind {
+                                SymKind::Method => CompletionItemKind::METHOD,
+                                SymKind::Field => CompletionItemKind::FIELD,
+                                SymKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
+                                _ => CompletionItemKind::FIELD,
+                            });
+                            let insert_text =
+                                if matches!(entry.kind, SymKind::Method | SymKind::EnumVariant)
+                                    && !entry.param_types.is_empty()
+                                {
+                                    Some(format!("{}($0)", member))
+                                } else {
+                                    None
+                                };
+                            CompletionItem {
+                                label: member,
+                                kind,
+                                insert_text_format: insert_text
+                                    .as_ref()
+                                    .map(|_| InsertTextFormat::SNIPPET),
+                                insert_text,
+                                documentation: Some(Documentation::MarkupContent(MarkupContent {
+                                    kind: MarkupKind::Markdown,
+                                    value: entry.detail,
+                                })),
+                                ..Default::default()
+                            }
+                        })
+                        .collect();
+                    return Ok(Some(CompletionResponse::Array(items)));
+                }
+                DotResolution::ReceiverChain {
+                    segments,
+                    visible_offset,
+                    symbol_table,
+                } => {
+                    let Some(ty) = self.resolve_receiver_chain_type_name(
+                        &symbol_table,
+                        &segments,
+                        visible_offset,
+                    ) else {
+                        return Ok(None);
+                    };
+
+                    let items: Vec<CompletionItem> = self
+                        .store
+                        .collect_type_members(&ty)
                         .into_iter()
                         .filter(|(name, _)| {
                             member_prefix.is_empty() || name.starts_with(member_prefix)
@@ -3834,6 +4008,32 @@ struct MemberCompletionContext {
     member_span: Option<Span>,
 }
 
+fn triggered_dot_position(
+    identifier_spans: &[(Span, String)],
+    text: &str,
+    cursor: usize,
+    trigger: Option<&str>,
+) -> Option<u32> {
+    let src = text.as_bytes();
+
+    if cursor < src.len() && src.get(cursor) == Some(&b'.') {
+        return Some(cursor as u32);
+    }
+
+    if cursor > 0 && src.get(cursor.saturating_sub(1)) == Some(&b'.') {
+        return Some((cursor as u32).saturating_sub(1));
+    }
+
+    if trigger != Some(".") {
+        return None;
+    }
+
+    identifier_spans
+        .iter()
+        .rfind(|(span, _)| span.end == cursor as u32)
+        .map(|(span, _)| span.end)
+}
+
 fn member_completion_context(
     identifier_spans: &[(Span, String)],
     text: &str,
@@ -3842,9 +4042,9 @@ fn member_completion_context(
 ) -> Option<MemberCompletionContext> {
     let src = text.as_bytes();
 
-    if cursor > 0 && (trigger == Some(".") || src.get(cursor.saturating_sub(1)) == Some(&b'.')) {
+    if let Some(dot_pos) = triggered_dot_position(identifier_spans, text, cursor, trigger) {
         return Some(MemberCompletionContext {
-            dot_pos: (cursor as u32).saturating_sub(1),
+            dot_pos,
             partial: String::new(),
             member_span: None,
         });
@@ -4164,6 +4364,7 @@ mod tests {
         assert!(COMPLETION_KEYWORDS.contains(&"parallel"));
         assert!(COMPLETION_KEYWORDS.contains(&"enum"));
         assert!(COMPLETION_KEYWORDS.contains(&"handle"));
+        assert!(COMPLETION_KEYWORDS.contains(&"hashset"));
     }
 
     #[test]
@@ -4362,8 +4563,7 @@ action greet with (certain name oftype string) returns string {
     }
 
     #[test]
-    fn identifier_receiver_method_diagnostics_report_too_many_arguments_after_constructor_patching()
-    {
+    fn receiver_chain_method_diagnostics_report_too_many_arguments_after_constructor_patching() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -4420,16 +4620,134 @@ action greet with (certain name oftype string) returns string {
                 patch_var_inferred_type(&mut doc, &site.var_name, site.decl_span, &ret_type, true);
             }
 
-            let diags = backend.check_identifier_receiver_method_diagnostics(
+            let diags = backend.check_receiver_chain_method_diagnostics(
                 text,
                 &uri,
                 &doc.symbol_table,
-                &analysis.identifier_receiver_method_call_sites,
+                &analysis.receiver_chain_method_call_sites,
             );
 
             assert!(diags.iter().any(|diag| {
                 matches!(diag.code, Some(NumberOrString::String(ref code)) if code == "E0305")
                     && diag.message.contains("expected 1 argument, got 2")
+            }));
+        });
+    }
+
+    #[test]
+    fn receiver_chain_method_diagnostics_accept_builtin_aliases() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let uri = Url::parse("file:///hashset_alias_diag.fdn").expect("main uri");
+            let text = r#"object StorageManager {
+    var tasks oftype hashset oftype string = hashset()
+
+    action addTask with (certain name oftype string) {
+        this.tasks.add(name)
+    }
+}
+"#;
+            let analysis = analysis::analyze(text, uri.as_str());
+
+            backend.store.insert(
+                uri.clone(),
+                Document {
+                    version: 1,
+                    text: text.to_string(),
+                    diagnostics: analysis.diagnostics.clone(),
+                    semantic_tokens: analysis.semantic_tokens,
+                    symbol_table: analysis.symbol_table.clone(),
+                    identifier_spans: analysis.identifier_spans,
+                    imports: HashMap::new(),
+                    direct_imports: HashMap::new(),
+                    wildcard_imports: vec![],
+                    stdlib_imports: HashMap::new(),
+                    stdlib_direct_imports: HashMap::new(),
+                    stdlib_call_sites: analysis.stdlib_call_sites,
+                    inlay_hint_sites: analysis.inlay_hint_sites,
+                    member_access_sites: analysis.member_access_sites,
+                },
+            );
+
+            assert!(backend.resolve_member_cross_doc("hashset", "add").is_some());
+
+            let diags = backend.check_receiver_chain_method_diagnostics(
+                text,
+                &uri,
+                &analysis.symbol_table,
+                &analysis.receiver_chain_method_call_sites,
+            );
+
+            assert!(diags.iter().all(|diag| {
+                !matches!(diag.code, Some(NumberOrString::String(ref code)) if code == "E0204" || code == "E0301" || code == "E0305")
+            }));
+        });
+    }
+
+    #[test]
+    fn receiver_chain_method_diagnostics_report_missing_args_for_builtin_aliases() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let uri = Url::parse("file:///hashset_alias_missing_arg_diag.fdn").expect("main uri");
+            let text = r#"object StorageManager {
+    var tasks oftype hashset oftype string = hashset()
+
+    action addTask {
+        this.tasks.add()
+    }
+}
+"#;
+            let analysis = analysis::analyze(text, uri.as_str());
+
+            backend.store.insert(
+                uri.clone(),
+                Document {
+                    version: 1,
+                    text: text.to_string(),
+                    diagnostics: analysis.diagnostics.clone(),
+                    semantic_tokens: analysis.semantic_tokens,
+                    symbol_table: analysis.symbol_table.clone(),
+                    identifier_spans: analysis.identifier_spans,
+                    imports: HashMap::new(),
+                    direct_imports: HashMap::new(),
+                    wildcard_imports: vec![],
+                    stdlib_imports: HashMap::new(),
+                    stdlib_direct_imports: HashMap::new(),
+                    stdlib_call_sites: analysis.stdlib_call_sites,
+                    inlay_hint_sites: analysis.inlay_hint_sites,
+                    member_access_sites: analysis.member_access_sites,
+                },
+            );
+
+            let diags = backend.check_receiver_chain_method_diagnostics(
+                text,
+                &uri,
+                &analysis.symbol_table,
+                &analysis.receiver_chain_method_call_sites,
+            );
+
+            assert!(diags.iter().any(|diag| {
+                matches!(diag.code, Some(NumberOrString::String(ref code)) if code == "E0301")
+                    && diag
+                        .message
+                        .contains("not enough arguments for `add`: 1 required but 0 provided")
+            }));
+            assert!(diags.iter().all(|diag| {
+                !matches!(diag.code, Some(NumberOrString::String(ref code)) if code == "E0305")
             }));
         });
     }
@@ -4969,6 +5287,9 @@ Holder.compass.
         let handle = builtin_hover_markdown("handle").expect("missing handle hover doc");
         assert!(handle.contains("```fidan\nhandle\n```"));
         assert!(handle.contains("Opaque native handle type"));
+
+        let hashset = builtin_hover_markdown("hashset").expect("missing hashset hover doc");
+        assert!(hashset.contains("hashset(items?) -> hashset"));
     }
 
     #[test]
@@ -5049,7 +5370,7 @@ Holder.compass.
 
         let parse = stdlib_member_hover_markdown("json", "parse", None)
             .expect("missing std.json.parse doc");
-        assert!(parse.contains("std.json.parse(text) -> dynamic"));
+        assert!(parse.contains("std.json.parse(text, soft?) -> dynamic"));
     }
 
     #[test]
@@ -5271,7 +5592,7 @@ Holder.compass.
             let backend = service.inner();
 
             let uri = Url::parse("file:///type_hover.fdn").expect("document uri");
-            let text = "action main {\n    var tasks oftype list oftype string = []\n    var lookup oftype map oftype (string, integer) = {}\n}\n";
+            let text = "action main {\n    var tasks oftype list oftype string = []\n    var tags oftype hashset oftype string = hashset()\n    var lookup oftype map oftype (string, integer) = {}\n}\n";
             backend.refresh(&uri, 1, text).await;
             let file = SourceFile::new(FileId(0), uri.as_str(), text);
 
@@ -5324,6 +5645,327 @@ Holder.compass.
                 panic!("expected markdown hover contents for map");
             };
             assert!(map_markup.value.contains("map oftype (K, V)"));
+
+            let hashset_offset = text.find("hashset oftype string").expect("hashset offset") as u32;
+            let hashset_pos = convert::span_to_range(
+                &file,
+                Span::new(FileId(0), hashset_offset, hashset_offset + 1),
+            )
+            .start;
+            let hashset_hover = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position: hashset_pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("hashset hover result")
+            .expect("hashset hover contents");
+
+            let HoverContents::Markup(hashset_markup) = hashset_hover.contents else {
+                panic!("expected markdown hover contents for hashset");
+            };
+            assert!(hashset_markup.value.contains("hashset oftype T"));
+        });
+    }
+
+    #[test]
+    fn completion_resolves_hashset_members_for_typed_receivers() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let uri = Url::parse("file:///hashset_receiver_completion.fdn").expect("document uri");
+            let text = "action main {\n    var tags oftype hashset oftype string = hashset()\n    tags.\n}\n";
+            backend.refresh(&uri, 1, text).await;
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+            let offset = text.find("tags.").expect("tags dot offset") as u32 + "tags.".len() as u32;
+            let position = convert::span_to_range(&file, Span::new(FileId(0), offset, offset)).start;
+
+            let response = LanguageServer::completion(
+                backend,
+                CompletionParams {
+                    text_document_position: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                    context: Some(CompletionContext {
+                        trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+                        trigger_character: Some(".".to_string()),
+                    }),
+                },
+            )
+            .await
+            .expect("completion result")
+            .expect("completion items");
+
+            let CompletionResponse::Array(items) = response else {
+                panic!("expected completion array");
+            };
+
+            let contains = items
+                .iter()
+                .find(|item| item.label == "contains")
+                .expect("hashset contains completion");
+            let documentation = contains.documentation.as_ref().expect("contains doc");
+            let Documentation::MarkupContent(markup) = documentation else {
+                panic!("expected markdown documentation for hashset member");
+            };
+            assert!(markup.value.contains("hashset.contains"));
+            assert!(items.iter().any(|item| item.label == "insert"));
+            assert!(items.iter().any(|item| item.label == "isEmpty"));
+        });
+    }
+
+    #[test]
+    fn completion_resolves_hashset_members_for_dot_trigger_before_doc_updates() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let uri = Url::parse("file:///hashset_trigger_completion.fdn").expect("document uri");
+            let text = "action main {\n    var tags oftype hashset oftype string = hashset()\n    tags\n}\n";
+            backend.refresh(&uri, 1, text).await;
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+            let offset = text.find("tags\n").expect("tags offset") as u32 + "tags".len() as u32;
+            let position = convert::span_to_range(&file, Span::new(FileId(0), offset, offset)).start;
+
+            let response = LanguageServer::completion(
+                backend,
+                CompletionParams {
+                    text_document_position: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                    context: Some(CompletionContext {
+                        trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+                        trigger_character: Some(".".to_string()),
+                    }),
+                },
+            )
+            .await
+            .expect("completion result")
+            .expect("completion items");
+
+            let CompletionResponse::Array(items) = response else {
+                panic!("expected completion array");
+            };
+
+            assert!(items.iter().any(|item| item.label == "contains"));
+            assert!(items.iter().any(|item| item.label == "insert"));
+            assert!(items.iter().all(|item| item.label != "FILE_PATH"));
+        });
+    }
+
+    #[test]
+    fn completion_resolves_field_chain_members_during_trailing_dot_parse_error() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let uri = Url::parse("file:///hashset_trailing_dot_parse_error.fdn").expect("document uri");
+            let text = "object StorageManager {\n    var tasks oftype hashset oftype string = hashset()\n\n    action loadData returns boolean {\n        if not this.tasks. {\n            return true\n        }\n        return false\n    }\n}\n";
+            backend.refresh(&uri, 1, text).await;
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+            let offset = text.find("this.tasks.").expect("this.tasks offset") as u32
+                + "this.tasks.".len() as u32;
+            let position = convert::span_to_range(&file, Span::new(FileId(0), offset, offset)).start;
+
+            let response = LanguageServer::completion(
+                backend,
+                CompletionParams {
+                    text_document_position: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                    context: Some(CompletionContext {
+                        trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+                        trigger_character: Some(".".to_string()),
+                    }),
+                },
+            )
+            .await
+            .expect("completion result")
+            .expect("completion items");
+
+            let CompletionResponse::Array(items) = response else {
+                panic!("expected completion array");
+            };
+
+            assert!(items.iter().any(|item| item.label == "contains"));
+            assert!(items.iter().any(|item| item.label == "isEmpty"));
+            assert!(items.iter().all(|item| item.label != "FILE_PATH"));
+        });
+    }
+
+    #[test]
+    fn completion_resolves_hashset_members_through_imported_object_fields() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let storage_uri = Url::parse("file:///storage_manager.fdn").expect("storage uri");
+            let storage_text = "object StorageManager {\n    var tasks oftype hashset oftype string = hashset()\n}\n";
+            backend
+                .store
+                .insert(storage_uri.clone(), background_doc(&storage_uri, storage_text));
+
+            let main_uri = Url::parse("file:///storage_main.fdn").expect("main uri");
+            let main_text = "use storage_manager as storage_mod\n\naction main {\n    var storage = storage_mod.StorageManager()\n    storage.tasks.\n}\n";
+            let analysis = analysis::analyze(main_text, main_uri.as_str());
+            let mut doc = Document {
+                version: 1,
+                text: main_text.to_string(),
+                diagnostics: analysis.diagnostics.clone(),
+                semantic_tokens: analysis.semantic_tokens,
+                symbol_table: analysis.symbol_table,
+                identifier_spans: analysis.identifier_spans,
+                imports: HashMap::from([("storage_mod".to_string(), storage_uri.clone())]),
+                direct_imports: HashMap::new(),
+                wildcard_imports: vec![],
+                stdlib_imports: HashMap::new(),
+                stdlib_direct_imports: HashMap::new(),
+                stdlib_call_sites: analysis.stdlib_call_sites.clone(),
+                inlay_hint_sites: analysis.inlay_hint_sites,
+                member_access_sites: analysis.member_access_sites,
+            };
+
+            for site in &analysis.imported_constructor_call_sites {
+                let ret_type = imported_constructor_type_name(
+                    &backend.store,
+                    &doc.imports,
+                    &doc.direct_imports,
+                    site,
+                )
+                .expect("imported constructor type");
+                patch_var_inferred_type(&mut doc, &site.var_name, site.decl_span, &ret_type, true);
+            }
+
+            backend.store.insert(main_uri.clone(), doc);
+
+            let file = SourceFile::new(FileId(0), main_uri.as_str(), main_text);
+            let offset = main_text.find("storage.tasks.").expect("storage.tasks offset") as u32
+                + "storage.tasks.".len() as u32;
+            let position = convert::span_to_range(&file, Span::new(FileId(0), offset, offset)).start;
+
+            let response = LanguageServer::completion(
+                backend,
+                CompletionParams {
+                    text_document_position: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: main_uri.clone() },
+                        position,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                    context: Some(CompletionContext {
+                        trigger_kind: CompletionTriggerKind::TRIGGER_CHARACTER,
+                        trigger_character: Some(".".to_string()),
+                    }),
+                },
+            )
+            .await
+            .expect("completion result")
+            .expect("completion items");
+
+            let CompletionResponse::Array(items) = response else {
+                panic!("expected completion array");
+            };
+
+            assert!(items.iter().any(|item| item.label == "contains"));
+            assert!(items.iter().any(|item| item.label == "insert"));
+        });
+    }
+
+    #[test]
+    fn imported_object_field_hashset_method_typos_report_diagnostics_recursively() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let storage_uri = Url::parse("file:///storage_manager_diag.fdn").expect("storage uri");
+            let storage_text = "object StorageManager {\n    var tasks oftype hashset oftype string = hashset()\n}\n";
+            backend
+                .store
+                .insert(storage_uri.clone(), background_doc(&storage_uri, storage_text));
+
+            let main_uri = Url::parse("file:///storage_diag_main.fdn").expect("main uri");
+            let main_text = "use storage_manager_diag as storage_mod\n\naction main {\n    var storage = storage_mod.StorageManager()\n    for task in storage.tasks.toaddsdsfList() {\n        print(task)\n    }\n}\n";
+            let analysis = analysis::analyze(main_text, main_uri.as_str());
+            let mut doc = Document {
+                version: 1,
+                text: main_text.to_string(),
+                diagnostics: analysis.diagnostics.clone(),
+                semantic_tokens: analysis.semantic_tokens,
+                symbol_table: analysis.symbol_table,
+                identifier_spans: analysis.identifier_spans,
+                imports: HashMap::from([("storage_mod".to_string(), storage_uri.clone())]),
+                direct_imports: HashMap::new(),
+                wildcard_imports: vec![],
+                stdlib_imports: HashMap::new(),
+                stdlib_direct_imports: HashMap::new(),
+                stdlib_call_sites: analysis.stdlib_call_sites.clone(),
+                inlay_hint_sites: analysis.inlay_hint_sites,
+                member_access_sites: analysis.member_access_sites,
+            };
+
+            for site in &analysis.imported_constructor_call_sites {
+                let ret_type = imported_constructor_type_name(
+                    &backend.store,
+                    &doc.imports,
+                    &doc.direct_imports,
+                    site,
+                )
+                .expect("imported constructor type");
+                patch_var_inferred_type(&mut doc, &site.var_name, site.decl_span, &ret_type, true);
+            }
+
+            let diagnostics = backend.check_receiver_chain_method_diagnostics(
+                main_text,
+                &main_uri,
+                &doc.symbol_table,
+                &analysis.receiver_chain_method_call_sites,
+            );
+
+            let diag = diagnostics
+                .iter()
+                .find(|diag| diag.message.contains("has no field or method `toaddsdsfList`"))
+                .expect("missing recursive imported-field method diagnostic");
+            assert_eq!(diag.code, Some(NumberOrString::String("E0204".into())));
         });
     }
 

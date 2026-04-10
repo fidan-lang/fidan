@@ -18,7 +18,10 @@ use fidan_mir::{BlockId, FunctionId, LocalId, MirProgram, Terminator};
 use fidan_runtime::FidanValue;
 use fidan_source::SourceMap;
 
-use super::{CallFrame, MirMachine, MirSignal, RunError, TestResult, route_signal_to_catch};
+use super::{
+    CallFrame, MirMachine, MirSignal, RunError, TestResult, instruction_trace_span,
+    route_signal_to_catch,
+};
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
@@ -260,20 +263,27 @@ impl MirMachine {
 
             for i in instr_start..instr_count {
                 let instr = &program.function(fn_id).block(bb_id).instructions[i];
+                let signal_span = instruction_trace_span(instr);
                 match self.exec_instr(instr, frame) {
                     Ok(Some(ret)) => return Ok(Some(ret)),
                     Ok(None) => {}
-                    Err(signal) => match route_signal_to_catch(frame, signal) {
-                        Ok(Some((catch_bb, value))) => {
-                            frame.current_exception = Some(value);
-                            prev_bb = Some(bb_id);
-                            bb_id = catch_bb;
-                            is_first_block = false;
-                            continue 'outer;
+                    Err(signal) => {
+                        if self.panic_site_span.is_none() {
+                            self.panic_site_span = signal_span;
                         }
-                        Ok(None) => {}
-                        Err(e) => return Err(e),
-                    },
+                        match route_signal_to_catch(frame, signal) {
+                            Ok(Some((catch_bb, value))) => {
+                                self.panic_site_span = None;
+                                frame.current_exception = Some(value);
+                                prev_bb = Some(bb_id);
+                                bb_id = catch_bb;
+                                is_first_block = false;
+                                continue 'outer;
+                            }
+                            Ok(None) => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
                 }
             }
 
@@ -369,19 +379,26 @@ impl MirMachine {
                 let ns_new_end = ns_instr_count.min(instr_count);
                 for i in ns_cursor..ns_new_end {
                     let instr = &program.function(fn_id).block(bb_id).instructions[i];
+                    let signal_span = instruction_trace_span(instr);
                     match self.exec_instr(instr, frame) {
                         Ok(Some(ret)) => return Ok(Some(ret)),
                         Ok(None) => {}
-                        Err(signal) => match route_signal_to_catch(frame, signal) {
-                            Ok(Some((catch_bb, value))) => {
-                                frame.current_exception = Some(value);
-                                prev_bb = Some(bb_id);
-                                bb_id = catch_bb;
-                                continue 'outer;
+                        Err(signal) => {
+                            if self.panic_site_span.is_none() {
+                                self.panic_site_span = signal_span;
                             }
-                            Ok(None) => {}
-                            Err(e) => return Err(e),
-                        },
+                            match route_signal_to_catch(frame, signal) {
+                                Ok(Some((catch_bb, value))) => {
+                                    self.panic_site_span = None;
+                                    frame.current_exception = Some(value);
+                                    prev_bb = Some(bb_id);
+                                    bb_id = catch_bb;
+                                    continue 'outer;
+                                }
+                                Ok(None) => {}
+                                Err(e) => return Err(e),
+                            }
+                        }
                     }
                 }
                 // Body starts at ns_instr_count; skip already-executed body instrs.
@@ -392,19 +409,26 @@ impl MirMachine {
 
             for i in instr_start..instr_count {
                 let instr = &program.function(fn_id).block(bb_id).instructions[i];
+                let signal_span = instruction_trace_span(instr);
                 match self.exec_instr(instr, frame) {
                     Ok(Some(ret)) => return Ok(Some(ret)),
                     Ok(None) => {}
-                    Err(signal) => match route_signal_to_catch(frame, signal) {
-                        Ok(Some((catch_bb, value))) => {
-                            frame.current_exception = Some(value);
-                            prev_bb = Some(bb_id);
-                            bb_id = catch_bb;
-                            continue 'outer;
+                    Err(signal) => {
+                        if self.panic_site_span.is_none() {
+                            self.panic_site_span = signal_span;
                         }
-                        Ok(None) => {}
-                        Err(e) => return Err(e),
-                    },
+                        match route_signal_to_catch(frame, signal) {
+                            Ok(Some((catch_bb, value))) => {
+                                self.panic_site_span = None;
+                                frame.current_exception = Some(value);
+                                prev_bb = Some(bb_id);
+                                bb_id = catch_bb;
+                                continue 'outer;
+                            }
+                            Ok(None) => {}
+                            Err(e) => return Err(e),
+                        }
+                    }
                 }
             }
 

@@ -437,6 +437,7 @@ fn build_builtin_receiver_member_entries(table: &mut SymbolTable) {
         ReceiverBuiltinKind::String,
         ReceiverBuiltinKind::List,
         ReceiverBuiltinKind::Dict,
+        ReceiverBuiltinKind::HashSet,
         ReceiverBuiltinKind::Shared,
         ReceiverBuiltinKind::WeakShared,
         ReceiverBuiltinKind::Function,
@@ -1089,13 +1090,23 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                             .get(name)
                             .and_then(|obj| obj.methods.get(mname));
                         if let Some(minfo) = method_info {
-                            let initial_entries = params
+                            let mut initial_entries: FxHashMap<String, SymbolEntry> = params
                                 .iter()
                                 .zip(minfo.params.iter())
                                 .map(|(ast_param, typed_param)| {
                                     make_param_entry_from_typed(ast_param, typed_param, interner)
                                 })
                                 .collect();
+                            initial_entries.insert(
+                                "this".to_string(),
+                                make_var_entry(
+                                    "this".to_string(),
+                                    *method_span,
+                                    Some(class_name.clone()),
+                                    class_name.clone(),
+                                    false,
+                                ),
+                            );
                             collect_scope_entries(
                                 *method_span,
                                 initial_entries,
