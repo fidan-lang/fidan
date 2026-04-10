@@ -45,6 +45,14 @@ pub struct StdlibMemberInfo {
     pub doc: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StdlibParamInfo {
+    pub name: String,
+    pub type_name: &'static str,
+    pub optional: bool,
+    pub variadic: bool,
+}
+
 pub const STDLIB_MODULES: &[StdlibModuleInfo] = &[
     StdlibModuleInfo {
         name: "async",
@@ -130,12 +138,333 @@ pub fn member_info(module: &str, name: &str) -> Option<&'static StdlibMemberInfo
         .find(|info| info.names.contains(&name))
 }
 
+fn split_signature_params(params: &str) -> Vec<&str> {
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut parts = Vec::new();
+
+    for (idx, ch) in params.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let part = params[start..idx].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                start = idx + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    let tail = params[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+
+    parts
+}
+
+fn raw_signature_params(signature: &str) -> Option<Vec<&str>> {
+    let open = signature.find('(')?;
+    let close = signature.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+
+    let params = signature[open + 1..close].trim();
+    if params.is_empty() {
+        return Some(Vec::new());
+    }
+    Some(split_signature_params(params))
+}
+
+fn canonical_member_name(module: &str, name: &str) -> Option<&'static str> {
+    member_info(module, name).and_then(|info| info.names.first().copied())
+}
+
+fn inferred_param_type_name(
+    module: &str,
+    canonical_name: &str,
+    index: usize,
+    param_name: &str,
+) -> &'static str {
+    match module {
+        "async" => match canonical_name {
+            "sleep" => "integer",
+            "ready" => "dynamic",
+            "gather" | "waitAny" => "list oftype Pending oftype dynamic",
+            "timeout" => {
+                if index == 0 {
+                    "Pending oftype dynamic"
+                } else {
+                    "integer"
+                }
+            }
+            _ => "dynamic",
+        },
+        "collections" => match canonical_name {
+            "range" => "integer",
+            "hashset" => "dynamic",
+            "setAdd" | "setRemove" | "setContains" => {
+                if index == 0 {
+                    "hashset oftype dynamic"
+                } else {
+                    "dynamic"
+                }
+            }
+            "setToList" | "setLen" => "hashset oftype dynamic",
+            "setUnion" | "setIntersect" | "setDiff" => "hashset oftype dynamic",
+            "Queue" | "Stack" => "list oftype dynamic",
+            "enqueue" | "push" => {
+                if index == 0 {
+                    "list oftype dynamic"
+                } else {
+                    "dynamic"
+                }
+            }
+            "dequeue" | "peek" | "pop" | "top" => "list oftype dynamic",
+            "flatten" | "zip" | "enumerate" | "partition" | "groupBy" | "unique" | "reverse"
+            | "sort" | "len" | "isEmpty" | "slice" | "first" | "last" | "sum" | "product"
+            | "min" | "max" => {
+                if param_name == "size" || param_name == "start" || param_name == "end" {
+                    "integer"
+                } else if param_name == "separator" {
+                    "string"
+                } else {
+                    "list oftype dynamic"
+                }
+            }
+            "chunk" | "window" => {
+                if index == 0 {
+                    "list oftype dynamic"
+                } else {
+                    "integer"
+                }
+            }
+            "concat" => "list oftype dynamic",
+            "join" => {
+                if index == 0 {
+                    "list oftype dynamic"
+                } else {
+                    "string"
+                }
+            }
+            _ => "dynamic",
+        },
+        "env" => match canonical_name {
+            "get" | "set" => "string",
+            _ => "dynamic",
+        },
+        "io" => match canonical_name {
+            "print" | "eprint" => "dynamic",
+            "readLine" => "string",
+            "readFile" | "readLines" | "deleteFile" | "fileExists" | "isFile" | "isDir"
+            | "makeDir" | "listDir" | "dirname" | "basename" | "extension" | "absolutePath"
+            | "getEnv" => "string",
+            "writeFile" | "appendFile" | "setEnv" => "string",
+            "copyFile" | "renameFile" => "string",
+            "join" | "joinPath" => "string",
+            "isatty" => "string",
+            _ => "dynamic",
+        },
+        "json" => match canonical_name {
+            "loads" | "parse" | "isValid" => {
+                if index == 0 {
+                    "string"
+                } else {
+                    "boolean"
+                }
+            }
+            "load" => {
+                if index == 0 {
+                    "string"
+                } else {
+                    "boolean"
+                }
+            }
+            "dump" => {
+                if index == 1 {
+                    "string"
+                } else {
+                    "dynamic"
+                }
+            }
+            "dumps" | "stringify" | "pretty" => "dynamic",
+            _ => "dynamic",
+        },
+        "math" => match canonical_name {
+            "pi" | "e" | "tau" | "inf" | "nan" | "random" => "dynamic",
+            "randomInt" => "integer",
+            _ => "float",
+        },
+        "parallel" => match canonical_name {
+            "parallelReduce" => match index {
+                0 => "list oftype dynamic",
+                1 => "dynamic",
+                _ => "action",
+            },
+            "parallelMap" | "parallelFilter" | "parallelForEach" => {
+                if index == 0 {
+                    "list oftype dynamic"
+                } else {
+                    "action"
+                }
+            }
+            _ => "dynamic",
+        },
+        "regex" => "string",
+        "string" => match canonical_name {
+            "join" => {
+                if index == 0 {
+                    "string"
+                } else {
+                    "list oftype dynamic"
+                }
+            }
+            "slice" => {
+                if index == 0 {
+                    "string"
+                } else {
+                    "integer"
+                }
+            }
+            "padStart" | "padEnd" => match index {
+                0 => "string",
+                1 => "integer",
+                _ => "string",
+            },
+            "repeat" => {
+                if index == 0 {
+                    "string"
+                } else {
+                    "integer"
+                }
+            }
+            "format" => {
+                if index == 0 {
+                    "string"
+                } else {
+                    "dynamic"
+                }
+            }
+            "fromChars" => "list oftype dynamic",
+            "fromCharCode" => "integer",
+            _ => match param_name {
+                "text" | "separator" | "pattern" | "prefix" | "suffix" | "from" | "to"
+                | "template" | "pad" => "string",
+                "width" | "n" | "code" => "integer",
+                "list" => "list oftype dynamic",
+                "chars" => "list oftype dynamic",
+                _ => "dynamic",
+            },
+        },
+        "test" => match canonical_name {
+            "assert" => {
+                if index == 0 {
+                    "boolean"
+                } else {
+                    "string"
+                }
+            }
+            "assertType" => match index {
+                0 => "dynamic",
+                1 => "string",
+                _ => "string",
+            },
+            "fail" | "skip" => "string",
+            _ => {
+                if index < 2 {
+                    "dynamic"
+                } else {
+                    "string"
+                }
+            }
+        },
+        "time" => match canonical_name {
+            "now" | "timestamp" => "dynamic",
+            "sleep" | "elapsed" | "date" | "time" | "datetime" | "year" | "month" | "day"
+            | "hour" | "minute" | "second" | "weekday" => "integer",
+            "format" => {
+                if index == 0 {
+                    "integer"
+                } else {
+                    "string"
+                }
+            }
+            _ => "dynamic",
+        },
+        _ => "dynamic",
+    }
+}
+
+pub fn member_params(module: &str, name: &str) -> Option<Vec<StdlibParamInfo>> {
+    let info = member_info(module, name)?;
+    let canonical_name = canonical_member_name(module, name)?;
+    let raw_params = raw_signature_params(info.signature)?;
+
+    Some(
+        raw_params
+            .into_iter()
+            .enumerate()
+            .map(|(index, raw)| {
+                let variadic = raw.ends_with("...");
+                let optional = raw.ends_with('?')
+                    || (module == "time" && canonical_name == "format" && index == 1);
+                let core = raw.trim_end_matches("...").trim_end_matches('?').trim();
+                StdlibParamInfo {
+                    name: core.to_string(),
+                    type_name: inferred_param_type_name(module, canonical_name, index, core),
+                    optional,
+                    variadic,
+                }
+            })
+            .collect(),
+    )
+}
+
+pub fn member_signature_with_return(
+    module: &str,
+    name: &str,
+    return_type: Option<&str>,
+) -> Option<String> {
+    let info = member_info(module, name)?;
+    let open = info.signature.find('(')?;
+    let close = info.signature.rfind(')')?;
+    let params = member_params(module, name)?
+        .into_iter()
+        .map(|param| {
+            let mut rendered = format!("{} oftype {}", param.name, param.type_name);
+            if param.variadic {
+                rendered.push_str("...");
+            }
+            if param.optional {
+                rendered.push('?');
+            }
+            rendered
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut signature = format!("{}({params})", &info.signature[..open],);
+    if params.is_empty() {
+        signature = format!("{}()", &info.signature[..open]);
+    }
+    if let Some(ret_type) = return_type {
+        signature.push_str(" -> ");
+        signature.push_str(ret_type);
+    }
+    let _ = close;
+    Some(signature)
+}
+
+pub fn member_signature(module: &str, name: &str) -> Option<String> {
+    member_signature_with_return(module, name, member_return_type(module, name))
+}
+
 pub fn member_doc(module: &str, name: &str) -> Option<String> {
     let info = member_info(module, name)?;
-    let signature = match member_return_type(module, name) {
-        Some(ret_type) => format!("{} -> {}", info.signature, ret_type),
-        None => info.signature.to_string(),
-    };
+    let signature = member_signature(module, name).unwrap_or_else(|| info.signature.to_string());
     Some(format!("```fidan\n{}\n```\n\n{}", signature, info.doc))
 }
 
@@ -469,8 +798,8 @@ pub use metadata::{
 };
 
 pub use fidan_config::{
-    ReceiverBuiltinKind, ReceiverMemberInfo, ReceiverMethodOp, ReceiverReturnKind,
-    infer_receiver_member,
+    ReceiverBuiltinKind, ReceiverMemberInfo, ReceiverMethodOp, ReceiverParamInfo,
+    ReceiverReturnKind, infer_receiver_member, receiver_member_params, receiver_member_signature,
 };
 
 const ASYNC_MEMBER_INFOS: &[StdlibMemberInfo] = &[
@@ -1504,13 +1833,17 @@ mod tests {
     #[test]
     fn member_docs_cover_recent_exports() {
         let sleep = member_doc("time", "sleep").expect("missing std.time.sleep doc");
-        assert!(sleep.contains("std.time.sleep"));
+        assert!(sleep.contains("std.time.sleep(ms oftype integer) -> nothing"));
 
         let gather = member_doc("async", "gather").expect("missing std.async.gather doc");
-        assert!(gather.contains("std.async.gather"));
+        assert!(gather.contains(
+            "std.async.gather(handles oftype list oftype Pending oftype dynamic) -> Pending oftype list oftype dynamic"
+        ));
 
         let json = member_doc("json", "parse").expect("missing std.json.parse doc");
-        assert!(json.contains("std.json.parse"));
+        assert!(
+            json.contains("std.json.parse(text oftype string, soft oftype boolean?) -> dynamic")
+        );
 
         assert!(member_doc("time", "definitely_missing").is_none());
     }

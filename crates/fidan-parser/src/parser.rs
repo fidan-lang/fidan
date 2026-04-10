@@ -679,7 +679,10 @@ impl<'t> Parser<'t> {
             match self.peek().clone() {
                 TokenKind::RBrace | TokenKind::Eof => break,
                 TokenKind::Var => {
-                    fields.push(self.parse_field_decl());
+                    fields.push(self.parse_field_decl(false));
+                }
+                TokenKind::Const => {
+                    fields.push(self.parse_field_decl(true));
                 }
                 TokenKind::Action | TokenKind::Parallel => {
                     let is_par = if matches!(self.peek(), TokenKind::Parallel) {
@@ -731,7 +734,7 @@ impl<'t> Parser<'t> {
                 _ => {
                     let span = self.current_span();
                     self.error(
-                        "expected field (`var`) or method (`action`) in object body",
+                        "expected field (`var` / `const var`) or method (`action`) in object body",
                         span,
                     );
                     self.synchronize();
@@ -752,11 +755,20 @@ impl<'t> Parser<'t> {
 
     // ── Field declaration (inside object body) ────────────────────────────────
 
-    pub(crate) fn parse_field_decl(&mut self) -> FieldDecl {
+    pub(crate) fn parse_field_decl(&mut self, is_const: bool) -> FieldDecl {
         let start = self.current_span().start;
-        self.advance(); // eat `var`
+        if is_const {
+            self.advance(); // eat `const`
+            if !self.eat(&TokenKind::Var) {
+                let span = self.current_span();
+                self.error("expected `var` after `const`", span);
+            }
+        } else {
+            self.advance(); // eat `var`
+        }
         let name = self.expect_ident_sym("expected field name");
-        let ty = if self.eat_type_ann() {
+        let has_type_annotation = self.eat_type_ann();
+        let ty = if has_type_annotation {
             self.parse_type_expr()
         } else {
             TypeExpr::Dynamic {
@@ -776,6 +788,8 @@ impl<'t> Parser<'t> {
         FieldDecl {
             name,
             ty,
+            has_type_annotation,
+            is_const,
             certain: false,
             default,
             span: Span::new(self.module.file, start, end),

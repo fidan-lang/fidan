@@ -6,13 +6,17 @@ use crate::{
 };
 use fidan_config::{
     BUILTIN_FUNCTIONS, BuiltinReturnKind, ReceiverBuiltinKind, builtin_return_kind, decorator_info,
-    editor_symbol_info, infer_receiver_member, receiver_method_arity_bounds, type_name_info,
+    editor_symbol_info, infer_receiver_member, receiver_member_param_type_names_for_type_name,
+    receiver_member_return_type_name_for_type_name, receiver_member_signature_for_type_name,
+    receiver_method_arity_bounds, type_name_info,
 };
 use fidan_fmt::{FormatOptions, format_source, load_format_options_for_path};
 use fidan_source::{FileId, SourceFile, Span};
 use fidan_stdlib::{
     STDLIB_MODULES, StdlibTypeSpec, infer_precise_stdlib_return_type,
     member_info as stdlib_member_info, member_return_type as stdlib_member_return_type,
+    member_signature as stdlib_member_signature,
+    member_signature_with_return as stdlib_member_signature_with_return,
     module_info as stdlib_module_info, parse_stdlib_type_spec,
 };
 use std::collections::{HashMap, HashSet};
@@ -178,8 +182,10 @@ fn stdlib_member_hover_markdown(
     let info = stdlib_member_info(mod_name, member_name)?;
     let signature = arg_tys
         .and_then(|tys| stdlib_precise_return_label(mod_name, member_name, tys))
-        .or_else(|| stdlib_member_return_type(mod_name, member_name).map(str::to_string))
-        .map(|ret_type| format!("{} -> {}", info.signature, ret_type))
+        .and_then(|ret_type| {
+            stdlib_member_signature_with_return(mod_name, member_name, Some(&ret_type))
+        })
+        .or_else(|| stdlib_member_signature(mod_name, member_name))
         .unwrap_or_else(|| info.signature.to_string());
     Some(format!("```fidan\n{}\n```\n\n{}", signature, info.doc))
 }
@@ -569,11 +575,40 @@ impl FidanLsp {
         let (receiver_kind, canonical_type_name) = builtin_receiver_info(type_name)?;
         let member = infer_receiver_member(receiver_kind, member_name)?;
         let key = format!("{}.{}", canonical_type_name, member.canonical_name);
-        self.store.find_in_any_doc(&key)
+        let (uri, entry) = self.store.find_in_any_doc(&key)?;
+        Some((
+            uri,
+            specialize_builtin_member_entry(type_name, member.canonical_name, &entry),
+        ))
+    }
+
+    fn collect_completion_members(&self, type_name: &str) -> Vec<(String, SymbolEntry)> {
+        let direct = self.store.collect_type_members(type_name);
+        if !direct.is_empty() {
+            return direct;
+        }
+
+        let Some((_, canonical_type_name)) = builtin_receiver_info(type_name) else {
+            return vec![];
+        };
+        if canonical_type_name == type_name {
+            return vec![];
+        }
+
+        self.store
+            .collect_type_members(canonical_type_name)
+            .into_iter()
+            .map(|(member, entry)| {
+                let specialized = specialize_builtin_member_entry(type_name, &member, &entry);
+                (member, specialized)
+            })
+            .collect()
     }
 
     fn type_name_is_known(&self, type_name: &str) -> bool {
-        self.store.find_in_any_doc(type_name).is_some() || type_name_info(type_name).is_some()
+        self.store.find_in_any_doc(type_name).is_some()
+            || type_name_info(type_name).is_some()
+            || builtin_receiver_info(type_name).is_some()
     }
 
     fn member_arity_bounds(
@@ -904,8 +939,57 @@ fn builtin_receiver_info(type_name: &str) -> Option<(ReceiverBuiltinKind, &'stat
         "Pending" => (ReceiverBuiltinKind::Pending, "Pending"),
         "action" => (ReceiverBuiltinKind::Function, "action"),
         "nothing" => (ReceiverBuiltinKind::Nothing, "nothing"),
+        _ if type_name.starts_with("list oftype ") => (ReceiverBuiltinKind::List, "list"),
+        _ if type_name.starts_with("dict oftype ") || type_name.starts_with("map oftype ") => {
+            (ReceiverBuiltinKind::Dict, "dict")
+        }
+        _ if type_name.starts_with("hashset oftype ") => (ReceiverBuiltinKind::HashSet, "hashset"),
+        _ if type_name.starts_with("Shared oftype ") => (ReceiverBuiltinKind::Shared, "Shared"),
+        _ if type_name.starts_with("WeakShared oftype ") => {
+            (ReceiverBuiltinKind::WeakShared, "WeakShared")
+        }
+        _ if type_name.starts_with("Pending oftype ") => (ReceiverBuiltinKind::Pending, "Pending"),
         _ => return None,
     })
+}
+
+fn specialize_builtin_member_entry(
+    receiver_type_name: &str,
+    member_name: &str,
+    entry: &SymbolEntry,
+) -> SymbolEntry {
+    let Some((receiver_kind, _)) = builtin_receiver_info(receiver_type_name) else {
+        return entry.clone();
+    };
+    let Some(member) = infer_receiver_member(receiver_kind, member_name) else {
+        return entry.clone();
+    };
+
+    let mut specialized = entry.clone();
+    if let Some(signature) = receiver_member_signature_for_type_name(
+        receiver_kind,
+        receiver_type_name,
+        member.canonical_name,
+    ) {
+        specialized.detail = format!("```fidan\n{}\n```", signature);
+    }
+    if let Some(param_types) = receiver_member_param_type_names_for_type_name(
+        receiver_kind,
+        receiver_type_name,
+        member.canonical_name,
+    ) {
+        specialized.param_types = param_types;
+    }
+    if let Some(return_type) = receiver_member_return_type_name_for_type_name(
+        receiver_kind,
+        receiver_type_name,
+        member.canonical_name,
+    ) {
+        specialized.ty_name = Some(return_type.clone());
+        specialized.return_type = Some(return_type);
+    }
+
+    specialized
 }
 
 struct ResolvedImports {
@@ -1854,6 +1938,20 @@ impl LanguageServer for FidanLsp {
             } else if let Some(entry) = declaration_entry_at_offset(&doc, offset, cur_name.as_str())
             {
                 HoverLookup::DocEntry(uri.clone(), entry)
+            } else if let Some(pn) = prev_name
+                && let Some(mod_name) = doc.stdlib_imports.get(pn)
+                && let Some(detail) = stdlib_member_hover_markdown(
+                    mod_name.as_str(),
+                    cur_name.as_str(),
+                    stdlib_call_args_at_offset(&doc, offset, mod_name.as_str(), cur_name.as_str()),
+                )
+            {
+                HoverLookup::Plain(detail)
+            } else if prev_name == Some("std") {
+                match stdlib_module_hover_markdown(cur_name.as_str()) {
+                    Some(detail) => HoverLookup::Plain(detail),
+                    None => HoverLookup::NotFound,
+                }
             } else if let Some(site) =
                 member_access_site_at_offset(&doc.member_access_sites, offset)
             {
@@ -1905,20 +2003,6 @@ impl LanguageServer for FidanLsp {
                 HoverLookup::Plain(detail)
             } else if let Some(detail) = builtin_hover_markdown(cur_name.as_str()) {
                 HoverLookup::Plain(detail)
-            } else if let Some(pn) = prev_name
-                && let Some(mod_name) = doc.stdlib_imports.get(pn)
-                && let Some(detail) = stdlib_member_hover_markdown(
-                    mod_name.as_str(),
-                    cur_name.as_str(),
-                    stdlib_call_args_at_offset(&doc, offset, mod_name.as_str(), cur_name.as_str()),
-                )
-            {
-                HoverLookup::Plain(detail)
-            } else if prev_name == Some("std") {
-                match stdlib_module_hover_markdown(cur_name.as_str()) {
-                    Some(detail) => HoverLookup::Plain(detail),
-                    None => HoverLookup::NotFound,
-                }
             } else if let Some((module_url, module_path)) =
                 user_module_import_hover_target_at_offset(doc.text.as_str(), uri, offset as usize)
             {
@@ -2787,7 +2871,7 @@ impl LanguageServer for FidanLsp {
             let member_prefix = completion_seed.dot_member_prefix.as_deref().unwrap_or("");
             match dot_res {
                 DotResolution::TypeName(ty) => {
-                    let members = self.store.collect_type_members(&ty);
+                    let members = self.collect_completion_members(&ty);
                     let items: Vec<CompletionItem> = members
                         .into_iter()
                         .filter(|(name, _)| {
@@ -2840,8 +2924,7 @@ impl LanguageServer for FidanLsp {
                     };
 
                     let items: Vec<CompletionItem> = self
-                        .store
-                        .collect_type_members(&ty)
+                        .collect_completion_members(&ty)
                         .into_iter()
                         .filter(|(name, _)| {
                             member_prefix.is_empty() || name.starts_with(member_prefix)
@@ -4798,7 +4881,7 @@ action greet with (certain name oftype string) returns string {
             );
 
             assert!(diags.iter().all(|diag| {
-                !matches!(diag.code, Some(NumberOrString::String(ref code)) if code == "E0204" || code == "E0301" || code == "E0305")
+                !matches!(diag.code, Some(NumberOrString::String(ref code)) if code == "E0204" || code == "E0301" || code == "E0302" || code == "E0305")
             }));
         });
     }
@@ -5472,17 +5555,21 @@ Holder.compass.
     fn stdlib_member_hover_docs_cover_recent_exports() {
         let sleep = stdlib_member_hover_markdown("time", "sleep", None)
             .expect("missing std.time.sleep doc");
-        assert!(sleep.contains("std.time.sleep(ms) -> nothing"));
+        assert!(sleep.contains("std.time.sleep(ms oftype integer) -> nothing"));
 
         let wait_any = stdlib_member_hover_markdown("async", "waitAny", None)
             .expect("missing std.async.waitAny doc");
         assert!(
-            wait_any.contains("std.async.waitAny(handles) -> Pending oftype (integer, dynamic)")
+            wait_any.contains(
+                "std.async.waitAny(handles oftype list oftype Pending oftype dynamic) -> Pending oftype (integer, dynamic)"
+            )
         );
 
         let parse = stdlib_member_hover_markdown("json", "parse", None)
             .expect("missing std.json.parse doc");
-        assert!(parse.contains("std.json.parse(text, soft?) -> dynamic"));
+        assert!(
+            parse.contains("std.json.parse(text oftype string, soft oftype boolean?) -> dynamic")
+        );
     }
 
     #[test]
@@ -5493,11 +5580,11 @@ Holder.compass.
             Some(&["integer".to_string(), "float".to_string()]),
         )
         .expect("missing std.math.max doc");
-        assert!(max.contains("std.math.max(a, b) -> float"));
+        assert!(max.contains("std.math.max(a oftype float, b oftype float) -> float"));
 
         let abs = stdlib_member_hover_markdown("math", "abs", Some(&["integer".to_string()]))
             .expect("missing std.math.abs doc");
-        assert!(abs.contains("std.math.abs(x) -> integer"));
+        assert!(abs.contains("std.math.abs(x oftype float) -> integer"));
     }
 
     #[test]
@@ -5538,7 +5625,54 @@ Holder.compass.
             let HoverContents::Markup(markup) = hover.contents else {
                 panic!("expected markdown hover contents");
             };
-            assert!(markup.value.contains("std.collections.enumerate(list) -> list"));
+            assert!(markup.value.contains(
+                "std.collections.enumerate(list oftype list oftype dynamic)"
+            ));
+        });
+    }
+
+    #[test]
+    fn hover_resolves_stdlib_namespace_member_functions() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let uri =
+                Url::parse("file:///stdlib_namespace_member_hover.fdn").expect("document uri");
+            let text =
+                "use std.json\n\naction main {\n    return json.dump({}, \"tasks.json\")\n}\n";
+            backend.refresh(&uri, 1, text).await;
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+            let offset = text.find("dump").expect("dump offset") as u32;
+            let pos = convert::span_to_range(&file, Span::new(FileId(0), offset, offset + 1)).start;
+
+            let hover = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position: pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("hover result")
+            .expect("hover contents");
+
+            let HoverContents::Markup(markup) = hover.contents else {
+                panic!("expected markdown hover contents");
+            };
+            assert!(
+                markup
+                    .value
+                    .contains("std.json.dump(value oftype dynamic, path oftype string) -> boolean")
+            );
         });
     }
 
@@ -5834,9 +5968,70 @@ Holder.compass.
             let Documentation::MarkupContent(markup) = documentation else {
                 panic!("expected markdown documentation for hashset member");
             };
-            assert!(markup.value.contains("hashset.contains"));
+            assert!(markup
+                .value
+                .contains("hashset.contains(value oftype string) -> boolean"));
             assert!(items.iter().any(|item| item.label == "insert"));
             assert!(items.iter().any(|item| item.label == "isEmpty"));
+        });
+    }
+
+    #[test]
+    fn hover_reports_typed_receiver_method_signatures_for_builtin_collections() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let uri = Url::parse("file:///receiver_signature_hover.fdn").expect("document uri");
+            let text = "action main {\n    var tasks oftype hashset oftype string = hashset()\n    var values oftype list oftype integer = []\n    var lookup oftype dict oftype (string, integer) = {}\n    tasks.contains\n    values.remove\n    lookup.get\n}\n";
+            backend.refresh(&uri, 1, text).await;
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+
+            for (needle, expected) in [
+                (
+                    "contains",
+                    "hashset.contains(value oftype string) -> boolean",
+                ),
+                (
+                    "remove",
+                    "list.remove(index oftype integer) -> integer",
+                ),
+                (
+                    "get",
+                    "dict.get(key oftype string) -> integer",
+                ),
+            ] {
+                let offset = text.find(needle).expect("member offset") as u32;
+                let position = convert::span_to_range(
+                    &file,
+                    Span::new(FileId(0), offset, offset + 1),
+                )
+                .start;
+
+                let hover = LanguageServer::hover(
+                    backend,
+                    HoverParams {
+                        text_document_position_params: TextDocumentPositionParams {
+                            text_document: TextDocumentIdentifier { uri: uri.clone() },
+                            position,
+                        },
+                        work_done_progress_params: Default::default(),
+                    },
+                )
+                .await
+                .expect("hover result")
+                .expect("hover contents");
+
+                let HoverContents::Markup(markup) = hover.contents else {
+                    panic!("expected markdown hover contents");
+                };
+                assert!(markup.value.contains(expected), "hover was: {}", markup.value);
+            }
         });
     }
 
@@ -6054,7 +6249,9 @@ Holder.compass.
             let HoverContents::Markup(markup) = hover.contents else {
                 panic!("expected markdown hover contents");
             };
-            assert!(markup.value.contains("hashset.isEmpty() -> boolean"));
+            assert!(markup
+                .value
+                .contains("hashset.isEmpty() -> boolean"));
         });
     }
 
@@ -6171,7 +6368,9 @@ Holder.compass.
             let HoverContents::Markup(markup) = hover.contents else {
                 panic!("expected markdown hover contents");
             };
-            assert!(markup.value.contains("hashset.isEmpty() -> boolean"));
+            assert!(markup
+                .value
+                .contains("hashset.isEmpty() -> boolean"));
         });
     }
 

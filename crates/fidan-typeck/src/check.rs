@@ -57,8 +57,15 @@ pub struct EnumInfo {
 }
 
 #[derive(Debug, Clone)]
+pub struct ObjectFieldInfo {
+    pub ty: FidanType,
+    pub is_const: bool,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct ObjectInfo {
-    pub fields: FxHashMap<Symbol, FidanType>,
+    pub fields: FxHashMap<Symbol, ObjectFieldInfo>,
     pub methods: FxHashMap<Symbol, ActionInfo>,
     pub parent: Option<Symbol>,
     pub span: Span,
@@ -280,7 +287,19 @@ impl TypeChecker {
         methods: impl IntoIterator<Item = (Symbol, ActionInfo)>,
     ) {
         let info = ObjectInfo {
-            fields: fields.into_iter().collect(),
+            fields: fields
+                .into_iter()
+                .map(|(field_name, ty)| {
+                    (
+                        field_name,
+                        ObjectFieldInfo {
+                            ty,
+                            is_const: false,
+                            span,
+                        },
+                    )
+                })
+                .collect(),
             methods: methods.into_iter().collect(),
             parent,
             span,
@@ -460,8 +479,14 @@ impl TypeChecker {
                     span: *span,
                 };
                 for field in fields {
-                    obj.fields
-                        .insert(field.name, self.resolve_type_expr(&field.ty));
+                    obj.fields.insert(
+                        field.name,
+                        ObjectFieldInfo {
+                            ty: self.resolve_type_expr(&field.ty),
+                            is_const: field.is_const,
+                            span: field.span,
+                        },
+                    );
                 }
                 for &mid in methods {
                     if let Item::ActionDecl {
@@ -970,15 +995,34 @@ impl TypeChecker {
                 self.inject_this_and_parent(obj_ty, parent_ty, module.file);
 
                 for field in fields {
-                    let declared_field_ty = self
-                        .objects
-                        .get(name)
-                        .and_then(|object| object.fields.get(&field.name))
-                        .cloned()
-                        .unwrap_or_else(|| self.resolve_type_expr(&field.ty));
+                    let declared_field_ty = if field.has_type_annotation {
+                        self.objects
+                            .get(name)
+                            .and_then(|object| object.fields.get(&field.name))
+                            .map(|field| field.ty.clone())
+                            .unwrap_or_else(|| self.resolve_type_expr(&field.ty))
+                    } else if let Some(default_expr) = field.default {
+                        self.infer_expr(default_expr, module)
+                    } else {
+                        FidanType::Dynamic
+                    };
+
+                    if let Some(object) = self.objects.get_mut(name)
+                        && let Some(object_field) = object.fields.get_mut(&field.name)
+                    {
+                        object_field.ty = declared_field_ty.clone();
+                    }
+
                     if let Some(default_expr) = field.default {
+                        self.validate_literal_against_expected_type(
+                            &declared_field_ty,
+                            default_expr,
+                            module,
+                        );
                         let actual = self.infer_expr(default_expr, module);
-                        if !declared_field_ty.is_assignable_from(&actual) {
+                        if field.has_type_annotation
+                            && !declared_field_ty.is_assignable_from(&actual)
+                        {
                             let expected_name = self.ty_name(&declared_field_ty);
                             let actual_name = self.ty_name(&actual);
                             let default_span = module.arena.get_expr(default_expr).span();
@@ -1836,15 +1880,16 @@ impl TypeChecker {
 
         let inferred = if let Some(init_id) = init {
             let actual = self.infer_expr(init_id, module);
-            if let Some(ref dt) = declared
-                && !dt.is_assignable_from(&actual)
-            {
-                let (d, a) = (self.ty_name(dt), self.ty_name(&actual));
-                self.emit_error(
-                    fidan_diagnostics::diag_code!("E0201"),
-                    format!("type mismatch: expected `{d}`, found `{a}`"),
-                    span,
-                );
+            if let Some(ref dt) = declared {
+                self.validate_literal_against_expected_type(dt, init_id, module);
+                if !dt.is_assignable_from(&actual) {
+                    let (d, a) = (self.ty_name(dt), self.ty_name(&actual));
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0201"),
+                        format!("type mismatch: expected `{d}`, found `{a}`"),
+                        span,
+                    );
+                }
             }
             actual
         } else {
@@ -1872,6 +1917,85 @@ impl TypeChecker {
                 },
                 const_value,
             },
+        );
+    }
+
+    fn validate_literal_against_expected_type(
+        &mut self,
+        expected: &FidanType,
+        expr_id: ExprId,
+        module: &Module,
+    ) {
+        let expr = module.arena.get_expr(expr_id).clone();
+        match (expected, expr) {
+            (FidanType::List(elem_ty), Expr::List { elements, .. }) => {
+                for element in elements {
+                    self.validate_literal_against_expected_type(elem_ty, element, module);
+                    self.emit_expected_type_mismatch_if_needed(elem_ty, element, module);
+                }
+            }
+            (FidanType::Dict(key_ty, value_ty), Expr::Dict { entries, .. }) => {
+                for (key, value) in entries {
+                    self.validate_literal_against_expected_type(key_ty, key, module);
+                    self.emit_expected_type_mismatch_if_needed(key_ty, key, module);
+                    self.validate_literal_against_expected_type(value_ty, value, module);
+                    self.emit_expected_type_mismatch_if_needed(value_ty, value, module);
+                }
+            }
+            (FidanType::HashSet(elem_ty), Expr::Call { callee, args, .. }) => {
+                let is_hashset_ctor = matches!(
+                    module.arena.get_expr(callee),
+                    Expr::Ident { name, .. }
+                        if self.interner.resolve(*name).as_ref() == "hashset"
+                );
+                if is_hashset_ctor && let Some(arg) = args.first() {
+                    let source_expr = module.arena.get_expr(arg.value).clone();
+                    match source_expr {
+                        Expr::List { elements, .. } => {
+                            for element in elements {
+                                self.validate_literal_against_expected_type(
+                                    elem_ty, element, module,
+                                );
+                                self.emit_expected_type_mismatch_if_needed(
+                                    elem_ty, element, module,
+                                );
+                            }
+                        }
+                        Expr::Call { .. } => {
+                            self.validate_literal_against_expected_type(elem_ty, arg.value, module);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn emit_expected_type_mismatch_if_needed(
+        &mut self,
+        expected: &FidanType,
+        expr_id: ExprId,
+        module: &Module,
+    ) {
+        let actual = self
+            .expr_types
+            .get(&expr_id)
+            .cloned()
+            .unwrap_or_else(|| self.infer_expr(expr_id, module));
+        if expected.is_assignable_from(&actual) {
+            return;
+        }
+
+        let span = module.arena.get_expr(expr_id).span();
+        self.emit_error(
+            fidan_diagnostics::diag_code!("E0201"),
+            format!(
+                "type mismatch: expected `{}`, found `{}`",
+                self.ty_name(expected),
+                self.ty_name(&actual)
+            ),
+            span,
         );
     }
 
@@ -2043,6 +2167,25 @@ impl TypeChecker {
                 )
                 .with_label(Label::secondary(def_span, "defined as `const var` here")),
             );
+        } else if let Expr::Field { object, field, .. } = expr {
+            let object_ty = self.infer_expr(object, module);
+            if let FidanType::Object(obj_sym) = object_ty
+                && let Some(field_info) = self.resolve_object_field_info(obj_sym, field)
+                && field_info.is_const
+            {
+                let field_name = self.interner.resolve(field).to_string();
+                self.diags.push(
+                    Diagnostic::error(
+                        fidan_diagnostics::diag_code!("E0103"),
+                        format!("cannot assign to constant field `{field_name}`"),
+                        span,
+                    )
+                    .with_label(Label::secondary(
+                        field_info.span,
+                        "defined as `const var` here",
+                    )),
+                );
+            }
         }
     }
 
@@ -2735,38 +2878,113 @@ impl TypeChecker {
         member_name: &str,
         args: &[CallArgInfo],
         span: Span,
+        module: &Module,
     ) {
-        let Some(info) = fidan_stdlib::member_info(module_name, member_name) else {
+        let Some(params) = fidan_stdlib::member_params(module_name, member_name) else {
             return;
         };
-        let Some((min_args, max_args)) = Self::parse_signature_arity(info.signature) else {
-            return;
-        };
+        let positional: Vec<&CallArgInfo> = args.iter().filter(|arg| arg.name.is_none()).collect();
+        let mut pos_used = 0usize;
+        let has_variadic = params.iter().any(|param| param.variadic);
 
-        if args.len() < min_args {
-            self.emit_error(
-                fidan_diagnostics::diag_code!("E0301"),
-                format!(
-                    "not enough arguments for `std.{module_name}.{member_name}`: {} required but {} provided",
-                    min_args,
-                    args.len()
-                ),
-                span,
-            );
+        for param in &params {
+            let named_arg = args.iter().find(|arg| {
+                arg.name
+                    .map(|sym| self.interner.resolve(sym).as_ref() == param.name)
+                    .unwrap_or(false)
+            });
+
+            if let Some(arg) = named_arg.copied() {
+                self.check_stdlib_bound_argument_compatibility(
+                    module_name,
+                    member_name,
+                    param,
+                    arg,
+                    module,
+                );
+                continue;
+            }
+
+            if param.variadic {
+                while pos_used < positional.len() {
+                    self.check_stdlib_bound_argument_compatibility(
+                        module_name,
+                        member_name,
+                        param,
+                        *positional[pos_used],
+                        module,
+                    );
+                    pos_used += 1;
+                }
+                continue;
+            }
+
+            if pos_used < positional.len() {
+                self.check_stdlib_bound_argument_compatibility(
+                    module_name,
+                    member_name,
+                    param,
+                    *positional[pos_used],
+                    module,
+                );
+                pos_used += 1;
+                continue;
+            }
+
+            if !param.optional {
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0301"),
+                    format!(
+                        "not enough arguments for `std.{module_name}.{member_name}`: required parameter `{}` was not provided",
+                        param.name
+                    ),
+                    span,
+                );
+            }
         }
 
-        if let Some(max_args) = max_args
-            && args.len() > max_args
-        {
+        if pos_used < positional.len() && !has_variadic {
+            let max_args = params.len();
             self.emit_error(
                 fidan_diagnostics::diag_code!("E0305"),
                 format!(
                     "expected {} argument{}, got {}",
                     max_args,
                     if max_args == 1 { "" } else { "s" },
-                    args.len()
+                    positional.len(),
                 ),
                 span,
+            );
+        }
+    }
+
+    fn check_stdlib_bound_argument_compatibility(
+        &mut self,
+        module_name: &str,
+        member_name: &str,
+        param: &fidan_stdlib::StdlibParamInfo,
+        arg: CallArgInfo,
+        module: &Module,
+    ) {
+        let actual = self
+            .expr_types
+            .get(&arg.value)
+            .cloned()
+            .unwrap_or_else(|| self.infer_expr(arg.value, module));
+        let expected = fidan_stdlib::parse_stdlib_type_spec(param.type_name)
+            .map(|spec| self.stdlib_spec_to_fidan_type(&spec))
+            .unwrap_or(FidanType::Dynamic);
+
+        if !expected.is_assignable_from(&actual) {
+            self.emit_error(
+                fidan_diagnostics::diag_code!("E0302"),
+                format!(
+                    "argument `{}` for `std.{module_name}.{member_name}` expects type `{}`, found `{}`",
+                    param.name,
+                    self.ty_name(&expected),
+                    self.ty_name(&actual),
+                ),
+                arg.span,
             );
         }
     }
@@ -3022,7 +3240,7 @@ impl TypeChecker {
                         .and_then(|o| o.fields.get(&field))
                         .cloned();
                     if let Some(ft) = found_field {
-                        return ft;
+                        return ft.ty;
                     }
                     // ── own method ──────────────────────────────────────────
                     let found_method = self
@@ -3184,7 +3402,13 @@ impl TypeChecker {
                 if let Some(import) = self.stdlib_imports.get(&name).copied() {
                     let module_name = self.interner.resolve(import.module).to_string();
                     let member_name = self.interner.resolve(import.export).to_string();
-                    self.check_stdlib_member_arguments(&module_name, &member_name, args, span);
+                    self.check_stdlib_member_arguments(
+                        &module_name,
+                        &member_name,
+                        args,
+                        span,
+                        module,
+                    );
                     if let Some(return_ty) = self.stdlib_import_return_type(import, args, module) {
                         return return_ty;
                     }
@@ -3262,7 +3486,13 @@ impl TypeChecker {
                 {
                     let module_name = self.interner.resolve(module_sym).to_string();
                     let member_name = self.interner.resolve(field).to_string();
-                    self.check_stdlib_member_arguments(&module_name, &member_name, args, span);
+                    self.check_stdlib_member_arguments(
+                        &module_name,
+                        &member_name,
+                        args,
+                        span,
+                        module,
+                    );
                     if let Some(return_ty) =
                         self.stdlib_namespace_return_type(module_sym, field, args, module)
                     {
@@ -3416,6 +3646,15 @@ impl TypeChecker {
     }
 
     fn resolve_object_field_only(&self, obj_sym: Symbol, field: Symbol) -> Option<FidanType> {
+        self.resolve_object_field_info(obj_sym, field)
+            .map(|field| field.ty.clone())
+    }
+
+    fn resolve_object_field_info(
+        &self,
+        obj_sym: Symbol,
+        field: Symbol,
+    ) -> Option<&ObjectFieldInfo> {
         if !self.objects.contains_key(&obj_sym) {
             return None;
         }
@@ -3424,7 +3663,7 @@ impl TypeChecker {
         loop {
             let info = self.objects.get(&cur)?;
             if let Some(field_ty) = info.fields.get(&field) {
-                return Some(field_ty.clone());
+                return Some(field_ty);
             }
             match info.parent {
                 Some(parent) if self.objects.contains_key(&parent) => cur = parent,

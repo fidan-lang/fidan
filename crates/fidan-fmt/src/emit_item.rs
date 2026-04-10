@@ -362,11 +362,17 @@ pub fn emit_item(p: &mut Printer<'_>, item: &Item, inside_object: bool) {
                     if field.certain {
                         p.w("certain ");
                     }
-                    p.w("var ");
+                    if field.is_const {
+                        p.w("const var ");
+                    } else {
+                        p.w("var ");
+                    }
                     let fn_ = p.sym_s(field.name);
                     p.w(&fn_);
-                    p.w(" oftype ");
-                    emit_type(p, &field.ty);
+                    if field.has_type_annotation {
+                        p.w(" oftype ");
+                        emit_type(p, &field.ty);
+                    }
                     if let Some(default) = field.default {
                         p.w(" = ");
                         emit_expr_after_prefix(p, default);

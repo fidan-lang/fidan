@@ -328,6 +328,27 @@ mod tests {
     }
 
     #[test]
+    fn object_const_field_parses() {
+        let (module, diags) = parse_src(
+            r#"object StorageManager {
+                const var tasks oftype hashset oftype string = hashset()
+            }"#,
+        );
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+
+        let fidan_ast::Item::ObjectDecl { fields, .. } = module.arena.get_item(module.items[0])
+        else {
+            panic!("expected object declaration");
+        };
+        assert_eq!(fields.len(), 1);
+        assert!(fields[0].is_const, "expected const field");
+    }
+
+    #[test]
     fn object_extends() {
         let (_, diags) = parse_src(
             r#"object Animal { var name oftype string }

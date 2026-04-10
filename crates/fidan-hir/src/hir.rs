@@ -108,6 +108,7 @@ pub struct HirObject {
 pub struct HirField {
     pub name: Symbol,
     pub ty: FidanType,
+    pub is_const: bool,
     pub certain: bool,
     pub default: Option<HirExpr>,
     pub span: Span,

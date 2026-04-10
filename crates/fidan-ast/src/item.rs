@@ -106,6 +106,8 @@ pub struct EnumVariantDef {
 pub struct FieldDecl {
     pub name: Symbol,
     pub ty: TypeExpr,
+    pub has_type_annotation: bool,
+    pub is_const: bool,
     pub certain: bool,
     pub default: Option<crate::ExprId>,
     pub span: Span,

@@ -833,11 +833,12 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                             .objects
                             .get(&name)
                             .and_then(|o| o.fields.get(&f.name))
-                            .cloned()
+                            .map(|field| field.ty.clone())
                             .unwrap_or(FidanType::Dynamic);
                         HirField {
                             name: f.name,
                             ty,
+                            is_const: f.is_const,
                             certain: f.certain,
                             default: f.default.map(|e| ctx.lower_expr(e)),
                             span: f.span,

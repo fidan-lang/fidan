@@ -176,6 +176,14 @@ mod tests {
     }
 
     #[test]
+    fn object_fields_preserve_const_and_implicit_types() {
+        let src = "object StorageManager {\n    const var FILE_PATH = \"tasks.json\"\n}\n";
+        let out = fmt(src);
+        assert_eq!(out, src);
+        assert_idempotent(src);
+    }
+
+    #[test]
     fn bool_var() {
         let out = fmt("var flag = true");
         assert_eq!(out, "var flag = true\n");

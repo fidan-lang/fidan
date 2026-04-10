@@ -153,6 +153,14 @@ pub struct ReceiverMemberSpec {
     pub info: ReceiverMemberInfo,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReceiverParamInfo {
+    pub name: &'static str,
+    pub type_name: &'static str,
+    pub optional: bool,
+    pub variadic: bool,
+}
+
 const fn spec(
     names: &'static [&'static str],
     canonical_name: &'static str,
@@ -179,6 +187,71 @@ const fn spec_with_op(
         },
     }
 }
+
+const fn param(name: &'static str, type_name: &'static str) -> ReceiverParamInfo {
+    ReceiverParamInfo {
+        name,
+        type_name,
+        optional: false,
+        variadic: false,
+    }
+}
+
+const fn optional_param(name: &'static str, type_name: &'static str) -> ReceiverParamInfo {
+    ReceiverParamInfo {
+        name,
+        type_name,
+        optional: true,
+        variadic: false,
+    }
+}
+
+const fn variadic_param(name: &'static str, type_name: &'static str) -> ReceiverParamInfo {
+    ReceiverParamInfo {
+        name,
+        type_name,
+        optional: false,
+        variadic: true,
+    }
+}
+
+const NO_RECEIVER_PARAMS: &[ReceiverParamInfo] = &[];
+const STRING_TEXT_PARAM: &[ReceiverParamInfo] = &[param("text", "string")];
+const STRING_PREFIX_PARAM: &[ReceiverParamInfo] = &[param("prefix", "string")];
+const STRING_SUFFIX_PARAM: &[ReceiverParamInfo] = &[param("suffix", "string")];
+const STRING_SEPARATOR_PARAM: &[ReceiverParamInfo] = &[param("separator", "string")];
+const STRING_INDEX_PARAM: &[ReceiverParamInfo] = &[param("index", "integer")];
+const STRING_COUNT_PARAM: &[ReceiverParamInfo] = &[param("count", "integer")];
+const STRING_VALUES_PARAM: &[ReceiverParamInfo] = &[param("values", "list oftype dynamic")];
+const STRING_VALUE_PARAM: &[ReceiverParamInfo] = &[param("value", "string")];
+const STRING_REPLACE_PARAMS: &[ReceiverParamInfo] =
+    &[param("from", "string"), param("to", "string")];
+const STRING_SUBSTRING_PARAMS: &[ReceiverParamInfo] =
+    &[param("start", "integer"), optional_param("end", "integer")];
+const STRING_WIDTH_AND_PAD_PARAMS: &[ReceiverParamInfo] =
+    &[param("width", "integer"), optional_param("pad", "string")];
+const STRING_FORMAT_VALUES_PARAM: &[ReceiverParamInfo] = &[variadic_param("values", "dynamic")];
+const LIST_VALUE_PARAM: &[ReceiverParamInfo] = &[param("value", "T")];
+const LIST_VALUES_PARAM: &[ReceiverParamInfo] = &[variadic_param("values", "T")];
+const LIST_INDEX_PARAM: &[ReceiverParamInfo] = &[param("index", "integer")];
+const LIST_SEPARATOR_PARAM: &[ReceiverParamInfo] = &[optional_param("separator", "string")];
+const LIST_SLICE_PARAMS: &[ReceiverParamInfo] = &[
+    optional_param("start", "integer"),
+    optional_param("end", "integer"),
+    optional_param("step", "integer"),
+];
+const LIST_ITEMS_PARAM: &[ReceiverParamInfo] = &[param("items", "list oftype T")];
+const LIST_CALLBACK_PARAM: &[ReceiverParamInfo] = &[param("callback", "action")];
+const LIST_PREDICATE_PARAM: &[ReceiverParamInfo] = &[param("predicate", "action")];
+const LIST_REDUCE_PARAMS: &[ReceiverParamInfo] = &[
+    param("callback", "action"),
+    optional_param("initial", "dynamic"),
+];
+const DICT_KEY_PARAM: &[ReceiverParamInfo] = &[param("key", "K")];
+const DICT_SET_PARAMS: &[ReceiverParamInfo] = &[param("key", "K"), param("value", "V")];
+const HASHSET_VALUE_PARAM: &[ReceiverParamInfo] = &[param("value", "T")];
+const HASHSET_OTHER_PARAM: &[ReceiverParamInfo] = &[param("other", "hashset oftype T")];
+const SHARED_VALUE_PARAM: &[ReceiverParamInfo] = &[param("value", "T")];
 
 const INTEGER_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
     spec(&["abs"], "abs", None, Some(ReceiverReturnKind::Integer)),
@@ -997,70 +1070,415 @@ pub fn infer_receiver_member(
         .map(|spec| spec.info)
 }
 
-pub fn receiver_method_arity_bounds(
+fn receiver_signature_type_name(receiver_kind: ReceiverBuiltinKind) -> &'static str {
+    match receiver_kind {
+        ReceiverBuiltinKind::Integer => "integer",
+        ReceiverBuiltinKind::Float => "float",
+        ReceiverBuiltinKind::Boolean => "boolean",
+        ReceiverBuiltinKind::String => "string",
+        ReceiverBuiltinKind::List => "list",
+        ReceiverBuiltinKind::Dict => "dict",
+        ReceiverBuiltinKind::HashSet => "hashset",
+        ReceiverBuiltinKind::Handle => "handle",
+        ReceiverBuiltinKind::Nothing => "nothing",
+        ReceiverBuiltinKind::Dynamic => "dynamic",
+        ReceiverBuiltinKind::Shared => "Shared",
+        ReceiverBuiltinKind::WeakShared => "WeakShared",
+        ReceiverBuiltinKind::Pending => "Pending",
+        ReceiverBuiltinKind::Function => "action",
+    }
+}
+
+fn receiver_self_type_name(receiver_kind: ReceiverBuiltinKind) -> &'static str {
+    match receiver_kind {
+        ReceiverBuiltinKind::List => "list oftype T",
+        ReceiverBuiltinKind::Dict => "dict oftype (K, V)",
+        ReceiverBuiltinKind::HashSet => "hashset oftype T",
+        ReceiverBuiltinKind::Shared => "Shared oftype T",
+        ReceiverBuiltinKind::WeakShared => "WeakShared oftype T",
+        ReceiverBuiltinKind::Pending => "Pending oftype T",
+        _ => receiver_signature_type_name(receiver_kind),
+    }
+}
+
+fn receiver_return_type_name(
+    receiver_kind: ReceiverBuiltinKind,
+    return_kind: ReceiverReturnKind,
+) -> String {
+    match return_kind {
+        ReceiverReturnKind::Integer => "integer".to_string(),
+        ReceiverReturnKind::Float => "float".to_string(),
+        ReceiverReturnKind::Boolean => "boolean".to_string(),
+        ReceiverReturnKind::String => "string".to_string(),
+        ReceiverReturnKind::Dynamic => "dynamic".to_string(),
+        ReceiverReturnKind::Nothing => "nothing".to_string(),
+        ReceiverReturnKind::ReceiverSelf => receiver_self_type_name(receiver_kind).to_string(),
+        ReceiverReturnKind::ReceiverElement => "T".to_string(),
+        ReceiverReturnKind::DictValue => "V".to_string(),
+        ReceiverReturnKind::ListOfString => "list oftype string".to_string(),
+        ReceiverReturnKind::ListOfInteger => "list oftype integer".to_string(),
+        ReceiverReturnKind::ListOfDynamic => "list oftype dynamic".to_string(),
+        ReceiverReturnKind::ListOfReceiverElement => "list oftype T".to_string(),
+        ReceiverReturnKind::ListOfDictValue => "list oftype V".to_string(),
+        ReceiverReturnKind::ListOfDynamicPairs => "list oftype (dynamic, dynamic)".to_string(),
+        ReceiverReturnKind::SharedInnerValue => "T".to_string(),
+        ReceiverReturnKind::SharedOfInner => "Shared oftype T".to_string(),
+        ReceiverReturnKind::WeakSharedOfInner => "WeakShared oftype T".to_string(),
+    }
+}
+
+fn split_top_level_pair(input: &str) -> Option<(String, String)> {
+    let mut depth = 0usize;
+    for (index, ch) in input.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let left = input[..index].trim();
+                let right = input[index + 1..].trim();
+                if left.is_empty() || right.is_empty() {
+                    return None;
+                }
+                return Some((left.to_string(), right.to_string()));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn receiver_type_bindings(
+    receiver_kind: ReceiverBuiltinKind,
+    receiver_type_name: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let trimmed = receiver_type_name.trim();
+    match receiver_kind {
+        ReceiverBuiltinKind::List => (
+            trimmed
+                .strip_prefix("list oftype ")
+                .map(str::trim)
+                .filter(|inner| !inner.is_empty())
+                .map(ToOwned::to_owned),
+            None,
+            None,
+        ),
+        ReceiverBuiltinKind::HashSet => (
+            trimmed
+                .strip_prefix("hashset oftype ")
+                .map(str::trim)
+                .filter(|inner| !inner.is_empty())
+                .map(ToOwned::to_owned),
+            None,
+            None,
+        ),
+        ReceiverBuiltinKind::Dict => {
+            let Some(inner) = trimmed
+                .strip_prefix("dict oftype ")
+                .or_else(|| trimmed.strip_prefix("map oftype "))
+                .map(str::trim)
+            else {
+                return (None, None, None);
+            };
+            let Some(tuple) = inner
+                .strip_prefix('(')
+                .and_then(|value| value.strip_suffix(')'))
+            else {
+                return (None, None, None);
+            };
+            let Some((key_ty, value_ty)) = split_top_level_pair(tuple) else {
+                return (None, None, None);
+            };
+            (None, Some(key_ty), Some(value_ty))
+        }
+        ReceiverBuiltinKind::Shared => (
+            trimmed
+                .strip_prefix("Shared oftype ")
+                .map(str::trim)
+                .filter(|inner| !inner.is_empty())
+                .map(ToOwned::to_owned),
+            None,
+            None,
+        ),
+        ReceiverBuiltinKind::WeakShared => (
+            trimmed
+                .strip_prefix("WeakShared oftype ")
+                .map(str::trim)
+                .filter(|inner| !inner.is_empty())
+                .map(ToOwned::to_owned),
+            None,
+            None,
+        ),
+        ReceiverBuiltinKind::Pending => (
+            trimmed
+                .strip_prefix("Pending oftype ")
+                .map(str::trim)
+                .filter(|inner| !inner.is_empty())
+                .map(ToOwned::to_owned),
+            None,
+            None,
+        ),
+        _ => (None, None, None),
+    }
+}
+
+pub fn specialize_receiver_type_template(
+    receiver_kind: ReceiverBuiltinKind,
+    receiver_type_name: &str,
+    template: &str,
+) -> String {
+    let (t_binding, k_binding, v_binding) =
+        receiver_type_bindings(receiver_kind, receiver_type_name);
+
+    let mut specialized = template.to_string();
+    if let Some(key_ty) = k_binding {
+        specialized = specialized.replace("K", &key_ty);
+    }
+    if let Some(value_ty) = v_binding {
+        specialized = specialized.replace("V", &value_ty);
+    }
+    if let Some(elem_ty) = t_binding {
+        specialized = specialized.replace("T", &elem_ty);
+    }
+
+    specialized
+}
+
+pub fn receiver_member_return_type_name_for_type_name(
+    receiver_kind: ReceiverBuiltinKind,
+    receiver_type_name: &str,
+    name: &str,
+) -> Option<String> {
+    let info = infer_receiver_member(receiver_kind, name)?;
+    let return_kind = info.method_return.or(info.field_return)?;
+    if matches!(return_kind, ReceiverReturnKind::ReceiverSelf) {
+        return Some(receiver_type_name.to_string());
+    }
+
+    Some(specialize_receiver_type_template(
+        receiver_kind,
+        receiver_type_name,
+        &receiver_return_type_name(receiver_kind, return_kind),
+    ))
+}
+
+pub fn receiver_member_param_type_names_for_type_name(
+    receiver_kind: ReceiverBuiltinKind,
+    receiver_type_name: &str,
+    name: &str,
+) -> Option<Vec<String>> {
+    let info = infer_receiver_member(receiver_kind, name)?;
+    let params =
+        receiver_member_params(receiver_kind, info.canonical_name).unwrap_or(NO_RECEIVER_PARAMS);
+    Some(
+        params
+            .iter()
+            .map(|param| {
+                specialize_receiver_type_template(
+                    receiver_kind,
+                    receiver_type_name,
+                    param.type_name,
+                )
+            })
+            .collect(),
+    )
+}
+
+pub fn receiver_member_signature_for_type_name(
+    receiver_kind: ReceiverBuiltinKind,
+    receiver_type_name: &str,
+    name: &str,
+) -> Option<String> {
+    let info = infer_receiver_member(receiver_kind, name)?;
+    let params =
+        receiver_member_params(receiver_kind, info.canonical_name).unwrap_or(NO_RECEIVER_PARAMS);
+    let params = params
+        .iter()
+        .map(|param| {
+            let ty_name = specialize_receiver_type_template(
+                receiver_kind,
+                receiver_type_name,
+                param.type_name,
+            );
+            let mut rendered = format!("{} oftype {}", param.name, ty_name);
+            if param.variadic {
+                rendered.push_str("...");
+            }
+            if param.optional {
+                rendered.push('?');
+            }
+            rendered
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if info.method_return.is_some() {
+        let return_type = receiver_member_return_type_name_for_type_name(
+            receiver_kind,
+            receiver_type_name,
+            info.canonical_name,
+        )?;
+        return Some(format!(
+            "{}.{}({}) -> {}",
+            receiver_signature_type_name(receiver_kind),
+            info.canonical_name,
+            params,
+            return_type
+        ));
+    }
+
+    let return_type = receiver_member_return_type_name_for_type_name(
+        receiver_kind,
+        receiver_type_name,
+        info.canonical_name,
+    )?;
+    Some(format!(
+        "{}.{} -> {}",
+        receiver_signature_type_name(receiver_kind),
+        info.canonical_name,
+        return_type
+    ))
+}
+
+pub fn receiver_member_params(
     receiver_kind: ReceiverBuiltinKind,
     name: &str,
-) -> Option<(usize, Option<usize>)> {
+) -> Option<&'static [ReceiverParamInfo]> {
     let canonical = infer_receiver_member(receiver_kind, name)?.canonical_name;
 
-    match receiver_kind {
+    let params = match receiver_kind {
         ReceiverBuiltinKind::Integer | ReceiverBuiltinKind::Float => match canonical {
             "abs" | "sqrt" | "floor" | "ceil" | "round" | "toFloat" | "toInt" | "toString" => {
-                Some((0, Some(0)))
+                NO_RECEIVER_PARAMS
             }
-            _ => None,
+            _ => return None,
         },
         ReceiverBuiltinKind::Boolean => match canonical {
-            "toString" => Some((0, Some(0))),
-            _ => None,
+            "toString" => NO_RECEIVER_PARAMS,
+            _ => return None,
         },
         ReceiverBuiltinKind::String => match canonical {
             "len" | "byteLen" | "lower" | "upper" | "capitalize" | "trim" | "trimStart"
-            | "trimEnd" | "lines" | "chars" => Some((0, Some(0))),
-            "split" | "join" | "contains" | "startsWith" | "endsWith" | "indexOf"
-            | "lastIndexOf" => Some((1, Some(1))),
-            "replace" | "replaceAll" => Some((2, Some(2))),
-            _ => None,
+            | "trimEnd" | "lines" | "chars" | "toInt" | "toFloat" | "toBool" | "toString"
+            | "reverse" | "bytes" | "charCode" | "isEmpty" => NO_RECEIVER_PARAMS,
+            "split" => STRING_SEPARATOR_PARAM,
+            "join" => STRING_VALUES_PARAM,
+            "contains" => STRING_TEXT_PARAM,
+            "startsWith" => STRING_PREFIX_PARAM,
+            "endsWith" => STRING_SUFFIX_PARAM,
+            "indexOf" | "lastIndexOf" => STRING_VALUE_PARAM,
+            "replace" | "replaceAll" | "replaceFirst" => STRING_REPLACE_PARAMS,
+            "repeat" => STRING_COUNT_PARAM,
+            "charAt" => STRING_INDEX_PARAM,
+            "substring" => STRING_SUBSTRING_PARAMS,
+            "padStart" | "padEnd" => STRING_WIDTH_AND_PAD_PARAMS,
+            "format" => STRING_FORMAT_VALUES_PARAM,
+            _ => return None,
         },
         ReceiverBuiltinKind::List => match canonical {
-            "len" | "isEmpty" | "first" | "last" | "reverse" | "reversed" | "sort" | "flatten"
-            | "toString" => Some((0, Some(0))),
-            "get" | "contains" | "indexOf" | "find" | "firstWhere" | "forEach" | "map"
-            | "filter" | "remove" | "reduce" => Some((1, Some(1))),
-            "join" => Some((0, Some(1))),
-            "append" | "extend" => Some((1, None)),
-            "slice" => Some((0, Some(3))),
-            _ => None,
+            "len" | "isEmpty" | "pop" | "first" | "last" | "reverse" | "reversed" | "sort"
+            | "flatten" | "toString" => NO_RECEIVER_PARAMS,
+            "append" => LIST_VALUES_PARAM,
+            "get" | "remove" => LIST_INDEX_PARAM,
+            "contains" | "indexOf" | "find" => LIST_VALUE_PARAM,
+            "join" => LIST_SEPARATOR_PARAM,
+            "slice" => LIST_SLICE_PARAMS,
+            "extend" => LIST_ITEMS_PARAM,
+            "forEach" | "map" => LIST_CALLBACK_PARAM,
+            "filter" | "firstWhere" => LIST_PREDICATE_PARAM,
+            "reduce" => LIST_REDUCE_PARAMS,
+            _ => return None,
         },
         ReceiverBuiltinKind::Dict => match canonical {
-            "len" | "isEmpty" | "keys" | "values" | "entries" | "toString" => Some((0, Some(0))),
-            "get" | "containsKey" | "remove" => Some((1, Some(1))),
-            "set" => Some((2, Some(2))),
-            _ => None,
+            "len" | "isEmpty" | "keys" | "values" | "entries" | "toString" => NO_RECEIVER_PARAMS,
+            "get" | "containsKey" | "remove" => DICT_KEY_PARAM,
+            "set" => DICT_SET_PARAMS,
+            _ => return None,
         },
         ReceiverBuiltinKind::HashSet => match canonical {
-            "len" | "isEmpty" | "toList" | "toString" => Some((0, Some(0))),
-            "insert" | "remove" | "contains" | "union" | "intersect" | "diff" => Some((1, Some(1))),
-            _ => None,
+            "len" | "isEmpty" | "toList" | "toString" => NO_RECEIVER_PARAMS,
+            "insert" | "remove" | "contains" => HASHSET_VALUE_PARAM,
+            "union" | "intersect" | "diff" => HASHSET_OTHER_PARAM,
+            _ => return None,
         },
         ReceiverBuiltinKind::Shared => match canonical {
-            "get" | "weak" => Some((0, Some(0))),
-            "set" => Some((1, Some(1))),
-            _ => None,
+            "get" | "weak" => NO_RECEIVER_PARAMS,
+            "set" => SHARED_VALUE_PARAM,
+            _ => return None,
         },
         ReceiverBuiltinKind::WeakShared => match canonical {
-            "upgrade" | "isAlive" => Some((0, Some(0))),
-            _ => None,
+            "upgrade" | "isAlive" => NO_RECEIVER_PARAMS,
+            _ => return None,
         },
         ReceiverBuiltinKind::Function => match canonical {
-            "name" => Some((0, Some(0))),
-            _ => None,
+            "name" => NO_RECEIVER_PARAMS,
+            _ => return None,
         },
         ReceiverBuiltinKind::Handle
         | ReceiverBuiltinKind::Nothing
         | ReceiverBuiltinKind::Dynamic
-        | ReceiverBuiltinKind::Pending => None,
+        | ReceiverBuiltinKind::Pending => return None,
+    };
+
+    Some(params)
+}
+
+pub fn receiver_member_signature(receiver_kind: ReceiverBuiltinKind, name: &str) -> Option<String> {
+    let info = infer_receiver_member(receiver_kind, name)?;
+    let receiver_name = receiver_signature_type_name(receiver_kind);
+    let params =
+        receiver_member_params(receiver_kind, info.canonical_name).unwrap_or(NO_RECEIVER_PARAMS);
+    let params = params
+        .iter()
+        .map(|param| {
+            let mut rendered = format!("{} oftype {}", param.name, param.type_name);
+            if param.variadic {
+                rendered.push_str("...");
+            }
+            if param.optional {
+                rendered.push('?');
+            }
+            rendered
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    if let Some(return_kind) = info.method_return {
+        return Some(format!(
+            "{}.{}({}) -> {}",
+            receiver_name,
+            info.canonical_name,
+            params,
+            receiver_return_type_name(receiver_kind, return_kind)
+        ));
     }
+
+    info.field_return.map(|return_kind| {
+        format!(
+            "{}.{} -> {}",
+            receiver_name,
+            info.canonical_name,
+            receiver_return_type_name(receiver_kind, return_kind)
+        )
+    })
+}
+
+pub fn receiver_method_arity_bounds(
+    receiver_kind: ReceiverBuiltinKind,
+    name: &str,
+) -> Option<(usize, Option<usize>)> {
+    let info = infer_receiver_member(receiver_kind, name)?;
+    info.method_return?;
+
+    let params =
+        receiver_member_params(receiver_kind, info.canonical_name).unwrap_or(NO_RECEIVER_PARAMS);
+    let min_args = params.iter().filter(|param| !param.optional).count();
+    let max_args = if params.iter().any(|param| param.variadic) {
+        None
+    } else {
+        Some(params.len())
+    };
+
+    Some((min_args, max_args))
 }
 
 pub fn type_name_info(name: &str) -> Option<&'static BuiltinInfo> {
@@ -1082,7 +1500,8 @@ mod tests {
         BuiltinSemantic, LANGUAGE_BUILTINS, LANGUAGE_DECORATORS, LANGUAGE_TYPE_NAMES,
         ReceiverBuiltinKind, ReceiverMethodOp, ReceiverReturnKind, builtin_info,
         builtin_return_kind, builtin_semantic, decorator_info, editor_symbol_info,
-        infer_receiver_member, receiver_method_arity_bounds, type_name_info,
+        infer_receiver_member, receiver_member_params, receiver_member_signature,
+        receiver_member_specs, receiver_method_arity_bounds, type_name_info,
     };
 
     #[test]
@@ -1180,6 +1599,80 @@ mod tests {
             receiver_method_arity_bounds(ReceiverBuiltinKind::Dict, "has"),
             Some((1, Some(1)))
         );
+    }
+
+    #[test]
+    fn receiver_method_signatures_are_typed_and_centralized() {
+        assert_eq!(
+            receiver_member_signature(ReceiverBuiltinKind::HashSet, "contains").as_deref(),
+            Some("hashset.contains(value oftype T) -> boolean")
+        );
+        assert_eq!(
+            receiver_member_signature(ReceiverBuiltinKind::Dict, "get").as_deref(),
+            Some("dict.get(key oftype K) -> V")
+        );
+        assert_eq!(
+            receiver_member_signature(ReceiverBuiltinKind::List, "slice").as_deref(),
+            Some(
+                "list.slice(start oftype integer?, end oftype integer?, step oftype integer?) -> list oftype T"
+            )
+        );
+    }
+
+    #[test]
+    fn receiver_method_signature_metadata_covers_every_builtin_receiver_member() {
+        let receiver_kinds = [
+            ReceiverBuiltinKind::Integer,
+            ReceiverBuiltinKind::Float,
+            ReceiverBuiltinKind::Boolean,
+            ReceiverBuiltinKind::String,
+            ReceiverBuiltinKind::List,
+            ReceiverBuiltinKind::Dict,
+            ReceiverBuiltinKind::HashSet,
+            ReceiverBuiltinKind::Shared,
+            ReceiverBuiltinKind::WeakShared,
+            ReceiverBuiltinKind::Function,
+        ];
+
+        for receiver_kind in receiver_kinds {
+            for spec in receiver_member_specs(receiver_kind) {
+                let signature = receiver_member_signature(receiver_kind, spec.info.canonical_name)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "missing signature metadata for {:?}.{}",
+                            receiver_kind, spec.info.canonical_name
+                        )
+                    });
+                assert!(
+                    signature.contains(spec.info.canonical_name),
+                    "signature should mention canonical member name: {signature}"
+                );
+
+                if spec.info.method_return.is_some() {
+                    let params = receiver_member_params(receiver_kind, spec.info.canonical_name)
+                        .unwrap_or(&[]);
+                    if let Some((min_args, max_args)) =
+                        receiver_method_arity_bounds(receiver_kind, spec.info.canonical_name)
+                    {
+                        let required_args = params.iter().filter(|param| !param.optional).count();
+                        assert_eq!(
+                            required_args, min_args,
+                            "required arg count mismatch for {:?}.{}",
+                            receiver_kind, spec.info.canonical_name
+                        );
+                        if let Some(max_args) = max_args {
+                            assert_eq!(
+                                params.len(),
+                                max_args,
+                                "max arg count mismatch for {:?}.{}",
+                                receiver_kind,
+                                spec.info.canonical_name
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -4,7 +4,10 @@
 //! Consumed by hover, go-to-definition and completion handlers.
 
 use fidan_ast::{AstArena, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr};
-use fidan_config::{ReceiverBuiltinKind, ReceiverReturnKind, receiver_member_specs};
+use fidan_config::{
+    ReceiverBuiltinKind, ReceiverReturnKind, receiver_member_params, receiver_member_signature,
+    receiver_member_specs,
+};
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::Span;
 use fidan_typeck::{ActionInfo, FidanType, ObjectInfo, TypedModule};
@@ -228,8 +231,7 @@ pub(crate) fn resolved_type_name(ty: &FidanType, interner: &SymbolInterner) -> O
             Some(interner.resolve(*sym).to_string())
         }
         _ => builtin_receiver_kind(ty)
-            .and_then(receiver_builtin_type_name)
-            .map(str::to_string),
+            .map(|_| ty.display_name(&|sym| interner.resolve(sym).to_string())),
     }
 }
 
@@ -274,13 +276,7 @@ fn inferred_var_type(
     interner: &SymbolInterner,
 ) -> (Option<String>, String) {
     let resolved_name = ty
-        .and_then(|annotated| {
-            if let TypeExpr::Named { name, .. } = annotated {
-                Some(interner.resolve(*name).to_string())
-            } else {
-                None
-            }
-        })
+        .map(|annotated| fmt_type_expr(annotated, interner))
         .or_else(|| {
             init.and_then(|expr_id| match typed.expr_types.get(&expr_id) {
                 Some(found_ty) => resolved_type_name(found_ty, interner),
@@ -452,15 +448,20 @@ fn build_builtin_receiver_member_entries(table: &mut SymbolTable) {
             let (return_label, ty_name) = return_kind
                 .map(receiver_return_summary)
                 .unwrap_or(("dynamic", None));
-            let callable_suffix = if spec.info.method_return.is_some() {
-                "()"
-            } else {
-                ""
-            };
-            let detail = format!(
-                "```fidan\n{}.{}{} -> {}\n```",
-                receiver_name, spec.info.canonical_name, callable_suffix, return_label
-            );
+            let signature = receiver_member_signature(receiver_kind, spec.info.canonical_name)
+                .unwrap_or_else(|| {
+                    let callable_suffix = if spec.info.method_return.is_some() {
+                        "()"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "{}.{}{} -> {}",
+                        receiver_name, spec.info.canonical_name, callable_suffix, return_label
+                    )
+                });
+            let params =
+                receiver_member_params(receiver_kind, spec.info.canonical_name).unwrap_or(&[]);
             table.put(
                 format!("{}.{}", receiver_name, spec.info.canonical_name),
                 SymbolEntry {
@@ -470,13 +471,19 @@ fn build_builtin_receiver_member_entries(table: &mut SymbolTable) {
                         SymKind::Field
                     },
                     span: Span::default(),
-                    detail,
+                    detail: format!("```fidan\n{}\n```", signature),
                     ty_name: ty_name.map(str::to_string),
                     parent_type_name: None,
-                    param_types: vec![],
-                    param_required: vec![],
+                    param_types: params
+                        .iter()
+                        .map(|param| param.type_name.to_string())
+                        .collect(),
+                    param_required: params.iter().map(|param| !param.optional).collect(),
                     return_type: Some(return_label.to_string()),
-                    param_names: vec![],
+                    param_names: params
+                        .iter()
+                        .map(|param| (param.name.to_string(), Span::default()))
+                        .collect(),
                     is_param: false,
                 },
             );
@@ -980,16 +987,21 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
         // Fields — stored under "ClassName.field_name".
         // Use `info.span` as a temporary placeholder; corrected in the
         // AST pass below where the individual FieldDecl spans are available.
-        for (&fsym, fty) in &info.fields {
+        for (&fsym, field) in &info.fields {
             let fname = res(fsym);
-            let ty_s = type_name(fty, interner);
+            let ty_s = type_name(&field.ty, interner);
+            let detail = if field.is_const {
+                format!("```fidan\nconst {}.{}: {}\n```", name, fname, ty_s)
+            } else {
+                format!("```fidan\n{}.{}: {}\n```", name, fname, ty_s)
+            };
             table.put(
                 format!("{}.{}", name, fname),
                 SymbolEntry {
                     kind: SymKind::Field,
                     span: info.span,
-                    detail: format!("```fidan\n{}.{}: {}\n```", name, fname, ty_s),
-                    ty_name: resolved_type_name(fty, interner),
+                    detail,
+                    ty_name: resolved_type_name(&field.ty, interner),
                     parent_type_name: None,
                     param_types: vec![],
                     param_required: vec![],
@@ -1254,9 +1266,9 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
             };
             let parent_name = res(parent_sym);
             // Inherited fields — reuse the already-corrected field span.
-            for (&fsym, fty) in &parent_info.fields {
+            for (&fsym, field) in &parent_info.fields {
                 let fname = res(fsym);
-                let ty_s = type_name(fty, interner);
+                let ty_s = type_name(&field.ty, interner);
                 let key = format!("{}.{}", child_name, fname);
                 let span = table
                     .entries
@@ -1272,7 +1284,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                             "```fidan\n(inherited from {}) {}: {}\n```",
                             parent_name, fname, ty_s
                         ),
-                        ty_name: resolved_type_name(fty, interner),
+                        ty_name: resolved_type_name(&field.ty, interner),
                         parent_type_name: None,
                         param_types: vec![],
                         param_required: vec![],
@@ -1352,8 +1364,14 @@ fn fmt_object(name: &str, info: &ObjectInfo, interner: &SymbolInterner) -> Strin
         None => format!("object {}", name),
     };
     let mut lines = vec![header];
-    for (&fsym, fty) in &info.fields {
-        lines.push(format!("  {}: {}", res(fsym), type_name(fty, interner)));
+    for (&fsym, field) in &info.fields {
+        let kw = if field.is_const { "const " } else { "" };
+        lines.push(format!(
+            "  {}{}: {}",
+            kw,
+            res(fsym),
+            type_name(&field.ty, interner)
+        ));
     }
     format!("```fidan\n{}\n```", lines.join("\n"))
 }

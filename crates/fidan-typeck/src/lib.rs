@@ -322,6 +322,24 @@ mod tests {
     }
 
     #[test]
+    fn list_reduce_accepts_optional_initial_value() {
+        let errors = check_errors(
+            r#"var values = [1, 2, 3]
+var total = values.reduce(
+    action with (certain acc oftype integer, certain value oftype integer) returns integer {
+        return acc + value
+    },
+    0
+)"#,
+        );
+
+        assert!(
+            errors.is_empty(),
+            "expected reduce(initial) to typecheck, got {errors:?}"
+        );
+    }
+
+    #[test]
     fn stdlib_enumerate_preserves_tuple_element_types() {
         let src = r#"use std.collections.{enumerate}
 
@@ -738,6 +756,83 @@ var result = choose(true)
     }
 
     #[test]
+    fn object_const_field_declaration_is_clean() {
+        assert!(
+            check_errors(
+                r#"object StorageManager {
+                    const var tasks oftype hashset oftype string = hashset()
+                }"#,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn object_const_field_assignment_is_rejected() {
+        let errors = check_errors(
+            r#"object StorageManager {
+                const var tasks oftype hashset oftype string = hashset()
+
+                action reset {
+                    this.tasks = hashset()
+                }
+            }"#,
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("cannot assign to constant field `tasks`")),
+            "expected const field assignment error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn typed_list_literals_reject_mixed_element_types() {
+        let errors = check_errors(r#"var something oftype list oftype string = ["a", "b", 1]"#);
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("expected `string`, found `integer`")),
+            "expected typed list element mismatch, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn typed_dict_literals_reject_mixed_key_or_value_types() {
+        let errors =
+            check_errors(r#"var lookup oftype dict oftype (string, integer) = {"ok": 1, 2: 3}"#);
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("expected `string`, found `integer`")),
+            "expected typed dict key mismatch, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn typed_map_literals_reject_mixed_value_types() {
+        let errors =
+            check_errors(r#"var lookup oftype map oftype (string, integer) = {"ok": "bad"}"#);
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("expected `integer`, found `string`")),
+            "expected typed map value mismatch, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn typed_hashset_literals_reject_mixed_element_types() {
+        let errors = check_errors(r#"var tags oftype hashset oftype string = hashset(["a", 1])"#);
+        assert!(
+            errors
+                .iter()
+                .any(|msg| msg.contains("expected `string`, found `integer`")),
+            "expected typed hashset element mismatch, got {errors:?}"
+        );
+    }
+
+    #[test]
     fn builtin_receiver_methods_enforce_required_arguments() {
         let errors = check_errors(
             r#"var tasks oftype list oftype string = []
@@ -829,6 +924,20 @@ var result = choose(true)
     }
 
     #[test]
+    fn imported_stdlib_free_function_validates_argument_types() {
+        let errors = check_errors(
+            r#"use std.io.fileExists
+            var ok = fileExists(12345)"#,
+        );
+        assert!(
+            errors.iter().any(|msg| msg.contains(
+                "argument `path` for `std.io.fileExists` expects type `string`, found `integer`"
+            )),
+            "expected std.io.fileExists type error, got {errors:?}"
+        );
+    }
+
+    #[test]
     fn stdlib_namespace_call_requires_required_arguments() {
         let errors = check_errors(
             r#"use std.io
@@ -839,6 +948,20 @@ var result = choose(true)
                 .iter()
                 .any(|msg| msg.contains("not enough arguments for `std.io.readFile`")),
             "expected std.io.readFile arity error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn stdlib_namespace_call_validates_argument_types() {
+        let errors = check_errors(
+            r#"use std.io
+            var ok = io.fileExists(12345)"#,
+        );
+        assert!(
+            errors.iter().any(|msg| msg.contains(
+                "argument `path` for `std.io.fileExists` expects type `string`, found `integer`"
+            )),
+            "expected std.io.fileExists type error, got {errors:?}"
         );
     }
 
