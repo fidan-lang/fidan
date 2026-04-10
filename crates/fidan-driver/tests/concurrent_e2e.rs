@@ -415,6 +415,42 @@ print("ok")
 "#
 }
 
+fn iterable_loop_source() -> &'static str {
+    r#"action main {
+    var tasks oftype hashset oftype integer set hashset([1, 2, 2, 3])
+    var total = 0
+    for item in tasks {
+        total = total + item
+    }
+    assert_eq(total, 6)
+
+    var tuple_values = (4, 5, 6)
+    var tuple_total = 0
+    for value in tuple_values {
+        tuple_total = tuple_total + value
+    }
+    assert_eq(tuple_total, 15)
+
+    var ran_hashset = Shared(false)
+    parallel for item in tasks {
+        assert_eq(tasks.contains(item), true)
+        ran_hashset.set(true)
+    }
+    assert_eq(ran_hashset.get(), true)
+
+    var ran_tuple = Shared(false)
+    parallel for value in tuple_values {
+        assert(value >= 4)
+        ran_tuple.set(true)
+    }
+    assert_eq(ran_tuple.get(), true)
+    print("ok")
+}
+
+main()
+"#
+}
+
 fn async_std_source() -> &'static str {
     r#"use std.async
 
@@ -1142,6 +1178,39 @@ fn hashset_llvm_aot_matches_interpreter_contract() {
         sandbox.join("hashset_smoke")
     };
     compile_program(hashset_source(), Backend::Llvm, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn iterable_for_cranelift_aot_supports_hashsets_and_tuples() {
+    let sandbox = temp_dir("fidan_iterable_loop_cranelift");
+    let output = if cfg!(windows) {
+        sandbox.join("iterable_loop.exe")
+    } else {
+        sandbox.join("iterable_loop")
+    };
+    compile_program(iterable_loop_source(), Backend::Cranelift, &output);
+    run_compiled_binary_clean(&output, "ok");
+    fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn iterable_for_llvm_aot_supports_hashsets_and_tuples() {
+    if !llvm_available() {
+        eprintln!(
+            "skipping LLVM iterable-loop AOT smoke test because no compatible LLVM toolchain is installed"
+        );
+        return;
+    }
+
+    let sandbox = temp_dir("fidan_iterable_loop_llvm");
+    let output = if cfg!(windows) {
+        sandbox.join("iterable_loop.exe")
+    } else {
+        sandbox.join("iterable_loop")
+    };
+    compile_program(iterable_loop_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
     fs::remove_dir_all(&sandbox).ok();
 }

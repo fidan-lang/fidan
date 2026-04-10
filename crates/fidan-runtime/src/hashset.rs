@@ -1,4 +1,5 @@
 use crate::value::{FidanValue, display};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -181,12 +182,14 @@ impl std::error::Error for HashKeyError {}
 #[derive(Debug, Clone)]
 pub struct FidanHashSet {
     inner: Rc<HashMap<FidanHashKey, FidanValue>>,
+    sorted_values_cache: Rc<RefCell<Option<Vec<FidanValue>>>>,
 }
 
 impl FidanHashSet {
     pub fn new() -> Self {
         Self {
             inner: Rc::new(HashMap::new()),
+            sorted_values_cache: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -208,7 +211,11 @@ impl FidanHashSet {
 
     pub fn insert(&mut self, value: FidanValue) -> Result<bool, HashKeyError> {
         let key = FidanHashKey::from_value(&value)?;
-        Ok(Rc::make_mut(&mut self.inner).insert(key, value).is_none())
+        let inserted = Rc::make_mut(&mut self.inner).insert(key, value).is_none();
+        if inserted {
+            self.invalidate_sorted_values_cache();
+        }
+        Ok(inserted)
     }
 
     pub fn contains(&self, value: &FidanValue) -> Result<bool, HashKeyError> {
@@ -218,7 +225,11 @@ impl FidanHashSet {
 
     pub fn remove(&mut self, value: &FidanValue) -> Result<bool, HashKeyError> {
         let key = FidanHashKey::from_value(value)?;
-        Ok(Rc::make_mut(&mut self.inner).remove(&key).is_some())
+        let removed = Rc::make_mut(&mut self.inner).remove(&key).is_some();
+        if removed {
+            self.invalidate_sorted_values_cache();
+        }
+        Ok(removed)
     }
 
     pub fn union(&self, other: &FidanHashSet) -> FidanHashSet {
@@ -242,6 +253,7 @@ impl FidanHashSet {
         }
         FidanHashSet {
             inner: Rc::new(result),
+            sorted_values_cache: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -254,6 +266,7 @@ impl FidanHashSet {
         }
         FidanHashSet {
             inner: Rc::new(result),
+            sorted_values_cache: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -269,7 +282,40 @@ impl FidanHashSet {
     }
 
     pub fn values_sorted(&self) -> Vec<FidanValue> {
-        self.values_sorted_refs().into_iter().cloned().collect()
+        self.ensure_sorted_values_cache();
+        self.sorted_values_cache
+            .borrow()
+            .as_ref()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn value_at_sorted_index(&self, index: i64) -> Option<FidanValue> {
+        self.ensure_sorted_values_cache();
+        let values = self.sorted_values_cache.borrow();
+        let values = values.as_ref()?;
+        let len = values.len() as i64;
+        let normalized = if index < 0 { len + index } else { index };
+        if normalized < 0 || normalized >= len {
+            return None;
+        }
+        values.get(normalized as usize).cloned()
+    }
+
+    fn ensure_sorted_values_cache(&self) {
+        if self.sorted_values_cache.borrow().is_some() {
+            return;
+        }
+        let values = self
+            .values_sorted_refs()
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        *self.sorted_values_cache.borrow_mut() = Some(values);
+    }
+
+    fn invalidate_sorted_values_cache(&self) {
+        *self.sorted_values_cache.borrow_mut() = None;
     }
 }
 
@@ -370,6 +416,30 @@ mod tests {
         assert_eq!(
             owned.iter().map(crate::display).collect::<Vec<_>>(),
             borrowed.iter().map(crate::display).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn value_at_sorted_index_preserves_values_sorted_order() {
+        let mut set = FidanHashSet::new();
+        assert!(set.insert(FidanValue::Integer(7)).expect("insert int"));
+        assert!(
+            set.insert(FidanValue::String(FidanString::new("alpha")))
+                .expect("insert string")
+        );
+        assert!(set.insert(FidanValue::Integer(3)).expect("insert int"));
+
+        let expected = set.values_sorted();
+        let actual = (0..expected.len())
+            .map(|index| {
+                set.value_at_sorted_index(index as i64)
+                    .expect("value at sorted index")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            expected.iter().map(crate::display).collect::<Vec<_>>(),
+            actual.iter().map(crate::display).collect::<Vec<_>>()
         );
     }
 }

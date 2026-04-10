@@ -1313,6 +1313,16 @@ fn hashset_runtime_and_tuple_dicts_work_with_jit() {
 }
 
 #[test]
+fn hashset_and_tuple_for_iteration_work() {
+    assert!(run_src(iterable_loop_source()).is_ok());
+}
+
+#[test]
+fn hashset_and_tuple_for_iteration_work_with_jit() {
+    assert!(run_src_with_threshold(iterable_loop_source(), 1).is_ok());
+}
+
+#[test]
 fn hashset_lowers_to_first_class_mir_type() {
     let (mir, interner) = build_mir(hashset_runtime_source());
     let local_types = fidan_mir::collect_effective_local_types(&mir.functions[0], &mir, |sym| {
@@ -1409,6 +1419,41 @@ fn hashset_runtime_source() -> &'static str {
         var object_scores oftype dict oftype (Box, integer) set {first_box: 10, second_box: 20}
         assert_eq(object_scores.get(first_box), 10)
         assert_eq(object_scores.get(second_box), 20)"#
+}
+
+fn iterable_loop_source() -> &'static str {
+    r#"action main {
+    var tasks oftype hashset oftype integer set hashset([1, 2, 2, 3])
+    var total = 0
+    for item in tasks {
+        total = total + item
+    }
+    assert_eq(total, 6)
+
+    var tuple_values = (4, 5, 6)
+    var tuple_total = 0
+    for value in tuple_values {
+        tuple_total = tuple_total + value
+    }
+    assert_eq(tuple_total, 15)
+
+    var ran_hashset = Shared(false)
+    parallel for item in tasks {
+        assert_eq(tasks.contains(item), true)
+        ran_hashset.set(true)
+    }
+    assert_eq(ran_hashset.get(), true)
+
+    var ran_tuple = Shared(false)
+    parallel for value in tuple_values {
+        assert(value >= 4)
+        ran_tuple.set(true)
+    }
+    assert_eq(ran_tuple.get(), true)
+}
+
+main()
+"#
 }
 
 #[test]

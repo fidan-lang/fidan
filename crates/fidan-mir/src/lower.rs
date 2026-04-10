@@ -2094,7 +2094,7 @@ impl<'p> FnCtx<'p> {
         iterable: &HirExpr,
         body: &[HirStmt],
     ) {
-        let list_op = self.lower_expr(iterable);
+        let iterable_op = self.lower_expr(iterable);
 
         // idx = 0
         let idx0 = self.alloc_local();
@@ -2104,16 +2104,13 @@ impl<'p> FnCtx<'p> {
             rhs: Rvalue::Literal(MirLit::Int(0)),
         });
 
-        // len = list.len
+        // len = len(iterable)
         let len_local = self.alloc_local();
         self.emit(Instr::Call {
             dest: Some(len_local),
             result_ty: Some(MirTy::Integer),
-            callee: Callee::Method {
-                receiver: list_op.clone(),
-                method: self.len_sym,
-            },
-            args: vec![],
+            callee: Callee::Builtin(self.len_sym),
+            args: vec![iterable_op.clone()],
             span: fidan_source::Span::default(),
         });
 
@@ -2174,11 +2171,11 @@ impl<'p> FnCtx<'p> {
         // ── Loop body ─────────────────────────────────────────────────────────
         self.switch_to(body_bb);
 
-        // binding = list[idx_phi]
+        // binding = iterable[idx_phi]
         let elem = self.alloc_local();
         self.emit(Instr::GetIndex {
             dest: elem,
-            object: list_op.clone(),
+            object: iterable_op.clone(),
             index: Operand::Local(idx_phi),
         });
         let binding_local = self.alloc_local();

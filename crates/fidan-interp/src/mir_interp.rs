@@ -1704,30 +1704,7 @@ impl MirMachine {
                     .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture()))
                     .collect();
 
-                let items: Option<Vec<FidanValue>> = match coll {
-                    FidanValue::List(list_ref) => {
-                        // Snapshot the list before spawning (immutable during iter).
-                        Some(list_ref.borrow().iter().cloned().collect())
-                    }
-                    FidanValue::Range {
-                        start,
-                        end,
-                        inclusive,
-                    } => {
-                        let mut items = Vec::new();
-                        if inclusive {
-                            for n in start..=end {
-                                items.push(FidanValue::Integer(n));
-                            }
-                        } else {
-                            for n in start..end {
-                                items.push(FidanValue::Integer(n));
-                            }
-                        }
-                        Some(items)
-                    }
-                    _ => None,
-                };
+                let items = self.iterable_items_snapshot(coll);
 
                 if let Some(items) = items {
                     // Collect the first error from any iteration.
@@ -2707,6 +2684,15 @@ impl MirMachine {
                 .flatten()
                 .cloned()
                 .unwrap_or(FidanValue::Nothing)),
+            (FidanValue::HashSet(r), FidanValue::Integer(i)) => {
+                let set = r.borrow();
+                set.value_at_sorted_index(i).ok_or_else(|| {
+                    MirSignal::RuntimeError(
+                        fidan_diagnostics::diag_code!("R2002"),
+                        format!("hashset index {} out of range", i),
+                    )
+                })
+            }
             (FidanValue::String(s), FidanValue::Integer(i)) => {
                 // Avoid materialising a Vec<char> — walk with an iterator instead.
                 let str_ref = s.as_str();
@@ -2745,7 +2731,15 @@ impl MirMachine {
                 Ok(FidanValue::Integer(start + norm))
             }
             (FidanValue::Tuple(items), FidanValue::Integer(i)) => {
-                items.into_iter().nth(i as usize).ok_or_else(|| {
+                let len = items.len() as i64;
+                let norm = if i < 0 { len + i } else { i };
+                if norm < 0 || norm >= len {
+                    return Err(MirSignal::RuntimeError(
+                        fidan_diagnostics::diag_code!("R2002"),
+                        format!("tuple index {} out of range", i),
+                    ));
+                }
+                items.into_iter().nth(norm as usize).ok_or_else(|| {
                     MirSignal::RuntimeError(
                         fidan_diagnostics::diag_code!("R2002"),
                         format!("tuple index {} out of range", i),
@@ -2757,6 +2751,32 @@ impl MirMachine {
                 obj.type_name(),
                 idx.type_name()
             ))),
+        }
+    }
+
+    fn iterable_items_snapshot(&self, collection: FidanValue) -> Option<Vec<FidanValue>> {
+        match collection {
+            FidanValue::List(list_ref) => Some(list_ref.borrow().iter().cloned().collect()),
+            FidanValue::Tuple(items) => Some(items),
+            FidanValue::HashSet(set_ref) => Some(set_ref.borrow().values_sorted()),
+            FidanValue::Range {
+                start,
+                end,
+                inclusive,
+            } => {
+                let mut items = Vec::new();
+                if inclusive {
+                    for n in start..=end {
+                        items.push(FidanValue::Integer(n));
+                    }
+                } else {
+                    for n in start..end {
+                        items.push(FidanValue::Integer(n));
+                    }
+                }
+                Some(items)
+            }
+            _ => None,
         }
     }
 

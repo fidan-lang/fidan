@@ -607,6 +607,7 @@ pub unsafe extern "C" fn fdn_len(ptr: *mut FidanValue) -> i64 {
         FidanValue::List(l) => l.borrow().len() as i64,
         FidanValue::Dict(d) => d.borrow().len() as i64,
         FidanValue::HashSet(s) => s.borrow().len() as i64,
+        FidanValue::Tuple(items) => items.len() as i64,
         FidanValue::Range {
             start,
             end,
@@ -913,12 +914,25 @@ pub unsafe extern "C" fn fdn_list_get(
         }
         FidanValue::Tuple(items) => {
             if let FidanValue::Integer(n) = idx_val {
-                let i = if *n < 0 {
-                    (items.len() as i64 + n).max(0) as usize
+                let len = items.len() as i64;
+                let i = if *n < 0 { len + n } else { *n };
+                if i < 0 {
+                    FidanValue::Nothing
                 } else {
-                    *n as usize
-                };
-                items.get(i).cloned().unwrap_or(FidanValue::Nothing)
+                    items
+                        .get(i as usize)
+                        .cloned()
+                        .unwrap_or(FidanValue::Nothing)
+                }
+            } else {
+                FidanValue::Nothing
+            }
+        }
+        FidanValue::HashSet(set) => {
+            if let FidanValue::Integer(n) = idx_val {
+                set.borrow()
+                    .value_at_sorted_index(*n)
+                    .unwrap_or(FidanValue::Nothing)
             } else {
                 FidanValue::Nothing
             }
@@ -2989,6 +3003,8 @@ pub unsafe extern "C" fn fdn_parallel_iter_seq(
     };
     let items: Option<Vec<FidanValue>> = match coll {
         FidanValue::List(list_ref) => Some(list_ref.borrow().iter().cloned().collect()),
+        FidanValue::Tuple(items) => Some(items),
+        FidanValue::HashSet(set_ref) => Some(set_ref.borrow().values_sorted()),
         FidanValue::Range {
             start,
             end,
