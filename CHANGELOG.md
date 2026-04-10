@@ -12,6 +12,41 @@ compiler releases.
 
 ---
 
+## [1.0.8] — 2026-04-10
+
+### Added
+- New `hashset oftype T` support now spans the language surface, runtime,
+  interpreter, stdlib metadata, JSON/container handling, and both Cranelift and
+  LLVM code generation paths, with expanded integration and concurrency
+  regressions.
+- Leading `#>` documentation extraction and richer hover coverage now surface
+  docs for user-module imports, stdlib members, and related editor entry points.
+- Parser, CLI trace, and release-smoke coverage now exercise richer string
+  interpolation handling and error reporting, including nested expressions in
+  interpolated fragments.
+
+### Changed
+- Type checking, MIR lowering, runtime metadata, and LSP analysis now share
+  more precise object/container/stdlib call information, improving hover,
+  signature help, completion, imported-constructor handling, and member/arity
+  validation instead of degrading to `dynamic`.
+- Import and namespace handling in the LSP now distinguish consecutive module
+  imports, direct stdlib bindings, grouped imports, aliases, and user-module
+  namespaces more consistently, keeping semantic tokens and navigation aligned.
+- CLI/distribution install candidate resolution, local test directory naming,
+  packaging helpers, and AI/helper provider plumbing were tightened for more
+  predictable toolchain and distribution workflows.
+
+### Fixed
+- LLVM backend borrow-checker issues in `inkwell_backend.rs` no longer block the
+  LLVM build path.
+- Module hover/signature rendering and semantic token classification now stay
+  consistent for stdlib and imported-module usage sites such as `io.join(...)`
+  and `math.abs(...)`.
+- Runtime and stdlib edge cases around dict/hashset/string/time/io helpers,
+  external value handling, and release-smoke filesystem flows now have aligned
+  behavior and regression coverage.
+
 ## [1.0.7] — 2026-04-08
 
 ### Added
@@ -239,7 +274,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.7...HEAD
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.8...HEAD
+[1.0.8]: https://github.com/fidan-lang/fidan/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/fidan-lang/fidan/compare/v1.0.6...v1.0.7
 [1.0.6]: https://github.com/fidan-lang/fidan/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/fidan-lang/fidan/compare/v1.0.4...v1.0.5
