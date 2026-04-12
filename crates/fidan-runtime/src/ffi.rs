@@ -3371,13 +3371,18 @@ pub unsafe extern "C" fn fdn_str_interp(
     parts_ptr: *const *mut FidanValue,
     count: i64,
 ) -> *mut FidanValue {
-    let mut capacity = 0usize;
-    for i in 0..count as usize {
-        let p = *parts_ptr.add(i);
-        capacity = capacity.saturating_add(display_len_hint(borrow(p)));
-    }
-    let mut result = String::with_capacity(capacity);
-    for i in 0..count as usize {
+    let part_count = count as usize;
+    let mut result = if part_count <= 4 {
+        String::with_capacity(part_count.saturating_mul(16))
+    } else {
+        let mut capacity = 0usize;
+        for i in 0..part_count {
+            let p = *parts_ptr.add(i);
+            capacity = capacity.saturating_add(display_len_hint(borrow(p)));
+        }
+        String::with_capacity(capacity)
+    };
+    for i in 0..part_count {
         let p = *parts_ptr.add(i);
         crate::value::display_into(&mut result, borrow(p));
     }
