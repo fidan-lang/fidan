@@ -48,21 +48,37 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanVal
     match semantic {
         // ── I/O ──────────────────────────────────────────────────────────────
         BuiltinSemantic::Print => {
-            let parts: Vec<String> = args.iter().map(display).collect();
-            println!("{}", parts.join(" "));
+            use std::io::Write as _;
+
+            let mut stdout = std::io::stdout().lock();
+            for (index, value) in args.iter().enumerate() {
+                if index > 0 {
+                    let _ = stdout.write_all(b" ");
+                }
+                let _ = fidan_runtime::write_display_io(&mut stdout, value);
+            }
+            let _ = stdout.write_all(b"\n");
             Ok(Some(FidanValue::Nothing))
         }
         BuiltinSemantic::Eprint => {
-            let parts: Vec<String> = args.iter().map(display).collect();
-            eprintln!("{}", parts.join(" "));
+            use std::io::Write as _;
+
+            let mut stderr = std::io::stderr().lock();
+            for (index, value) in args.iter().enumerate() {
+                if index > 0 {
+                    let _ = stderr.write_all(b" ");
+                }
+                let _ = fidan_runtime::write_display_io(&mut stderr, value);
+            }
+            let _ = stderr.write_all(b"\n");
             Ok(Some(FidanValue::Nothing))
         }
         BuiltinSemantic::Input => {
-            let prompt = args.first().map(display).unwrap_or_default();
-            if !prompt.is_empty() {
+            if let Some(prompt) = args.first() {
                 use std::io::Write;
-                print!("{}", prompt);
-                let _ = std::io::stdout().flush();
+                let mut stdout = std::io::stdout().lock();
+                let _ = fidan_runtime::write_display_io(&mut stdout, prompt);
+                let _ = stdout.flush();
             }
             let stdin = std::io::stdin();
             let mut line = String::new();

@@ -51,9 +51,12 @@ use crate::{
 use fidan_config::{
     BuiltinSemantic, ReceiverBuiltinKind, ReceiverMethodOp, builtin_semantic, infer_receiver_member,
 };
-use std::io::BufRead;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::{
+    cell::RefCell,
+    io::{BufRead, BufWriter, IsTerminal, LineWriter, Write},
+};
 
 // ── Internal helpers ───────────────────────────────────────────────────────────
 
@@ -62,6 +65,52 @@ use std::time::{Duration, Instant};
 unsafe fn borrow<'a>(ptr: *mut FidanValue) -> &'a FidanValue {
     debug_assert!(!ptr.is_null(), "fdn_*: null ptr");
     &*ptr
+}
+
+enum StdoutBuffer {
+    Terminal(LineWriter<std::io::Stdout>),
+    Redirected(BufWriter<std::io::Stdout>),
+}
+
+impl StdoutBuffer {
+    fn new() -> Self {
+        let stdout = std::io::stdout();
+        if stdout.is_terminal() {
+            Self::Terminal(LineWriter::new(stdout))
+        } else {
+            Self::Redirected(BufWriter::with_capacity(64 * 1024, stdout))
+        }
+    }
+}
+
+impl Write for StdoutBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Terminal(stdout) => stdout.write(buf),
+            Self::Redirected(stdout) => stdout.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Terminal(stdout) => stdout.flush(),
+            Self::Redirected(stdout) => stdout.flush(),
+        }
+    }
+}
+
+thread_local! {
+    static STDOUT_BUFFER: RefCell<StdoutBuffer> = RefCell::new(StdoutBuffer::new());
+}
+
+fn with_stdout_buffer<R>(callback: impl FnOnce(&mut StdoutBuffer) -> R) -> R {
+    STDOUT_BUFFER.with(|buffer| callback(&mut buffer.borrow_mut()))
+}
+
+fn flush_stdout_buffer() {
+    with_stdout_buffer(|stdout| {
+        let _ = stdout.flush();
+    });
 }
 
 /// Allocate a new owned `FidanValue` and return its raw pointer.
@@ -84,6 +133,49 @@ fn panic_runtime_message(message: impl Into<String>) -> ! {
     let message = message.into();
     let msg_val = into_raw(FidanValue::String(FidanString::new(&message)));
     unsafe { fdn_panic(msg_val) }
+}
+
+fn integer_display_len(value: i64) -> usize {
+    if value == 0 {
+        return 1;
+    }
+    let magnitude = value.unsigned_abs();
+    let digits = magnitude.ilog10() as usize + 1;
+    if value < 0 { digits + 1 } else { digits }
+}
+
+fn display_len_hint(value: &FidanValue) -> usize {
+    match value {
+        FidanValue::Integer(n) => integer_display_len(*n),
+        FidanValue::Float(_) => 24,
+        FidanValue::Boolean(true) => 4,
+        FidanValue::Boolean(false) => 5,
+        FidanValue::Handle(_) => 24,
+        FidanValue::Nothing => 7,
+        FidanValue::String(s) => s.len(),
+        FidanValue::Function(_) | FidanValue::Closure { .. } => 16,
+        FidanValue::Namespace(module) => module.len() + 9,
+        FidanValue::StdlibFn(module, name) => module.len() + name.len() + 10,
+        FidanValue::EnumType(name) => name.len() + 7,
+        FidanValue::ClassType(name) => name.len() + 8,
+        FidanValue::EnumVariant { tag, payload } => {
+            tag.len() + if payload.is_empty() { 0 } else { 16 }
+        }
+        FidanValue::Range {
+            start,
+            end,
+            inclusive,
+        } => {
+            integer_display_len(*start) + integer_display_len(*end) + if *inclusive { 3 } else { 2 }
+        }
+        FidanValue::Pending(_) | FidanValue::PendingTask(_) => 9,
+        FidanValue::Shared(_) | FidanValue::WeakShared(_) => 16,
+        FidanValue::List(list) => list.borrow().len().saturating_mul(8).saturating_add(2),
+        FidanValue::Tuple(items) => items.len().saturating_mul(8).saturating_add(2),
+        FidanValue::Dict(dict) => dict.borrow().len().saturating_mul(16).saturating_add(2),
+        FidanValue::HashSet(set) => set.borrow().len().saturating_mul(8).saturating_add(10),
+        FidanValue::Object(_) => 16,
+    }
 }
 
 /// Coerce to `FidanString` if possible, otherwise stringify.
@@ -555,27 +647,33 @@ pub extern "C" fn fdn_make_range(start: i64, end: i64, inclusive: i8) -> *mut Fi
 /// Print then newline.  Borrows `ptr`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_println(ptr: *mut FidanValue) {
-    println!("{}", display(borrow(ptr)));
+    with_stdout_buffer(|stdout| {
+        let _ = crate::value::write_display_io(stdout, borrow(ptr));
+        let _ = stdout.write_all(b"\n");
+    });
 }
 
 /// Print multiple values space-separated, then newline.
 /// `ptrs` is an array of `n` `*mut FidanValue` pointers.  Borrows each.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_print_many(ptrs: *const *mut FidanValue, n: i64) {
-    let mut rendered = String::new();
-    for i in 0..n as usize {
-        if i > 0 {
-            rendered.push(' ');
+    with_stdout_buffer(|stdout| {
+        for i in 0..n as usize {
+            if i > 0 {
+                let _ = stdout.write_all(b" ");
+            }
+            let _ = crate::value::write_display_io(stdout, borrow(*ptrs.add(i)));
         }
-        crate::value::display_into(&mut rendered, borrow(*ptrs.add(i)));
-    }
-    println!("{rendered}");
+        let _ = stdout.write_all(b"\n");
+    });
 }
 
 /// Print without newline.  Borrows `ptr`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_print(ptr: *mut FidanValue) {
-    print!("{}", display(borrow(ptr)));
+    with_stdout_buffer(|stdout| {
+        let _ = crate::value::write_display_io(stdout, borrow(ptr));
+    });
 }
 
 /// Read a line from stdin, optionally printing a UTF-8 prompt.  Borrows `prompt`.
@@ -583,10 +681,12 @@ pub unsafe extern "C" fn fdn_print(ptr: *mut FidanValue) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_input(prompt: *mut FidanValue) -> *mut FidanValue {
     let pv = borrow(prompt);
+    flush_stdout_buffer();
     if !matches!(pv, FidanValue::Nothing) {
-        print!("{}", display(pv));
-        use std::io::Write;
-        let _ = std::io::stdout().flush();
+        with_stdout_buffer(|stdout| {
+            let _ = crate::value::write_display_io(stdout, pv);
+            let _ = stdout.flush();
+        });
     }
     let mut line = String::new();
     let _ = std::io::stdin().read_line(&mut line);
@@ -3271,10 +3371,15 @@ pub unsafe extern "C" fn fdn_str_interp(
     parts_ptr: *const *mut FidanValue,
     count: i64,
 ) -> *mut FidanValue {
-    let mut result = String::new();
+    let mut capacity = 0usize;
     for i in 0..count as usize {
         let p = *parts_ptr.add(i);
-        result.push_str(&display(borrow(p)));
+        capacity = capacity.saturating_add(display_len_hint(borrow(p)));
+    }
+    let mut result = String::with_capacity(capacity);
+    for i in 0..count as usize {
+        let p = *parts_ptr.add(i);
+        crate::value::display_into(&mut result, borrow(p));
     }
     into_raw(FidanValue::String(FidanString::new(&result)))
 }

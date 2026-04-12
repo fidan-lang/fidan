@@ -22,7 +22,7 @@ pub use owned_ref::OwnedRef;
 pub use parallel::{FidanPending, ParallelArgs, ParallelCapture};
 pub use shared_ref::{SharedRef, WeakSharedRef};
 pub use string::FidanString;
-pub use value::{FidanValue, FunctionId, display};
+pub use value::{FidanValue, FunctionId, display, display_into, write_display_io};
 
 static PROGRAM_ARGS_OVERRIDE: OnceLock<RwLock<Option<Vec<String>>>> = OnceLock::new();
 

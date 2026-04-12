@@ -1884,7 +1884,7 @@ impl MirMachine {
                         MirStringPart::Literal(lit) => s.push_str(lit),
                         MirStringPart::Operand(op) => {
                             let v = self.eval_operand(op, frame);
-                            s.push_str(&builtins::display(&v));
+                            fidan_runtime::display_into(&mut s, &v);
                         }
                     }
                 }

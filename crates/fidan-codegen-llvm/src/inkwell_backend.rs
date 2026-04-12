@@ -3875,12 +3875,21 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
 
     fn lower_string_interp(&mut self, parts: &[MirStringPart]) -> Result<PointerValue<'ctx>> {
         let mut values = Vec::with_capacity(parts.len());
+        let mut cached_operands: Vec<(Operand, PointerValue<'ctx>)> = Vec::new();
         for part in parts {
             let value = match part {
                 MirStringPart::Literal(text) => self.lower_literal(&MirLit::Str(text.clone()))?,
                 MirStringPart::Operand(operand) => {
-                    let value = self.lower_operand(operand)?;
-                    self.call_ptr("fdn_to_string", &[value.into()])?
+                    if let Some((_, cached)) = cached_operands
+                        .iter()
+                        .find(|(candidate, _)| candidate == operand)
+                    {
+                        *cached
+                    } else {
+                        let value = self.lower_operand(operand)?;
+                        cached_operands.push((operand.clone(), value));
+                        value
+                    }
                 }
             };
             values.push(value);

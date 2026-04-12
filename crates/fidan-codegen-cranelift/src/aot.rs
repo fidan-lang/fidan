@@ -3338,6 +3338,7 @@ fn lower_string_interp(
 ) -> Result<cranelift_codegen::ir::Value> {
     // Build a stack-allocated array of ptr values.
     let n = parts.len() as i64;
+    let mut cached_operands: Vec<(Operand, cranelift_codegen::ir::Value)> = Vec::new();
     let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
         cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
         (n * 8) as u32,
@@ -3351,8 +3352,16 @@ fn lower_string_interp(
                 call_rt(module, builder, rt.box_str, &[p, l])?.unwrap()
             }
             MirStringPart::Operand(op) => {
-                let v = lower_operand_boxed(builder, cl_vars, local_types, op, rt, module)?;
-                call_rt(module, builder, rt.to_string, &[v])?.unwrap()
+                if let Some((_, cached)) = cached_operands
+                    .iter()
+                    .find(|(candidate, _)| candidate == op)
+                {
+                    *cached
+                } else {
+                    let value = lower_operand_boxed(builder, cl_vars, local_types, op, rt, module)?;
+                    cached_operands.push((op.clone(), value));
+                    value
+                }
             }
         };
         builder.ins().stack_store(boxed, slot, offset);

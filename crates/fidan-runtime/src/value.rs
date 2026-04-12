@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::{fmt::Write as _, string::String};
+use std::{fmt::Write as _, io, string::String};
 
 use crate::parallel::FidanPending;
 use crate::{
@@ -247,10 +247,139 @@ pub fn display(val: &FidanValue) -> String {
     out
 }
 
-pub(crate) fn display_into(out: &mut String, val: &FidanValue) {
+pub fn write_display_io<W: io::Write>(out: &mut W, val: &FidanValue) -> io::Result<()> {
     match val {
         FidanValue::Integer(n) => {
-            let _ = write!(out, "{n}");
+            let mut buffer = itoa::Buffer::new();
+            out.write_all(buffer.format(*n).as_bytes())
+        }
+        FidanValue::Float(f) => {
+            if f.fract() == 0.0 {
+                write!(out, "{f:.1}")
+            } else {
+                write!(out, "{f}")
+            }
+        }
+        FidanValue::Boolean(true) => out.write_all(b"true"),
+        FidanValue::Boolean(false) => out.write_all(b"false"),
+        FidanValue::Handle(h) => write!(out, "handle({h:#x})"),
+        FidanValue::Nothing => out.write_all(b"nothing"),
+        FidanValue::String(s) => out.write_all(s.as_str().as_bytes()),
+        FidanValue::List(l) => {
+            out.write_all(b"[")?;
+            for (index, item) in l.borrow().iter().enumerate() {
+                if index > 0 {
+                    out.write_all(b", ")?;
+                }
+                write_display_io(out, item)?;
+            }
+            out.write_all(b"]")
+        }
+        FidanValue::Dict(d) => {
+            let borrowed = d.borrow();
+            let class_key = FidanValue::String(FidanString::new("__class__"));
+            if let Ok(Some(FidanValue::String(cn))) = borrowed.get(&class_key) {
+                out.write_all(b"<")?;
+                out.write_all(cn.as_str().as_bytes())?;
+                return out.write_all(b">");
+            }
+            out.write_all(b"{")?;
+            for (index, (key, value)) in borrowed.entries_sorted_refs().into_iter().enumerate() {
+                if index > 0 {
+                    out.write_all(b", ")?;
+                }
+                write_display_io(out, key)?;
+                out.write_all(b": ")?;
+                write_display_io(out, value)?;
+            }
+            out.write_all(b"}")
+        }
+        FidanValue::HashSet(set) => {
+            out.write_all(b"hashset({")?;
+            for (index, value) in set.borrow().values_sorted_refs().into_iter().enumerate() {
+                if index > 0 {
+                    out.write_all(b", ")?;
+                }
+                write_display_io(out, value)?;
+            }
+            out.write_all(b"})")
+        }
+        FidanValue::Tuple(items) => {
+            out.write_all(b"(")?;
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.write_all(b", ")?;
+                }
+                write_display_io(out, item)?;
+            }
+            out.write_all(b")")
+        }
+        FidanValue::Object(o) => {
+            let name = o.borrow().class.name_str.clone();
+            out.write_all(b"<")?;
+            out.write_all(name.as_bytes())?;
+            out.write_all(b">")
+        }
+        FidanValue::Shared(s) => {
+            let inner = s.0.lock().unwrap();
+            out.write_all(b"Shared(")?;
+            write_display_io(out, &inner)?;
+            out.write_all(b")")
+        }
+        FidanValue::WeakShared(ws) => {
+            if let Some(shared) = ws.upgrade() {
+                let inner = shared.0.lock().unwrap();
+                out.write_all(b"WeakShared(")?;
+                write_display_io(out, &inner)?;
+                out.write_all(b")")
+            } else {
+                out.write_all(b"WeakShared(<collected>)")
+            }
+        }
+        FidanValue::Pending(_) | FidanValue::PendingTask(_) => out.write_all(b"<pending>"),
+        FidanValue::Function(id) => write!(out, "<action#{}>", id.0),
+        FidanValue::Closure { fn_id, .. } => write!(out, "<action#{}>", fn_id.0),
+        FidanValue::Namespace(m) => write!(out, "<module:{m}>"),
+        FidanValue::StdlibFn(module, name) => write!(out, "<action:{module}.{name}>"),
+        FidanValue::EnumType(s) => write!(out, "<enum:{s}>"),
+        FidanValue::EnumVariant { tag, payload } => {
+            out.write_all(tag.as_bytes())?;
+            if payload.is_empty() {
+                return Ok(());
+            }
+            out.write_all(b"(")?;
+            for (index, item) in payload.iter().enumerate() {
+                if index > 0 {
+                    out.write_all(b", ")?;
+                }
+                write_display_io(out, item)?;
+            }
+            out.write_all(b")")
+        }
+        FidanValue::ClassType(s) => write!(out, "<class:{s}>"),
+        FidanValue::Range {
+            start,
+            end,
+            inclusive,
+        } => {
+            let mut start_buffer = itoa::Buffer::new();
+            let mut end_buffer = itoa::Buffer::new();
+            out.write_all(start_buffer.format(*start).as_bytes())?;
+            if *inclusive {
+                out.write_all(b"...")?;
+            } else {
+                out.write_all(b"..")?;
+            }
+            out.write_all(end_buffer.format(*end).as_bytes())
+        }
+    }
+}
+
+pub fn display_into(out: &mut String, val: &FidanValue) {
+    match val {
+        FidanValue::Integer(n) => {
+            let mut buffer = itoa::Buffer::new();
+            out.push_str(buffer.format(*n));
         }
         FidanValue::Float(f) => {
             if f.fract() == 0.0 {
@@ -259,9 +388,8 @@ pub(crate) fn display_into(out: &mut String, val: &FidanValue) {
                 let _ = write!(out, "{f}");
             }
         }
-        FidanValue::Boolean(b) => {
-            let _ = write!(out, "{b}");
-        }
+        FidanValue::Boolean(true) => out.push_str("true"),
+        FidanValue::Boolean(false) => out.push_str("false"),
         FidanValue::Handle(h) => {
             let _ = write!(out, "handle({h:#x})");
         }
@@ -379,11 +507,52 @@ pub(crate) fn display_into(out: &mut String, val: &FidanValue) {
             end,
             inclusive,
         } => {
+            let mut start_buffer = itoa::Buffer::new();
+            let mut end_buffer = itoa::Buffer::new();
+            out.push_str(start_buffer.format(*start));
             if *inclusive {
-                let _ = write!(out, "{start}...{end}");
+                out.push_str("...");
             } else {
-                let _ = write!(out, "{start}..{end}");
+                out.push_str("..");
             }
+            out.push_str(end_buffer.format(*end));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FidanValue, display, write_display_io};
+    use crate::{FidanHashSet, FidanList, FidanString, OwnedRef};
+
+    #[test]
+    fn io_display_matches_string_display_for_nested_values() {
+        let mut list = FidanList::new();
+        list.append(FidanValue::Integer(7));
+        list.append(FidanValue::String(FidanString::new("eight")));
+        let set = FidanHashSet::from_values([
+            FidanValue::Integer(3),
+            FidanValue::Integer(1),
+            FidanValue::Integer(2),
+        ])
+        .expect("hashset");
+        let value = FidanValue::Tuple(vec![
+            FidanValue::List(OwnedRef::new(list)),
+            FidanValue::HashSet(OwnedRef::new(set)),
+            FidanValue::Range {
+                start: 4,
+                end: 6,
+                inclusive: true,
+            },
+            FidanValue::EnumVariant {
+                tag: "Ok".into(),
+                payload: vec![FidanValue::Boolean(true)],
+            },
+        ]);
+
+        let mut buf = Vec::new();
+        write_display_io(&mut buf, &value).expect("write display");
+        let io_rendered = String::from_utf8(buf).expect("utf8");
+        assert_eq!(io_rendered, display(&value));
     }
 }
