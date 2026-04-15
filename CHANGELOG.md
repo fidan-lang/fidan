@@ -12,6 +12,41 @@ compiler releases.
 
 ---
 
+## [1.0.10] — 2026-04-15
+
+### Added
+- Capacity-aware list and dictionary construction paths, including runtime
+  `with_capacity` support and matching stdlib/bootstrap wiring to reduce
+  reallocation pressure in collection-heavy programs.
+- Targeted LSP regressions for user-module import navigation and module-doc
+  hover behavior.
+- `itoa` in runtime formatting paths to speed up integer-to-string conversion
+  during interpolation and display operations.
+
+### Changed
+- MIR interpreter internals now handle scalar operands more efficiently and
+  recycle frames more aggressively to reduce execution overhead.
+- String interpolation and display plumbing across runtime/FFI/backends now
+  pre-sizes and reuses formatting buffers more effectively.
+- Dependency set refreshed (including async/runtime dependency updates), and
+  release documentation in `README.md` expanded for clearer language and
+  AI-tooling guidance.
+
+### Fixed
+- User-module import go-to-definition now resolves module tokens consistently
+  across grouped imports, direct module imports, and string/file-path imports,
+  while keeping `std.*` module imports non-file-navigable.
+- Background-loaded module docs in LSP hover now refresh from disk so module
+  doc-comment additions/updates/removals are reflected immediately.
+
+### Tests
+- Added coverage for go-to-definition on grouped/direct/string user-module
+  imports plus stdlib import exclusion.
+- Added hover regressions verifying grouped user-module doc-comment refresh
+  behavior after file updates.
+
+---
+
 ## [1.0.9] — 2026-04-10
 
 ### Added
@@ -309,7 +344,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.9...HEAD
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.10...HEAD
+[1.0.10]: https://github.com/fidan-lang/fidan/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/fidan-lang/fidan/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/fidan-lang/fidan/compare/v1.0.7...v1.0.8
 [1.0.7]: https://github.com/fidan-lang/fidan/compare/v1.0.6...v1.0.7
