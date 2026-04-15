@@ -6,9 +6,9 @@
 
 # Fidan
 
-**A modern, expressive, human-readable programming language built for clarity, safety, and real-world performance.**
+**A modern, expressive, human-readable programming language built for clarity, safety, native performance, and compiler-grounded AI tooling.**
 
-[![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; [![CI](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml/badge.svg)](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://github.com/fidan-lang/fidan-editors/tree/main/vscode)
+[![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; [![CI](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml/badge.svg)](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://marketplace.visualstudio.com/items?itemName=fidan.fidan)
 
 [Getting Started](#getting-started) • [Language Tour](#language-tour) • [CLI Reference](#cli-reference) • [Standard Library](#standard-library) • [VS Code Extension](#vs-code-extension) • [Contributing](#contributing)
 
@@ -18,7 +18,7 @@
 
 ## What is Fidan?
 
-Fidan is a general-purpose programming language that prioritizes **human readability without sacrificing power**. It reads almost like English, yet compiles to native code and runs real threads. It is statically typed with full inference, null-safe by design, and ships a complete toolchain — formatter, linter, fixer, LSP server, REPL, and both JIT and AOT compilers — out of the box.
+Fidan is a general-purpose programming language that prioritizes **human readability without sacrificing power**. It reads almost like English, yet compiles to native code and runs real threads. It is statically typed with full inference, null-safe by design, and ships a complete toolchain: formatter, linter, fixer, LSP server, REPL, interpreter, Cranelift JIT, Cranelift AOT, optional LLVM AOT, package manager, self/toolchain installer, and compiler-backed AI explain/fix/improve workflows.
 
 ```fidan
 object Person extends Creature {
@@ -57,7 +57,8 @@ Most languages make a trade-off: either **readable** (Python) or **fast** (C++/R
 | **Safety without ceremony** | Null-safety analysis, `certain` non-null guarantees, data-race detection at compile time |
 | **Performance** | MIR-level optimization passes + Cranelift JIT (`@precompile`, auto hot-path with safe interpreter fallback) + Cranelift/LLVM AOT |
 | **Real concurrency** | `parallel` uses OS threads; `spawn`/`await` and `concurrent` provide structured same-thread async-style scheduling |
-| **Great tooling** | Formatter, linter, fixer, REPL, LSP, VS Code extension — all built-in, not plugins |
+| **AI-native tooling** | `explain --ai`, `fix --ai`, `fix --improve`, and `exec ai mcp` are grounded in compiler facts: diagnostics, inferred types, reads/writes, call graphs, type maps, and static traces |
+| **Great tooling** | Formatter, linter, fixer, REPL, LSP, VS Code extension, package flow, self updates, optional toolchains — all built-in, not plugins |
 | **Reproducible debugging** | `--replay` captures stdin and replays crashes exactly |
 | **Readable errors** | Ariadne-rendered diagnostics with source context, inline carets, fix-it patches |
 
@@ -76,11 +77,12 @@ Most languages make a trade-off: either **readable** (Python) or **fast** (C++/R
 | Built-in `spawn`/`await` model | ✅ | ⚠️ asyncio | ✅ | ✅ goroutines | ✅ |
 | JIT compilation (`@precompile`) | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Built-in formatter | ✅ | ❌ (black) | ❌ (prettier) | ✅ | ✅ |
-| Built-in linter + auto-fixer | ✅ | ❌ (ruff) | ❌ | ⚠️ | ⚠️ clippy |
+| Built-in linter + auto-fixer | ✅ | ❌ (ruff) | ❌ | ⚠️ | ✅ clippy |
 | Built-in REPL | ✅ | ✅ | ❌ | ❌ | ❌ |
 | Built-in LSP server | ✅ | ❌ (pylsp) | ✅ (tsserver) | ⚠️ | ⚠️ (rust-analyzer) |
 | Replay-based crash reproduction | ✅ | ❌ | ❌ | ❌ | ❌ |
 | `explain` line-level static analysis | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Compiler-grounded AI explain/fix/improve | ✅ | ❌ | ❌ | ❌ | ❌ |
 | First-class test blocks | ✅ | ❌ (unittest) | ❌ (jest) | ✅ | ✅ |
 | Hot reload (`--reload`) | ✅ | ❌ | ❌ | ❌ | ❌ |
 | String synonyms (`is`, `equals`, `and`, …) | ✅ | ❌ | ❌ | ❌ | ❌ |
@@ -722,6 +724,48 @@ fidan run app.fdn --jit-threshold 0     # disable JIT entirely
 
 ---
 
+## AI-native tooling
+
+Fidan's AI features are implemented as first-party tooling around the compiler, not as a prompt-only layer beside it.
+
+The deterministic analysis path can produce structured context for a file or line range:
+
+- selected source text
+- diagnostics and stable diagnostic codes
+- inferred types
+- reads and writes
+- line-level risk notes such as possible division by zero or out-of-bounds access
+- module outline and imports
+- related symbols
+- call graph
+- type map
+- static runtime trace
+
+That context feeds the optional AI analysis toolchain used by `explain --ai`, `fix --ai`, `fix --improve`, and editor commands.
+
+```bash
+fidan toolchain add ai-analysis
+fidan exec ai setup
+fidan exec ai doctor
+
+fidan explain app.fdn --line 42 --ai "focus on data flow"
+fidan fix app.fdn --ai --in-place
+fidan fix app.fdn --improve "simplify without changing behavior" --in-place
+fidan exec ai mcp
+```
+
+The AI toolchain supports OpenAI-compatible APIs, Anthropic, local Ollama or LM Studio endpoints, and custom OpenAI-compatible endpoints. API keys can be stored through the OS keychain or supplied through environment variables.
+
+`fix --ai` and `fix --improve` return structured hunks with exact old/new text and reasons. The CLI validates hunks before applying them, rejects empty or no-op edits, and still runs deterministic compiler fixes first. This keeps AI assistance inside a reviewable source-editing workflow instead of bypassing the compiler.
+
+The built-in MCP mode exposes the same compiler-grounded context to compatible AI clients:
+
+```bash
+fidan exec ai mcp
+```
+
+---
+
 ## CLI Reference
 
 ```
@@ -743,6 +787,9 @@ fidan <COMMAND> [OPTIONS] [FILE]
 | `fidan explain <file> --line N` | Explain what line N does (static analysis) |
 | `fidan new <name>` | Scaffold a new Fidan project |
 | `fidan new <name> --package` | Scaffold a Dal-ready package with `dal.toml` and `src/init.fdn` |
+| `fidan self <command>` | Install, switch, list, and remove self-managed Fidan versions |
+| `fidan toolchain <command>` | Install and inspect optional toolchains such as LLVM and AI analysis |
+| `fidan exec <namespace>` | Run commands registered by installed toolchains, such as `fidan exec ai ...` |
 | `fidan dal <command>` | Work with the Dal package registry |
 
 ### `fidan dal` commands
@@ -755,6 +802,7 @@ fidan <COMMAND> [OPTIONS] [FILE]
 | `fidan dal search <query>` | Search packages on Dal |
 | `fidan dal info <package>` | Show package metadata and published versions |
 | `fidan dal add <package>` | Download and vendor a package into a local importable module directory |
+| `fidan dal remove <package>` | Remove a local or global package install |
 | `fidan dal package [path]` | Validate the package layout locally and build a canonical Dal `.tar.gz` archive |
 | `fidan dal publish [path]` | Run the same local validation, build the archive, and publish it to Dal |
 | `fidan dal yank <package> <version>` | Yank a published version |
@@ -767,6 +815,15 @@ in Fidan as:
 ```fidan
 use my_package
 ```
+
+Package requests can include semver constraints and feature selections:
+
+```bash
+fidan dal add my-package[json,cli] --version "^1.2"
+fidan dal add my-tool --global
+```
+
+Dal resolves dependencies into `dal.lock`, supports optional dependencies through feature wiring, and can install package-provided CLI entries declared in `[cli]` metadata.
 
 Dal token lookup order:
 
@@ -811,8 +868,39 @@ Dal package preflight validation happens locally before archive creation or uplo
 | Flag | Description |
 |---|---|
 | `--output <path>` | Output binary path |
-| `--release` | Enable full optimizations |
-| `--emit tokens\|ast\|hir\|mir` | Dump intermediate representation |
+| `--release` | Enable the release preset (`O3`, full LTO, strip all, native CPU unless overridden) |
+| `--opt O0\|O1\|O2\|O3\|Os\|Oz` | Select optimization level |
+| `--lto off\|full` | Control link-time optimization |
+| `--strip off\|symbols\|all` | Control symbol stripping |
+| `--backend auto\|cranelift\|llvm` | Select native backend |
+| `--target-cpu <spec>` | Use `generic`, `native`, a CPU name, or a CPU plus feature string where supported |
+| `--lib-dir <path>` | Add native library search path for AOT linking |
+| `--link-runtime static\|dynamic` | Choose runtime linkage mode |
+| `--linker <path-or-name>` | Override the linker used for AOT output |
+| `--emit tokens\|ast\|hir\|mir\|obj` | Dump intermediate representation or object output |
+
+### `fidan self`, `fidan toolchain`, and `fidan exec`
+
+Fidan can manage its own installed versions and optional toolchains from the same CLI.
+
+```bash
+fidan self list
+fidan self install
+fidan self use
+fidan self remove
+
+fidan toolchain available
+fidan toolchain add llvm
+fidan toolchain add ai-analysis
+fidan toolchain list
+
+fidan exec ai help
+fidan exec ai setup
+fidan exec ai doctor
+fidan exec ai mcp
+```
+
+Optional toolchains are versioned release artifacts with compatibility metadata. The LLVM toolchain powers `fidan build --backend llvm`; the AI analysis toolchain powers model-backed explain/fix/improve workflows and exposes the `ai` exec namespace.
 
 ### Hot reload
 
@@ -852,6 +940,20 @@ R0001: division by zero at line 3
 ```
 
 The REPL supports multi-line input, continuation prompts (`...`), `:cancel` to abort a block, and `:type <expr>` to inspect inferred types.
+
+### `fix` — deterministic and AI-assisted source edits
+
+```bash
+fidan fix app.fdn
+fidan fix app.fdn --in-place
+fidan fix app.fdn --ai
+fidan fix app.fdn --ai "preserve public API" --in-place
+fidan fix app.fdn --improve "reduce duplication" --in-place
+```
+
+The default mode prints the proposed result so you can review it first. `--in-place` rewrites the file.
+
+Deterministic high-confidence fixes always run first. With the AI analysis toolchain installed, `--ai` asks for additional diagnostic-oriented repairs and `--improve` / `--refactor` asks for behavior-preserving cleanups. AI edits are returned as exact hunks and validated before application.
 
 ### `explain` — static analysis on demand
 
@@ -912,11 +1014,15 @@ fidan explain --diagnostic E0401    # print a full page of documentation for thi
 
 | Module | What it provides |
 |---|---|
-| `std.io` | File I/O, environment, console, directory listing |
-| `std.math` | `sqrt`, `abs`, `floor`, `ceil`, `round`, `pow`, `log`, trig, `PI`, `E`, `clamp` |
-| `std.string` | `toUpper`, `toLower`, `trim`, `split`, `join`, `replace`, `startsWith`, `endsWith`, `pad`, `repeat` |
-| `std.collections` | `Queue`, `Stack`, `Set`, `OrderedDict` with full method sets |
-| `std.test` | `assertEqual`, `assertNotEqual`, `assertTrue`, `assertFalse`, `assertContains`, `fail`, and more |
+| `std.async` | Same-thread `Pending` helpers: `sleep`, `ready`, `gather`, `waitAny`, `timeout` |
+| `std.collections` | `range`, `hashset`, `Queue`, `Stack`, `zip`, `enumerate`, `chunk`, `window`, `partition`, `groupBy`, reducers, set operations |
+| `std.env` | Environment variable access and script arguments |
+| `std.io` | Console I/O, files, directories, paths, environment convenience, terminal helpers |
+| `std.json` | Parse, validate, stringify, pretty-print, read, and write JSON with soft-error mode |
+| `std.math` | `sqrt`, `abs`, `floor`, `ceil`, `round`, `pow`, `log`, trig, randomness, numeric predicates, constants |
+| `std.regex` | Match, find, capture, replace, split, and validate regular expressions |
+| `std.string` | Casing, trimming, splitting, joining, replacing, slicing, padding, parsing, character/codepoint helpers |
+| `std.test` | `assert`, `assertEq`, `assertNe`, ordering/type/nothing assertions, `fail`, `skip` |
 | `std.parallel` | `parallelMap`, `parallelFilter`, `parallelForEach`, `parallelReduce` |
 | `std.time` | `sleep`, timestamps, duration helpers |
 
@@ -995,7 +1101,7 @@ npm run compile
 
 ## Architecture
 
-Fidan is written entirely in Rust and organized as a Cargo workspace of 17 focused crates:
+Fidan is written in Rust and organized as a Cargo workspace of focused crates:
 
 ```
 Source Text → Lexer → Parser → AST
@@ -1019,20 +1125,28 @@ The same MIR feeds all three backends — no behavioral divergence between run m
 
 | Crate | Role |
 |---|---|
+| `fidan-config` | Shared language metadata for builtins, decorators, types, aliases, and receiver methods |
 | `fidan-source` | `SourceFile`, `Span`, `SourceMap` |
 | `fidan-lexer` | Tokenizer, synonym normalization |
 | `fidan-ast` | All AST node types, arena allocator |
 | `fidan-parser` | Recursive-descent + Pratt expression parser |
+| `fidan-secrets` | OS keychain / credential storage helpers used by registry and AI tooling |
+| `fidan-diagnostics` | Diagnostic types, ariadne rendering, fix engine, stable code explanations |
 | `fidan-typeck` | Symbol tables, type inference, null-safety, data-race detection |
 | `fidan-hir` | Typed, desugared high-level IR |
 | `fidan-mir` | SSA-form mid-level IR, CFG |
 | `fidan-passes` | Optimization and analysis passes |
-| `fidan-diagnostics` | Diagnostic types, ariadne rendering, fix engine |
 | `fidan-runtime` | Value model, COW collections, object model, `Shared<T>` |
 | `fidan-interp` | MIR tree-walking interpreter |
+| `fidan-extern-fixture` | Native interop test fixture library |
+| `libfidan` | C ABI embedding surface |
+| `fidan-embed` | Safe Rust wrapper around `libfidan` |
 | `fidan-codegen-cranelift` | Cranelift JIT backend |
 | `fidan-codegen-llvm` | LLVM AOT backend |
+| `fidan-llvm-helper` | Packaged helper binary for the optional LLVM toolchain |
+| `fidan-ai-analysis-helper` | Packaged helper binary for AI explain/fix/improve and MCP workflows |
 | `fidan-stdlib` | Rust-backed standard library |
+| `fidan-driver` | Compiler driver and CLI-facing orchestration across frontends/backends/toolchains |
 | `fidan-fmt` | Canonical source formatter |
 | `fidan-lsp` | Full LSP server |
 | `fidan-cli` | `fidan` binary — all subcommands |
@@ -1050,13 +1164,14 @@ The same MIR feeds all three backends — no behavioral divergence between run m
 | Interpreter (tree-walking + MIR) | ✅ Complete |
 | Real OS thread parallelism (`parallel`, `spawn`/`await`) | ✅ Complete |
 | Cranelift JIT (`@precompile`, auto hot-path with interpreter fallback for unsupported MIR) | ✅ Complete |
-| Standard library (`std.io`, `std.math`, `std.string`, `std.collections`, `std.test`, `std.parallel`) | ✅ Complete |
+| Standard library (`std.async`, `std.collections`, `std.env`, `std.io`, `std.json`, `std.math`, `std.parallel`, `std.regex`, `std.string`, `std.test`, `std.time`) | ✅ Complete |
 | Full LSP server | ✅ Complete |
 | VS Code extension | ✅ Complete |
 | Hot reload (`--reload`) | ✅ Complete |
 | Replay-based crash reproduction (`--replay`) | ✅ Complete |
 | LLVM AOT backend (`fidan build --release`) | ✅ Complete |
 | Package manager (DAL) | ✅ Complete |
+| AI analysis toolchain (`explain --ai`, `fix --ai`, `fix --improve`, MCP) | ✅ Complete |
 | Debug adapter (VS Code breakpoints) | 🔜 Planned |
 | Playground (browser WASM) | 🔜 Planned |
 
