@@ -230,10 +230,26 @@ enum PendingTaskState {
     Ready(Result<FidanValue, DeferredTaskError>),
 }
 
+#[derive(Clone, Copy)]
+enum ScalarOperand {
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+}
+
 impl CallFrame {
     fn new(local_count: u32) -> Self {
         Self {
             locals: vec![FidanValue::Nothing; local_count as usize],
+            catch_stack: vec![],
+            current_exception: None,
+        }
+    }
+
+    fn from_locals(mut locals: Vec<FidanValue>, local_count: u32) -> Self {
+        locals.resize(local_count as usize, FidanValue::Nothing);
+        Self {
+            locals,
             catch_stack: vec![],
             current_exception: None,
         }
@@ -244,6 +260,10 @@ impl CallFrame {
             .get(local.0 as usize)
             .cloned()
             .unwrap_or(FidanValue::Nothing)
+    }
+
+    fn get(&self, local: LocalId) -> Option<&FidanValue> {
+        self.locals.get(local.0 as usize)
     }
 
     fn store(&mut self, local: LocalId, value: FidanValue) {
@@ -343,6 +363,9 @@ pub struct MirMachine {
     replay_pos: usize,
     /// Zero-config sandbox policy (`None` = no sandboxing).
     sandbox: Option<Arc<SandboxPolicy>>,
+    /// Reused local-slot buffers for interpreted function calls.
+    /// Frames are recycled only after cleanup has cleared every local.
+    frame_pool: Vec<Vec<FidanValue>>,
 }
 
 /// A single test result recorded during `fidan test`.
@@ -576,6 +599,7 @@ impl MirMachine {
             replay_inputs: Vec::new(),
             replay_pos: 0,
             sandbox: None,
+            frame_pool: Vec::new(),
         }
     }
 
@@ -615,6 +639,19 @@ impl MirMachine {
         Ok(())
     }
 
+    fn take_frame(&mut self, local_count: u32) -> CallFrame {
+        self.frame_pool
+            .pop()
+            .map(|locals| CallFrame::from_locals(locals, local_count))
+            .unwrap_or_else(|| CallFrame::new(local_count))
+    }
+
+    fn recycle_frame(&mut self, frame: CallFrame) {
+        if self.frame_pool.len() < 64 {
+            self.frame_pool.push(frame.locals);
+        }
+    }
+
     fn format_trace_location(&self, span: Option<Span>) -> Option<String> {
         span.map(|s| {
             let file = self.source_map.get(s.file);
@@ -626,8 +663,8 @@ impl MirMachine {
     fn prepare_call_args(
         &self,
         func: &MirFunction,
-        args: &[FidanValue],
-    ) -> Result<Vec<FidanValue>, MirSignal> {
+        args: &mut Vec<FidanValue>,
+    ) -> Result<(), MirSignal> {
         if args.len() > func.params.len() {
             let fn_name_s = self.sym_str(func.name).to_string();
             let expected = func.params.len();
@@ -637,27 +674,21 @@ impl MirMachine {
             )));
         }
 
-        let mut prepared = Vec::with_capacity(func.params.len());
+        args.resize(func.params.len(), FidanValue::Nothing);
         for (i, param) in func.params.iter().enumerate() {
-            let val = args.get(i).cloned().unwrap_or(FidanValue::Nothing);
-            let val = if matches!(val, FidanValue::Nothing) {
-                if let Some(ref lit) = param.default {
-                    mir_lit_to_value(lit)
-                } else {
-                    val
-                }
-            } else {
-                val
-            };
-            if param.certain && matches!(val, FidanValue::Nothing) {
+            if matches!(args[i], FidanValue::Nothing)
+                && let Some(ref lit) = param.default
+            {
+                args[i] = mir_lit_to_value(lit);
+            }
+            if param.certain && matches!(args[i], FidanValue::Nothing) {
                 let pname = self.sym_str(param.name);
                 return Err(MirSignal::Panic(format!(
                     "certain parameter `{pname}` cannot be nothing"
                 )));
             }
-            prepared.push(val);
         }
-        Ok(prepared)
+        Ok(())
     }
 
     /// Create a lightweight clone of this machine for use on a parallel thread.
@@ -710,6 +741,7 @@ impl MirMachine {
             replay_inputs: self.replay_inputs.clone(),
             replay_pos: self.replay_pos,
             sandbox: self.sandbox.as_ref().map(Arc::clone),
+            frame_pool: Vec::new(),
         }
     }
 
@@ -1132,9 +1164,9 @@ impl MirMachine {
 
     // ── Function call ─────────────────────────────────────────────────────────
 
-    fn call_function(&mut self, fn_id: FunctionId, args: Vec<FidanValue>) -> MirResult {
+    fn call_function(&mut self, fn_id: FunctionId, mut args: Vec<FidanValue>) -> MirResult {
         let func = self.program.function(fn_id);
-        let args = self.prepare_call_args(func, &args)?;
+        self.prepare_call_args(func, &mut args)?;
 
         if func.extern_decl.is_some() {
             if self.sandbox.is_some() {
@@ -1214,13 +1246,13 @@ impl MirMachine {
 
         let local_count = func.local_count;
 
-        let mut frame = CallFrame::new(local_count);
+        let mut frame = self.take_frame(local_count);
 
         // Bind parameters — defer all string formatting to the error path only.
         // On the happy path we do ZERO formatting/allocation per argument.
         // For `optional` params with a default: if the caller passed `nothing`
         // (or omitted the arg entirely), substitute the compile-time default.
-        for (i, param) in func.params.iter().enumerate() {
+        for (i, param) in self.program.function(fn_id).params.iter().enumerate() {
             let val = args.get(i).cloned().unwrap_or(FidanValue::Nothing);
             frame.store(param.local, val);
         }
@@ -1234,6 +1266,7 @@ impl MirMachine {
         // Block-level execution starting at entry (BlockId(0)).
         let result = self.run_function(fn_id, &mut frame);
         let cleanup_result = self.cleanup_frame_locals(&mut frame);
+        let cleanup_ok = cleanup_result.is_ok();
 
         // Capture the trace at the innermost frame (only once — don't overwrite).
         // Exclude the module-level entry function (FunctionId(0)) from the trace
@@ -1296,11 +1329,15 @@ impl MirMachine {
             }
         }
 
-        match (result, cleanup_result) {
+        let final_result = match (result, cleanup_result) {
             (Ok(v), Ok(())) => Ok(v.unwrap_or(FidanValue::Nothing)),
             (Ok(_), Err(e)) => Err(e),
             (Err(e), _) => Err(e),
+        };
+        if cleanup_ok {
+            self.recycle_frame(frame);
         }
+        final_result
     }
 
     fn run_function(
@@ -1406,9 +1443,12 @@ impl MirMachine {
                     then_bb,
                     else_bb,
                 } => {
-                    let cv = self.eval_operand(&cond, frame);
                     prev_bb = Some(bb_id);
-                    bb_id = if cv.truthy() { then_bb } else { else_bb };
+                    bb_id = if self.eval_operand_truthy(&cond, frame) {
+                        then_bb
+                    } else {
+                        else_bb
+                    };
                 }
                 Terminator::Throw { value } => {
                     let v = self.eval_operand(&value, frame);
@@ -1808,37 +1848,26 @@ impl MirMachine {
         local: LocalId,
         frame: &mut CallFrame,
     ) -> Result<(), MirSignal> {
-        let val = frame.load(local);
-        if let FidanValue::Object(ref obj_ref) = val {
-            // Fast path: most classes have no drop action — bail immediately.
-            let (class_has_drop, drop_fn) = {
-                let obj = obj_ref.borrow();
-                let class = &obj.class;
-                if !class.has_drop_action {
-                    return Ok(());
-                }
-                // Resolve the `drop` method FunctionId from the class hierarchy.
-                let fn_id = class.find_method(self.drop_sym);
-                (true, fn_id)
-            };
+        let Some(FidanValue::Object(obj_ref)) = frame.get(local) else {
+            return Ok(());
+        };
 
-            if class_has_drop {
-                // Check strong_count: only the last owner triggers the destructor.
-                // Any clone/alias of this OwnedRef shares the same Rc — if count > 1
-                // another live reference exists and drop will be called by whoever
-                // holds the final reference.
-                // NOTE: `obj_ref.0` is the `Rc<RefCell<FidanObject>>`.
-                //
-                // strong_count includes the val binding above (+1) and the frame slot
-                // (+1 from frame.load clone), so a "sole owner" shows count == 2 here.
-                // We use == 2 as the "last owner" threshold.
-                let is_last_owner = std::rc::Rc::strong_count(&obj_ref.0) == 2;
-                if is_last_owner && let Some(RuntimeFnId(id)) = drop_fn {
-                    // Call `drop` with only `this` — no other arguments.
-                    // We consume `val` here so the drop body can access `this`.
-                    self.call_function(FunctionId(id), vec![val])?;
-                }
+        // Fast path: most classes have no drop action — bail immediately.
+        let drop_fn = {
+            let obj = obj_ref.borrow();
+            let class = &obj.class;
+            if !class.has_drop_action {
+                return Ok(());
             }
+            class.find_method(self.drop_sym)
+        };
+
+        // Check strong_count before cloning the frame value for the destructor call.
+        // A count of 1 here is equivalent to the old cloned-value check for 2.
+        let is_last_owner = std::rc::Rc::strong_count(&obj_ref.0) == 1;
+        if is_last_owner && let Some(RuntimeFnId(id)) = drop_fn {
+            let val = frame.load(local);
+            self.call_function(FunctionId(id), vec![val])?;
         }
         Ok(())
     }
@@ -1854,7 +1883,7 @@ impl MirMachine {
             Rvalue::Use(op) => Ok(self.eval_operand(op, frame)),
             Rvalue::Literal(lit) => Ok(mir_lit_to_value(lit)),
             Rvalue::Binary { op, lhs, rhs } => {
-                if let Some(value) = self.eval_integer_binary(*op, lhs, rhs, frame)? {
+                if let Some(value) = self.eval_scalar_binary(*op, lhs, rhs, frame)? {
                     Ok(value)
                 } else {
                     let l = self.eval_operand(lhs, frame);
@@ -2002,78 +2031,133 @@ impl MirMachine {
         }
     }
 
-    fn eval_integer_operand(&self, op: &Operand, frame: &CallFrame) -> Option<i64> {
+    fn eval_operand_truthy(&self, op: &Operand, frame: &CallFrame) -> bool {
+        match op {
+            Operand::Local(local) => frame
+                .locals
+                .get(local.0 as usize)
+                .is_some_and(FidanValue::truthy),
+            Operand::Const(lit) => mir_lit_to_value(lit).truthy(),
+        }
+    }
+
+    fn eval_scalar_operand(&self, op: &Operand, frame: &CallFrame) -> Option<ScalarOperand> {
         match op {
             Operand::Local(local) => match frame.locals.get(local.0 as usize) {
-                Some(FidanValue::Integer(value)) => Some(*value),
+                Some(FidanValue::Integer(value)) => Some(ScalarOperand::Integer(*value)),
+                Some(FidanValue::Float(value)) => Some(ScalarOperand::Float(*value)),
+                Some(FidanValue::Boolean(value)) => Some(ScalarOperand::Boolean(*value)),
                 _ => None,
             },
-            Operand::Const(MirLit::Int(value)) => Some(*value),
+            Operand::Const(MirLit::Int(value)) => Some(ScalarOperand::Integer(*value)),
+            Operand::Const(MirLit::Float(value)) => Some(ScalarOperand::Float(*value)),
+            Operand::Const(MirLit::Bool(value)) => Some(ScalarOperand::Boolean(*value)),
             Operand::Const(_) => None,
         }
     }
 
-    fn eval_integer_binary(
+    fn eval_scalar_binary(
         &self,
         op: BinOp,
         lhs: &Operand,
         rhs: &Operand,
         frame: &CallFrame,
     ) -> Result<Option<FidanValue>, MirSignal> {
-        let Some(left) = self.eval_integer_operand(lhs, frame) else {
+        let Some(left) = self.eval_scalar_operand(lhs, frame) else {
             return Ok(None);
         };
-        let Some(right) = self.eval_integer_operand(rhs, frame) else {
+        let Some(right) = self.eval_scalar_operand(rhs, frame) else {
             return Ok(None);
         };
 
         use FidanValue::*;
-        Ok(Some(match op {
-            BinOp::Add => Integer(left + right),
-            BinOp::Sub => Integer(left - right),
-            BinOp::Mul => Integer(left * right),
-            BinOp::Div => {
-                if right == 0 {
-                    return Err(MirSignal::RuntimeError(
-                        fidan_diagnostics::diag_code!("R2001"),
-                        "division by zero".into(),
-                    ));
+        Ok(match (left, right) {
+            (ScalarOperand::Integer(left), ScalarOperand::Integer(right)) => Some(match op {
+                BinOp::Add => Integer(left + right),
+                BinOp::Sub => Integer(left - right),
+                BinOp::Mul => Integer(left * right),
+                BinOp::Div => {
+                    if right == 0 {
+                        return Err(MirSignal::RuntimeError(
+                            fidan_diagnostics::diag_code!("R2001"),
+                            "division by zero".into(),
+                        ));
+                    }
+                    Integer(left / right)
                 }
-                Integer(left / right)
-            }
-            BinOp::Rem => {
-                if right == 0 {
-                    return Err(MirSignal::RuntimeError(
-                        fidan_diagnostics::diag_code!("R2001"),
-                        "modulo by zero".into(),
-                    ));
+                BinOp::Rem => {
+                    if right == 0 {
+                        return Err(MirSignal::RuntimeError(
+                            fidan_diagnostics::diag_code!("R2001"),
+                            "modulo by zero".into(),
+                        ));
+                    }
+                    Integer(left % right)
                 }
-                Integer(left % right)
-            }
-            BinOp::Pow => Integer(left.wrapping_pow(right as u32)),
-            BinOp::Eq => Boolean(left == right),
-            BinOp::NotEq => Boolean(left != right),
-            BinOp::Lt => Boolean(left < right),
-            BinOp::LtEq => Boolean(left <= right),
-            BinOp::Gt => Boolean(left > right),
-            BinOp::GtEq => Boolean(left >= right),
-            BinOp::BitAnd => Integer(left & right),
-            BinOp::BitOr => Integer(left | right),
-            BinOp::BitXor => Integer(left ^ right),
-            BinOp::Shl => Integer(left << (right & 63)),
-            BinOp::Shr => Integer(left >> (right & 63)),
-            BinOp::Range => FidanValue::Range {
-                start: left,
-                end: right,
-                inclusive: false,
-            },
-            BinOp::RangeInclusive => FidanValue::Range {
-                start: left,
-                end: right,
-                inclusive: true,
-            },
-            _ => return Ok(None),
-        }))
+                BinOp::Pow => Integer(left.wrapping_pow(right as u32)),
+                BinOp::Eq => Boolean(left == right),
+                BinOp::NotEq => Boolean(left != right),
+                BinOp::Lt => Boolean(left < right),
+                BinOp::LtEq => Boolean(left <= right),
+                BinOp::Gt => Boolean(left > right),
+                BinOp::GtEq => Boolean(left >= right),
+                BinOp::BitAnd => Integer(left & right),
+                BinOp::BitOr => Integer(left | right),
+                BinOp::BitXor => Integer(left ^ right),
+                BinOp::Shl => Integer(left << (right & 63)),
+                BinOp::Shr => Integer(left >> (right & 63)),
+                BinOp::Range => FidanValue::Range {
+                    start: left,
+                    end: right,
+                    inclusive: false,
+                },
+                BinOp::RangeInclusive => FidanValue::Range {
+                    start: left,
+                    end: right,
+                    inclusive: true,
+                },
+                _ => return Ok(None),
+            }),
+            (ScalarOperand::Float(left), ScalarOperand::Float(right)) => Some(match op {
+                BinOp::Add => Float(left + right),
+                BinOp::Sub => Float(left - right),
+                BinOp::Mul => Float(left * right),
+                BinOp::Div => Float(left / right),
+                BinOp::Rem => Float(left % right),
+                BinOp::Pow => Float(left.powf(right)),
+                BinOp::Eq => Boolean(left == right),
+                BinOp::NotEq => Boolean(left != right),
+                BinOp::Lt => Boolean(left < right),
+                BinOp::LtEq => Boolean(left <= right),
+                BinOp::Gt => Boolean(left > right),
+                BinOp::GtEq => Boolean(left >= right),
+                _ => return Ok(None),
+            }),
+            (ScalarOperand::Integer(left), ScalarOperand::Float(right)) => Some(match op {
+                BinOp::Add => Float(left as f64 + right),
+                BinOp::Sub => Float(left as f64 - right),
+                BinOp::Mul => Float(left as f64 * right),
+                BinOp::Div => Float(left as f64 / right),
+                BinOp::Pow => Float((left as f64).powf(right)),
+                _ => return Ok(None),
+            }),
+            (ScalarOperand::Float(left), ScalarOperand::Integer(right)) => Some(match op {
+                BinOp::Add => Float(left + right as f64),
+                BinOp::Sub => Float(left - right as f64),
+                BinOp::Mul => Float(left * right as f64),
+                BinOp::Div => Float(left / right as f64),
+                BinOp::Pow => Float(left.powf(right as f64)),
+                _ => return Ok(None),
+            }),
+            (ScalarOperand::Boolean(left), ScalarOperand::Boolean(right)) => Some(match op {
+                BinOp::And => Boolean(left && right),
+                BinOp::Or => Boolean(left || right),
+                BinOp::Eq => Boolean(left == right),
+                BinOp::NotEq => Boolean(left != right),
+                _ => return Ok(None),
+            }),
+            _ => None,
+        })
     }
 
     // ── Call dispatch ─────────────────────────────────────────────────────────
@@ -2173,6 +2257,19 @@ impl MirMachine {
                 Err(MirSignal::Panic(format!("unknown builtin `{}`", name)))
             }
             Callee::Method { receiver, method } => {
+                if let Operand::Const(MirLit::Namespace(module)) = receiver {
+                    let method_name = self.sym_str(*method);
+                    if self.stdlib_modules.contains(module.as_str()) {
+                        return self.dispatch_stdlib_call(module, &method_name, args);
+                    }
+                    if let Some(&fn_id) = self.user_fn_map.get(method) {
+                        return self.call_function(fn_id, args);
+                    }
+                    return Err(MirSignal::Panic(format!(
+                        "no function `{}` in user module `{}`",
+                        method_name, module
+                    )));
+                }
                 let recv = self.eval_operand(receiver, frame);
                 self.dispatch_method_sym(recv, *method, args)
             }
