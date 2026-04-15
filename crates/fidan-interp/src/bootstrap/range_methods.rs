@@ -27,7 +27,12 @@ pub fn dispatch(
         }
         "to_list" | "collect" => {
             use fidan_runtime::{FidanList, OwnedRef};
-            let mut list = FidanList::new();
+            let len = if inclusive {
+                (end - start + 1).max(0)
+            } else {
+                (end - start).max(0)
+            } as usize;
+            let mut list = FidanList::with_capacity(len);
             if inclusive {
                 for n in start..=end {
                     list.append(FidanValue::Integer(n));

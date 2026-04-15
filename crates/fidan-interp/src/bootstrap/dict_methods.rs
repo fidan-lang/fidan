@@ -31,23 +31,26 @@ pub fn dispatch(d: OwnedRef<FidanDict>, method: &str, args: Vec<FidanValue>) -> 
         }
         ReceiverMethodOp::Len => Some(FidanValue::Integer(d.borrow().len() as i64)),
         ReceiverMethodOp::Keys => {
-            let mut list = FidanList::new();
-            for (k, _) in d.borrow().iter() {
+            let borrow = d.borrow();
+            let mut list = FidanList::with_capacity(borrow.len());
+            for (k, _) in borrow.iter() {
                 list.append(k.clone());
             }
             Some(FidanValue::List(OwnedRef::new(list)))
         }
         ReceiverMethodOp::Values => {
-            let mut list = FidanList::new();
-            for (_, v) in d.borrow().iter() {
+            let borrow = d.borrow();
+            let mut list = FidanList::with_capacity(borrow.len());
+            for (_, v) in borrow.iter() {
                 list.append(v.clone());
             }
             Some(FidanValue::List(OwnedRef::new(list)))
         }
         ReceiverMethodOp::Entries => {
-            let mut list = FidanList::new();
-            for (k, v) in d.borrow().iter() {
-                let mut pair = FidanList::new();
+            let borrow = d.borrow();
+            let mut list = FidanList::with_capacity(borrow.len());
+            for (k, v) in borrow.iter() {
+                let mut pair = FidanList::with_capacity(2);
                 pair.append(k.clone());
                 pair.append(v.clone());
                 list.append(FidanValue::List(OwnedRef::new(pair)));

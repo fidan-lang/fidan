@@ -21,8 +21,9 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             Some(FidanValue::Nothing)
         }
         "args" => {
-            let mut list = FidanList::new();
-            for arg in current_program_args().into_iter().skip(1) {
+            let args = current_program_args();
+            let mut list = FidanList::with_capacity(args.len().saturating_sub(1));
+            for arg in args.into_iter().skip(1) {
                 list.append(string_value(&arg));
             }
             Some(FidanValue::List(OwnedRef::new(list)))

@@ -1,4 +1,4 @@
-use crate::{FidanDict, FidanHashSet, FidanList, FidanValue, OwnedRef, display};
+use crate::{FidanDict, FidanHashSet, FidanList, FidanValue, OwnedRef, display, display_into};
 
 use super::common::{list_value, string_value};
 
@@ -23,11 +23,31 @@ fn set_from_value(value: &FidanValue) -> Option<FidanHashSet> {
 }
 
 fn set_to_list(set: &FidanHashSet) -> FidanValue {
-    let mut list = FidanList::new();
+    let mut list = FidanList::with_capacity(set.len());
     for value in set.values_sorted() {
         list.append(value);
     }
     FidanValue::List(OwnedRef::new(list))
+}
+
+fn stepped_range_len(start: i64, stop: i64, step: i64) -> usize {
+    if step == 0 {
+        return 0;
+    }
+    let start = start as i128;
+    let stop = stop as i128;
+    let step = step as i128;
+    if step > 0 {
+        if start >= stop {
+            0
+        } else {
+            (((stop - start - 1) / step) + 1) as usize
+        }
+    } else if start <= stop {
+        0
+    } else {
+        (((start - stop - 1) / -step) + 1) as usize
+    }
 }
 
 pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
@@ -51,7 +71,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                     }
                 }
             };
-            let mut list = FidanList::new();
+            let mut list = FidanList::with_capacity(stepped_range_len(start, stop, step));
             if step == 0 {
                 return Some(FidanValue::List(OwnedRef::new(list)));
             }
@@ -142,7 +162,14 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             }
         }
         "Queue" | "Stack" => {
-            let mut list = FidanList::new();
+            let mut list = FidanList::with_capacity(
+                args.first()
+                    .and_then(|value| match value {
+                        FidanValue::List(l) => Some(l.borrow().len()),
+                        _ => None,
+                    })
+                    .unwrap_or(0),
+            );
             if let Some(FidanValue::List(l)) = args.first() {
                 for value in l.borrow().iter() {
                     list.append(value.clone());
@@ -160,36 +187,14 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "dequeue" => {
             if let Some(FidanValue::List(l)) = args.first() {
                 let mut borrow = l.borrow_mut();
-                let items: Vec<FidanValue> = borrow.iter().cloned().collect();
-                if items.is_empty() {
-                    return Some(FidanValue::Nothing);
-                }
-                let first = items[0].clone();
-                let mut new_list = FidanList::new();
-                for item in items.into_iter().skip(1) {
-                    new_list.append(item);
-                }
-                *borrow = new_list;
-                Some(first)
+                Some(borrow.remove(0).unwrap_or(FidanValue::Nothing))
             } else {
                 Some(FidanValue::Nothing)
             }
         }
         "pop" => {
             if let Some(FidanValue::List(l)) = args.first() {
-                let mut borrow = l.borrow_mut();
-                let items: Vec<FidanValue> = borrow.iter().cloned().collect();
-                let len = items.len();
-                if len == 0 {
-                    return Some(FidanValue::Nothing);
-                }
-                let top = items[len - 1].clone();
-                let mut new_list = FidanList::new();
-                for item in items.into_iter().take(len - 1) {
-                    new_list.append(item);
-                }
-                *borrow = new_list;
-                Some(top)
+                Some(l.borrow_mut().pop().unwrap_or(FidanValue::Nothing))
             } else {
                 Some(FidanValue::Nothing)
             }
@@ -214,8 +219,16 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         },
         "flatten" => {
             if let Some(FidanValue::List(outer)) = args.first() {
-                let mut result = FidanList::new();
-                for item in outer.borrow().iter() {
+                let outer_ref = outer.borrow();
+                let capacity = outer_ref
+                    .iter()
+                    .map(|item| match item {
+                        FidanValue::List(inner) => inner.borrow().len(),
+                        _ => 1,
+                    })
+                    .sum();
+                let mut result = FidanList::with_capacity(capacity);
+                for item in outer_ref.iter() {
                     if let FidanValue::List(inner) = item {
                         for value in inner.borrow().iter() {
                             result.append(value.clone());
@@ -236,7 +249,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 let a_ref = a.borrow();
                 let b_ref = b.borrow();
                 let len = a_ref.len().min(b_ref.len());
-                let mut result = FidanList::new();
+                let mut result = FidanList::with_capacity(len);
                 for index in 0..len {
                     result.append(FidanValue::Tuple(vec![
                         a_ref.get(index).cloned().unwrap_or(FidanValue::Nothing),
@@ -250,8 +263,9 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "enumerate" => {
             if let Some(FidanValue::List(list)) = args.first() {
-                let mut result = FidanList::new();
-                for (index, value) in list.borrow().iter().cloned().enumerate() {
+                let list_ref = list.borrow();
+                let mut result = FidanList::with_capacity(list_ref.len());
+                for (index, value) in list_ref.iter().cloned().enumerate() {
                     result.append(FidanValue::Tuple(vec![
                         FidanValue::Integer(index as i64),
                         value,
@@ -272,7 +286,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                     return Some(FidanValue::List(OwnedRef::new(FidanList::new())));
                 }
                 let items: Vec<FidanValue> = list.borrow().iter().cloned().collect();
-                let mut result = FidanList::new();
+                let mut result = FidanList::with_capacity(items.len().div_ceil(size));
                 for chunk in items.chunks(size) {
                     result.append(list_value(chunk.iter().cloned()));
                 }
@@ -288,7 +302,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                     _ => 0,
                 };
                 let items: Vec<FidanValue> = list.borrow().iter().cloned().collect();
-                let mut result = FidanList::new();
+                let mut result = FidanList::with_capacity(items.len().saturating_sub(size) + 1);
                 if size == 0 || size > items.len() {
                     return Some(FidanValue::List(OwnedRef::new(result)));
                 }
@@ -321,12 +335,13 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "groupBy" | "group_by" => {
             if let Some(FidanValue::List(list)) = args.first() {
-                let mut groups = FidanDict::new();
-                for value in list.borrow().iter().cloned() {
+                let list_ref = list.borrow();
+                let mut groups = FidanDict::with_capacity(list_ref.len());
+                for value in list_ref.iter().cloned() {
                     match groups.get(&value).ok().flatten().cloned() {
                         Some(FidanValue::List(existing)) => existing.borrow_mut().append(value),
                         _ => {
-                            let mut bucket = FidanList::new();
+                            let mut bucket = FidanList::with_capacity(1);
                             bucket.append(value.clone());
                             let _ = groups.insert(value, FidanValue::List(OwnedRef::new(bucket)));
                         }
@@ -339,9 +354,10 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "unique" | "dedup" => {
             if let Some(FidanValue::List(list)) = args.first() {
+                let list_ref = list.borrow();
                 let mut seen = FidanHashSet::new();
-                let mut result = FidanList::new();
-                for value in list.borrow().iter() {
+                let mut result = FidanList::with_capacity(list_ref.len());
+                for value in list_ref.iter() {
                     if seen.insert(value.clone()).unwrap_or(false) {
                         result.append(value.clone());
                     }
@@ -381,7 +397,14 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             _ => Some(FidanValue::Boolean(true)),
         },
         "concat" => {
-            let mut result = FidanList::new();
+            let capacity = args
+                .iter()
+                .map(|arg| match arg {
+                    FidanValue::List(list) => list.borrow().len(),
+                    _ => 0,
+                })
+                .sum();
+            let mut result = FidanList::with_capacity(capacity);
             for arg in &args {
                 if let FidanValue::List(list) = arg {
                     for value in list.borrow().iter() {
@@ -393,8 +416,8 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "slice" => {
             if let Some(FidanValue::List(list)) = args.first() {
-                let items: Vec<FidanValue> = list.borrow().iter().cloned().collect();
-                let len = items.len();
+                let list_ref = list.borrow();
+                let len = list_ref.len();
                 let start = match args.get(1) {
                     Some(FidanValue::Integer(n)) => (*n).max(0) as usize,
                     _ => 0,
@@ -403,9 +426,13 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                     Some(FidanValue::Integer(n)) => (*n as usize).min(len),
                     _ => len,
                 };
-                Some(list_value(
-                    items[start.min(len)..end.min(len)].iter().cloned(),
-                ))
+                let start = start.min(len);
+                let end = end.min(len);
+                let mut result = FidanList::with_capacity(end.saturating_sub(start));
+                for value in list_ref.iter().skip(start).take(end.saturating_sub(start)) {
+                    result.append(value.clone());
+                }
+                Some(FidanValue::List(OwnedRef::new(result)))
             } else {
                 Some(FidanValue::Nothing)
             }
@@ -432,8 +459,15 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             let list = args.first().cloned().unwrap_or(FidanValue::Nothing);
             let sep = args.get(1).map(display).unwrap_or_default();
             if let FidanValue::List(list) = list {
-                let parts: Vec<String> = list.borrow().iter().map(display).collect();
-                Some(string_value(&parts.join(&sep)))
+                let borrow = list.borrow();
+                let mut joined = String::with_capacity(sep.len().saturating_mul(borrow.len()));
+                for (index, value) in borrow.iter().enumerate() {
+                    if index > 0 {
+                        joined.push_str(&sep);
+                    }
+                    display_into(&mut joined, value);
+                }
+                Some(string_value(&joined))
             } else {
                 Some(FidanValue::Nothing)
             }

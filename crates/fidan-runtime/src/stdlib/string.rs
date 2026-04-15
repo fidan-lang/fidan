@@ -102,8 +102,10 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 .get(1)
                 .map(coerce_string)
                 .unwrap_or_else(|| " ".to_string());
-            let mut list = FidanList::new();
-            for part in s.split(sep.as_str()) {
+            let parts = s.split(sep.as_str());
+            let (lower, upper) = parts.size_hint();
+            let mut list = FidanList::with_capacity(upper.unwrap_or(lower));
+            for part in parts {
                 list.append(string_value(part));
             }
             Some(FidanValue::List(OwnedRef::new(list)))
@@ -114,7 +116,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 Some(FidanValue::List(l)) => l.borrow(),
                 _ => return Some(string_value("")),
             };
-            let mut joined = String::new();
+            let mut joined = String::with_capacity(sep.len().saturating_mul(list.len()));
             for (index, value) in list.iter().enumerate() {
                 if index > 0 {
                     joined.push_str(&sep);
@@ -125,8 +127,10 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "lines" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
-            let mut list = FidanList::new();
-            for part in s.lines() {
+            let parts = s.lines();
+            let (lower, upper) = parts.size_hint();
+            let mut list = FidanList::with_capacity(upper.unwrap_or(lower));
+            for part in parts {
                 list.append(string_value(part));
             }
             Some(FidanValue::List(OwnedRef::new(list)))
@@ -257,7 +261,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "chars" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
-            let mut list = FidanList::new();
+            let mut list = FidanList::with_capacity(s.chars().count());
             for ch in s.chars() {
                 list.append(string_value(&ch.to_string()));
             }
@@ -265,7 +269,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         }
         "bytes" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
-            let mut list = FidanList::new();
+            let mut list = FidanList::with_capacity(s.len());
             for byte in s.bytes() {
                 list.append(FidanValue::Integer(byte as i64));
             }

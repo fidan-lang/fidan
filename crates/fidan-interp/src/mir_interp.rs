@@ -287,6 +287,8 @@ pub struct MirMachine {
     /// Set of namespace aliases that were re-exported (`export use mod`) — used by
     /// `get_field` for O(1) chaining lookup (e.g. `lib.math.sqrt`).
     reexported_namespaces: Arc<FxHashSet<Arc<str>>>,
+    /// Builtin callee symbols that resolve to `@extern` declarations.
+    extern_builtin_fns: Arc<FxHashMap<Symbol, FunctionId>>,
     /// Maps merged free-function names to their `FunctionId`.
     /// Used for `use mymod` / `test2.add(...)` user-module namespace dispatch.
     user_fn_map: Arc<FxHashMap<Symbol, FunctionId>>,
@@ -495,8 +497,14 @@ impl MirMachine {
         // non-method). Methods have `this` as their first param; we detect that.
         let this_sym = interner.intern("this");
         let drop_sym = interner.intern("drop");
+        let mut extern_builtin_fns: FxHashMap<Symbol, FunctionId> = FxHashMap::default();
         let mut user_fn_map: FxHashMap<Symbol, FunctionId> = FxHashMap::default();
         for (i, func) in program.functions.iter().enumerate() {
+            if func.extern_decl.is_some() {
+                extern_builtin_fns
+                    .entry(func.name)
+                    .or_insert(FunctionId(i as u32));
+            }
             if i == 0 {
                 continue; // skip init fn
             }
@@ -546,6 +554,7 @@ impl MirMachine {
             stdlib_free_fns: Arc::new(stdlib_free_fns),
             stdlib_modules: Arc::new(stdlib_modules),
             reexported_namespaces: Arc::new(reexported_namespaces),
+            extern_builtin_fns: Arc::new(extern_builtin_fns),
             user_fn_map: Arc::new(user_fn_map),
             globals: Rc::new(parking_lot::RwLock::new(vec![
                 FidanValue::Nothing;
@@ -678,6 +687,7 @@ impl MirMachine {
             stdlib_free_fns: self.stdlib_free_fns.clone(),
             stdlib_modules: self.stdlib_modules.clone(),
             reexported_namespaces: self.reexported_namespaces.clone(),
+            extern_builtin_fns: self.extern_builtin_fns.clone(),
             user_fn_map: self.user_fn_map.clone(),
             globals: Rc::new(parking_lot::RwLock::new(thread_globals.clone())),
             frozen_globals: Some(thread_globals.into_boxed_slice()),
@@ -1309,25 +1319,41 @@ impl MirMachine {
             // Most blocks have no phi nodes — skip the Vec allocation entirely.
             {
                 let bb = program.function(fn_id).block(bb_id);
-                if !bb.phis.is_empty() {
-                    let phis: Vec<(LocalId, FidanValue)> = bb
-                        .phis
-                        .iter()
-                        .map(|phi| {
-                            let val = if let Some(p) = prev_bb {
-                                phi.operands
-                                    .iter()
-                                    .find(|(src, _)| *src == p)
-                                    .map(|(_, op)| self.eval_operand(op, frame))
-                                    .unwrap_or(FidanValue::Nothing)
-                            } else {
-                                FidanValue::Nothing
-                            };
-                            (phi.result, val)
-                        })
-                        .collect();
-                    for (dest, val) in phis {
-                        frame.store(dest, val);
+                match bb.phis.len() {
+                    0 => {}
+                    1 => {
+                        let phi = &bb.phis[0];
+                        let val = if let Some(p) = prev_bb {
+                            phi.operands
+                                .iter()
+                                .find(|(src, _)| *src == p)
+                                .map(|(_, op)| self.eval_operand(op, frame))
+                                .unwrap_or(FidanValue::Nothing)
+                        } else {
+                            FidanValue::Nothing
+                        };
+                        frame.store(phi.result, val);
+                    }
+                    _ => {
+                        let phis: Vec<(LocalId, FidanValue)> = bb
+                            .phis
+                            .iter()
+                            .map(|phi| {
+                                let val = if let Some(p) = prev_bb {
+                                    phi.operands
+                                        .iter()
+                                        .find(|(src, _)| *src == p)
+                                        .map(|(_, op)| self.eval_operand(op, frame))
+                                        .unwrap_or(FidanValue::Nothing)
+                                } else {
+                                    FidanValue::Nothing
+                                };
+                                (phi.result, val)
+                            })
+                            .collect();
+                        for (dest, val) in phis {
+                            frame.store(dest, val);
+                        }
                     }
                 }
             }
@@ -1828,9 +1854,13 @@ impl MirMachine {
             Rvalue::Use(op) => Ok(self.eval_operand(op, frame)),
             Rvalue::Literal(lit) => Ok(mir_lit_to_value(lit)),
             Rvalue::Binary { op, lhs, rhs } => {
-                let l = self.eval_operand(lhs, frame);
-                let r = self.eval_operand(rhs, frame);
-                eval_binary(*op, l, r)
+                if let Some(value) = self.eval_integer_binary(*op, lhs, rhs, frame)? {
+                    Ok(value)
+                } else {
+                    let l = self.eval_operand(lhs, frame);
+                    let r = self.eval_operand(rhs, frame);
+                    eval_binary(*op, l, r)
+                }
             }
             Rvalue::Unary { op, operand } => {
                 let v = self.eval_operand(operand, frame);
@@ -1857,14 +1887,14 @@ impl MirMachine {
                 self.construct_object(*ty, field_vals)
             }
             Rvalue::List(elems) => {
-                let mut list = FidanList::new();
+                let mut list = FidanList::with_capacity(elems.len());
                 for e in elems {
                     list.append(self.eval_operand(e, frame));
                 }
                 Ok(FidanValue::List(OwnedRef::new(list)))
             }
             Rvalue::Dict(pairs) => {
-                let mut dict = FidanDict::new();
+                let mut dict = FidanDict::with_capacity(pairs.len());
                 for (k, v) in pairs {
                     let key = self.eval_operand(k, frame);
                     let val = self.eval_operand(v, frame);
@@ -1878,7 +1908,14 @@ impl MirMachine {
                 Ok(FidanValue::Tuple(items))
             }
             Rvalue::StringInterp(parts) => {
-                let mut s = String::new();
+                let capacity = parts
+                    .iter()
+                    .map(|part| match part {
+                        MirStringPart::Literal(lit) => lit.len(),
+                        MirStringPart::Operand(_) => 8,
+                    })
+                    .sum();
+                let mut s = String::with_capacity(capacity);
                 for part in parts {
                     match part {
                         MirStringPart::Literal(lit) => s.push_str(lit),
@@ -1965,6 +2002,80 @@ impl MirMachine {
         }
     }
 
+    fn eval_integer_operand(&self, op: &Operand, frame: &CallFrame) -> Option<i64> {
+        match op {
+            Operand::Local(local) => match frame.locals.get(local.0 as usize) {
+                Some(FidanValue::Integer(value)) => Some(*value),
+                _ => None,
+            },
+            Operand::Const(MirLit::Int(value)) => Some(*value),
+            Operand::Const(_) => None,
+        }
+    }
+
+    fn eval_integer_binary(
+        &self,
+        op: BinOp,
+        lhs: &Operand,
+        rhs: &Operand,
+        frame: &CallFrame,
+    ) -> Result<Option<FidanValue>, MirSignal> {
+        let Some(left) = self.eval_integer_operand(lhs, frame) else {
+            return Ok(None);
+        };
+        let Some(right) = self.eval_integer_operand(rhs, frame) else {
+            return Ok(None);
+        };
+
+        use FidanValue::*;
+        Ok(Some(match op {
+            BinOp::Add => Integer(left + right),
+            BinOp::Sub => Integer(left - right),
+            BinOp::Mul => Integer(left * right),
+            BinOp::Div => {
+                if right == 0 {
+                    return Err(MirSignal::RuntimeError(
+                        fidan_diagnostics::diag_code!("R2001"),
+                        "division by zero".into(),
+                    ));
+                }
+                Integer(left / right)
+            }
+            BinOp::Rem => {
+                if right == 0 {
+                    return Err(MirSignal::RuntimeError(
+                        fidan_diagnostics::diag_code!("R2001"),
+                        "modulo by zero".into(),
+                    ));
+                }
+                Integer(left % right)
+            }
+            BinOp::Pow => Integer(left.wrapping_pow(right as u32)),
+            BinOp::Eq => Boolean(left == right),
+            BinOp::NotEq => Boolean(left != right),
+            BinOp::Lt => Boolean(left < right),
+            BinOp::LtEq => Boolean(left <= right),
+            BinOp::Gt => Boolean(left > right),
+            BinOp::GtEq => Boolean(left >= right),
+            BinOp::BitAnd => Integer(left & right),
+            BinOp::BitOr => Integer(left | right),
+            BinOp::BitXor => Integer(left ^ right),
+            BinOp::Shl => Integer(left << (right & 63)),
+            BinOp::Shr => Integer(left >> (right & 63)),
+            BinOp::Range => FidanValue::Range {
+                start: left,
+                end: right,
+                inclusive: false,
+            },
+            BinOp::RangeInclusive => FidanValue::Range {
+                start: left,
+                end: right,
+                inclusive: true,
+            },
+            _ => return Ok(None),
+        }))
+    }
+
     // ── Call dispatch ─────────────────────────────────────────────────────────
 
     fn dispatch_call(
@@ -1976,13 +2087,8 @@ impl MirMachine {
         match callee {
             Callee::Fn(fn_id) => self.call_function(*fn_id, args),
             Callee::Builtin(sym) => {
-                if let Some(extern_fn) = self
-                    .program
-                    .functions
-                    .iter()
-                    .find(|f| f.name == *sym && f.extern_decl.is_some())
-                {
-                    return self.call_function(extern_fn.id, args);
+                if let Some(&extern_fn) = self.extern_builtin_fns.get(sym) {
+                    return self.call_function(extern_fn, args);
                 }
                 let name: Arc<str> = self.sym_str(*sym);
                 // Check if this is a free-imported stdlib function (e.g. `use std.io.{readFile}`).

@@ -38,55 +38,25 @@ pub fn dispatch(r: OwnedRef<FidanList>, method: &str, args: Vec<FidanValue>) -> 
                 Some(FidanValue::Nothing)
             }
         }
-        "pop" => {
-            let len = r.borrow().len();
-            if len > 0 {
-                let val = r
-                    .borrow()
-                    .get(len - 1)
-                    .cloned()
-                    .unwrap_or(FidanValue::Nothing);
-                let items: Vec<FidanValue> = r.borrow().iter().take(len - 1).cloned().collect();
-                let mut new_list = FidanList::new();
-                for item in items {
-                    new_list.append(item);
-                }
-                *r.borrow_mut() = new_list;
-                Some(val)
-            } else {
-                Some(FidanValue::Nothing)
-            }
-        }
+        "pop" => Some(r.borrow_mut().pop().unwrap_or(FidanValue::Nothing)),
         "remove" => {
             let idx = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             if let FidanValue::Integer(i) = idx {
-                let i = i as usize;
-                let items: Vec<FidanValue> = r.borrow().iter().cloned().collect();
-                let removed = items.get(i).cloned().unwrap_or(FidanValue::Nothing);
-                let mut new_list = FidanList::new();
-                for (pos, v) in items.into_iter().enumerate() {
-                    if pos != i {
-                        new_list.append(v);
-                    }
-                }
-                *r.borrow_mut() = new_list;
-                Some(removed)
+                Some(
+                    r.borrow_mut()
+                        .remove(i as usize)
+                        .unwrap_or(FidanValue::Nothing),
+                )
             } else {
                 Some(FidanValue::Nothing)
             }
         }
         "reverse" => {
-            let items: Vec<FidanValue> = r.borrow().iter().cloned().collect();
-            let mut new_list = FidanList::new();
-            for v in items.into_iter().rev() {
-                new_list.append(v);
-            }
-            *r.borrow_mut() = new_list;
+            r.borrow_mut().reverse();
             Some(FidanValue::Nothing)
         }
         "sort" => {
-            let mut items: Vec<FidanValue> = r.borrow().iter().cloned().collect();
-            items.sort_by(|a, b| match (a, b) {
+            r.borrow_mut().sort_by(|a, b| match (a, b) {
                 (FidanValue::Integer(x), FidanValue::Integer(y)) => x.cmp(y),
                 (FidanValue::Float(x), FidanValue::Float(y)) => {
                     x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
@@ -94,11 +64,6 @@ pub fn dispatch(r: OwnedRef<FidanList>, method: &str, args: Vec<FidanValue>) -> 
                 (FidanValue::String(x), FidanValue::String(y)) => x.as_str().cmp(y.as_str()),
                 _ => std::cmp::Ordering::Equal,
             });
-            let mut new_list = FidanList::new();
-            for v in items {
-                new_list.append(v);
-            }
-            *r.borrow_mut() = new_list;
             Some(FidanValue::Nothing)
         }
         "join" => {
@@ -107,19 +72,22 @@ pub fn dispatch(r: OwnedRef<FidanList>, method: &str, args: Vec<FidanValue>) -> 
                 FidanValue::String(s) => s.as_str().to_string(),
                 _ => String::new(),
             };
-            let parts: Vec<String> = r
-                .borrow()
-                .iter()
-                .map(|v| match v {
-                    FidanValue::String(s) => s.as_str().to_string(),
-                    FidanValue::Integer(n) => n.to_string(),
-                    FidanValue::Float(f) => f.to_string(),
-                    FidanValue::Boolean(b) => b.to_string(),
-                    FidanValue::Nothing => "nothing".to_string(),
-                    _ => String::new(),
-                })
-                .collect();
-            Some(FidanValue::String(FidanString::new(&parts.join(&sep_str))))
+            let borrow = r.borrow();
+            let mut joined = String::with_capacity(sep_str.len().saturating_mul(borrow.len()));
+            for (index, value) in borrow.iter().enumerate() {
+                if index > 0 {
+                    joined.push_str(&sep_str);
+                }
+                match value {
+                    FidanValue::String(s) => joined.push_str(s.as_str()),
+                    FidanValue::Integer(n) => joined.push_str(&n.to_string()),
+                    FidanValue::Float(f) => joined.push_str(&f.to_string()),
+                    FidanValue::Boolean(b) => joined.push_str(&b.to_string()),
+                    FidanValue::Nothing => joined.push_str("nothing"),
+                    _ => {}
+                }
+            }
+            Some(FidanValue::String(FidanString::new(&joined)))
         }
         "toString" => Some(FidanValue::String(FidanString::new(
             &fidan_runtime::display(&FidanValue::List(r.clone())),
@@ -143,7 +111,7 @@ pub fn dispatch(r: OwnedRef<FidanList>, method: &str, args: Vec<FidanValue>) -> 
         // Complements the in-place `reverse()` for functional-style use.
         "reversed" => {
             let items: Vec<FidanValue> = r.borrow().iter().cloned().collect();
-            let mut new_list = FidanList::new();
+            let mut new_list = FidanList::with_capacity(items.len());
             for v in items.into_iter().rev() {
                 new_list.append(v);
             }

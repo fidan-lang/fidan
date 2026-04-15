@@ -5,7 +5,9 @@ pub fn string_value(s: &str) -> FidanValue {
 }
 
 pub fn list_value(values: impl IntoIterator<Item = FidanValue>) -> FidanValue {
-    let mut list = FidanList::new();
+    let values = values.into_iter();
+    let (lower, upper) = values.size_hint();
+    let mut list = FidanList::with_capacity(upper.unwrap_or(lower));
     for value in values {
         list.append(value);
     }

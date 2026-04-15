@@ -43,8 +43,10 @@ fn read_file_text(path: &str) -> Result<String, StdlibRuntimeError> {
 
 fn read_file_lines(path: &str) -> Result<FidanValue, StdlibRuntimeError> {
     let content = read_file_text(path)?;
-    let mut list = FidanList::new();
-    for line in content.lines() {
+    let lines = content.lines();
+    let (lower, upper) = lines.size_hint();
+    let mut list = FidanList::with_capacity(upper.unwrap_or(lower));
+    for line in lines {
         list.append(string_value(line));
     }
     Ok(FidanValue::List(OwnedRef::new(list)))

@@ -1124,7 +1124,14 @@ pub unsafe extern "C" fn fdn_list_concat(
     a: *mut FidanValue,
     b: *mut FidanValue,
 ) -> *mut FidanValue {
-    let mut result = FidanList::new();
+    let capacity = match borrow(a) {
+        FidanValue::List(la) => la.borrow().len(),
+        _ => 0,
+    } + match borrow(b) {
+        FidanValue::List(lb) => lb.borrow().len(),
+        _ => 0,
+    };
+    let mut result = FidanList::with_capacity(capacity);
     if let FidanValue::List(la) = borrow(a) {
         for item in la.borrow().iter() {
             result.append(item.clone());
@@ -1207,8 +1214,9 @@ pub unsafe extern "C" fn fdn_dict_remove(dict: *mut FidanValue, key: *mut FidanV
 pub unsafe extern "C" fn fdn_dict_keys(dict: *mut FidanValue) -> *mut FidanValue {
     match borrow(dict) {
         FidanValue::Dict(d) => {
-            let mut list = FidanList::new();
-            for (key, _) in d.borrow().iter() {
+            let borrow = d.borrow();
+            let mut list = FidanList::with_capacity(borrow.len());
+            for (key, _) in borrow.iter() {
                 list.append(key.clone());
             }
             into_raw(FidanValue::List(OwnedRef::new(list)))
@@ -1221,8 +1229,9 @@ pub unsafe extern "C" fn fdn_dict_keys(dict: *mut FidanValue) -> *mut FidanValue
 pub unsafe extern "C" fn fdn_dict_values(dict: *mut FidanValue) -> *mut FidanValue {
     match borrow(dict) {
         FidanValue::Dict(d) => {
-            let mut list = FidanList::new();
-            for (_, value) in d.borrow().iter() {
+            let borrow = d.borrow();
+            let mut list = FidanList::with_capacity(borrow.len());
+            for (_, value) in borrow.iter() {
                 list.append(value.clone());
             }
             into_raw(FidanValue::List(OwnedRef::new(list)))
@@ -1235,9 +1244,10 @@ pub unsafe extern "C" fn fdn_dict_values(dict: *mut FidanValue) -> *mut FidanVal
 pub unsafe extern "C" fn fdn_dict_entries(dict: *mut FidanValue) -> *mut FidanValue {
     match borrow(dict) {
         FidanValue::Dict(d) => {
-            let mut list = FidanList::new();
-            for (key, value) in d.borrow().iter() {
-                let mut pair = FidanList::new();
+            let borrow = d.borrow();
+            let mut list = FidanList::with_capacity(borrow.len());
+            for (key, value) in borrow.iter() {
+                let mut pair = FidanList::with_capacity(2);
                 pair.append(key.clone());
                 pair.append(value.clone());
                 list.append(FidanValue::List(OwnedRef::new(pair)));
@@ -1508,21 +1518,25 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
                 .first()
                 .map(as_str_val)
                 .unwrap_or_else(|| " ".to_owned());
-            let mut list = FidanList::new();
-            for part in str_val.split(sep.as_str()) {
+            let parts = str_val.split(sep.as_str());
+            let (lower, upper) = parts.size_hint();
+            let mut list = FidanList::with_capacity(upper.unwrap_or(lower));
+            for part in parts {
                 list.append(FidanValue::String(FidanString::new(part)));
             }
             into_raw(FidanValue::List(OwnedRef::new(list)))
         }
         "lines" => {
-            let mut list = FidanList::new();
-            for line in str_val.lines() {
+            let lines = str_val.lines();
+            let (lower, upper) = lines.size_hint();
+            let mut list = FidanList::with_capacity(upper.unwrap_or(lower));
+            for line in lines {
                 list.append(FidanValue::String(FidanString::new(line)));
             }
             into_raw(FidanValue::List(OwnedRef::new(list)))
         }
         "chars" => {
-            let mut list = FidanList::new();
+            let mut list = FidanList::with_capacity(str_val.chars().count());
             for c in str_val.chars() {
                 list.append(FidanValue::String(FidanString::new(&c.to_string())));
             }
@@ -1534,8 +1548,16 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
             let collection = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             match collection {
                 FidanValue::List(l) => {
-                    let items: Vec<String> = l.borrow().iter().map(as_str_val).collect();
-                    into_raw(FidanValue::String(FidanString::new(&items.join(&str_val))))
+                    let borrow = l.borrow();
+                    let mut joined =
+                        String::with_capacity(str_val.len().saturating_mul(borrow.len()));
+                    for (index, value) in borrow.iter().enumerate() {
+                        if index > 0 {
+                            joined.push_str(&str_val);
+                        }
+                        joined.push_str(&as_str_val(value));
+                    }
+                    into_raw(FidanValue::String(FidanString::new(&joined)))
                 }
                 _ => into_raw(FidanValue::String(FidanString::new(""))),
             }
@@ -1726,7 +1748,7 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
 
         // ── Bytes / char codes ────────────────────────────────────────────────
         "bytes" => {
-            let mut list = FidanList::new();
+            let mut list = FidanList::with_capacity(str_val.len());
             for b in str_val.bytes() {
                 list.append(FidanValue::Integer(b as i64));
             }
@@ -1773,20 +1795,7 @@ fn dispatch_list_method(
         }
         "pop" => {
             let mut b = list.borrow_mut();
-            let len = b.len();
-            if len == 0 {
-                into_raw(FidanValue::Nothing)
-            } else {
-                // Clone last element then truncate
-                let last = b.get(len - 1).cloned().unwrap_or(FidanValue::Nothing);
-                // Rebuild without last element
-                let mut new_list = FidanList::new();
-                for i in 0..len - 1 {
-                    new_list.append(b.get(i).cloned().unwrap_or(FidanValue::Nothing));
-                }
-                *b = new_list;
-                into_raw(last)
-            }
+            into_raw(b.pop().unwrap_or(FidanValue::Nothing))
         }
         "first" => into_raw(list.borrow().get(0).cloned().unwrap_or(FidanValue::Nothing)),
         "last" => {
@@ -1834,42 +1843,30 @@ fn dispatch_list_method(
             into_raw(FidanValue::Integer(idx))
         }
         "reverse" => {
-            let mut b = list.borrow_mut();
-            let mut items: Vec<FidanValue> = b.iter().cloned().collect();
-            items.reverse();
-            let mut new_list = FidanList::new();
-            for v in items {
-                new_list.append(v);
-            }
-            *b = new_list;
+            list.borrow_mut().reverse();
             into_raw(FidanValue::Nothing)
         }
         "reversed" => {
             let b = list.borrow();
             let mut items: Vec<FidanValue> = b.iter().cloned().collect();
             items.reverse();
-            let mut new_list = FidanList::new();
-            for v in items {
-                new_list.append(v);
-            }
-            into_raw(FidanValue::List(OwnedRef::new(new_list)))
+            into_raw(FidanValue::List(OwnedRef::new(FidanList::from_vec(items))))
         }
         "sort" => {
-            let mut b = list.borrow_mut();
-            let mut items: Vec<FidanValue> = b.iter().cloned().collect();
-            items.sort_by(compare_values);
-            let mut new_list = FidanList::new();
-            for v in items {
-                new_list.append(v);
-            }
-            *b = new_list;
+            list.borrow_mut().sort_by(compare_values);
             into_raw(FidanValue::Nothing)
         }
         "join" => {
             let sep = args.first().map(as_str_val).unwrap_or_default();
             let b = list.borrow();
-            let items: Vec<String> = b.iter().map(as_str_val).collect();
-            into_raw(FidanValue::String(FidanString::new(&items.join(&sep))))
+            let mut joined = String::with_capacity(sep.len().saturating_mul(b.len()));
+            for (index, value) in b.iter().enumerate() {
+                if index > 0 {
+                    joined.push_str(&sep);
+                }
+                joined.push_str(&as_str_val(value));
+            }
+            into_raw(FidanValue::String(FidanString::new(&joined)))
         }
         "slice" => {
             let start = args
@@ -1895,8 +1892,9 @@ fn dispatch_list_method(
                 })
                 .map(|e| (e.max(0) as usize).min(b.len()))
                 .unwrap_or(b.len());
-            let mut new_list = FidanList::new();
-            for i in start.min(b.len())..end {
+            let start = start.min(b.len());
+            let mut new_list = FidanList::with_capacity(end.saturating_sub(start));
+            for i in start..end {
                 if let Some(v) = b.get(i) {
                     new_list.append(v.clone());
                 }
@@ -1905,7 +1903,14 @@ fn dispatch_list_method(
         }
         "flatten" => {
             let b = list.borrow();
-            let mut new_list = FidanList::new();
+            let capacity = b
+                .iter()
+                .map(|v| match v {
+                    FidanValue::List(inner) => inner.borrow().len(),
+                    _ => 1,
+                })
+                .sum();
+            let mut new_list = FidanList::with_capacity(capacity);
             for v in b.iter() {
                 match v {
                     FidanValue::List(inner) => {
@@ -1965,7 +1970,7 @@ fn dispatch_list_method(
             if let Some(callback) = args.into_iter().next() {
                 let cb_ptr = into_raw(callback);
                 let items: Vec<FidanValue> = list.borrow().iter().cloned().collect();
-                let mut new_list = FidanList::new();
+                let mut new_list = FidanList::with_capacity(items.len());
                 for item in items {
                     let item_ptr = into_raw(item);
                     let call_args = [item_ptr];
@@ -1994,7 +1999,7 @@ fn dispatch_list_method(
             if let Some(predicate) = args.into_iter().next() {
                 let pred_ptr = into_raw(predicate);
                 let items: Vec<FidanValue> = list.borrow().iter().cloned().collect();
-                let mut new_list = FidanList::new();
+                let mut new_list = FidanList::with_capacity(items.len());
                 for item in items {
                     let item_ptr = into_raw(item.clone());
                     let call_args = [item_ptr];
@@ -2089,15 +2094,7 @@ fn dispatch_list_method(
                 idx_val as usize
             };
             if i < b.len() {
-                let removed = b.get(i).cloned().unwrap_or(FidanValue::Nothing);
-                let mut new_list = FidanList::new();
-                for j in 0..b.len() {
-                    if j != i {
-                        new_list.append(b.get(j).cloned().unwrap_or(FidanValue::Nothing));
-                    }
-                }
-                *b = new_list;
-                into_raw(removed)
+                into_raw(b.remove(i).unwrap_or(FidanValue::Nothing))
             } else {
                 into_raw(FidanValue::Nothing)
             }
@@ -2199,7 +2196,7 @@ fn dispatch_dict_method(
         }
         ReceiverMethodOp::Keys => {
             let b = dict.borrow();
-            let mut list = FidanList::new();
+            let mut list = FidanList::with_capacity(b.len());
             for (key, _) in b.iter() {
                 list.append(key.clone());
             }
@@ -2207,7 +2204,7 @@ fn dispatch_dict_method(
         }
         ReceiverMethodOp::Values => {
             let b = dict.borrow();
-            let mut list = FidanList::new();
+            let mut list = FidanList::with_capacity(b.len());
             for (_, val) in b.iter() {
                 list.append(val.clone());
             }
@@ -2215,9 +2212,9 @@ fn dispatch_dict_method(
         }
         ReceiverMethodOp::Entries => {
             let b = dict.borrow();
-            let mut list = FidanList::new();
+            let mut list = FidanList::with_capacity(b.len());
             for (k, v) in b.iter() {
-                let mut pair = FidanList::new();
+                let mut pair = FidanList::with_capacity(2);
                 pair.append(k.clone());
                 pair.append(v.clone());
                 list.append(FidanValue::List(OwnedRef::new(pair)));

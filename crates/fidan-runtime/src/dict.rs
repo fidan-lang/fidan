@@ -15,6 +15,12 @@ impl FidanDict {
         }
     }
 
+    pub fn with_capacity(capacity: usize) -> Self {
+        FidanDict {
+            inner: Rc::new(HashMap::with_capacity(capacity)),
+        }
+    }
+
     pub fn get(&self, key: &FidanValue) -> Result<Option<&FidanValue>, HashKeyError> {
         let key = FidanHashKey::from_value(key)?;
         Ok(self.inner.get(&key).map(|(_, value)| value))

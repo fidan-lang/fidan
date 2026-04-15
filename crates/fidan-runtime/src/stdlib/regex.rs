@@ -60,7 +60,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             match compile(&pattern) {
                 Some(re) => match re.captures(&subject) {
                     Some(caps) => {
-                        let mut list = FidanList::new();
+                        let mut list = FidanList::with_capacity(caps.len());
                         for group in caps.iter() {
                             match group {
                                 Some(m) => list.append(string_value(m.as_str())),
@@ -80,7 +80,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             let mut outer = FidanList::new();
             if let Some(re) = compile(&pattern) {
                 for caps in re.captures_iter(&subject) {
-                    let mut inner = FidanList::new();
+                    let mut inner = FidanList::with_capacity(caps.len());
                     for group in caps.iter() {
                         match group {
                             Some(m) => inner.append(string_value(m.as_str())),
@@ -119,16 +119,22 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "split" => {
             let pattern = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
             let subject = coerce_string(args.get(1).unwrap_or(&FidanValue::Nothing));
-            let mut list = FidanList::new();
             match compile(&pattern) {
                 Some(re) => {
-                    for part in re.split(&subject) {
+                    let parts = re.split(&subject);
+                    let (lower, upper) = parts.size_hint();
+                    let mut list = FidanList::with_capacity(upper.unwrap_or(lower));
+                    for part in parts {
                         list.append(string_value(part));
                     }
+                    Some(FidanValue::List(OwnedRef::new(list)))
                 }
-                None => list.append(string_value(&subject)),
+                None => {
+                    let mut list = FidanList::with_capacity(1);
+                    list.append(string_value(&subject));
+                    Some(FidanValue::List(OwnedRef::new(list)))
+                }
             }
-            Some(FidanValue::List(OwnedRef::new(list)))
         }
         "isValid" | "is_valid" => {
             let pattern = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));

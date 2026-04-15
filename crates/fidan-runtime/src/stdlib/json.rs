@@ -27,7 +27,7 @@ fn decode_tagged_dict(entries: &JsonValue) -> Option<FidanValue> {
         return None;
     };
 
-    let mut dict = FidanDict::new();
+    let mut dict = FidanDict::with_capacity(items.len());
     for item in items {
         let JsonValue::Array(pair) = item else {
             return None;
@@ -132,7 +132,7 @@ fn json_to_fidan(value: serde_json::Value) -> FidanValue {
         serde_json::Value::Array(values) => list_value(values.into_iter().map(json_to_fidan)),
         serde_json::Value::Object(entries) => {
             decode_tagged_json_object(&entries).unwrap_or_else(|| {
-                let mut dict = FidanDict::new();
+                let mut dict = FidanDict::with_capacity(entries.len());
                 for (key, value) in entries {
                     let _ = dict.insert(
                         FidanValue::String(FidanString::new(&key)),
