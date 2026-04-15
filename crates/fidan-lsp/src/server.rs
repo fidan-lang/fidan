@@ -1102,12 +1102,23 @@ fn user_module_path_candidates(base_dir: &Path, segments: &[String]) -> Vec<std:
 }
 
 fn load_background_document(store: &DocumentStore, url: &Url) -> Option<()> {
-    if store.get(url).is_some() {
+    // Keep editor-managed documents authoritative. Background snapshots
+    // (version < 0) are refreshed from disk on every lookup.
+    let existing_version = store.get(url).map(|doc| doc.version);
+    if existing_version.is_some_and(|version| version >= 0) {
         return Some(());
     }
 
-    let path = url.to_file_path().ok()?;
-    let file_text = std::fs::read_to_string(&path).ok()?;
+    let path = match url.to_file_path() {
+        Ok(path) => path,
+        Err(_) if existing_version.is_some() => return Some(()),
+        Err(_) => return None,
+    };
+    let file_text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(_) if existing_version.is_some() => return Some(()),
+        Err(_) => return None,
+    };
     let analysis = analysis::analyze(&file_text, url.as_str());
     let resolved_imports = resolve_document_imports(
         Some(&path),
@@ -2223,6 +2234,10 @@ impl LanguageServer for FidanLsp {
                 import_path_url_at_offset(doc.text.as_str(), uri, offset as usize)
             {
                 (DefinitionLookup::OpenFile(import_url), file)
+            } else if let Some((module_url, _)) =
+                user_module_import_hover_target_at_offset(doc.text.as_str(), uri, offset as usize)
+            {
+                (DefinitionLookup::OpenFile(module_url), file)
             } else {
                 let spans = &doc.identifier_spans;
                 let hit_idx = match spans
@@ -5151,6 +5166,199 @@ action greet with (certain name oftype string) returns string {
     }
 
     #[test]
+    fn goto_definition_opens_grouped_user_module_import_paths() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let root = temp_test_dir("goto-grouped-user-module");
+            let main_path = root.join("main.fdn");
+            let imported_path = root.join("test_file_manager.fdn");
+            std::fs::write(&imported_path, "object StorageManager {}\n")
+                .expect("write imported module");
+
+            let text = "use test_file_manager.{StorageManager}\n";
+            std::fs::write(&main_path, text).expect("write main module");
+
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+            let uri = path_url(&main_path);
+            backend.refresh(&uri, 1, text).await;
+
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+            let offset = text.find("test_file_manager").expect("module offset") as u32;
+            let pos = convert::span_to_range(&file, Span::new(FileId(0), offset, offset + 1)).start;
+
+            let response = LanguageServer::goto_definition(
+                backend,
+                GotoDefinitionParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position: pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                },
+            )
+            .await
+            .expect("goto definition result")
+            .expect("definition location");
+
+            let GotoDefinitionResponse::Scalar(location) = response else {
+                panic!("expected scalar definition location");
+            };
+            assert_eq!(location.uri, path_url(&imported_path));
+
+            let _ = std::fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn goto_definition_opens_direct_user_module_import_paths() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let root = temp_test_dir("goto-direct-user-module");
+            let main_path = root.join("main.fdn");
+            let imported_path = root.join("test_file_manager.fdn");
+            std::fs::write(&imported_path, "object StorageManager {}\n")
+                .expect("write imported module");
+
+            let text = "use test_file_manager\n";
+            std::fs::write(&main_path, text).expect("write main module");
+
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+            let uri = path_url(&main_path);
+            backend.refresh(&uri, 1, text).await;
+
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+            let offset = text.find("test_file_manager").expect("module offset") as u32;
+            let pos = convert::span_to_range(&file, Span::new(FileId(0), offset, offset + 1)).start;
+
+            let response = LanguageServer::goto_definition(
+                backend,
+                GotoDefinitionParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position: pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                },
+            )
+            .await
+            .expect("goto definition result")
+            .expect("definition location");
+
+            let GotoDefinitionResponse::Scalar(location) = response else {
+                panic!("expected scalar definition location");
+            };
+            assert_eq!(location.uri, path_url(&imported_path));
+
+            let _ = std::fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn goto_definition_opens_string_import_paths() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let root = temp_test_dir("goto-string-import");
+            let main_path = root.join("main.fdn");
+            let imported_path = root.join("test_file_manager.fdn");
+            std::fs::write(&imported_path, "object StorageManager {}\n")
+                .expect("write imported module");
+
+            let text = "use \"test_file_manager.fdn\"\n";
+            std::fs::write(&main_path, text).expect("write main module");
+
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+            let uri = path_url(&main_path);
+            backend.refresh(&uri, 1, text).await;
+
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+            let offset = (text
+                .find("test_file_manager.fdn")
+                .expect("import path offset")
+                + 2) as u32;
+            let pos = convert::span_to_range(&file, Span::new(FileId(0), offset, offset + 1)).start;
+
+            let response = LanguageServer::goto_definition(
+                backend,
+                GotoDefinitionParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position: pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                },
+            )
+            .await
+            .expect("goto definition result")
+            .expect("definition location");
+
+            let GotoDefinitionResponse::Scalar(location) = response else {
+                panic!("expected scalar definition location");
+            };
+            assert_eq!(location.uri, path_url(&imported_path));
+
+            let _ = std::fs::remove_dir_all(&root);
+        });
+    }
+
+    #[test]
+    fn goto_definition_does_not_resolve_stdlib_module_import_paths() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+
+            let uri = Url::parse("file:///goto_stdlib_import.fdn").expect("main uri");
+            let text = "use std.io\n";
+            backend.refresh(&uri, 1, text).await;
+
+            let file = SourceFile::new(FileId(0), uri.as_str(), text);
+            let offset = text.find("io").expect("stdlib module offset") as u32;
+            let pos = convert::span_to_range(&file, Span::new(FileId(0), offset, offset + 1)).start;
+
+            let response = LanguageServer::goto_definition(
+                backend,
+                GotoDefinitionParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier { uri: uri.clone() },
+                        position: pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                },
+            )
+            .await
+            .expect("goto definition result");
+
+            assert!(
+                response.is_none(),
+                "stdlib imports should not resolve to files"
+            );
+        });
+    }
+
+    #[test]
     fn stdlib_module_docs_cover_current_modules() {
         for info in STDLIB_MODULES {
             assert!(
@@ -5724,6 +5932,109 @@ Holder.compass.
             };
             assert!(markup.value.contains("use test_file_manager"));
             assert!(markup.value.contains("Some doccomment  \nBlablabla"));
+        });
+    }
+
+    #[test]
+    fn hover_refreshes_grouped_module_doc_comments_after_disk_changes() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+
+        runtime.block_on(async {
+            let root = temp_test_dir("hover-grouped-module-doc-refresh");
+            let main_path = root.join("main.fdn");
+            let imported_path = root.join("test_file_manager.fdn");
+            let main_text = "use test_file_manager.{StorageManager}\n";
+
+            std::fs::write(&main_path, main_text).expect("write main module");
+            std::fs::write(
+                &imported_path,
+                "#> Initial module docs\n\nobject StorageManager {}\n",
+            )
+            .expect("write imported module");
+
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+            let main_uri = path_url(&main_path);
+            backend.refresh(&main_uri, 1, main_text).await;
+
+            let file = SourceFile::new(FileId(0), main_uri.as_str(), main_text);
+            let offset = main_text.find("test_file_manager").expect("module offset") as u32;
+            let pos = convert::span_to_range(&file, Span::new(FileId(0), offset, offset + 1)).start;
+
+            let initial = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier {
+                            uri: main_uri.clone(),
+                        },
+                        position: pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("initial hover result")
+            .expect("initial hover contents");
+            let HoverContents::Markup(initial_markup) = initial.contents else {
+                panic!("expected markdown hover contents");
+            };
+            assert!(initial_markup.value.contains("Initial module docs"));
+
+            std::fs::write(
+                &imported_path,
+                "#> Updated module docs\n\nobject StorageManager {}\n",
+            )
+            .expect("rewrite imported module with updated docs");
+
+            let updated = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier {
+                            uri: main_uri.clone(),
+                        },
+                        position: pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("updated hover result")
+            .expect("updated hover contents");
+            let HoverContents::Markup(updated_markup) = updated.contents else {
+                panic!("expected markdown hover contents");
+            };
+            assert!(updated_markup.value.contains("Updated module docs"));
+            assert!(!updated_markup.value.contains("Initial module docs"));
+
+            std::fs::write(&imported_path, "object StorageManager {}\n")
+                .expect("rewrite imported module without docs");
+
+            let removed = LanguageServer::hover(
+                backend,
+                HoverParams {
+                    text_document_position_params: TextDocumentPositionParams {
+                        text_document: TextDocumentIdentifier {
+                            uri: main_uri.clone(),
+                        },
+                        position: pos,
+                    },
+                    work_done_progress_params: Default::default(),
+                },
+            )
+            .await
+            .expect("removed hover result")
+            .expect("removed hover contents");
+            let HoverContents::Markup(removed_markup) = removed.contents else {
+                panic!("expected markdown hover contents");
+            };
+            assert!(!removed_markup.value.contains("Updated module docs"));
+
+            let _ = std::fs::remove_dir_all(&root);
         });
     }
 
