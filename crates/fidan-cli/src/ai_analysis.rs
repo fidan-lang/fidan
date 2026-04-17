@@ -10,11 +10,17 @@ use fidan_driver::{
 use fidan_lexer::{Lexer, SymbolInterner};
 use fidan_source::SourceMap;
 use std::collections::{BTreeSet, HashSet, VecDeque};
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub(crate) fn handle_internal_request_from_stdio() -> Result<()> {
+    if std::io::stdin().is_terminal() {
+        bail!(
+            "`__ai-analysis` is an internal command and should not be invoked manually. Use `fidan explain --ai` or `fidan fix --ai`."
+        );
+    }
+
     let mut request_bytes = Vec::new();
     std::io::stdin()
         .read_to_end(&mut request_bytes)
