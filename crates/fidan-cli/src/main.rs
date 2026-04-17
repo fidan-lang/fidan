@@ -7,6 +7,7 @@ use fidan_diagnostics::{Severity, render_backtrace_to_stderr, render_message_to_
 use fidan_driver::{
     CompileOptions, EmitKind, ExecutionMode, LtoMode, OptLevel, SandboxPolicy, StripMode, TraceMode,
 };
+use std::ffi::OsStr;
 use std::path::PathBuf;
 
 mod ai_analysis;
@@ -314,8 +315,6 @@ enum Command {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    #[command(hide = true, name = "__ai-analysis")]
-    AiAnalysisInternal,
 }
 
 fn parse_emit(raw: &[String]) -> Result<Vec<EmitKind>> {
@@ -428,6 +427,12 @@ fn main() {
 }
 
 fn run_cli() -> Result<()> {
+    // Internal machine API used by the ai-analysis helper. Keep it out of Clap's
+    // subcommand table so typo suggestions do not reveal it.
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("__ai-analysis")) {
+        return ai_analysis::handle_internal_request_from_stdio();
+    }
+
     let cli = Cli::parse();
 
     match cli.command {
@@ -723,7 +728,6 @@ fn run_cli() -> Result<()> {
         Command::Toolchain { command } => toolchain::run(command),
         Command::Dal { command } => dal::run(command),
         Command::Exec { namespace, args } => exec::run(namespace, args),
-        Command::AiAnalysisInternal => ai_analysis::handle_internal_request_from_stdio(),
     }
 }
 
