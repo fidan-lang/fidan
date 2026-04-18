@@ -169,7 +169,10 @@ if ($SubmitWinget) {
 
 $hostTriple = Get-HostTriple
 $binaryName = if ($IsWindows) { "fidan.exe" } else { "fidan" }
-$shouldBuildWindowsInstaller = $IsWindows -and (Test-EnvVarTruthy -Name "GITHUB_ACTIONS" -or Test-EnvVarTruthy -Name "FIDAN_BUILD_INSTALLER")
+$shouldBuildWindowsInstaller = $IsWindows -and (
+  (Test-EnvVarTruthy -Name "GITHUB_ACTIONS") -or
+  (Test-EnvVarTruthy -Name "FIDAN_BUILD_INSTALLER")
+)
 
 if (-not $SkipBuild) {
   cargo build -p fidan-cli -p fidan-runtime -p libfidan --release
