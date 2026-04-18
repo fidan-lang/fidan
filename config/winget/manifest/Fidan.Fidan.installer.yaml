@@ -6,7 +6,7 @@ PackageVersion: 0.0.0
 InstallerType: inno
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/fidan-lang/fidan/releases/{version}/download/fidan_windows_bootstrap_v{version}.exe
+    InstallerUrl: https://github.com/fidan-lang/fidan/releases/download/{version}/fidan_windows_bootstrap_v{version}.exe
     InstallerSha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ManifestType: installer
 ManifestVersion: 1.10.0
