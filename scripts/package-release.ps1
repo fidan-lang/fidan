@@ -69,23 +69,23 @@ function Invoke-WindowsReleaseHelper {
     throw "Missing helper script: '$helperScript'"
   }
 
-  $args = @{
+  $scriptArgs = @{
     Mode       = $Mode
     Version    = $ResolvedVersion
     OutputRoot = $ResolvedOutputRoot
   }
 
   if ($Mode -eq "build-installer") {
-    $args["HostTriple"] = $ResolvedHostTriple
-    $args["BootstrapScriptUrl"] = $ResolvedBootstrapScriptUrl
-    $args["BinaryPath"] = $ResolvedBinaryPath
+    $scriptArgs["HostTriple"] = $ResolvedHostTriple
+    $scriptArgs["BootstrapScriptUrl"] = $ResolvedBootstrapScriptUrl
+    $scriptArgs["BinaryPath"] = $ResolvedBinaryPath
   }
 
   if ($Mode -eq "submit-winget" -or $Mode -eq "prepare-winget") {
-    $args["WingetManifestRoot"] = $ResolvedWingetManifestRoot
+    $scriptArgs["WingetManifestRoot"] = $ResolvedWingetManifestRoot
   }
 
-  & $helperScript @args
+  & $helperScript @scriptArgs
 }
 
 function Get-RuntimeArtifactNames {
@@ -134,7 +134,7 @@ function Get-LibFidanArtifactNames {
 
 function Test-EnvVarTruthy {
   param (
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [string]$Name
   )
 
