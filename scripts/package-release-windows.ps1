@@ -186,11 +186,10 @@ function Get-IsccSignToolOverrideArgument {
     "/a `$f"
   ) -join " "
 
-  # ISCC expects the /S<name>=<command> value as a single argument. Wrap the
-  # whole command and double any embedded quotes so ISCC does not split tokens.
+  # ISCC parsing is sensitive here: quote the entire /SCertForge switch token
+  # and double embedded quotes so it receives one logical sign-command value.
   $escapedSignCommand = $signCommand.Replace('"', '""')
-
-  return "/SCertForge=`"$escapedSignCommand`""
+  return '"/SCertForge=""' + $escapedSignCommand + '"""'
 }
 
 function Resolve-BootstrapScriptMetadata {
@@ -262,9 +261,13 @@ function Build-WindowsInstaller {
     $signingMaterial = New-TemporarySigningMaterial
     $isccSignOverrideArgument = Get-IsccSignToolOverrideArgument -PfxPath $signingMaterial.PfxPath
 
-    & iscc $isccSignOverrideArgument ".\config\innosetup\installer.iss"
-    if ($LASTEXITCODE -ne 0) {
-      throw "ISCC.exe failed with exit code $LASTEXITCODE"
+    $isccProcess = Start-Process -FilePath "iscc.exe" -ArgumentList @(
+      $isccSignOverrideArgument,
+      ".\config\innosetup\installer.iss"
+    ) -NoNewWindow -Wait -PassThru
+
+    if ($isccProcess.ExitCode -ne 0) {
+      throw "ISCC.exe failed with exit code $($isccProcess.ExitCode)"
     }
   }
   finally {
