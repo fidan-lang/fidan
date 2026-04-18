@@ -32,7 +32,7 @@ function Add-DirectoryToPath {
   }
 }
 
-function Ensure-Command {
+function Install-CommandIfMissing {
   param(
     [string]$Name,
     [scriptblock]$InstallAction
@@ -47,13 +47,13 @@ function Ensure-Command {
   }
 }
 
-function Ensure-SignTool {
+function Assert-SignToolAvailable {
   if (Get-Command signtool.exe -ErrorAction SilentlyContinue) {
     return
   }
 
   $signtools = Get-ChildItem -Path "C:\Program Files (x86)\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -match '\\x64\\' }
+  Where-Object { $_.FullName -match '\\x64\\' }
 
   $signtool = $signtools | Sort-Object {
     if ($_.FullName -match '\\bin\\(?<ver>\d+\.\d+\.\d+\.\d+)\\x64\\') {
@@ -73,19 +73,19 @@ function Ensure-SignTool {
   }
 }
 
-function Ensure-WindowsInstallerDependencies {
+function Install-WindowsInstallerDependencies {
   Add-DirectoryToPath -Path "C:\Program Files (x86)\Inno Setup 6"
   Add-DirectoryToPath -Path "C:\ProgramData\chocolatey\bin"
   Add-DirectoryToPath -Path "C:\ProgramData\chocolatey\lib\upx\tools"
 
-  Ensure-Command -Name "iscc.exe" -InstallAction {
+  Install-CommandIfMissing -Name "iscc.exe" -InstallAction {
     $installer = Join-Path $env:TEMP "innosetup-installer.exe"
     Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile $installer
     Start-Process -FilePath $installer -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
     Add-DirectoryToPath -Path "C:\Program Files (x86)\Inno Setup 6"
   }
 
-  Ensure-Command -Name "upx.exe" -InstallAction {
+  Install-CommandIfMissing -Name "upx.exe" -InstallAction {
     if (-not (Get-Command choco.exe -ErrorAction SilentlyContinue)) {
       throw "UPX is mandatory but Chocolatey is not available to install it automatically."
     }
@@ -95,7 +95,7 @@ function Ensure-WindowsInstallerDependencies {
     Add-DirectoryToPath -Path "C:\ProgramData\chocolatey\lib\upx\tools"
   }
 
-  Ensure-SignTool
+  Assert-SignToolAvailable
 }
 
 function Get-RequiredEnvironmentVariable {
@@ -174,13 +174,13 @@ function Get-IsccSignToolOverrideArgument {
   $quotedTimestampUrl = '"' + $timestampUrl + '"'
 
   $signCommand =
-    $quotedSigntoolPath +
-    " sign /f " + $quotedPfxPath +
-    " /p " + $quotedCertPassword +
-    " /d " + $quotedCertDescription +
-    " /du " + $quotedCertWebsite +
-    " /fd SHA256 /tr " + $quotedTimestampUrl +
-    " /td SHA256 /a $f"
+  $quotedSigntoolPath +
+  " sign /f " + $quotedPfxPath +
+  " /p " + $quotedCertPassword +
+  " /d " + $quotedCertDescription +
+  " /du " + $quotedCertWebsite +
+  " /fd SHA256 /tr " + $quotedTimestampUrl +
+  " /td SHA256 /a $f"
 
   return "/SCertForge=$signCommand"
 }
@@ -226,7 +226,7 @@ function Build-WindowsInstaller {
     [string]$ResolvedBinaryPath
   )
 
-  Ensure-WindowsInstallerDependencies
+  Install-WindowsInstallerDependencies
   Compress-BinaryWithUpx -ResolvedBinaryPath $ResolvedBinaryPath
 
   $metadata = Resolve-BootstrapScriptMetadata -Url $ResolvedBootstrapScriptUrl
@@ -368,13 +368,13 @@ function Submit-WingetManifest {
 
   foreach ($manifest in $manifestFiles) {
     (Get-Content -LiteralPath $manifest.FullName) -replace '(?i)^(?<indent>\s*)(?<key>PackageVersion:\s*).*$' , ('${indent}${key}' + $ResolvedVersion) |
-      Set-Content -LiteralPath $manifest.FullName -Encoding UTF8
+    Set-Content -LiteralPath $manifest.FullName -Encoding UTF8
 
     (Get-Content -LiteralPath $manifest.FullName) -replace '(?i)^(?<indent>\s*)(?<key>InstallerSha256:\s*).*$' , ('${indent}${key}' + $installerSha256) |
-      Set-Content -LiteralPath $manifest.FullName -Encoding UTF8
+    Set-Content -LiteralPath $manifest.FullName -Encoding UTF8
 
     (Get-Content -LiteralPath $manifest.FullName) -replace '(?i)^(?<indent>\s*)(?<key>InstallerUrl:\s*).*$' , ('${indent}${key}' + $installerUrl) |
-      Set-Content -LiteralPath $manifest.FullName -Encoding UTF8
+    Set-Content -LiteralPath $manifest.FullName -Encoding UTF8
   }
 
   $winget = (Get-Command winget.exe -ErrorAction SilentlyContinue).Source
