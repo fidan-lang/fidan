@@ -2,7 +2,7 @@ param(
   [string]$Version = "",
   [string]$OutputRoot = "dist/release",
   [string]$HostTriple = "x86_64-pc-windows-msvc",
-  [switch]$SkipBuild = $true,
+  [switch]$SkipBuild,
   [switch]$SkipPackaging,
   [switch]$StrictSignatureTrust
 )
@@ -43,12 +43,12 @@ if (-not $SkipPackaging) {
   for ($run = 1; $run -le 2; $run++) {
     Write-Host "Packaging run $run/2..."
 
-    $args = @("-Version", $Version)
+    $scriptArgs = @("-Version", $Version)
     if ($SkipBuild) {
-      $args += "-SkipBuild"
+      $scriptArgs += "-SkipBuild"
     }
 
-    & ./scripts/package-release.ps1 @args
+    & ./scripts/package-release.ps1 @scriptArgs
     if ($LASTEXITCODE -ne 0) {
       throw "package-release.ps1 failed on run $run with exit code $LASTEXITCODE"
     }
