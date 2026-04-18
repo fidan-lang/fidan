@@ -260,13 +260,13 @@ jobs:
             throw "No Fidan.Fidan.installer.yaml found under '$manifestRoot'"
           }
 
-          $manifestDirs = $installerManifestMatches | Select-Object -ExpandProperty DirectoryName -Unique
+          $manifestDirs = @($installerManifestMatches | Select-Object -ExpandProperty DirectoryName -Unique)
           if ($manifestDirs.Count -eq 1) {
-            $manifestRoot = $manifestDirs[0]
+            $manifestRoot = $manifestDirs | Select-Object -First 1
           } else {
-            $versionMatch = $manifestDirs | Where-Object { (Split-Path -Leaf $_) -eq $version }
+            $versionMatch = @($manifestDirs | Where-Object { (Split-Path -Leaf $_) -eq $version })
             if ($versionMatch.Count -eq 1) {
-              $manifestRoot = $versionMatch[0]
+              $manifestRoot = $versionMatch | Select-Object -First 1
             } else {
               $candidates = $manifestDirs -join ", "
               throw "Multiple winget manifest directories found and none uniquely matched version '$version': $candidates"
