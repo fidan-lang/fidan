@@ -12,6 +12,48 @@ compiler releases.
 
 ---
 
+## [1.0.11] — 2026-04-19
+
+### Added
+- Windows release distribution now includes a signed bootstrap installer and
+  Winget publication workflow support, including installer asset upload in
+  GitHub Releases and CI-driven Winget submission wiring.
+- New packaging modes for Winget handling:
+  - `prepare-winget` to rewrite/validate manifests without publishing.
+  - `submit-winget` to perform full validation and submission.
+- Windows signing flow now supports secret-backed certificate handling for CI:
+  base64 PFX decoding, temporary signing material management, and direct
+  `ISCC /SCertForge=...` sign-command injection while preserving the Inno
+  `CertForge` SignTool alias.
+- Internal CLI `__ai-analysis` invocation handling now includes explicit
+  internal-command behavior and messaging to prevent accidental manual use.
+
+### Changed
+- Release packaging internals were split so cross-platform artifact packaging
+  remains in `scripts/package-release.ps1` while Windows installer and Winget
+  responsibilities live in `scripts/package-release-windows.ps1`.
+- Windows installer build gating now uses clearer environment-truthiness checks
+  for CI/local release script behavior.
+- Dependency updates across the workspace include `inkwell`/
+  `inkwell_internals`, `aws-lc-rs`/`aws-lc-sys`, `rand`, `tokio`,
+  `webpki-root-certs`, `clap`, and `regalloc2`.
+
+### Fixed
+- Winget installer URL generation now uses the correct release-download format.
+- CI workflow packaging step now includes required build environment plumbing
+  for signing paths.
+- LSP wildcard import go-to-definition test stability was improved by avoiding
+  a re-entrant store-lock pattern in test lookup flow.
+- Internal AI-analysis command handling was tightened so hidden/internal command
+  paths are less likely to leak into normal CLI usage patterns.
+
+### Notes
+- This is a minor infrastructure-focused release to validate Winget and Windows
+  distribution behavior.
+- No breaking language changes in Fidan itself are introduced in this release.
+
+---
+
 ## [1.0.10] — 2026-04-15
 
 ### Added
@@ -344,7 +386,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.10...HEAD
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.11...HEAD
+[1.0.11]: https://github.com/fidan-lang/fidan/compare/v1.0.10...v1.0.11
 [1.0.10]: https://github.com/fidan-lang/fidan/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/fidan-lang/fidan/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/fidan-lang/fidan/compare/v1.0.7...v1.0.8
