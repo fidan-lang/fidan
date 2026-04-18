@@ -5112,17 +5112,18 @@ action greet with (certain name oftype string) returns string {
             backend.refresh(&uri, 1, &text).await;
 
             let doc = backend.store.get(&uri).expect("refreshed document");
+            let wildcard_imports = doc.wildcard_imports.clone();
+            let identifier_spans = doc.identifier_spans.clone();
+            drop(doc);
             assert!(
-                wildcard_import_entry(&backend.store, &doc.wildcard_imports, "greet").is_some(),
+                wildcard_import_entry(&backend.store, &wildcard_imports, "greet").is_some(),
                 "wildcard import lookup should resolve greet before goto-definition",
             );
-            let greet_span = doc
-                .identifier_spans
+            let greet_span = identifier_spans
                 .iter()
                 .find(|(_, name)| name == "greet")
                 .map(|(span, _)| *span)
                 .expect("greet token span");
-            drop(doc);
 
             let file = SourceFile::new(FileId(0), uri.as_str(), text.as_str());
             let pos = convert::span_to_range(&file, greet_span).start;
