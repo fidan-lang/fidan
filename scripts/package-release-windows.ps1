@@ -96,19 +96,93 @@ function Ensure-WindowsInstallerDependencies {
   }
 
   Ensure-SignTool
+}
 
-  if (-not (Get-Command certforge -ErrorAction SilentlyContinue)) {
-    if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
-      throw "CertForge is required for installer signing but Python is not available."
-    }
+function Get-RequiredEnvironmentVariable {
+  param([string]$Name)
 
-    python -m pip install --upgrade pip
-    python -m pip install certforge
+  $value = [System.Environment]::GetEnvironmentVariable($Name)
+  if ([string]::IsNullOrWhiteSpace($value)) {
+    throw "Required environment variable '$Name' is missing or empty."
   }
 
-  if (-not (Get-Command certforge -ErrorAction SilentlyContinue)) {
-    throw "CertForge is required for installer signing but was not found."
+  return $value
+}
+
+function New-TemporarySigningMaterial {
+  $pfxBase64 = Get-RequiredEnvironmentVariable -Name "CERT_PFX_BASE64"
+
+  $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("fidan-signing-" + [Guid]::NewGuid().ToString("N"))
+  New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+
+  $pfxPath = Join-Path $tempDir "codesign.pfx"
+  try {
+    $pfxBytes = [Convert]::FromBase64String($pfxBase64)
   }
+  catch {
+    throw "CERT_PFX_BASE64 is not valid base64."
+  }
+
+  [System.IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+
+  return [PSCustomObject]@{
+    TempDir = $tempDir
+    PfxPath = $pfxPath
+  }
+}
+
+function Remove-TemporarySigningMaterial {
+  param([string]$TempDir)
+
+  if (-not $TempDir) {
+    return
+  }
+
+  if (Test-Path -LiteralPath $TempDir) {
+    Remove-Item -LiteralPath $TempDir -Force -Recurse -ErrorAction SilentlyContinue
+  }
+}
+
+function Get-IsccSignToolOverrideArgument {
+  param([string]$PfxPath)
+
+  $signtoolPath = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+  if (-not $signtoolPath) {
+    throw "signtool.exe not found on PATH"
+  }
+
+  $certPassword = Get-RequiredEnvironmentVariable -Name "CERT_PASSWORD"
+  $certDescription = [System.Environment]::GetEnvironmentVariable("CERT_DESCRIPTION")
+  $certWebsite = [System.Environment]::GetEnvironmentVariable("CERT_WEBSITE")
+  $timestampUrl = [System.Environment]::GetEnvironmentVariable("CERT_TIMESTAMP_URL")
+
+  if ([string]::IsNullOrWhiteSpace($certDescription)) {
+    $certDescription = "Fidan"
+  }
+  if ([string]::IsNullOrWhiteSpace($certWebsite)) {
+    $certWebsite = "https://fidan.dev"
+  }
+  if ([string]::IsNullOrWhiteSpace($timestampUrl)) {
+    $timestampUrl = "http://timestamp.digicert.com"
+  }
+
+  $quotedSigntoolPath = '"' + $signtoolPath + '"'
+  $quotedPfxPath = '"' + $PfxPath + '"'
+  $quotedCertPassword = '"' + $certPassword + '"'
+  $quotedCertDescription = '"' + $certDescription + '"'
+  $quotedCertWebsite = '"' + $certWebsite + '"'
+  $quotedTimestampUrl = '"' + $timestampUrl + '"'
+
+  $signCommand =
+    $quotedSigntoolPath +
+    " sign /f " + $quotedPfxPath +
+    " /p " + $quotedCertPassword +
+    " /d " + $quotedCertDescription +
+    " /du " + $quotedCertWebsite +
+    " /fd SHA256 /tr " + $quotedTimestampUrl +
+    " /td SHA256 /a $f"
+
+  return "/SCertForge=$signCommand"
 }
 
 function Resolve-BootstrapScriptMetadata {
@@ -162,7 +236,19 @@ function Build-WindowsInstaller {
   $env:BOOTSTRAP_SCRIPT_SIZE = [string]$metadata.Size
   $env:BOOTSTRAP_SCRIPT_SHA256 = $metadata.Sha256
 
-  iscc .\config\innosetup\installer.iss
+  $signingMaterial = $null
+  try {
+    $signingMaterial = New-TemporarySigningMaterial
+    $isccSignOverrideArgument = Get-IsccSignToolOverrideArgument -PfxPath $signingMaterial.PfxPath
+
+    & iscc $isccSignOverrideArgument ".\config\innosetup\installer.iss"
+    if ($LASTEXITCODE -ne 0) {
+      throw "ISCC.exe failed with exit code $LASTEXITCODE"
+    }
+  }
+  finally {
+    Remove-TemporarySigningMaterial -TempDir $signingMaterial?.TempDir
+  }
 
   $installerName = "fidan_windows_bootstrap_v$ResolvedVersion.exe"
   $builtInstallerPath = Join-Path "dist/innosetup/installers" $installerName

@@ -53,6 +53,9 @@ jobs:
 
       - name: Package release artifact
         shell: pwsh
+        env:
+          CERT_PFX_BASE64: ${{ secrets.CERT_PFX_BASE64 }}
+          CERT_PASSWORD: ${{ secrets.CERT_PASSWORD }}
         run: |
           $version = ""
           if ("${{ github.event_name }}" -eq "push") {
