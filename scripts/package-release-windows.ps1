@@ -219,10 +219,23 @@ function Compress-BinaryWithUpx {
     throw "Expected binary for UPX compression at '$ResolvedBinaryPath'"
   }
 
-  & upx --best --lzma $ResolvedBinaryPath
-  if ($LASTEXITCODE -ne 0) {
-    throw "UPX compression failed for '$ResolvedBinaryPath'"
+  $upxOutput = & upx --best --lzma $ResolvedBinaryPath 2>&1
+  $upxExitCode = $LASTEXITCODE
+  $upxText = ($upxOutput | Out-String).Trim()
+
+  if ($upxExitCode -eq 0) {
+    if (-not [string]::IsNullOrWhiteSpace($upxText)) {
+      Write-Host $upxText
+    }
+    return
   }
+
+  if ($upxText -match "AlreadyPackedException|already packed by UPX") {
+    Write-Host "UPX skipped: '$ResolvedBinaryPath' is already packed."
+    return
+  }
+
+  throw "UPX compression failed for '$ResolvedBinaryPath'`n$upxText"
 }
 
 function Build-WindowsInstaller {
