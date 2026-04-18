@@ -173,16 +173,24 @@ function Get-IsccSignToolOverrideArgument {
   $quotedCertWebsite = '"' + $certWebsite + '"'
   $quotedTimestampUrl = '"' + $timestampUrl + '"'
 
-  $signCommand =
-  $quotedSigntoolPath +
-  " sign /f " + $quotedPfxPath +
-  " /p " + $quotedCertPassword +
-  " /d " + $quotedCertDescription +
-  " /du " + $quotedCertWebsite +
-  " /fd SHA256 /tr " + $quotedTimestampUrl +
-  " /td SHA256 /a $f"
+  $signCommand = @(
+    $quotedSigntoolPath,
+    "sign",
+    "/f $quotedPfxPath",
+    "/p $quotedCertPassword",
+    "/d $quotedCertDescription",
+    "/du $quotedCertWebsite",
+    "/fd SHA256",
+    "/tr $quotedTimestampUrl",
+    "/td SHA256",
+    "/a `$f"
+  ) -join " "
 
-  return "/SCertForge=$signCommand"
+  # ISCC expects the /S<name>=<command> value as a single argument. Wrap the
+  # whole command and double any embedded quotes so ISCC does not split tokens.
+  $escapedSignCommand = $signCommand.Replace('"', '""')
+
+  return "/SCertForge=`"$escapedSignCommand`""
 }
 
 function Resolve-BootstrapScriptMetadata {
