@@ -132,6 +132,23 @@ function Get-LibFidanArtifactNames {
   )
 }
 
+function Test-EnvVarTruthy {
+  param (
+    [Parameter(Mandatory=$true)]
+    [string]$Name
+  )
+
+  $value = [System.Environment]::GetEnvironmentVariable($Name)
+
+  if (-not $value) {
+    return $false
+  }
+
+  $truthyValues = @("true", "yes", "y", "1")
+
+  return $truthyValues -contains $value.ToLower()
+}
+
 if (-not $Version) {
   $Version = Get-WorkspaceVersion
 }
@@ -152,7 +169,7 @@ if ($SubmitWinget) {
 
 $hostTriple = Get-HostTriple
 $binaryName = if ($IsWindows) { "fidan.exe" } else { "fidan" }
-$shouldBuildWindowsInstaller = $IsWindows -and ($env:GITHUB_ACTIONS -eq "true" -or $env:FIDAN_BUILD_INSTALLER -eq "1")
+$shouldBuildWindowsInstaller = $IsWindows -and (Test-EnvVarTruthy -Name "GITHUB_ACTIONS" -or Test-EnvVarTruthy -Name "FIDAN_BUILD_INSTALLER")
 
 if (-not $SkipBuild) {
   cargo build -p fidan-cli -p fidan-runtime -p libfidan --release
