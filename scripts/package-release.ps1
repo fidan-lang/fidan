@@ -2,7 +2,10 @@ param(
   [string]$Version = "",
   [string]$BaseUrl = "https://releases.fidan.dev",
   [string]$OutputRoot = "dist/release",
-  [switch]$SkipBuild
+  [switch]$SkipBuild,
+  [switch]$SubmitWinget,
+  [string]$WingetManifestRoot = "config/winget/manifest",
+  [string]$BootstrapScriptUrl = "https://fidan.dev/install.ps1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,6 +45,46 @@ function Initialize-CleanDirectory {
     Remove-Item -LiteralPath $Path -Force -Recurse
   }
   New-Item -ItemType Directory -Force -Path $Path | Out-Null
+}
+
+function Invoke-WindowsReleaseHelper {
+  param(
+    [ValidateSet("build-installer", "submit-winget")]
+    [string]$Mode,
+    [string]$ResolvedVersion,
+    [string]$ResolvedOutputRoot,
+    [string]$ResolvedHostTriple = "",
+    [string]$ResolvedBootstrapScriptUrl = "",
+    [string]$ResolvedWingetManifestRoot = "",
+    [string]$ResolvedBinaryPath = ""
+  )
+
+  if (-not $IsWindows) {
+    throw "Windows release helper mode '$Mode' can only run on Windows."
+  }
+
+  $helperScript = Join-Path $PSScriptRoot "package-release-windows.ps1"
+  if (-not (Test-Path -LiteralPath $helperScript)) {
+    throw "Missing helper script: '$helperScript'"
+  }
+
+  $args = @{
+    Mode       = $Mode
+    Version    = $ResolvedVersion
+    OutputRoot = $ResolvedOutputRoot
+  }
+
+  if ($Mode -eq "build-installer") {
+    $args["HostTriple"] = $ResolvedHostTriple
+    $args["BootstrapScriptUrl"] = $ResolvedBootstrapScriptUrl
+    $args["BinaryPath"] = $ResolvedBinaryPath
+  }
+
+  if ($Mode -eq "submit-winget") {
+    $args["WingetManifestRoot"] = $ResolvedWingetManifestRoot
+  }
+
+  & $helperScript @args
 }
 
 function Get-RuntimeArtifactNames {
@@ -92,8 +135,14 @@ if (-not $Version) {
   $Version = Get-WorkspaceVersion
 }
 
+if ($SubmitWinget) {
+  Invoke-WindowsReleaseHelper -Mode "submit-winget" -ResolvedVersion $Version -ResolvedOutputRoot $OutputRoot -ResolvedWingetManifestRoot $WingetManifestRoot
+  return
+}
+
 $hostTriple = Get-HostTriple
 $binaryName = if ($IsWindows) { "fidan.exe" } else { "fidan" }
+$shouldBuildWindowsInstaller = $IsWindows -and ($env:GITHUB_ACTIONS -eq "true" -or $env:FIDAN_BUILD_INSTALLER -eq "1")
 
 if (-not $SkipBuild) {
   cargo build -p fidan-cli -p fidan-runtime -p libfidan --release
@@ -102,6 +151,10 @@ if (-not $SkipBuild) {
 $binaryPath = Join-Path "target/release" $binaryName
 if (-not (Test-Path -LiteralPath $binaryPath)) {
   throw "Expected release binary at '$binaryPath'"
+}
+
+if ($shouldBuildWindowsInstaller) {
+  Invoke-WindowsReleaseHelper -Mode "build-installer" -ResolvedVersion $Version -ResolvedOutputRoot $OutputRoot -ResolvedHostTriple $hostTriple -ResolvedBootstrapScriptUrl $BootstrapScriptUrl -ResolvedBinaryPath $binaryPath
 }
 
 $runtimeArtifacts = @()

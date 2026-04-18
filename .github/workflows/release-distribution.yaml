@@ -199,7 +199,9 @@ jobs:
         if: ${{ github.event_name == 'push' }}
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/release/payload/fidan/**/*.tar.gz
+          files: |
+            dist/release/payload/fidan/**/*.tar.gz
+            dist/release/payload/fidan/**/*.exe
           generate_release_notes: true
           make_latest: true
           append_body: true
@@ -207,6 +209,8 @@ jobs:
             ## Installation
 
             Bootstrap installers:
+            - Windows installer: download `fidan_windows_bootstrap_${{ github.ref_name }}.exe` from this Release and run it.
+            - WinGet: install via `winget install --id=Fidan.Fidan --source=winget`
             - Windows PowerShell: `iwr https://fidan.dev/install.ps1 -UseBasicParsing | iex`
             - POSIX shell: `curl -fsSL https://fidan.dev/install.sh | sh`
 
@@ -219,3 +223,50 @@ jobs:
             - The `fidan` binaries published here are self-managed installs.
             - Optional toolchains such as LLVM are distributed separately via `releases.fidan.dev`.
             - By installing Fidan or any separately distributed toolchain component, you agree to the license and terms of the respective component.
+
+  winget:
+    name: Submit winget manifest
+    runs-on: windows-latest
+    needs: publish
+    environment: releases
+    if: ${{ github.event_name == 'push' && needs.publish.result == 'success' }}
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download merged distribution bundle
+        uses: actions/download-artifact@v8
+        with:
+          name: distribution-bundle
+          path: dist/release
+
+      - name: Submit winget manifest
+        shell: pwsh
+        env:
+          WINGET_GITHUB_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          $manifestRoot = "config/winget/manifest"
+          if (-not (Test-Path -LiteralPath $manifestRoot)) {
+            throw "Expected winget manifest root at '$manifestRoot'"
+          }
+
+          $installerManifestMatches = Get-ChildItem -Path $manifestRoot -Recurse -File -Filter "Fidan.Fidan.installer.yaml"
+          if (-not $installerManifestMatches) {
+            throw "No Fidan.Fidan.installer.yaml found under '$manifestRoot'"
+          }
+
+          $manifestDirs = $installerManifestMatches | Select-Object -ExpandProperty DirectoryName -Unique
+          if ($manifestDirs.Count -eq 1) {
+            $manifestRoot = $manifestDirs[0]
+          } else {
+            $versionMatch = $manifestDirs | Where-Object { (Split-Path -Leaf $_) -eq $version }
+            if ($versionMatch.Count -eq 1) {
+              $manifestRoot = $versionMatch[0]
+            } else {
+              $candidates = $manifestDirs -join ", "
+              throw "Multiple winget manifest directories found and none uniquely matched version '$version': $candidates"
+            }
+          }
+
+          ./scripts/package-release.ps1 -Version $version -OutputRoot "dist/release" -SkipBuild -SubmitWinget -WingetManifestRoot $manifestRoot
