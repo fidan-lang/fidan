@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("build-installer", "submit-winget")]
+  [ValidateSet("build-installer", "prepare-winget", "submit-winget")]
   [string]$Mode,
 
   [Parameter(Mandatory = $true)]
@@ -255,12 +255,9 @@ function Submit-WingetManifest {
   param(
     [string]$ResolvedVersion,
     [string]$ResolvedOutputRoot,
-    [string]$ResolvedWingetManifestRoot
+    [string]$ResolvedWingetManifestRoot,
+    [switch]$SkipSubmit
   )
-
-  if (-not $env:WINGET_GITHUB_TOKEN) {
-    throw "WINGET_GITHUB_TOKEN is required for winget submission."
-  }
 
   $packageIdentifier = "Fidan.Fidan"
   $manifestDir = Resolve-WingetManifestDirectory -ResolvedWingetManifestRoot $ResolvedWingetManifestRoot -ResolvedVersion $ResolvedVersion -PackageIdentifier $packageIdentifier
@@ -304,6 +301,15 @@ function Submit-WingetManifest {
     throw "winget validate failed"
   }
 
+  if ($SkipSubmit) {
+    Write-Host "Prepared and validated winget manifests at '$manifestDir' (submission skipped)."
+    return
+  }
+
+  if (-not $env:WINGET_GITHUB_TOKEN) {
+    throw "WINGET_GITHUB_TOKEN is required for winget submission."
+  }
+
   $wingetCreateExe = Join-Path (Resolve-Path ".") "wingetcreate.exe"
   Invoke-WebRequest -Uri "https://github.com/microsoft/winget-create/releases/latest/download/wingetcreate.exe" -OutFile $wingetCreateExe
 
@@ -318,6 +324,9 @@ function Submit-WingetManifest {
 switch ($Mode) {
   "build-installer" {
     Build-WindowsInstaller -ResolvedVersion $Version -ResolvedOutputRoot $OutputRoot -ResolvedHostTriple $HostTriple -ResolvedBootstrapScriptUrl $BootstrapScriptUrl -ResolvedBinaryPath $BinaryPath
+  }
+  "prepare-winget" {
+    Submit-WingetManifest -ResolvedVersion $Version -ResolvedOutputRoot $OutputRoot -ResolvedWingetManifestRoot $WingetManifestRoot -SkipSubmit
   }
   "submit-winget" {
     Submit-WingetManifest -ResolvedVersion $Version -ResolvedOutputRoot $OutputRoot -ResolvedWingetManifestRoot $WingetManifestRoot

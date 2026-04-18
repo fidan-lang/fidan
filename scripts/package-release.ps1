@@ -3,6 +3,7 @@ param(
   [string]$BaseUrl = "https://releases.fidan.dev",
   [string]$OutputRoot = "dist/release",
   [switch]$SkipBuild,
+  [switch]$PrepareWinget,
   [switch]$SubmitWinget,
   [string]$WingetManifestRoot = "config/winget/manifest",
   [string]$BootstrapScriptUrl = "https://fidan.dev/install.ps1"
@@ -49,7 +50,7 @@ function Initialize-CleanDirectory {
 
 function Invoke-WindowsReleaseHelper {
   param(
-    [ValidateSet("build-installer", "submit-winget")]
+    [ValidateSet("build-installer", "prepare-winget", "submit-winget")]
     [string]$Mode,
     [string]$ResolvedVersion,
     [string]$ResolvedOutputRoot,
@@ -80,7 +81,7 @@ function Invoke-WindowsReleaseHelper {
     $args["BinaryPath"] = $ResolvedBinaryPath
   }
 
-  if ($Mode -eq "submit-winget") {
+  if ($Mode -eq "submit-winget" -or $Mode -eq "prepare-winget") {
     $args["WingetManifestRoot"] = $ResolvedWingetManifestRoot
   }
 
@@ -133,6 +134,15 @@ function Get-LibFidanArtifactNames {
 
 if (-not $Version) {
   $Version = Get-WorkspaceVersion
+}
+
+if ($PrepareWinget -and $SubmitWinget) {
+  throw "Use either -PrepareWinget or -SubmitWinget, not both."
+}
+
+if ($PrepareWinget) {
+  Invoke-WindowsReleaseHelper -Mode "prepare-winget" -ResolvedVersion $Version -ResolvedOutputRoot $OutputRoot -ResolvedWingetManifestRoot $WingetManifestRoot
+  return
 }
 
 if ($SubmitWinget) {
