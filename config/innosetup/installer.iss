@@ -210,7 +210,8 @@ begin
     wpWelcome,
     'Bootstrap Options',
     'Configure bootstrap parameters',
-    'These options are equivalent to bootstrap command-line arguments.'
+    'These options are equivalent to bootstrap command-line arguments.' + #13#10 +
+    'Leave Manifest URL and Install root empty to use bootstrap defaults.'
   );
 
   BootstrapTextPage.Add('Version (default: ' + BootstrapDefaultVersion + ', or "latest")', False);
@@ -230,8 +231,8 @@ begin
     False
   );
 
-  BootstrapFlagsPage.Add('Skip PATH update');
-  BootstrapFlagsPage.Add('Allow existing install root');
+  BootstrapFlagsPage.Add(' Skip PATH update');
+  BootstrapFlagsPage.Add(' Allow existing install root');
 
   BootstrapFlagsPage.Values[0] := BootstrapSkipPathUpdate;
   BootstrapFlagsPage.Values[1] := BootstrapAllowExistingInstall;
