@@ -24,6 +24,8 @@ Closes #
 
 ## Checklist
 
-- [ ] I have read [CONTRIBUTING.md](../CONTRIBUTING.md)
+- [ ] I have read [CONTRIBUTING.md](../CONTRIBUTING.md) and followed the contributing guidelines
+- [ ] The PR description is clear and concise
 - [ ] The PR title is in `type: description` format (e.g. `fix: …`, `feat: …`)
+- [ ] I have installed the pre-commit hooks and run them locally to ensure code quality
 - [ ] No unrelated changes are included
