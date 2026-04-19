@@ -213,7 +213,7 @@ jobs:
             ## Installation
 
             Bootstrap installers:
-            - Windows installer: download `fidan_windows_bootstrap_${{ github.ref_name }}.exe` from this Release and run it.
+            - Windows installer: download [`fidan_windows_bootstrap_${{ github.ref_name }}.exe`](https://github.com/fidan-lang/fidan/releases/download/${{ github.ref_name }}/fidan_windows_bootstrap_${{ github.ref_name }}.exe) from this Release and run it.
             - WinGet: install via `winget install --id=Fidan.Fidan --source=winget`
             - Windows PowerShell: `iwr https://fidan.dev/install.ps1 -UseBasicParsing | iex`
             - POSIX shell: `curl -fsSL https://fidan.dev/install.sh | sh`
