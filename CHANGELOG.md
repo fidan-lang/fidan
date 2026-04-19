@@ -12,7 +12,7 @@ compiler releases.
 
 ---
 
-## [1.0.11] — 2026-04-19
+## [1.0.12] — 2026-04-19
 
 ### Added
 - Windows release distribution now includes a signed bootstrap installer and
@@ -386,8 +386,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.11...HEAD
-[1.0.11]: https://github.com/fidan-lang/fidan/compare/v1.0.10...v1.0.11
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.12...HEAD
+[1.0.12]: https://github.com/fidan-lang/fidan/compare/v1.0.10...v1.0.12
 [1.0.10]: https://github.com/fidan-lang/fidan/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/fidan-lang/fidan/compare/v1.0.8...v1.0.9
 [1.0.8]: https://github.com/fidan-lang/fidan/compare/v1.0.7...v1.0.8
