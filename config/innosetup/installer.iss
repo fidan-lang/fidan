@@ -86,10 +86,11 @@ Source: "{#BootstrapScriptUrl}"; DestDir: "{tmp}"; DestName: "bootstrap.ps1"; Ex
 [Code]
 const
   MaxBootstrapErrorChars = 3500;
+  BootstrapDefaultVersion = '{#AppVersion}';
   BootstrapUsage =
     'Fidan bootstrap installer' + #13#10 + #13#10 +
     'Options:' + #13#10 +
-    '  -Version <version>             Install a specific released version (default: latest)' + #13#10 +
+    '  -Version <version>             Install a specific released version (default: ' + BootstrapDefaultVersion + '; use "latest" for newest published release)' + #13#10 +
     '  -ManifestUrl <url>             Override the distribution manifest URL' + #13#10 +
     '  -InstallRoot <path>            Override the self-managed install root' + #13#10 +
     '  -SkipPathUpdate                Do not modify the user PATH' + #13#10 +
@@ -119,7 +120,7 @@ var
   ParamValue: string;
   UpperParam: string;
 begin
-  BootstrapVersion := 'latest';
+  BootstrapVersion := BootstrapDefaultVersion;
   BootstrapManifestUrl := '';
   BootstrapInstallRoot := '';
   BootstrapSkipPathUpdate := False;
@@ -187,7 +188,7 @@ begin
   begin
     BootstrapVersion := Trim(BootstrapTextPage.Values[0]);
     if BootstrapVersion = '' then
-      BootstrapVersion := 'latest';
+      BootstrapVersion := BootstrapDefaultVersion;
 
     BootstrapManifestUrl := Trim(BootstrapTextPage.Values[1]);
     BootstrapInstallRoot := Trim(BootstrapTextPage.Values[2]);
@@ -212,7 +213,7 @@ begin
     'These options are equivalent to bootstrap command-line arguments.'
   );
 
-  BootstrapTextPage.Add('Version (default: latest):', False);
+  BootstrapTextPage.Add('Version (default: ' + BootstrapDefaultVersion + ', or "latest")', False);
   BootstrapTextPage.Add('Manifest URL override (optional):', False);
   BootstrapTextPage.Add('Install root override (optional):', False);
 

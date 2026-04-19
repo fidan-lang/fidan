@@ -109,7 +109,20 @@ curl -fsSL https://fidan.dev/install.sh | sh
 iwr https://fidan.dev/install.ps1 -UseBasicParsing | iex
 ```
 
-The bootstrap installer downloads the latest published Fidan release for your host, installs it into the standard Fidan install directory, and makes the first installed version active.
+The bootstrap scripts above download the latest published Fidan release for your host, install it into the standard Fidan install directory, and make the first installed version active.
+
+On Windows, each release cycle also ships an Inno Setup bootstrap installer and submits a matching WinGet package update.
+
+```powershell
+# Windows (Winget)
+winget install --id Fidan.Fidan --exact
+```
+
+For the Inno Setup installer asset (`fidan_windows_bootstrap_v<release>.exe`):
+
+- the `Version` bootstrap parameter defaults to the installer's own release version
+- you can override that default to the newest release by setting version to `latest`
+- unattended override example: `/VERSION=latest`
 
 Published archives are also available from GitHub Releases if you prefer downloading them manually:
 
