@@ -32,7 +32,7 @@ $targets = @(
 $codes = @{
   english             = 'en'
   armenian            = 'hy'
-  brazilianportuguese = 'pt'
+  brazilianportuguese = 'pt-BR'
   bulgarian           = 'bg'
   catalan             = 'ca'
   corsican            = 'co'
@@ -47,7 +47,7 @@ $codes = @{
   japanese            = 'ja'
   norwegian           = 'no'
   polish              = 'pl'
-  portuguese          = 'pt'
+  portuguese          = 'pt-PT'
   russian             = 'ru'
   slovak              = 'sk'
   slovenian           = 'sl'
@@ -96,7 +96,6 @@ $messages = [ordered]@{
 }
 
 $languageThrottle = 6
-$messageThrottle = 12
 
 $targets | ForEach-Object -Parallel {
   $ErrorActionPreference = 'Stop'
@@ -105,15 +104,14 @@ $targets | ForEach-Object -Parallel {
   $dir = $using:dir
   $codes = $using:codes
   $messages = $using:messages
-  $messageThrottle = $using:messageThrottle
+  $context = 'This is text for a Windows installer UI. Use short, natural wording.'
 
-  function ConvertTo-InnoSetupString {
+  function Protect-InnoSetupTokens {
     param(
-      [string]$Text,
-      [string]$Target
+      [string]$Text
     )
 
-    $p = $Text.
+    return $Text.
     Replace('%1', '__T0__').
     Replace('"latest"', '__T1__').
     Replace('"fidan self install"', '__T2__').
@@ -121,6 +119,35 @@ $targets | ForEach-Object -Parallel {
     Replace('bootstrap.ps1', '__T4__').
     Replace('PowerShell', '__T5__').
     Replace('PATH', '__T6__')
+  }
+
+  function Restore-InnoSetupTokens {
+    param(
+      [string]$Text
+    )
+
+    return $Text.
+    Replace('__T0__', '%1').
+    Replace('__T1__', '"latest"').
+    Replace('__T2__', '"fidan self install"').
+    Replace('__T3__', '"fidan self use"').
+    Replace('__T4__', 'bootstrap.ps1').
+    Replace('__T5__', 'PowerShell').
+    Replace('__T6__', 'PATH')
+  }
+
+  function ConvertTo-InnoSetupBatch {
+    param(
+      [string[]]$TextLines,
+      [string]$Target
+    )
+
+    $protectedLines = foreach ($line in $TextLines) {
+      Protect-InnoSetupTokens -Text $line
+    }
+
+    $batchBody = $protectedLines -join "`n"
+    $p = "$context ||| $batchBody"
 
     $q = [uri]::EscapeDataString($p)
     $url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=$Target&dt=t&q=$q"
@@ -132,24 +159,42 @@ $targets | ForEach-Object -Parallel {
       $out += [string]$seg[0]
     }
 
-    $out = $out.
-    Replace('__T0__', '%1').
-    Replace('__T1__', '"latest"').
-    Replace('__T2__', '"fidan self install"').
-    Replace('__T3__', '"fidan self use"').
-    Replace('__T4__', 'bootstrap.ps1').
-    Replace('__T5__', 'PowerShell').
-    Replace('__T6__', 'PATH')
+    # Remove the context prefix up to the first marker from the full response.
+    $out = [regex]::Replace($out, '(?s)^.*?\|\|\|\s*', '')
 
-    return $out
+    $rawTranslatedLines = $out -split "`n"
+    $rawTranslatedLines = foreach ($line in $rawTranslatedLines) {
+      # Some languages keep the context phrase and marker on the first translated line.
+      [regex]::Replace($line, '^.*?\|\|\|\s*', '')
+    }
+
+    if ($rawTranslatedLines.Count -gt $TextLines.Count) {
+      # If an extra prologue line remains, keep the trailing lines that map to messages.
+      $start = $rawTranslatedLines.Count - $TextLines.Count
+      $rawTranslatedLines = $rawTranslatedLines[$start..($rawTranslatedLines.Count - 1)]
+    }
+
+    $translatedLines = @()
+    for ($i = 0; $i -lt $TextLines.Count; $i++) {
+      if (($i -lt $rawTranslatedLines.Count) -and -not [string]::IsNullOrWhiteSpace($rawTranslatedLines[$i])) {
+        $translatedLines += (Restore-InnoSetupTokens -Text $rawTranslatedLines[$i])
+      }
+      else {
+        # Keep original text when the API returns fewer/malformed lines.
+        $translatedLines += (Restore-InnoSetupTokens -Text $protectedLines[$i])
+      }
+    }
+
+    return $translatedLines
   }
 
   $code = $codes[$name]
   $path = Join-Path $dir ($name + '.isl')
+  $messageKeys = @($messages.Keys | Sort-Object)
 
   if ($name -eq 'english') {
     $lines = @('[CustomMessages]')
-    foreach ($k in $messages.Keys) {
+    foreach ($k in $messageKeys) {
       $v = $messages[$k] -replace "`r|`n", ' '
       $lines += ('{0}={1}' -f $k, $v)
     }
@@ -159,79 +204,21 @@ $targets | ForEach-Object -Parallel {
     return
   }
 
-  $messageEntries = foreach ($k in $messages.Keys) {
-    [pscustomobject]@{
-      Key   = $k
-      Value = $messages[$k]
-    }
+  $sourceValues = foreach ($k in $messageKeys) {
+    [string]$messages[$k]
   }
 
-  $translated = $messageEntries | ForEach-Object -Parallel {
-    $ErrorActionPreference = 'Stop'
-
-    $entry = $_
-    $code = $using:code
-    $lang = $using:name
-
-    function ConvertTo-InnoSetupString {
-      param(
-        [string]$Text,
-        [string]$Target
-      )
-
-      $p = $Text.
-      Replace('%1', '__T0__').
-      Replace('"latest"', '__T1__').
-      Replace('"fidan self install"', '__T2__').
-      Replace('"fidan self use"', '__T3__').
-      Replace('bootstrap.ps1', '__T4__').
-      Replace('PowerShell', '__T5__').
-      Replace('PATH', '__T6__')
-
-      $q = [uri]::EscapeDataString($p)
-      $url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=$Target&dt=t&q=$q"
-
-      $resp = Invoke-RestMethod -Uri $url -TimeoutSec 30
-
-      $out = ''
-      foreach ($seg in $resp[0]) {
-        $out += [string]$seg[0]
-      }
-
-      $out = $out.
-      Replace('__T0__', '%1').
-      Replace('__T1__', '"latest"').
-      Replace('__T2__', '"fidan self install"').
-      Replace('__T3__', '"fidan self use"').
-      Replace('__T4__', 'bootstrap.ps1').
-      Replace('__T5__', 'PowerShell').
-      Replace('__T6__', 'PATH')
-
-      return $out
-    }
-
-    try {
-      $translatedValue = ConvertTo-InnoSetupString -Text $entry.Value -Target $code
-    }
-    catch {
-      Write-Warning "[$lang] Failed translating '$($entry.Key)': $($_.Exception.Message)"
-      $translatedValue = $entry.Value
-    }
-
-    [pscustomobject]@{
-      Key   = $entry.Key
-      Value = ($translatedValue -replace "`r|`n", ' ')
-    }
-  } -ThrottleLimit $messageThrottle
-
-  $translatedMap = @{}
-  foreach ($item in $translated) {
-    $translatedMap[$item.Key] = $item.Value
+  try {
+    $translatedValues = ConvertTo-InnoSetupBatch -TextLines $sourceValues -Target $code
+  }
+  catch {
+    Write-Warning "[$name] Batch translation failed: $($_.Exception.Message)"
+    $translatedValues = $sourceValues
   }
 
   $lines = @('[CustomMessages]')
-  foreach ($k in $messages.Keys) {
-    $lines += ('{0}={1}' -f $k, $translatedMap[$k])
+  for ($i = 0; $i -lt $messageKeys.Count; $i++) {
+    $lines += ('{0}={1}' -f $messageKeys[$i], ($translatedValues[$i] -replace "`r|`n", ' '))
   }
 
   Set-Content -LiteralPath $path -Value $lines -Encoding UTF8
