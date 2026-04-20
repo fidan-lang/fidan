@@ -1,5 +1,5 @@
-# Created using wingetcreate 1.10.3.0
-# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.10.0.schema.json
+# Created using wingetcreate 1.12.8.0
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 
 PackageIdentifier: Fidan.Fidan
 PackageVersion: 0.0.0
@@ -9,4 +9,4 @@ Installers:
     InstallerUrl: https://github.com/fidan-lang/fidan/releases/download/{version}/fidan_windows_bootstrap_v{version}.exe
     InstallerSha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 ManifestType: installer
-ManifestVersion: 1.10.0
+ManifestVersion: 1.12.0
