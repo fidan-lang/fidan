@@ -22,6 +22,13 @@ if (-not (Test-Path -LiteralPath $hostPlatformHelperPath)) {
 
 . $hostPlatformHelperPath
 
+$windowsVcRedistHelperPath = Join-Path $PSScriptRoot "shared/windows-vc-redist.ps1"
+if (-not (Test-Path -LiteralPath $windowsVcRedistHelperPath)) {
+  throw "Missing Windows VC++ redistributable helper: '$windowsVcRedistHelperPath'"
+}
+
+. $windowsVcRedistHelperPath
+
 $isWindowsHost = [bool](Get-HostPlatformFlags).IsWindowsHost
 
 if (-not $isWindowsHost) {
@@ -302,6 +309,7 @@ function Build-WindowsInstaller {
   $releaseTag = if ($env:GITHUB_REF_NAME -and $env:GITHUB_REF_NAME.StartsWith("v")) { $env:GITHUB_REF_NAME } else { "v$ResolvedVersion" }
   $installerSha256 = (Get-FileHash -LiteralPath $payloadInstallerPath -Algorithm SHA256).Hash
   $installerUrl = "https://github.com/$repo/releases/download/$releaseTag/$installerName"
+  $vcRedistMetadata = Get-WindowsVcRedistReleaseMetadata -HostTriple $ResolvedHostTriple
 
   $wingetInfo = [ordered]@{
     version       = $ResolvedVersion
@@ -309,6 +317,10 @@ function Build-WindowsInstaller {
     installer     = $installerName
     installer_url = $installerUrl
     sha256        = $installerSha256
+    vc_redist     = [ordered]@{
+      package_identifier = $vcRedistMetadata.PackageIdentifier
+      minimum_version    = $vcRedistMetadata.MinimumVersion
+    }
   }
 
   $wingetInfoPath = Join-Path $wingetDir "windows-installer.json"
@@ -398,16 +410,25 @@ function Submit-WingetManifest {
   $repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "fidan-lang/fidan" }
   $releaseTag = if ($env:GITHUB_REF_NAME -and $env:GITHUB_REF_NAME.StartsWith("v")) { $env:GITHUB_REF_NAME } else { "v$ResolvedVersion" }
   $installerUrl = "https://github.com/$repo/releases/download/$releaseTag/$($installer.Name)"
+  $wingetInfoPath = Join-Path $ResolvedOutputRoot "winget/windows-installer.json"
+  if (-not (Test-Path -LiteralPath $wingetInfoPath)) {
+    throw "Winget installer metadata not found at '$wingetInfoPath'"
+  }
+  $wingetInfo = Get-Content -LiteralPath $wingetInfoPath -Raw | ConvertFrom-Json
+  if (-not $wingetInfo.vc_redist -or -not $wingetInfo.vc_redist.package_identifier -or -not $wingetInfo.vc_redist.minimum_version) {
+    throw "Winget installer metadata is missing VC++ redistributable dependency information."
+  }
+  $vcRedistPackageIdentifier = [string]$wingetInfo.vc_redist.package_identifier
+  $vcRedistMinimumVersion = [string]$wingetInfo.vc_redist.minimum_version
 
   foreach ($manifest in $manifestFiles) {
-    (Get-Content -LiteralPath $manifest.FullName) -replace '(?i)^(?<indent>\s*)(?<key>PackageVersion:\s*).*$' , ('${indent}${key}' + $ResolvedVersion) |
-    Set-Content -LiteralPath $manifest.FullName -Encoding UTF8
-
-    (Get-Content -LiteralPath $manifest.FullName) -replace '(?i)^(?<indent>\s*)(?<key>InstallerSha256:\s*).*$' , ('${indent}${key}' + $installerSha256) |
-    Set-Content -LiteralPath $manifest.FullName -Encoding UTF8
-
-    (Get-Content -LiteralPath $manifest.FullName) -replace '(?i)^(?<indent>\s*)(?<key>InstallerUrl:\s*).*$' , ('${indent}${key}' + $installerUrl) |
-    Set-Content -LiteralPath $manifest.FullName -Encoding UTF8
+    $content = Get-Content -LiteralPath $manifest.FullName -Raw
+    $content = $content -replace '(?im)^(?<indent>\s*)(?<key>PackageVersion:\s*).*$' , ('${indent}${key}' + $ResolvedVersion)
+    $content = $content -replace '(?im)^(?<indent>\s*)(?<key>InstallerSha256:\s*).*$' , ('${indent}${key}' + $installerSha256)
+    $content = $content -replace '(?im)^(?<indent>\s*)(?<key>InstallerUrl:\s*).*$' , ('${indent}${key}' + $installerUrl)
+    $content = $content -replace '(?im)^(?<indent>\s*-\s*PackageIdentifier:\s*).*$' , ('${indent}' + $vcRedistPackageIdentifier)
+    $content = $content -replace '(?im)^(?<indent>\s*)(?<key>MinimumVersion:\s*).*$' , ('${indent}${key}' + $vcRedistMinimumVersion)
+    Set-Content -LiteralPath $manifest.FullName -Value $content -Encoding UTF8
   }
 
   $winget = (Get-Command winget.exe -ErrorAction SilentlyContinue).Source

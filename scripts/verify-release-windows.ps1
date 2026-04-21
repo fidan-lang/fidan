@@ -33,6 +33,24 @@ function Assert-PathExists {
   }
 }
 
+function Assert-TarArchiveContains {
+  param(
+    [string]$ArchivePath,
+    [string[]]$ExpectedEntries
+  )
+
+  $entries = @(& tar -tzf $ArchivePath)
+  if ($LASTEXITCODE -ne 0) {
+    throw "Failed to inspect archive '$ArchivePath'"
+  }
+
+  foreach ($expected in $ExpectedEntries) {
+    if (-not ($entries -contains $expected)) {
+      throw "Archive '$ArchivePath' is missing expected entry '$expected'"
+    }
+  }
+}
+
 if (-not $Version) {
   $Version = Get-WorkspaceVersion
 }
@@ -61,12 +79,20 @@ $distInstallerPath = Join-Path "dist/innosetup/installers" $installerName
 $archivePath = Join-Path (Join-Path $OutputRoot "payload/fidan/$Version") "$HostTriple/fidan-$Version-$HostTriple.tar.gz"
 $fragmentPath = Join-Path $OutputRoot "fragments/fidan-$Version-$HostTriple.json"
 $wingetMetadataPath = Join-Path $OutputRoot "winget/windows-installer.json"
+$wingetInstallerManifestPath = "config/winget/manifest/Fidan.Fidan.installer.yaml"
 
 Assert-PathExists -Path $payloadInstallerPath -Description "Payload installer"
 Assert-PathExists -Path $distInstallerPath -Description "Inno output installer"
 Assert-PathExists -Path $archivePath -Description "Release archive"
 Assert-PathExists -Path $fragmentPath -Description "Release fragment"
 Assert-PathExists -Path $wingetMetadataPath -Description "Winget metadata"
+Assert-PathExists -Path $wingetInstallerManifestPath -Description "Winget installer manifest"
+
+Assert-TarArchiveContains -ArchivePath $archivePath -ExpectedEntries @(
+  "./fidan.exe",
+  "./fidan_runtime.dll",
+  "./libfidan.dll"
+)
 
 $payloadSha256 = (Get-FileHash -LiteralPath $payloadInstallerPath -Algorithm SHA256).Hash
 $distSha256 = (Get-FileHash -LiteralPath $distInstallerPath -Algorithm SHA256).Hash
@@ -80,6 +106,17 @@ if ($wingetMetadata.version -ne $Version) {
 }
 if (-not [string]::Equals($wingetMetadata.sha256, $payloadSha256, [System.StringComparison]::OrdinalIgnoreCase)) {
   throw "Winget metadata sha256 does not match payload installer hash."
+}
+if (-not $wingetMetadata.vc_redist -or -not $wingetMetadata.vc_redist.package_identifier -or -not $wingetMetadata.vc_redist.minimum_version) {
+  throw "Winget metadata is missing VC++ redistributable dependency information."
+}
+
+$wingetInstallerManifest = Get-Content -LiteralPath $wingetInstallerManifestPath -Raw
+if ($wingetInstallerManifest -notmatch "(?m)^\s*-\s*PackageIdentifier:\s*$([regex]::Escape([string]$wingetMetadata.vc_redist.package_identifier))\s*$") {
+  throw "Winget installer manifest is missing VC++ redistributable package dependency '$($wingetMetadata.vc_redist.package_identifier)'."
+}
+if ($wingetInstallerManifest -notmatch "(?m)^\s*MinimumVersion:\s*$([regex]::Escape([string]$wingetMetadata.vc_redist.minimum_version))\s*$") {
+  throw "Winget installer manifest is missing VC++ redistributable minimum version '$($wingetMetadata.vc_redist.minimum_version)'."
 }
 
 $signature = Get-AuthenticodeSignature -FilePath $payloadInstallerPath

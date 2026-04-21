@@ -220,6 +220,175 @@ function Resolve-HostTriple {
   return "$archPart-$osPart"
 }
 
+function Get-WindowsVcRedistArchitecture {
+  $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
+  switch ($arch) {
+    "x64" { return "x64" }
+    "arm64" { return "arm64" }
+    default { throw "Unsupported Windows VC++ Redistributable architecture: '$arch'" }
+  }
+}
+
+function Get-WindowsVcRedistInstallerUrl {
+  param([string]$Architecture)
+
+  switch ($Architecture) {
+    "x64" { return "https://aka.ms/vc14/vc_redist.x64.exe" }
+    "arm64" { return "https://aka.ms/vc14/vc_redist.arm64.exe" }
+    default { throw "Unsupported Windows VC++ Redistributable architecture: '$Architecture'" }
+  }
+}
+
+function Get-WindowsVcRedistRegistryPaths {
+  param([string]$Architecture)
+
+  return @(
+    "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\$Architecture",
+    "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Microsoft\VisualStudio\14.0\VC\Runtimes\$Architecture"
+  )
+}
+
+function Get-WindowsVcRedistState {
+  param([string]$Architecture)
+
+  foreach ($path in (Get-WindowsVcRedistRegistryPaths -Architecture $Architecture)) {
+    if (-not (Test-Path -LiteralPath $path)) {
+      continue
+    }
+
+    $props = Get-ItemProperty -LiteralPath $path
+    $versionString = ""
+    if ($props.Version) {
+      $versionString = [string]$props.Version
+    }
+
+    return [pscustomobject]@{
+      Installed    = ($props.Installed -eq 1)
+      Version      = $versionString
+      RegistryPath = $path
+    }
+  }
+
+  return [pscustomobject]@{
+    Installed    = $false
+    Version      = ""
+    RegistryPath = ""
+  }
+}
+
+function Normalize-WindowsVcRedistVersionString {
+  param([string]$VersionString)
+
+  if (-not $VersionString) {
+    return ""
+  }
+
+  $trimmed = $VersionString.Trim()
+  if ($trimmed -match '^\D*(\d+(?:\.\d+){1,3})\D*$') {
+    return $matches[1]
+  }
+
+  return ""
+}
+
+function ConvertTo-WindowsVcRedistVersion {
+  param([string]$VersionString)
+
+  $normalized = Normalize-WindowsVcRedistVersionString -VersionString $VersionString
+  if (-not $normalized) {
+    return $null
+  }
+
+  return [version]$normalized
+}
+
+function Test-WindowsVcRedistVersionSatisfiesRequirement {
+  param(
+    [string]$InstalledVersion,
+    [string]$MinimumVersion
+  )
+
+  if (-not $MinimumVersion) {
+    return $true
+  }
+
+  $installed = ConvertTo-WindowsVcRedistVersion -VersionString $InstalledVersion
+  $required = ConvertTo-WindowsVcRedistVersion -VersionString $MinimumVersion
+
+  if ($null -eq $required) {
+    throw "Invalid VC++ runtime minimum version '$MinimumVersion'"
+  }
+  if ($null -eq $installed) {
+    return $false
+  }
+
+  return ($installed -ge $required)
+}
+
+function Ensure-WindowsVcRedist {
+  param(
+    [string]$ScratchRoot,
+    [string]$MinimumVersion = ""
+  )
+
+  if (-not $script:IsWindowsHost) {
+    return
+  }
+
+  $architecture = Get-WindowsVcRedistArchitecture
+  $state = Get-WindowsVcRedistState -Architecture $architecture
+  $normalizedMinimumVersion = Normalize-WindowsVcRedistVersionString -VersionString $MinimumVersion
+  if ($state.Installed -and (Test-WindowsVcRedistVersionSatisfiesRequirement -InstalledVersion $state.Version -MinimumVersion $normalizedMinimumVersion)) {
+    if ($state.Version) {
+      if ($normalizedMinimumVersion) {
+        Write-Host "Microsoft Visual C++ Redistributable ($architecture) already present (version $($state.Version); required >= $normalizedMinimumVersion)."
+      }
+      else {
+        Write-Host "Microsoft Visual C++ Redistributable ($architecture) already present (version $($state.Version))."
+      }
+    }
+    else {
+      Write-Host "Microsoft Visual C++ Redistributable ($architecture) already present."
+    }
+    return
+  }
+
+  $installerUrl = Get-WindowsVcRedistInstallerUrl -Architecture $architecture
+  $installerPath = Join-Path $ScratchRoot "vc_redist.$architecture.exe"
+  $logPath = Join-Path $ScratchRoot "vc_redist.$architecture.log"
+
+  if ($normalizedMinimumVersion) {
+    Write-Host "Installing Microsoft Visual C++ Redistributable ($architecture, required >= $normalizedMinimumVersion)"
+  }
+  else {
+    Write-Host "Installing Microsoft Visual C++ Redistributable ($architecture)"
+  }
+  Save-ResourceToFile -Url $installerUrl -Destination $installerPath
+
+  $process = Start-Process -FilePath $installerPath -ArgumentList @(
+    "/install",
+    "/quiet",
+    "/norestart",
+    "/log",
+    $logPath
+  ) -Wait -PassThru
+
+  $finalState = Get-WindowsVcRedistState -Architecture $architecture
+  if (-not $finalState.Installed) {
+    throw "Failed to install Microsoft Visual C++ Redistributable ($architecture). Exit code $($process.ExitCode). See '$logPath' for details."
+  }
+  if (-not (Test-WindowsVcRedistVersionSatisfiesRequirement -InstalledVersion $finalState.Version -MinimumVersion $normalizedMinimumVersion)) {
+    throw "Installed Microsoft Visual C++ Redistributable ($architecture) version '$($finalState.Version)' does not satisfy required minimum '$normalizedMinimumVersion'."
+  }
+
+  if ($process.ExitCode -eq 3010) {
+    Write-Host "Microsoft Visual C++ Redistributable ($architecture) installed; a restart may be required."
+    return
+  }
+
+  Write-Host "Microsoft Visual C++ Redistributable ($architecture) installed."
+}
+
 function Get-ManifestUrl {
   param([string]$Explicit)
   if ($Explicit) {
@@ -462,6 +631,7 @@ try {
   $releaseVersion = $release.version
   $archiveUrl = $release.url
   $expectedSha = $release.sha256.ToLowerInvariant()
+  $requiredVcRedistVersion = if ($release.vc_redist_min_version) { [string]$release.vc_redist_min_version } else { "" }
   $binaryRelPath = if ($release.binary_relpath) { $release.binary_relpath } elseif ($script:IsWindowsHost) { "fidan.exe" } else { "fidan" }
 
   if ($script:IsWindowsHost -and -not $binaryRelPath.ToLowerInvariant().EndsWith(".exe")) {
@@ -493,6 +663,7 @@ try {
 
   try {
     Write-Host "Downloading Fidan $releaseVersion for $hostTriple"
+    Ensure-WindowsVcRedist -ScratchRoot $tempRoot -MinimumVersion $requiredVcRedistVersion
     Save-ResourceToFile -Url $archiveUrl -Destination $archivePath
 
     $actualSha = Get-Sha256 -Path $archivePath

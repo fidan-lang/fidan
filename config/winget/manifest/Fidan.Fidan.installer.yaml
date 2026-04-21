@@ -8,5 +8,9 @@ Installers:
   - Architecture: x64
     InstallerUrl: https://github.com/fidan-lang/fidan/releases/download/{version}/fidan_windows_bootstrap_v{version}.exe
     InstallerSha256: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    Dependencies:
+      PackageDependencies:
+        - PackageIdentifier: Microsoft.VCRedist.2015+.x64
+          MinimumVersion: 14.0.0.0
 ManifestType: installer
 ManifestVersion: 1.12.0

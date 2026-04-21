@@ -18,6 +18,13 @@ if (-not (Test-Path -LiteralPath $hostPlatformHelperPath)) {
 
 . $hostPlatformHelperPath
 
+$windowsVcRedistHelperPath = Join-Path $PSScriptRoot "shared/windows-vc-redist.ps1"
+if (-not (Test-Path -LiteralPath $windowsVcRedistHelperPath)) {
+  throw "Missing Windows VC++ redistributable helper: '$windowsVcRedistHelperPath'"
+}
+
+. $windowsVcRedistHelperPath
+
 $hostPlatformFlags = Get-HostPlatformFlags
 $script:HostPlatform = [string]$hostPlatformFlags.HostPlatform
 $script:IsWindowsHost = [bool]$hostPlatformFlags.IsWindowsHost
@@ -241,6 +248,11 @@ $fragmentDir = Join-Path $OutputRoot "fragments"
 $archiveName = "fidan-$Version-$hostTriple.tar.gz"
 $archivePath = Join-Path $artifactDir $archiveName
 $binaryRelPath = $binaryName
+$windowsVcRedistMetadata = $null
+
+if ($script:IsWindowsHost) {
+  $windowsVcRedistMetadata = Get-WindowsVcRedistReleaseMetadata -HostTriple $hostTriple
+}
 
 New-Item -ItemType Directory -Force -Path $artifactDir | Out-Null
 New-Item -ItemType Directory -Force -Path $fragmentDir | Out-Null
@@ -279,16 +291,22 @@ finally {
 $sha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
 $releaseUrl = "$($BaseUrl.TrimEnd('/'))/fidan/$Version/$hostTriple/$archiveName"
 
+$releaseEntry = [ordered]@{
+  version        = $Version
+  host_triple    = $hostTriple
+  url            = $releaseUrl
+  sha256         = $sha256
+  binary_relpath = $binaryRelPath
+}
+
+if ($windowsVcRedistMetadata) {
+  $releaseEntry["vc_redist_min_version"] = $windowsVcRedistMetadata.MinimumVersion
+}
+
 $fragment = @{
   schema_version = 1
   fidan_versions = @(
-    @{
-      version        = $Version
-      host_triple    = $hostTriple
-      url            = $releaseUrl
-      sha256         = $sha256
-      binary_relpath = $binaryRelPath
-    }
+    $releaseEntry
   )
   toolchains     = @()
 }

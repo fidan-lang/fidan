@@ -111,6 +111,8 @@ iwr https://fidan.dev/install.ps1 -UseBasicParsing | iex
 
 The bootstrap scripts above download the latest published Fidan release for your host, install it into the standard Fidan install directory, and make the first installed version active.
 
+On Windows, the bootstrap script and the Inno Setup installer automatically ensure the required Microsoft Visual C++ Redistributable is present before activating Fidan. The WinGet package also declares that dependency so WinGet can install it first when needed.
+
 On Windows, each release cycle also ships an Inno Setup bootstrap installer and submits a matching WinGet package update.
 
 ```powershell
@@ -134,6 +136,8 @@ Stable release archives also ship the `libfidan` embedding bundle:
 - the platform `libfidan` static library
 - `include/fidan.h`
 - a tiny C embedding example under `examples/embed_c/`
+
+On Windows, manual `.tar.gz` extraction still assumes the Microsoft Visual C++ Redistributable for your architecture is already installed on the machine.
 
 For Rust hosts built from source, the workspace also includes a small safe
 wrapper crate:
