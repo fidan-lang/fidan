@@ -1483,10 +1483,8 @@ fn user_module_import_hover_target_at_offset(
 
     let rest = if let Some(rest) = trimmed.strip_prefix("use ") {
         rest
-    } else if let Some(rest) = trimmed.strip_prefix("export use ") {
-        rest
     } else {
-        return None;
+        trimmed.strip_prefix("export use ")?
     };
 
     if rest.starts_with('"') || rest.starts_with("std.") || rest.is_empty() {

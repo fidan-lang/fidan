@@ -429,10 +429,10 @@ fn function_may_throw(function: &MirFunction, throw_map: &HashMap<FunctionId, bo
                     rhs: Rvalue::Call { callee, .. },
                     ..
                 }
-                | Instr::Call { callee, .. } => {
-                    if callee_may_throw(callee, throw_map) {
-                        return true;
-                    }
+                | Instr::Call { callee, .. }
+                    if callee_may_throw(callee, throw_map) =>
+                {
+                    return true;
                 }
                 Instr::GetField { .. }
                 | Instr::SetField { .. }

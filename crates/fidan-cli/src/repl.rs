@@ -1,6 +1,7 @@
 use crate::last_error;
 use crate::pipeline::{DiagnosticBudget, emit_mir_safety_diags, render_trace_to_stderr};
 use anyhow::Result;
+use crossterm::{cursor, execute, terminal};
 use fidan_ast::{Item, Module, Stmt};
 use fidan_diagnostics::{Diagnostic, Severity, render_message_to_stderr};
 use fidan_driver::TraceMode;
@@ -35,7 +36,11 @@ impl rustyline::highlight::Highlighter for ReplHelper {
     ) -> std::borrow::Cow<'b, str> {
         // Wrap the plain prompt in bold-cyan colour codes for display only.
         // rustyline never passes this string through its width logic.
-        std::borrow::Cow::Owned(format!("\x1b[1;36m{prompt}\x1b[0m"))
+        if crate::terminal::stdout_supports_color() {
+            std::borrow::Cow::Owned(format!("\x1b[1;36m{prompt}\x1b[0m"))
+        } else {
+            std::borrow::Cow::Borrowed(prompt)
+        }
     }
 
     fn highlight_char(
@@ -420,9 +425,11 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
 
                 // ── :clear / :cls ─────────────────────────────────────────
                 "clear" | "cls" => {
-                    // ANSI: erase display + move cursor to top-left.
-                    print!("\x1b[2J\x1b[1;1H");
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    let _ = execute!(
+                        std::io::stdout(),
+                        terminal::Clear(terminal::ClearType::All),
+                        cursor::MoveTo(0, 0)
+                    );
                     continue;
                 }
 

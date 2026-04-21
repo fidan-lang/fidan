@@ -2,7 +2,6 @@ use anyhow::{Context, Result, bail};
 use fidan_diagnostics::Diagnostic;
 use fidan_diagnostics::{Severity, render_message_to_stderr};
 use fidan_driver::AiFixMode;
-use std::io::IsTerminal as _;
 use std::path::PathBuf;
 
 pub(crate) fn run_fix(
@@ -69,7 +68,7 @@ pub(crate) fn run_fix(
     edits.extend(synthesize_grouped_import_edits(&type_diags, &src));
 
     // Sort descending by byte offset — apply back-to-front to preserve earlier offsets.
-    edits.sort_by(|a, b| b.0.cmp(&a.0));
+    edits.sort_by_key(|b| std::cmp::Reverse(b.0));
     edits.dedup_by_key(|e| e.0);
 
     let src_bytes = src.as_bytes();
@@ -233,6 +232,7 @@ fn combine_ai_prompts(ai_prompt: Option<&str>, improve_prompt: Option<&str>) -> 
 }
 
 fn print_diff_hunk(src_bytes: &[u8], src: &str, lo: usize, hi: usize, replacement: &str) {
+    let color = crate::terminal::stdout_supports_color();
     let line_start = src_bytes[..lo]
         .iter()
         .rposition(|&b| b == b'\n')
@@ -243,17 +243,28 @@ fn print_diff_hunk(src_bytes: &[u8], src: &str, lo: usize, hi: usize, replacemen
         .position(|&b| b == b'\n')
         .map(|p| hi + p)
         .unwrap_or(src.len());
-    println!("\x1b[31m- {}\x1b[0m", &src[line_start..line_end]);
+    println!(
+        "{}",
+        crate::terminal::paint(
+            color,
+            "\x1b[31m",
+            &format!("- {}", &src[line_start..line_end])
+        )
+    );
     let new_line = format!(
         "{}{}{}",
         &src[line_start..lo],
         replacement,
         &src[hi..line_end]
     );
-    println!("\x1b[32m+ {}\x1b[0m", new_line);
+    println!(
+        "{}",
+        crate::terminal::paint(color, "\x1b[32m", &format!("+ {new_line}"))
+    );
 }
 
 fn print_ai_hunk_diff(hunk: &fidan_driver::AiFixHunk) {
+    let color = crate::terminal::stdout_supports_color();
     let old: Vec<&str> = hunk.old_text.trim_end_matches('\n').lines().collect();
     let new: Vec<&str> = hunk.new_text.trim_end_matches('\n').lines().collect();
 
@@ -296,12 +307,21 @@ fn print_ai_hunk_diff(hunk: &fidan_driver::AiFixHunk) {
     for op in &ops {
         match op {
             Op::Context(l) => println!("  {l}"),
-            Op::Remove(l) => println!("\x1b[31m- {l}\x1b[0m"),
-            Op::Add(l) => println!("\x1b[32m+ {l}\x1b[0m"),
+            Op::Remove(l) => println!(
+                "{}",
+                crate::terminal::paint(color, "\x1b[31m", &format!("- {l}"))
+            ),
+            Op::Add(l) => println!(
+                "{}",
+                crate::terminal::paint(color, "\x1b[32m", &format!("+ {l}"))
+            ),
         }
     }
     if !hunk.reason.is_empty() {
-        println!("\x1b[33m  # {}\x1b[0m", hunk.reason);
+        println!(
+            "{}",
+            crate::terminal::paint(color, "\x1b[33m", &format!("  # {}", hunk.reason))
+        );
     }
 }
 
@@ -488,7 +508,7 @@ fn invoke_ai_fix_helper(
             .context("failed to send ai-fix helper request")?;
     }
 
-    let spinner = if std::io::stderr().is_terminal() && std::env::var_os("NO_COLOR").is_none() {
+    let spinner = if crate::terminal::stderr_supports_color() {
         let pb = indicatif::ProgressBar::new_spinner();
         pb.set_style(
             indicatif::ProgressStyle::with_template("  {spinner:.cyan}  {msg}")
@@ -726,7 +746,7 @@ fn apply_ai_hunks(
     }
 
     // Apply back-to-front so earlier indices remain valid.
-    resolved.sort_by(|a, b| b.actual_start.cmp(&a.actual_start));
+    resolved.sort_by_key(|b| std::cmp::Reverse(b.actual_start));
 
     let mut lines = lines_snapshot;
     for r in &resolved {

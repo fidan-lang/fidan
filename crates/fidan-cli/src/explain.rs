@@ -886,11 +886,9 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
             match module.arena.get_expr(eid) {
                 Expr::Binary { op, lhs, rhs, .. } => {
                     match op {
-                        BinOp::Div | BinOp::Rem => {
-                            if !*seen_div {
-                                out.push("division or modulo by zero".to_string());
-                                *seen_div = true;
-                            }
+                        BinOp::Div | BinOp::Rem if !*seen_div => {
+                            out.push("division or modulo by zero".to_string());
+                            *seen_div = true;
                         }
                         BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Pow => {
                             out.push("integer overflow on very large values".to_string());
@@ -1729,53 +1727,49 @@ pub(crate) fn run_explain_line(file: PathBuf, line_start: usize, line_end: usize
                                 params,
                                 span: mspan,
                                 ..
-                            } => {
-                                if span_overlaps(&src, *mspan, line_start, line_end) {
-                                    let mn = interner.resolve(*mname);
-                                    let ctx = format!("method `{mn}` on object `{obj_name}`");
-                                    for &sid in body {
-                                        let stmt = module.arena.get_stmt(sid);
-                                        process_stmt(stmt, &ctx, &stmt_ctx, &mut results);
-                                    }
-                                    // Signature line with no body match → describe the method.
-                                    let sig_lo = offset_line(&src, mspan.start as usize);
-                                    if sig_lo >= line_start
-                                        && sig_lo <= line_end
-                                        && results.is_empty()
-                                    {
-                                        let param_list: Vec<String> = params
-                                            .iter()
-                                            .map(|p| {
-                                                let pn = interner.resolve(p.name);
-                                                format!("`{pn}`")
-                                            })
-                                            .collect();
-                                        let what = if param_list.is_empty() {
-                                            format!(
-                                                "declares method `{mn}` on object `{obj_name}` with no parameters"
-                                            )
-                                        } else {
-                                            format!(
-                                                "declares method `{mn}` on object `{obj_name}` with parameters: {}",
-                                                param_list.join(", ")
-                                            )
-                                        };
-                                        results.push(Expl {
-                                            line_range: format!("line {sig_lo}"),
-                                            source_text: all_src_lines
-                                                .get(sig_lo.saturating_sub(1))
-                                                .unwrap_or(&"")
-                                                .chars()
-                                                .take(120)
-                                                .collect(),
-                                            context: format!("in object `{obj_name}`"),
-                                            what,
-                                            ty: None,
-                                            reads: vec![],
-                                            writes: vec![],
-                                            risks: vec![],
-                                        });
-                                    }
+                            } if span_overlaps(&src, *mspan, line_start, line_end) => {
+                                let mn = interner.resolve(*mname);
+                                let ctx = format!("method `{mn}` on object `{obj_name}`");
+                                for &sid in body {
+                                    let stmt = module.arena.get_stmt(sid);
+                                    process_stmt(stmt, &ctx, &stmt_ctx, &mut results);
+                                }
+                                // Signature line with no body match → describe the method.
+                                let sig_lo = offset_line(&src, mspan.start as usize);
+                                if sig_lo >= line_start && sig_lo <= line_end && results.is_empty()
+                                {
+                                    let param_list: Vec<String> = params
+                                        .iter()
+                                        .map(|p| {
+                                            let pn = interner.resolve(p.name);
+                                            format!("`{pn}`")
+                                        })
+                                        .collect();
+                                    let what = if param_list.is_empty() {
+                                        format!(
+                                            "declares method `{mn}` on object `{obj_name}` with no parameters"
+                                        )
+                                    } else {
+                                        format!(
+                                            "declares method `{mn}` on object `{obj_name}` with parameters: {}",
+                                            param_list.join(", ")
+                                        )
+                                    };
+                                    results.push(Expl {
+                                        line_range: format!("line {sig_lo}"),
+                                        source_text: all_src_lines
+                                            .get(sig_lo.saturating_sub(1))
+                                            .unwrap_or(&"")
+                                            .chars()
+                                            .take(120)
+                                            .collect(),
+                                        context: format!("in object `{obj_name}`"),
+                                        what,
+                                        ty: None,
+                                        reads: vec![],
+                                        writes: vec![],
+                                        risks: vec![],
+                                    });
                                 }
                             }
                             _ => {}

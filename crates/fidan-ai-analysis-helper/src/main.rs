@@ -628,10 +628,24 @@ fn print_ai_exec_usage() {
     println!("- mcp");
 }
 
+fn paint(enabled: bool, ansi_prefix: &str, text: &str) -> String {
+    if enabled {
+        format!("{ansi_prefix}{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
 fn prompt_yes_no(prompt: &str, default: bool) -> Result<bool> {
     let suffix = if default { "[Y/n]" } else { "[y/N]" };
-    eprint!("\x1b[1;33mconfirm\x1b[0m ");
-    print!("\x1b[1m{prompt}\x1b[0m \x1b[36m{suffix}\x1b[0m ");
+    let color = fidan_driver::terminal::stderr_supports_color()
+        && fidan_driver::terminal::stdout_supports_color();
+    eprint!("{} ", paint(color, "\x1b[1;33m", "confirm"));
+    print!(
+        "{} {} ",
+        paint(color, "\x1b[1m", prompt),
+        paint(color, "\x1b[36m", suffix)
+    );
     std::io::stdout().flush().ok();
     let mut line = String::new();
     std::io::stdin()
@@ -649,7 +663,13 @@ fn prompt_text(prompt: &str, default: Option<&str>) -> Result<String> {
         .filter(|value| !value.trim().is_empty())
         .map(|value| format!(" [default: {value}]"))
         .unwrap_or_default();
-    print!("\x1b[1;36minput\x1b[0m \x1b[1m{prompt}\x1b[0m{suffix} ");
+    let color = fidan_driver::terminal::stdout_supports_color();
+    print!(
+        "{} {}{} ",
+        paint(color, "\x1b[1;36m", "input"),
+        paint(color, "\x1b[1m", prompt),
+        suffix
+    );
     std::io::stdout().flush().ok();
     let mut line = String::new();
     std::io::stdin()
@@ -663,7 +683,8 @@ fn prompt_text(prompt: &str, default: Option<&str>) -> Result<String> {
 }
 
 fn prompt_menu(prompt: &str, options: &[&str], default: usize) -> Result<usize> {
-    eprintln!("\x1b[1;33mselect\x1b[0m {prompt}");
+    let color = fidan_driver::terminal::stderr_supports_color();
+    eprintln!("{} {prompt}", paint(color, "\x1b[1;33m", "select"));
     for (index, option) in options.iter().enumerate() {
         eprintln!("  {}. {}", index + 1, option);
     }

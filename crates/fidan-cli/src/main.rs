@@ -23,6 +23,7 @@ mod prompts;
 mod repl;
 mod replay;
 mod self_cmd;
+mod terminal;
 mod toolchain;
 
 // On Windows, PowerShell's default code page is CP1252 which corrupts the UTF-8

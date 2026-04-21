@@ -116,26 +116,22 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<NullSafetyDiag
                     Instr::Assign {
                         rhs: Rvalue::Unary { operand, .. },
                         ..
-                    } => {
-                        if is_def_nothing(operand, &def_nothing, &def_value) {
-                            diags.push(NullSafetyDiag {
-                                fn_name: fn_name.clone(),
-                                context: "unary operation on `nothing`".into(),
-                            });
-                        }
+                    } if is_def_nothing(operand, &def_nothing, &def_value) => {
+                        diags.push(NullSafetyDiag {
+                            fn_name: fn_name.clone(),
+                            context: "unary operation on `nothing`".into(),
+                        });
                     }
 
                     // ── Method call on nothing receiver ───────────────────────
                     Instr::Call {
                         callee: Callee::Method { receiver, .. },
                         ..
-                    } => {
-                        if is_def_nothing(receiver, &def_nothing, &def_value) {
-                            diags.push(NullSafetyDiag {
-                                fn_name: fn_name.clone(),
-                                context: "method call on `nothing`".into(),
-                            });
-                        }
+                    } if is_def_nothing(receiver, &def_nothing, &def_value) => {
+                        diags.push(NullSafetyDiag {
+                            fn_name: fn_name.clone(),
+                            context: "method call on `nothing`".into(),
+                        });
                     }
 
                     // ── Direct function call: check `certain` params ──────────
@@ -157,41 +153,41 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<NullSafetyDiag
                     }
 
                     // ── Field access on nothing ───────────────────────────────
-                    Instr::GetField { object, field, .. } => {
-                        if is_def_nothing(object, &def_nothing, &def_value) {
-                            let fname = interner.resolve(*field);
-                            diags.push(NullSafetyDiag {
-                                fn_name: fn_name.clone(),
-                                context: format!("field read `.{fname}` on `nothing`"),
-                            });
-                        }
+                    Instr::GetField { object, field, .. }
+                        if is_def_nothing(object, &def_nothing, &def_value) =>
+                    {
+                        let fname = interner.resolve(*field);
+                        diags.push(NullSafetyDiag {
+                            fn_name: fn_name.clone(),
+                            context: format!("field read `.{fname}` on `nothing`"),
+                        });
                     }
-                    Instr::SetField { object, field, .. } => {
-                        if is_def_nothing(object, &def_nothing, &def_value) {
-                            let fname = interner.resolve(*field);
-                            diags.push(NullSafetyDiag {
-                                fn_name: fn_name.clone(),
-                                context: format!("field write `.{fname}` on `nothing`"),
-                            });
-                        }
+                    Instr::SetField { object, field, .. }
+                        if is_def_nothing(object, &def_nothing, &def_value) =>
+                    {
+                        let fname = interner.resolve(*field);
+                        diags.push(NullSafetyDiag {
+                            fn_name: fn_name.clone(),
+                            context: format!("field write `.{fname}` on `nothing`"),
+                        });
                     }
 
                     // ── Index access on nothing ───────────────────────────────
-                    Instr::GetIndex { object, .. } => {
-                        if is_def_nothing(object, &def_nothing, &def_value) {
-                            diags.push(NullSafetyDiag {
-                                fn_name: fn_name.clone(),
-                                context: "index read on `nothing`".into(),
-                            });
-                        }
+                    Instr::GetIndex { object, .. }
+                        if is_def_nothing(object, &def_nothing, &def_value) =>
+                    {
+                        diags.push(NullSafetyDiag {
+                            fn_name: fn_name.clone(),
+                            context: "index read on `nothing`".into(),
+                        });
                     }
-                    Instr::SetIndex { object, .. } => {
-                        if is_def_nothing(object, &def_nothing, &def_value) {
-                            diags.push(NullSafetyDiag {
-                                fn_name: fn_name.clone(),
-                                context: "index write on `nothing`".into(),
-                            });
-                        }
+                    Instr::SetIndex { object, .. }
+                        if is_def_nothing(object, &def_nothing, &def_value) =>
+                    {
+                        diags.push(NullSafetyDiag {
+                            fn_name: fn_name.clone(),
+                            context: "index write on `nothing`".into(),
+                        });
                     }
                     _ => {}
                 }

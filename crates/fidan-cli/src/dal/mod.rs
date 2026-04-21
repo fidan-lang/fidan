@@ -1142,10 +1142,8 @@ fn read_masked_token(prompt: &str) -> Result<String> {
                         println!();
                         return Ok(token.trim().to_string());
                     }
-                    KeyCode::Backspace => {
-                        if token.pop().is_some() {
-                            erase_masked_chars(1);
-                        }
+                    KeyCode::Backspace if token.pop().is_some() => {
+                        erase_masked_chars(1);
                     }
                     KeyCode::Char('\u{17}') => {
                         erase_masked_chars(delete_last_word(&mut token));

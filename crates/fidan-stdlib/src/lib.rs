@@ -207,23 +207,11 @@ fn inferred_param_type_name(
         "collections" => match canonical_name {
             "range" => "integer",
             "hashset" => "dynamic",
-            "setAdd" | "setRemove" | "setContains" => {
-                if index == 0 {
-                    "hashset oftype dynamic"
-                } else {
-                    "dynamic"
-                }
-            }
+            "setAdd" | "setRemove" | "setContains" if index == 0 => "hashset oftype dynamic",
             "setToList" | "setLen" => "hashset oftype dynamic",
             "setUnion" | "setIntersect" | "setDiff" => "hashset oftype dynamic",
             "Queue" | "Stack" => "list oftype dynamic",
-            "enqueue" | "push" => {
-                if index == 0 {
-                    "list oftype dynamic"
-                } else {
-                    "dynamic"
-                }
-            }
+            "enqueue" | "push" if index == 0 => "list oftype dynamic",
             "dequeue" | "peek" | "pop" | "top" => "list oftype dynamic",
             "flatten" | "zip" | "enumerate" | "partition" | "groupBy" | "unique" | "reverse"
             | "sort" | "len" | "isEmpty" | "slice" | "first" | "last" | "sum" | "product"
@@ -284,13 +272,7 @@ fn inferred_param_type_name(
                     "boolean"
                 }
             }
-            "dump" => {
-                if index == 1 {
-                    "string"
-                } else {
-                    "dynamic"
-                }
-            }
+            "dump" if index == 1 => "string",
             "dumps" | "stringify" | "pretty" => "dynamic",
             _ => "dynamic",
         },

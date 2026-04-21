@@ -6,6 +6,15 @@
 
 use std::sync::atomic::AtomicU64;
 
+fn stdout_supports_color() -> bool {
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && std::env::var("TERM")
+            .ok()
+            .is_none_or(|term| !term.eq_ignore_ascii_case("dumb"))
+}
+
 // ── Per-function counters ─────────────────────────────────────────────────────
 
 /// Atomic call-count and inclusive-time accumulator per function.
@@ -55,14 +64,20 @@ pub struct ProfileReport {
 impl ProfileReport {
     /// Render a human-readable terminal table.
     pub fn render(&self) -> String {
+        self.render_with_color(stdout_supports_color())
+    }
+
+    fn render_with_color(&self, color: bool) -> String {
         use std::fmt::Write as _;
 
         let mut out = String::new();
         let total_str = format_ms(self.total_ms);
+        let dim = if color { "\x1b[2m" } else { "" };
+        let reset = if color { "\x1b[0m" } else { "" };
         let _ = writeln!(
             out,
-            "\x1b[2m[% profile]: {}  ({} total)\x1b[0m\n",
-            self.program_name, total_str
+            "{dim}[% profile]: {}  ({} total){reset}\n",
+            self.program_name, total_str,
         );
 
         if self.hot_paths.is_empty() {
@@ -179,4 +194,26 @@ fn format_count(n: u64) -> String {
 
 fn escape_json(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FnProfileItem, ProfileReport};
+
+    #[test]
+    fn profile_render_plain_without_noisy_ansi_when_color_disabled() {
+        let report = ProfileReport {
+            program_name: "demo".to_string(),
+            total_ms: 12.5,
+            hot_paths: vec![FnProfileItem {
+                name: "main".to_string(),
+                call_count: 1,
+                total_ms: 12.5,
+                avg_ms: 12.5,
+                pct: 100.0,
+            }],
+        };
+        let rendered = report.render_with_color(false);
+        assert!(!rendered.contains('\x1b'));
+    }
 }

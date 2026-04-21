@@ -1,6 +1,7 @@
 use crate::imports::{collect_file_import_paths, filter_hir_module, pre_register_hir_into_tc};
 use crate::last_error;
 use crate::replay::save_replay_bundle;
+use crate::terminal::paint;
 use anyhow::{Context, Result, bail};
 use fidan_diagnostics::{Diagnostic, Severity, render_message_to_stderr};
 use fidan_driver::dal::validate_package_name;
@@ -20,6 +21,8 @@ pub(crate) fn run_with_reload(opts: CompileOptions) -> Result<()> {
     use std::collections::HashSet;
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
+
+    let color = crate::terminal::stderr_supports_color();
 
     let watch_path = opts.input.clone();
 
@@ -103,11 +106,22 @@ pub(crate) fn run_with_reload(opts: CompileOptions) -> Result<()> {
             if watched.insert(dir.clone()) {
                 if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
                     eprintln!(
-                        "\x1b[1;31m[↻ reload] cannot watch {}: {e}\x1b[0m",
-                        dir.display()
+                        "{}",
+                        paint(
+                            color,
+                            "\x1b[1;31m",
+                            &format!("[↻ reload] cannot watch {}: {e}", dir.display())
+                        )
                     );
                 } else {
-                    eprintln!("\x1b[2m[↻ reload] also watching {}\x1b[0m", dir.display());
+                    eprintln!(
+                        "{}",
+                        paint(
+                            color,
+                            "\x1b[2m",
+                            &format!("[↻ reload] also watching {}", dir.display())
+                        )
+                    );
                 }
             }
         }
@@ -118,8 +132,15 @@ pub(crate) fn run_with_reload(opts: CompileOptions) -> Result<()> {
     watch_extra(&mut watcher, initial_extra, &mut extra_watched);
 
     eprintln!(
-        "\x1b[2m[↻ reload] watching {} — Ctrl+C to stop\x1b[0m",
-        entry_dir.display()
+        "{}",
+        paint(
+            color,
+            "\x1b[2m",
+            &format!(
+                "[↻ reload] watching {} — Ctrl+C to stop",
+                entry_dir.display()
+            )
+        )
     );
 
     // Run once immediately on startup.
@@ -158,8 +179,12 @@ pub(crate) fn run_with_reload(opts: CompileOptions) -> Result<()> {
                     })
                     .collect();
                 eprintln!(
-                    "\x1b[2m[↻ reload] {} changed — re-running\x1b[0m",
-                    changed.join(", ")
+                    "{}",
+                    paint(
+                        color,
+                        "\x1b[2m",
+                        &format!("[↻ reload] {} changed — re-running", changed.join(", "))
+                    )
                 );
 
                 // Re-collect external import dirs in case imports changed.
@@ -169,7 +194,14 @@ pub(crate) fn run_with_reload(opts: CompileOptions) -> Result<()> {
                 // Re-run — errors are printed but do not stop the watcher.
                 let _ = run_pipeline(opts.clone());
             }
-            Ok(Err(e)) => eprintln!("\x1b[1;31m[↻ reload] watcher error: {e}\x1b[0m"),
+            Ok(Err(e)) => eprintln!(
+                "{}",
+                paint(
+                    color,
+                    "\x1b[1;31m",
+                    &format!("[↻ reload] watcher error: {e}")
+                )
+            ),
             Err(_) => break, // channel closed
         }
     }
@@ -1209,28 +1241,46 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                             (Ok(()), results) => {
                                 let mut passed = 0usize;
                                 let mut failed = 0usize;
+                                let color = crate::terminal::stderr_supports_color();
                                 for r in &results {
                                     if r.passed {
                                         passed += 1;
-                                        eprintln!("  \x1b[1;32m✓\x1b[0m {}", r.name);
+                                        eprintln!(
+                                            "  {} {}",
+                                            paint(color, "\x1b[1;32m", "✓"),
+                                            r.name
+                                        );
                                     } else {
                                         failed += 1;
                                         let msg = r.message.as_deref().unwrap_or("failed");
                                         let msg = msg.trim_start_matches("assertion failed: ");
-                                        eprintln!("  \x1b[1;31m✗\x1b[0m {} — {}", r.name, msg);
+                                        eprintln!(
+                                            "  {} {} — {}",
+                                            paint(color, "\x1b[1;31m", "✗"),
+                                            r.name,
+                                            msg
+                                        );
                                     }
                                 }
                                 eprintln!();
                                 if failed == 0 {
                                     eprintln!(
-                                        "\x1b[1;32m{} test{} passed\x1b[0m",
-                                        passed,
-                                        if passed == 1 { "" } else { "s" }
+                                        "{}",
+                                        paint(
+                                            color,
+                                            "\x1b[1;32m",
+                                            &format!(
+                                                "{} test{} passed",
+                                                passed,
+                                                if passed == 1 { "" } else { "s" }
+                                            )
+                                        )
                                     );
                                 } else {
                                     eprintln!(
-                                        "\x1b[1;32m{} passed\x1b[0m, \x1b[1;31m{} failed\x1b[0m",
-                                        passed, failed
+                                        "{}, {}",
+                                        paint(color, "\x1b[1;32m", &format!("{passed} passed")),
+                                        paint(color, "\x1b[1;31m", &format!("{failed} failed"))
                                     );
                                     std::process::exit(1);
                                 }

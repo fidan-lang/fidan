@@ -9,6 +9,7 @@ mod options;
 mod pipeline;
 pub mod progress;
 mod session;
+pub mod terminal;
 
 pub use ai_analysis::{
     AI_ANALYSIS_HELPER_PROTOCOL_VERSION, AI_ANALYSIS_PROTOCOL_VERSION, AiAnalysisCommand,

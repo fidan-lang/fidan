@@ -83,8 +83,16 @@ EOF
 RED='\033[31m'
 NC='\033[0m' # No Color
 
+supports_color() {
+  [ -t 2 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != "dumb" ]
+}
+
 fail() {
   message="$1"
+  if ! supports_color; then
+    RED=''
+    NC=''
+  fi
   printf "\n${RED}[X] Installation failed:${NC}\n" >&2
   printf "${RED}%s${NC}\n" "$message" >&2
   exit 1

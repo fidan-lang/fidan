@@ -234,12 +234,10 @@ fn find_loop_blocks(func: &fidan_mir::MirFunction) -> FxHashSet<BlockId> {
     // terminators have none.
     for bb in &func.blocks {
         match &bb.terminator {
-            fidan_mir::Terminator::Goto(id) => {
-                if id.0 <= bb.id.0 {
-                    // Back-edge: mark [id .. bb] as loop body.
-                    for b in id.0..=bb.id.0 {
-                        loop_blocks.insert(BlockId(b));
-                    }
+            fidan_mir::Terminator::Goto(id) if id.0 <= bb.id.0 => {
+                // Back-edge: mark [id .. bb] as loop body.
+                for b in id.0..=bb.id.0 {
+                    loop_blocks.insert(BlockId(b));
                 }
             }
             fidan_mir::Terminator::Branch {

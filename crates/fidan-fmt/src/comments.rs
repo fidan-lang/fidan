@@ -35,11 +35,9 @@ pub fn collect_comments(file: &SourceFile) -> Vec<FmtComment> {
                 let inner_ch = inner.chars().next().expect("char boundary");
                 pos += inner_ch.len_utf8();
                 match inner_ch {
-                    '\\' => {
-                        if pos < src.len() {
-                            let escaped = src[pos..].chars().next().expect("char boundary");
-                            pos += escaped.len_utf8();
-                        }
+                    '\\' if pos < src.len() => {
+                        let escaped = src[pos..].chars().next().expect("char boundary");
+                        pos += escaped.len_utf8();
                     }
                     '"' => break,
                     _ => {}
