@@ -244,7 +244,21 @@ jobs:
           name: distribution-bundle
           path: dist/release
 
+      - name: Update WinGet (App Installer)
+        shell: pwsh
+        run: |
+          $progressPreference = 'SilentlyContinue'
+          $bundlePath = Join-Path $env:RUNNER_TEMP "Microsoft.DesktopAppInstaller.msixbundle"
+
+          Invoke-WebRequest -Uri "https://aka.ms/getwinget" -OutFile $bundlePath
+          Add-AppxPackage -Path $bundlePath -ForceUpdateFromAnyVersion
+
+          Write-Host "App Installer version: $((Get-AppxPackage Microsoft.DesktopAppInstaller).Version)"
+          winget --info
+
       - name: Submit winget manifest
+        id: submit_winget
+        continue-on-error: true
         shell: pwsh
         env:
           WINGET_GITHUB_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
@@ -274,3 +288,9 @@ jobs:
           }
 
           ./scripts/package-release.ps1 -Version $version -OutputRoot "dist/release" -SkipBuild -SubmitWinget -WingetManifestRoot $manifestRoot
+
+      - name: Warn on winget submission failure
+        if: steps.submit_winget.outcome == 'failure'
+        shell: pwsh
+        run: |
+          Write-Warning "WinGet manifest submission failed, but the workflow is configured to continue."
