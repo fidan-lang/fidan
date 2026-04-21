@@ -276,7 +276,7 @@ function Get-WindowsVcRedistState {
   }
 }
 
-function Normalize-WindowsVcRedistVersionString {
+function ConvertTo-NormalizedWindowsVcRedistVersionString {
   param([string]$VersionString)
 
   if (-not $VersionString) {
@@ -294,7 +294,7 @@ function Normalize-WindowsVcRedistVersionString {
 function ConvertTo-WindowsVcRedistVersion {
   param([string]$VersionString)
 
-  $normalized = Normalize-WindowsVcRedistVersionString -VersionString $VersionString
+  $normalized = ConvertTo-NormalizedWindowsVcRedistVersionString -VersionString $VersionString
   if (-not $normalized) {
     return $null
   }
@@ -325,7 +325,7 @@ function Test-WindowsVcRedistVersionSatisfiesRequirement {
   return ($installed -ge $required)
 }
 
-function Ensure-WindowsVcRedist {
+function Install-WindowsVcRedist {
   param(
     [string]$ScratchRoot,
     [string]$MinimumVersion = ""
@@ -337,7 +337,7 @@ function Ensure-WindowsVcRedist {
 
   $architecture = Get-WindowsVcRedistArchitecture
   $state = Get-WindowsVcRedistState -Architecture $architecture
-  $normalizedMinimumVersion = Normalize-WindowsVcRedistVersionString -VersionString $MinimumVersion
+  $normalizedMinimumVersion = ConvertTo-NormalizedWindowsVcRedistVersionString -VersionString $MinimumVersion
   if ($state.Installed -and (Test-WindowsVcRedistVersionSatisfiesRequirement -InstalledVersion $state.Version -MinimumVersion $normalizedMinimumVersion)) {
     if ($state.Version) {
       if ($normalizedMinimumVersion) {
@@ -662,7 +662,7 @@ try {
   New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
 
   try {
-    Ensure-WindowsVcRedist -ScratchRoot $tempRoot -MinimumVersion $requiredVcRedistVersion
+    Install-WindowsVcRedist -ScratchRoot $tempRoot -MinimumVersion $requiredVcRedistVersion
     Write-Host "Downloading Fidan $releaseVersion for $hostTriple"
     Save-ResourceToFile -Url $archiveUrl -Destination $archivePath
 
