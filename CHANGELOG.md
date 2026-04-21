@@ -12,6 +12,59 @@ compiler releases.
 
 ---
 
+## [1.0.13] — 2026-04-21
+
+### Added
+- Windows bootstrap/install flows now enforce the Microsoft Visual C++
+  Redistributable prerequisite, including version-aware detection in the
+  bootstrap script, generated release metadata for the required runtime
+  version, and matching Winget dependency metadata for Windows distribution.
+- Windows bootstrap coverage now includes a dedicated smoke test under
+  `test/scripts/test-bootstrap-windows.ps1`, and the CI workflow runs that
+  smoke path on Windows.
+- The Windows Inno bootstrap installer now ships expanded language coverage and
+  updated localized strings for bootstrap options and error messaging.
+- Shared terminal capability helpers were added for CLI-facing tools so color
+  output can be gated consistently across TTY/non-TTY environments.
+
+### Changed
+- Bootstrap and Windows packaging scripts now use more robust host/platform
+  detection, improving consistency across `pwsh`, Windows PowerShell 5.1, and
+  release-packaging contexts.
+- Windows release packaging now emits VC++ runtime metadata into distribution
+  fragments and generated Winget installer metadata, keeping bootstrap,
+  packaged release manifests, and Winget dependency data aligned.
+- Installer and README wording around bootstrap defaults, installer download
+  flows, and Windows install options was polished for clearer first-install and
+  release-channel guidance.
+- Terminal-facing CLI output was refactored to use shared color/prompt helpers
+  instead of ad hoc ANSI sequences in multiple command paths.
+
+### Fixed
+- Windows PowerShell 5.1 bootstrap execution now resolves the correct Windows
+  host triple and install root more reliably instead of falling back to
+  non-Windows platform assumptions.
+- First-install Windows bootstrap now installs or upgrades the required VC++
+  runtime before staging `fidan`, reducing missing-`VCRUNTIME140.dll` failures
+  on clean machines.
+- CLI prompts and status output such as self/toolchain/DAL confirmations,
+  reload/test status lines, fix diffs, REPL prompt handling, profiler output,
+  and AI-helper prompts no longer emit raw ANSI escape sequences when color is
+  disabled or the output stream is not a terminal.
+- POSIX bootstrap failure output now suppresses ANSI coloring on `NO_COLOR` or
+  `TERM=dumb` environments instead of printing literal escape sequences.
+- Bootstrap progress messaging around Windows downloads/runtime setup now
+  reports steps in a clearer order and surfaces more diagnostic context during
+  prerequisite installation.
+
+### Tests
+- Added plain-output regression coverage for CLI prompt rendering and profiler
+  rendering without color.
+- Added Windows bootstrap smoke coverage for local-manifest archive installs and
+  VC++ prerequisite handling.
+
+---
+
 ## [1.0.12] — 2026-04-19
 
 ### Added
@@ -386,7 +439,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.12...HEAD
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.13...HEAD
+[1.0.13]: https://github.com/fidan-lang/fidan/compare/v1.0.12...v1.0.13
 [1.0.12]: https://github.com/fidan-lang/fidan/compare/v1.0.10...v1.0.12
 [1.0.10]: https://github.com/fidan-lang/fidan/compare/v1.0.9...v1.0.10
 [1.0.9]: https://github.com/fidan-lang/fidan/compare/v1.0.8...v1.0.9
