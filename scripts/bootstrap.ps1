@@ -11,6 +11,76 @@ $ErrorActionPreference = "Stop"
 $BannerUrl = "https://raw.githubusercontent.com/fidan-lang/fidan/main/assets/github/banner.txt"
 $script:BannerTextCache = $null
 
+function Invoke-WebRequestCompat {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Uri,
+    [string]$OutFile = ""
+  )
+
+  $invokeParams = @{
+    Uri         = $Uri
+    ErrorAction = 'Stop'
+  }
+
+  if ($OutFile) {
+    $invokeParams['OutFile'] = $OutFile
+  }
+
+  # Windows PowerShell may prompt without this flag; PowerShell Core does not need it.
+  if ($PSVersionTable.PSEdition -ne 'Core') {
+    $invokeParams['UseBasicParsing'] = $true
+  }
+
+  return Invoke-WebRequest @invokeParams
+}
+
+function Get-HostPlatform {
+  # PowerShell Core (6/7+) exposes the clean cross-platform built-in flags.
+  if ($PSVersionTable.PSEdition -eq 'Core') {
+    if ($IsWindows) {
+      return 'Windows'
+    }
+    if ($IsMacOS) {
+      return 'MacOS'
+    }
+    if ($IsLinux) {
+      return 'Linux'
+    }
+  }
+
+  # Windows PowerShell (Desktop) runs on Windows only.
+  if ($env:OS -eq 'Windows_NT') {
+    return 'Windows'
+  }
+
+  # Defensive fallback for unusual hosts.
+  try {
+    if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)) {
+      return 'Windows'
+    }
+    if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::OSX)) {
+      return 'MacOS'
+    }
+    if ([System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Linux)) {
+      return 'Linux'
+    }
+  }
+  catch {
+  }
+
+  return 'Unknown'
+}
+
+$script:HostPlatform = Get-HostPlatform
+$script:IsWindowsHost = ($script:HostPlatform -eq 'Windows')
+$script:IsMacOSHost = ($script:HostPlatform -eq 'MacOS')
+$script:IsLinuxHost = ($script:HostPlatform -eq 'Linux')
+
+if ($script:HostPlatform -eq 'Unknown') {
+  throw "Unable to determine host operating system."
+}
+
 function Get-BannerText {
   if ($null -ne $script:BannerTextCache) {
     return $script:BannerTextCache
@@ -27,7 +97,7 @@ function Get-BannerText {
   }
 
   try {
-    $script:BannerTextCache = (Invoke-WebRequest -Uri $BannerUrl).Content
+    $script:BannerTextCache = (Invoke-WebRequestCompat -Uri $BannerUrl).Content
     return $script:BannerTextCache
   }
   catch {
@@ -111,7 +181,7 @@ function Resolve-InstallRoot {
     return $Explicit
   }
 
-  if ($IsWindows) {
+  if ($script:IsWindowsHost) {
     $local = [Environment]::GetFolderPath("LocalApplicationData")
     if (-not $local) {
       throw "LOCALAPPDATA is not available"
@@ -119,7 +189,7 @@ function Resolve-InstallRoot {
     return (Join-Path $local "Programs\Fidan")
   }
 
-  if ($IsMacOS) {
+  if ($script:IsMacOSHost) {
     return (Join-Path $HOME "Applications/Fidan")
   }
 
@@ -131,10 +201,10 @@ function Resolve-InstallRoot {
 }
 
 function Resolve-HostTriple {
-  $osPart = if ($IsWindows) {
+  $osPart = if ($script:IsWindowsHost) {
     "pc-windows-msvc"
   }
-  elseif ($IsMacOS) {
+  elseif ($script:IsMacOSHost) {
     "apple-darwin"
   }
   else {
@@ -167,7 +237,7 @@ function Read-TextResource {
     $path = $Url.Substring(7)
     return Get-Content -LiteralPath $path -Raw
   }
-  return (Invoke-WebRequest -Uri $Url).Content
+  return (Invoke-WebRequestCompat -Uri $Url).Content
 }
 
 function Save-ResourceToFile {
@@ -179,7 +249,7 @@ function Save-ResourceToFile {
     Copy-Item -LiteralPath $Url.Substring(7) -Destination $Destination
     return
   }
-  Invoke-WebRequest -Uri $Url -OutFile $Destination
+  Invoke-WebRequestCompat -Uri $Url -OutFile $Destination | Out-Null
 }
 
 function ConvertTo-CanonicalPath {
@@ -258,6 +328,27 @@ function Get-Release {
 function Get-Sha256 {
   param([string]$Path)
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+
+function Test-IsPortableExecutable {
+  param([string]$Path)
+
+  $stream = $null
+  try {
+    $stream = [System.IO.File]::OpenRead($Path)
+    if ($stream.Length -lt 2) {
+      return $false
+    }
+
+    $b0 = $stream.ReadByte()
+    $b1 = $stream.ReadByte()
+    return ($b0 -eq 0x4D -and $b1 -eq 0x5A) # MZ
+  }
+  finally {
+    if ($null -ne $stream) {
+      $stream.Dispose()
+    }
+  }
 }
 
 function Update-Metadata {
@@ -364,10 +455,21 @@ try {
   }
 
   $release = Get-Release -Manifest $manifest -RequestedVersion $Version -HostTriple $hostTriple
+  if ($release.host_triple -ne $hostTriple) {
+    throw "Manifest host mismatch: requested '$hostTriple' but got '$($release.host_triple)'"
+  }
+
   $releaseVersion = $release.version
   $archiveUrl = $release.url
   $expectedSha = $release.sha256.ToLowerInvariant()
-  $binaryRelPath = if ($release.binary_relpath) { $release.binary_relpath } elseif ($IsWindows) { "fidan.exe" } else { "fidan" }
+  $binaryRelPath = if ($release.binary_relpath) { $release.binary_relpath } elseif ($script:IsWindowsHost) { "fidan.exe" } else { "fidan" }
+
+  if ($script:IsWindowsHost -and -not $binaryRelPath.ToLowerInvariant().EndsWith(".exe")) {
+    throw "Manifest entry for Windows host '$hostTriple' must set binary_relpath to a .exe path (got '$binaryRelPath')"
+  }
+  if ((-not $script:IsWindowsHost) -and $binaryRelPath.ToLowerInvariant().EndsWith(".exe")) {
+    throw "Manifest entry for non-Windows host '$hostTriple' must not set a Windows .exe binary_relpath (got '$binaryRelPath')"
+  }
 
   $versionsDir = Join-Path $installRootResolved "versions"
   $metadataDir = Join-Path $installRootResolved "metadata"
@@ -412,6 +514,10 @@ try {
       if (-not (Test-Path -LiteralPath $candidateBinary)) {
         throw "Downloaded archive does not contain the expected file '$binaryRelPath'"
       }
+    }
+
+    if ($script:IsWindowsHost -and -not (Test-IsPortableExecutable -Path $candidateBinary)) {
+      throw "Downloaded archive for '$hostTriple' does not contain a valid Windows executable at '$binaryRelPath'"
     }
 
     Move-Item -LiteralPath $candidateRoot -Destination $finalDir

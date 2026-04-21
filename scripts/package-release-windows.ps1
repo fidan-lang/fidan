@@ -15,7 +15,16 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not $IsWindows) {
+$hostPlatformHelperPath = Join-Path $PSScriptRoot "shared/host-platform.ps1"
+if (-not (Test-Path -LiteralPath $hostPlatformHelperPath)) {
+  throw "Missing host platform helper: '$hostPlatformHelperPath'"
+}
+
+. $hostPlatformHelperPath
+
+$isWindowsHost = [bool](Get-HostPlatformFlags).IsWindowsHost
+
+if (-not $isWindowsHost) {
   throw "scripts/package-release-windows.ps1 can only run on Windows."
 }
 

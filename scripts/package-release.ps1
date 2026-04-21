@@ -11,6 +11,23 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$hostPlatformHelperPath = Join-Path $PSScriptRoot "shared/host-platform.ps1"
+if (-not (Test-Path -LiteralPath $hostPlatformHelperPath)) {
+  throw "Missing host platform helper: '$hostPlatformHelperPath'"
+}
+
+. $hostPlatformHelperPath
+
+$hostPlatformFlags = Get-HostPlatformFlags
+$script:HostPlatform = [string]$hostPlatformFlags.HostPlatform
+$script:IsWindowsHost = [bool]$hostPlatformFlags.IsWindowsHost
+$script:IsMacOSHost = [bool]$hostPlatformFlags.IsMacOSHost
+$script:IsLinuxHost = [bool]$hostPlatformFlags.IsLinuxHost
+
+if ($script:HostPlatform -eq "Unknown") {
+  throw "Unable to determine host operating system."
+}
+
 function Get-WorkspaceVersion {
   $cargoToml = Get-Content "Cargo.toml" -Raw
   $match = [regex]::Match($cargoToml, '(?ms)\[workspace\.package\].*?version\s*=\s*"([^"]+)"')
@@ -21,10 +38,10 @@ function Get-WorkspaceVersion {
 }
 
 function Get-HostTriple {
-  $osPart = if ($IsWindows) {
+  $osPart = if ($script:IsWindowsHost) {
     "pc-windows-msvc"
   }
-  elseif ($IsMacOS) {
+  elseif ($script:IsMacOSHost) {
     "apple-darwin"
   }
   else {
@@ -60,7 +77,7 @@ function Invoke-WindowsReleaseHelper {
     [string]$ResolvedBinaryPath = ""
   )
 
-  if (-not $IsWindows) {
+  if (-not $script:IsWindowsHost) {
     throw "Windows release helper mode '$Mode' can only run on Windows."
   }
 
@@ -89,7 +106,7 @@ function Invoke-WindowsReleaseHelper {
 }
 
 function Get-RuntimeArtifactNames {
-  if ($IsWindows) {
+  if ($script:IsWindowsHost) {
     return @(
       "fidan_runtime.lib",
       "fidan_runtime.dll",
@@ -97,7 +114,7 @@ function Get-RuntimeArtifactNames {
     )
   }
 
-  if ($IsMacOS) {
+  if ($script:IsMacOSHost) {
     return @(
       "libfidan_runtime.a",
       "libfidan_runtime.dylib"
@@ -111,7 +128,7 @@ function Get-RuntimeArtifactNames {
 }
 
 function Get-LibFidanArtifactNames {
-  if ($IsWindows) {
+  if ($script:IsWindowsHost) {
     return @(
       @{ Source = "libfidan.lib"; Destination = "libfidan.lib" },
       @{ Source = "libfidan.dll"; Destination = "libfidan.dll" },
@@ -119,7 +136,7 @@ function Get-LibFidanArtifactNames {
     )
   }
 
-  if ($IsMacOS) {
+  if ($script:IsMacOSHost) {
     return @(
       @{ Source = "liblibfidan.a"; Destination = "libfidan.a" },
       @{ Source = "liblibfidan.dylib"; Destination = "libfidan.dylib" }
@@ -168,8 +185,8 @@ if ($SubmitWinget) {
 }
 
 $hostTriple = Get-HostTriple
-$binaryName = if ($IsWindows) { "fidan.exe" } else { "fidan" }
-$shouldBuildWindowsInstaller = $IsWindows -and (
+$binaryName = if ($script:IsWindowsHost) { "fidan.exe" } else { "fidan" }
+$shouldBuildWindowsInstaller = $script:IsWindowsHost -and (
   (Test-EnvVarTruthy -Name "GITHUB_ACTIONS") -or
   (Test-EnvVarTruthy -Name "FIDAN_BUILD_INSTALLER")
 )
