@@ -662,8 +662,8 @@ try {
   New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
 
   try {
-    Write-Host "Downloading Fidan $releaseVersion for $hostTriple"
     Ensure-WindowsVcRedist -ScratchRoot $tempRoot -MinimumVersion $requiredVcRedistVersion
+    Write-Host "Downloading Fidan $releaseVersion for $hostTriple"
     Save-ResourceToFile -Url $archiveUrl -Destination $archivePath
 
     $actualSha = Get-Sha256 -Path $archivePath
