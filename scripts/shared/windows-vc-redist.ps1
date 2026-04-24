@@ -1,4 +1,4 @@
-function Normalize-WindowsVcRedistVersionString {
+function ConvertTo-WindowsVcRedistVersionString {
   param([string]$VersionString)
 
   if (-not $VersionString) {
@@ -16,7 +16,7 @@ function Normalize-WindowsVcRedistVersionString {
 function ConvertTo-WindowsVcRedistVersion {
   param([string]$VersionString)
 
-  $normalized = Normalize-WindowsVcRedistVersionString -VersionString $VersionString
+  $normalized = ConvertTo-WindowsVcRedistVersionString -VersionString $VersionString
   if (-not $normalized) {
     return $null
   }
@@ -83,7 +83,7 @@ function Get-WindowsVcRedistState {
     return [pscustomobject]@{
       Installed         = ($props.Installed -eq 1)
       Version           = $versionString
-      NormalizedVersion = Normalize-WindowsVcRedistVersionString -VersionString $versionString
+      NormalizedVersion = ConvertTo-WindowsVcRedistVersionString -VersionString $versionString
       RegistryPath      = $path
     }
   }
