@@ -12,6 +12,48 @@ compiler releases.
 
 ---
 
+## [1.0.14] — 2026-04-24
+
+### Added
+- WinGet release automation now updates Microsoft App Installer before
+  submitting manifests, improving CI reliability on Windows release runners.
+- New runnable examples were added for concurrency behavior, declaration
+  hoisting, and profiling with `@precompile`.
+- README documentation now includes a clearer entry-point note, short runnable
+  example references, concurrency ordering guidance, and `fidan format`
+  behavior.
+
+### Changed
+- `fidan new` scaffold coverage now verifies that generated projects declare
+  `action main` and call `main()` explicitly.
+- Windows VC++ Redistributable helper naming was refactored for clearer intent
+  across bootstrap and shared PowerShell scripts.
+- Formatter behavior around arrow-style type annotations is now covered to keep
+  canonical `oftype` output stable.
+- Dependency set was refreshed, including updates to `dbus`, `libc`,
+  `mimalloc`, `rustls`, `cc`, `hybrid-array`, and `rustls-pki-types`.
+
+### Fixed
+- Awaiting pending async values in same-thread concurrent execution now yields
+  to sibling tasks instead of blocking immediately, allowing async sleeps and
+  other ready tasks to interleave correctly.
+- Parser diagnostics for missing variable initializers after `=` or `set` now
+  report a clearer actionable error.
+- WinGet manifest submission failures no longer fail the whole release workflow;
+  they are surfaced as warnings so release packaging can continue.
+
+### Tests
+- Added regression coverage for cooperative async sleep interleaving inside
+  `concurrent` blocks.
+- Added regression coverage for top-level action calls before declaration via
+  hoisting.
+- Added CLI coverage for `fidan format --help` documenting stdout-default and
+  `--in-place` behavior.
+- Added parser and formatter coverage for arrow-style type annotations and
+  missing variable initializers.
+
+---
+
 ## [1.0.13] — 2026-04-21
 
 ### Added
@@ -439,7 +481,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.13...HEAD
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.14...HEAD
+[1.0.14]: https://github.com/fidan-lang/fidan/compare/v1.0.13...v1.0.14
 [1.0.13]: https://github.com/fidan-lang/fidan/compare/v1.0.12...v1.0.13
 [1.0.12]: https://github.com/fidan-lang/fidan/compare/v1.0.10...v1.0.12
 [1.0.10]: https://github.com/fidan-lang/fidan/compare/v1.0.9...v1.0.10
