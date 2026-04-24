@@ -558,6 +558,101 @@ action main {
 }
 
 #[test]
+fn run_concurrent_sleep_await_interleaves_before_joining_block() {
+    let file = make_temp_program(
+        "concurrent_sleep_interleave",
+        r#"use std.async
+
+action main {
+    print("start")
+
+    concurrent {
+        task {
+            print("task A before sleep")
+            await async.sleep(10)
+            print("task A after sleep")
+        }
+        task {
+            print("task B before sleep")
+            await async.sleep(1)
+            print("task B after sleep")
+        }
+    }
+
+    parallel {
+        task { print("parallel 1") }
+        task { print("parallel 2") }
+    }
+
+    print("end")
+}
+
+main()
+"#,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("run")
+        .arg(&file)
+        .current_dir(workspace_root())
+        .output()
+        .expect("run concurrent sleep interleave demo");
+    std::fs::remove_file(&file).ok();
+
+    assert!(
+        output.status.success(),
+        "expected concurrent interleave demo to run cleanly:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let lines: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    let idx = |needle: &str| {
+        lines
+            .iter()
+            .position(|line| *line == needle)
+            .unwrap_or_else(|| panic!("missing output line {needle:?} in:\n{stdout}"))
+    };
+
+    let start = idx("start");
+    let a_before = idx("task A before sleep");
+    let b_before = idx("task B before sleep");
+    let b_after = idx("task B after sleep");
+    let a_after = idx("task A after sleep");
+    let end = idx("end");
+
+    assert!(
+        start < a_before,
+        "expected start before task output: {stdout}"
+    );
+    assert!(
+        a_before < b_before,
+        "expected task B to start while task A is sleeping: {stdout}"
+    );
+    assert!(
+        b_before < b_after,
+        "expected task B progress ordering: {stdout}"
+    );
+    assert!(
+        b_after < a_after,
+        "expected task B to finish before task A wake-up: {stdout}"
+    );
+    assert!(
+        a_after < end,
+        "expected end after concurrent block completion: {stdout}"
+    );
+    assert!(
+        stdout.contains("parallel 1") && stdout.contains("parallel 2"),
+        "expected both parallel task outputs:\n{stdout}"
+    );
+}
+
+#[test]
 fn repl_max_errors_per_input_one_stops_after_first_parse_error() {
     let output = run_repl_session(
         &["--max-errors-per-input", "1"],
@@ -989,6 +1084,29 @@ action main {
         stderr.contains("unexpected trailing tokens in interpolation expression")
             || stderr.contains("refusing to format"),
         "expected syntax-aware format rejection, got:\n{stderr}"
+    );
+}
+
+#[test]
+fn format_help_mentions_stdout_default_and_in_place_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .arg("format")
+        .arg("--help")
+        .current_dir(workspace_root())
+        .output()
+        .expect("run fidan format --help");
+
+    assert!(
+        output.status.success(),
+        "expected format --help to succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Rewrite the file in place instead of printing to stdout"),
+        "expected --in-place behavior to be documented:\n{stdout}"
     );
 }
 

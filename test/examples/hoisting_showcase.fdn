@@ -1,0 +1,16 @@
+# hoisting_showcase.fdn
+# Demonstrates that declarations are hoisted, while execution order stays explicit.
+# Run with: fidan run test/examples/hoisting_showcase.fdn
+var result = square(8)
+
+print("square(8) = {result}")
+
+action square with (certain x oftype integer) returns integer {
+    return x * x
+}
+
+main()
+
+action main {
+    print("main called explicitly")
+}

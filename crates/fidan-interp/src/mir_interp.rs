@@ -882,9 +882,7 @@ impl MirMachine {
     fn resolve_async_value(&mut self, value: FidanValue) -> Result<FidanValue, DeferredTaskError> {
         match value {
             FidanValue::PendingTask(id) => self.resolve_same_thread_pending(id),
-            FidanValue::Pending(pending) => pending
-                .try_join()
-                .map_err(|message| DeferredTaskError::Signal(MirSignal::Panic(message))),
+            FidanValue::Pending(pending) => self.resolve_pending_with_yield(&pending),
             other => Ok(other),
         }
     }
@@ -899,6 +897,22 @@ impl MirMachine {
                 result.map_err(|message| DeferredTaskError::Signal(MirSignal::Panic(message)))
             }),
             other => Some(Ok(other.clone())),
+        }
+    }
+
+    fn resolve_pending_with_yield(
+        &mut self,
+        pending: &FidanPending,
+    ) -> Result<FidanValue, DeferredTaskError> {
+        loop {
+            if let Some(result) = pending.try_take_ready() {
+                return result
+                    .map_err(|message| DeferredTaskError::Signal(MirSignal::Panic(message)));
+            }
+            if self.run_next_same_thread_task() {
+                continue;
+            }
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -1747,9 +1761,12 @@ impl MirMachine {
                             return Err(signal);
                         }
                     },
-                    FidanValue::Pending(p) => match p.try_join() {
+                    FidanValue::Pending(p) => match self.resolve_pending_with_yield(p) {
                         Ok(v) => v,
-                        Err(message) => return Err(MirSignal::Panic(message)),
+                        Err(DeferredTaskError::Signal(signal))
+                        | Err(DeferredTaskError::ConcurrentTask { signal, .. }) => {
+                            return Err(signal);
+                        }
                     },
                     _ => val,
                 };

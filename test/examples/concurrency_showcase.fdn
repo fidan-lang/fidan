@@ -5,32 +5,43 @@
 #   - `concurrent` uses cooperative same-thread tasks
 #   - `spawn` / `await` use explicit deferred same-thread handles
 
+use std.async
+
 action square with (certain n oftype integer) returns integer {
     return n * n
 }
 
 print("== spawn / await ==")
+
 var handle = spawn square(12)
+
 print("spawn returned a pending handle immediately")
 print("await result = {string(await handle)}\n")
-
 print("== concurrent ==")
+
 var seen = []
+
 concurrent {
     task first {
-        seen.push("task A start")
+        seen.push("task A before sleep")
+        await async.sleep(10)
+        seen.push("task A after sleep")
     }
     task second {
-        var nested = spawn square(5)
+        var nested = async.sleep(1)
+
         seen.push("task B before await")
-        seen.push("nested spawn result = {string(await nested)}")
+        await nested
         seen.push("task B after await")
+
+        var square_pending = spawn square(5)
+
+        seen.push("nested spawn result = {string(await square_pending)}")
     }
 }
 for entry in seen {
     print("  {entry}")
 }
-
 print("\n== parallel ==")
 parallel {
     task left {
@@ -40,7 +51,6 @@ parallel {
         print("  parallel task B")
     }
 }
-
 print("\n== parallel for ==")
 parallel for value in [1, 2, 3, 4] {
     print("  square({string(value)}) = {string(square(value))}")

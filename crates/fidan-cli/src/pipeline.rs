@@ -1310,7 +1310,17 @@ mod tests {
         let sandbox = make_temp_dir("fidan_new_standard");
         run_new("hello-app", Some(&sandbox), false)?;
         let project_dir = sandbox.join("hello-app");
-        assert!(project_dir.join("main.fdn").is_file());
+        let main_file = project_dir.join("main.fdn");
+        assert!(main_file.is_file());
+        let main_src = fs::read_to_string(&main_file).expect("read scaffolded main.fdn");
+        assert!(
+            main_src.contains("action main"),
+            "expected scaffolded template to declare action main"
+        );
+        assert!(
+            main_src.contains("main()"),
+            "expected scaffolded template to call main() explicitly"
+        );
         assert!(!project_dir.join("dal.toml").exists());
         fs::remove_dir_all(&sandbox).ok();
         Ok(())

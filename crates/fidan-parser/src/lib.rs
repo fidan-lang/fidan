@@ -74,6 +74,28 @@ mod tests {
     }
 
     #[test]
+    fn var_with_arrow_type_annotation() {
+        let (_, diags) = parse_src("var x -> integer = 10");
+        assert!(
+            errors(&diags).is_empty(),
+            "unexpected errors: {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
+    fn missing_var_initializer_reports_actionable_error() {
+        let (_, diags) = parse_src("action main {\n    var x =\n}\n");
+        assert!(
+            errors(&diags)
+                .iter()
+                .any(|msg| msg.contains("expected initializer expression after `=` or `set`")),
+            "expected actionable missing-initializer error, got {:?}",
+            errors(&diags)
+        );
+    }
+
+    #[test]
     fn var_nothing() {
         let (_, diags) = parse_src("var x = nothing");
         assert!(

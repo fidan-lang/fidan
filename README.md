@@ -45,6 +45,10 @@ action main {
 main()
 ```
 
+Entry-point note: declaring `action main` does not auto-run by itself. Call
+`main()` explicitly (as shown above). Declarations are hoisted, so actions can
+still be called before their textual declaration in the same module.
+
 ---
 
 ## Why Fidan?
@@ -545,6 +549,31 @@ concurrent {
 preserves normal mutable-state semantics, and lets `await` yield to sibling
 ready tasks in the block.
 
+If you want an ordering sanity check, this pattern should interleave
+predictably in `concurrent` and remain non-deterministic in `parallel`:
+
+```fidan
+use std.async
+
+concurrent {
+    task {
+        print("A before")
+        await async.sleep(10)
+        print("A after")
+    }
+    task {
+        print("B before")
+        await async.sleep(1)
+        print("B after")
+    }
+}
+
+parallel {
+    task { print("parallel 1") }
+    task { print("parallel 2") }
+}
+```
+
 #### `Shared` — thread-safe shared state
 
 ```fidan
@@ -739,6 +768,22 @@ fidan run app.fdn --jit-threshold 100    # compile after 100 calls
 fidan run app.fdn --jit-threshold 0     # disable JIT entirely
 ```
 
+## Short runnable examples
+
+- Concurrency split and expected behavior: `test/examples/concurrency_showcase.fdn`
+- Hoisting behavior (call before declaration): `test/examples/hoisting_showcase.fdn`
+- Inline tests: `test/examples/test_blocks.fdn`
+- Profiling and `@precompile`: `test/examples/profiling_showcase.fdn`
+
+Try them directly:
+
+```bash
+fidan run test/examples/concurrency_showcase.fdn
+fidan run test/examples/hoisting_showcase.fdn
+fidan test test/examples/test_blocks.fdn
+fidan profile test/examples/profiling_showcase.fdn
+```
+
 ---
 
 ## AI-native tooling
@@ -808,6 +853,15 @@ fidan <COMMAND> [OPTIONS] [FILE]
 | `fidan toolchain <command>` | Install and inspect optional toolchains such as LLVM and AI analysis |
 | `fidan exec <namespace>` | Run commands registered by installed toolchains, such as `fidan exec ai ...` |
 | `fidan dal <command>` | Work with the Dal package registry |
+
+`fidan format` behavior:
+
+- default mode prints formatted source to stdout and does not modify the file
+- `--in-place` rewrites the file on disk
+- `--check` exits with status 1 when formatting changes are required
+
+`fidan new` scaffolds `main.fdn` with an explicit `main()` call so the entry
+behavior is obvious in new projects.
 
 ### `fidan dal` commands
 

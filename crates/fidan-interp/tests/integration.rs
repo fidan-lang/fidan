@@ -1614,6 +1614,49 @@ fn concurrent_await_yields_to_other_same_thread_tasks() {
 }
 
 #[test]
+fn concurrent_async_sleep_yields_to_sibling_tasks() {
+    assert!(
+        run_src(
+            r#"use std.async
+
+        var trace = Shared(0)
+
+        concurrent {
+            task A {
+                trace.set(trace.get() * 10 + 1)
+                await async.sleep(10)
+                trace.set(trace.get() * 10 + 4)
+            }
+            task B {
+                trace.set(trace.get() * 10 + 2)
+                await async.sleep(1)
+                trace.set(trace.get() * 10 + 3)
+            }
+        }
+
+        assert_eq(trace.get(), 1234)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn top_level_action_calls_work_before_declaration_via_hoisting() {
+    assert!(
+        run_src(
+            r#"var result = square(8)
+
+        action square with (certain x oftype integer) returns integer {
+            return x * x
+        }
+
+        assert_eq(result, 64)"#
+        )
+        .is_ok()
+    );
+}
+
+#[test]
 fn collections_helpers_cover_enumerate_chunk_window_partition_and_group_by() {
     assert!(
         run_src(

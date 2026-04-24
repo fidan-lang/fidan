@@ -1,0 +1,21 @@
+# profiling_showcase.fdn
+# Small profile-friendly workload with @precompile.
+# Run with: fidan profile test/examples/profiling_showcase.fdn
+@precompile
+action hot_step with (certain x oftype integer) returns integer {
+    return (x * 3 + 7) % 97
+}
+
+action main {
+    var total = 0
+    var i = 0
+
+    while i < 200000 {
+        total += hot_step(i)
+        i += 1
+    }
+
+    print("total={total}")
+}
+
+main()

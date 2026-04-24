@@ -1428,7 +1428,16 @@ impl<'t> Parser<'t> {
         };
         let init = if matches!(self.peek(), TokenKind::Assign | TokenKind::Set) {
             self.advance();
-            Some(self.parse_expr())
+            if matches!(
+                self.peek(),
+                TokenKind::Newline | TokenKind::Semicolon | TokenKind::RBrace | TokenKind::Eof
+            ) {
+                let span = self.current_span();
+                self.error("expected initializer expression after `=` or `set`", span);
+                Some(self.error_expr(span))
+            } else {
+                Some(self.parse_expr())
+            }
         } else {
             None
         };

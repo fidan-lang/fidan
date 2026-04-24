@@ -170,6 +170,18 @@ mod tests {
     }
 
     #[test]
+    fn arrow_type_annotations_format_to_canonical_oftype_style() {
+        let out = fmt(
+            "action add with (certain a -> integer, optional b -> integer = 2) returns integer {\n    return a + b\n}\n",
+        );
+        assert_eq!(
+            out,
+            "action add with (certain a oftype integer, optional b oftype integer = 2) returns integer {\n    return a + b\n}\n"
+        );
+        assert_idempotent(&out);
+    }
+
+    #[test]
     fn const_var() {
         let out = fmt("const var MAX oftype integer = 100");
         assert_eq!(out, "const var MAX oftype integer = 100\n");
