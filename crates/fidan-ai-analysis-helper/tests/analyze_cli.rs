@@ -1,3 +1,5 @@
+#![allow(unused_crate_dependencies)]
+
 use fidan_driver::{
     AI_ANALYSIS_HELPER_PROTOCOL_VERSION, AI_ANALYSIS_PROTOCOL_VERSION, AiAnalysisHelperCommand,
     AiAnalysisHelperRequest, AiAnalysisHelperResponse, AiAnalysisHelperResult, AiAnalysisResponse,

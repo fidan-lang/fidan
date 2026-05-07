@@ -7,7 +7,6 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
-fidan-source = { workspace = true }
 fidan-ast = { workspace = true }
 fidan-mir = { workspace = true }
 fidan-runtime = { workspace = true }
@@ -24,6 +23,7 @@ anyhow = { workspace = true }
 libffi = { workspace = true }
 
 [dev-dependencies]
+fidan-source = { workspace = true }
 fidan-parser = { workspace = true }
 fidan-typeck = { workspace = true }
 fidan-hir = { workspace = true }

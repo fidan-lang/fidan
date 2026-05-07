@@ -16,8 +16,6 @@ fidan-typeck = { workspace = true }
 fidan-hir = { workspace = true }
 fidan-mir = { workspace = true }
 fidan-passes = { workspace = true }
-fidan-runtime = { workspace = true }
-fidan-interp = { workspace = true }
 fidan-stdlib = { workspace = true }
 fidan-codegen-cranelift = { workspace = true }
 anyhow = { workspace = true }
@@ -26,3 +24,6 @@ serde_json = { workspace = true }
 semver = { workspace = true }
 indicatif = { workspace = true }
 toml = { workspace = true }
+
+[dev-dependencies]
+fidan-interp = { workspace = true }

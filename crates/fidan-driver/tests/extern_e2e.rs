@@ -1,3 +1,5 @@
+#![allow(unused_crate_dependencies)]
+
 use fidan_driver::install::{installed_llvm_toolchains, resolve_fidan_home};
 use fidan_driver::{
     Backend, CompileOptions, ExecutionMode, FrontendOutput, LtoMode, OptLevel, Session, StripMode,

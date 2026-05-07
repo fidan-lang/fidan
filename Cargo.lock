@@ -209,16 +209,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "borsh"
-version = "1.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfd1e3f8955a5d7de9fab72fc8373fade9fb8a703968cb200ae3dc6cf08e185a"
-dependencies = [
- "bytes",
- "cfg_aliases",
-]
-
-[[package]]
 name = "bstr"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -867,8 +857,6 @@ dependencies = [
  "fidan-lexer",
  "fidan-source",
  "serde",
- "smol_str",
- "typed-arena",
 ]
 
 [[package]]
@@ -942,7 +930,6 @@ dependencies = [
  "fidan-ast",
  "fidan-lexer",
  "fidan-mir",
- "fidan-runtime",
  "fidan-source",
  "fidan-stdlib",
  "inkwell",
@@ -961,7 +948,6 @@ version = "1.0.14"
 dependencies = [
  "fidan-source",
  "strsim",
- "thiserror",
  "unicode-width",
 ]
 
@@ -979,7 +965,6 @@ dependencies = [
  "fidan-mir",
  "fidan-parser",
  "fidan-passes",
- "fidan-runtime",
  "fidan-source",
  "fidan-stdlib",
  "fidan-typeck",
@@ -1057,13 +1042,10 @@ dependencies = [
 name = "fidan-lexer"
 version = "1.0.14"
 dependencies = [
- "dashmap 6.1.0",
  "fidan-diagnostics",
  "fidan-source",
- "phf",
  "rustc-hash",
  "serde",
- "smol_str",
 ]
 
 [[package]]
@@ -1081,7 +1063,6 @@ dependencies = [
 name = "fidan-lsp"
 version = "1.0.14"
 dependencies = [
- "anyhow",
  "dashmap 6.1.0",
  "fidan-ast",
  "fidan-config",
@@ -1110,7 +1091,6 @@ dependencies = [
  "fidan-source",
  "fidan-stdlib",
  "fidan-typeck",
- "indexmap",
  "rustc-hash",
  "serde",
 ]
@@ -1144,7 +1124,6 @@ dependencies = [
  "fidan-config",
  "fidan-diagnostics",
  "fidan-lexer",
- "fidan-source",
  "itoa",
  "regex",
  "rustc-hash",
@@ -1173,12 +1152,9 @@ dependencies = [
 name = "fidan-stdlib"
 version = "1.0.14"
 dependencies = [
- "dashmap 6.1.0",
  "fidan-config",
  "fidan-diagnostics",
  "fidan-runtime",
- "fidan-source",
- "regex",
 ]
 
 [[package]]
@@ -1192,7 +1168,6 @@ dependencies = [
  "fidan-parser",
  "fidan-source",
  "fidan-stdlib",
- "indexmap",
  "rustc-hash",
 ]
 
@@ -2245,49 +2220,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "phf"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
-dependencies = [
- "phf_macros",
- "phf_shared",
- "serde",
-]
-
-[[package]]
-name = "phf_generator"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "135ace3a761e564ec88c03a77317a7c6b80bb7f7135ef2544dbe054243b89737"
-dependencies = [
- "fastrand",
- "phf_shared",
-]
-
-[[package]]
-name = "phf_macros"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "812f032b54b1e759ccd5f8b6677695d5268c588701effba24601f6932f8269ef"
-dependencies = [
- "phf_generator",
- "phf_shared",
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "phf_shared"
-version = "0.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
-dependencies = [
- "siphasher",
-]
-
-[[package]]
 name = "pin-project"
 version = "1.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2929,12 +2861,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
-name = "siphasher"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
-
-[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2945,16 +2871,6 @@ name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
-
-[[package]]
-name = "smol_str"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4aaa7368fcf4852a4c2dd92df0cace6a71f2091ca0a23391ce7f3a31833f1523"
-dependencies = [
- "borsh",
- "serde_core",
-]
 
 [[package]]
 name = "socket2"
@@ -3294,12 +3210,6 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
-
-[[package]]
-name = "typed-arena"
-version = "2.0.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6af6ae20167a9ece4bcb41af5b80f8a1f1df981f6391189ce00fd257af04126a"
 
 [[package]]
 name = "typenum"

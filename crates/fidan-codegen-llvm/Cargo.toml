@@ -8,17 +8,25 @@ repository.workspace = true
 
 [features]
 default = []
-llvm-toolchain-21 = ["dep:inkwell", "dep:llvm-sys", "inkwell/llvm21-1"]
+llvm-toolchain-21 = [
+  "dep:fidan-ast",
+  "dep:fidan-stdlib",
+  "dep:inkwell",
+  "dep:llvm-sys",
+  "inkwell/llvm21-1",
+]
 
 [dependencies]
 anyhow = { workspace = true }
-fidan-ast = { workspace = true }
 fidan-lexer = { workspace = true }
-fidan-source = { workspace = true }
 fidan-mir = { workspace = true }
-fidan-runtime = { workspace = true }
-fidan-stdlib = { workspace = true }
+fidan-ast = { workspace = true, optional = true }
+fidan-stdlib = { workspace = true, optional = true }
 inkwell = { workspace = true, optional = true }
 llvm-sys = { version = "211", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+fidan-ast = { workspace = true }
+fidan-source = { workspace = true }

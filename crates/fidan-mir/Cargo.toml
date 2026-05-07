@@ -15,7 +15,6 @@ fidan-stdlib = { workspace = true }
 fidan-hir = { workspace = true }
 fidan-typeck = { workspace = true }
 rustc-hash = { workspace = true }
-indexmap = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]

@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(unused_crate_dependencies))]
+
 //! `fidan-driver` — Compilation pipeline orchestration.
 
 mod ai_analysis;

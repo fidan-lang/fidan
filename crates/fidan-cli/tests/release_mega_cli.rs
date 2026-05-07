@@ -1,3 +1,5 @@
+#![allow(unused_crate_dependencies)]
+
 use std::sync::Arc;
 
 use fidan_lexer::{Lexer, SymbolInterner};

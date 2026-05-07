@@ -1,3 +1,5 @@
+#![allow(unused_crate_dependencies)]
+
 // fidan-interp/tests/integration.rs
 //
 // End-to-end integration tests: source string → full pipeline → result.

@@ -1,3 +1,5 @@
+#![allow(unused_crate_dependencies)]
+
 use fidan_driver::{
     AI_ANALYSIS_PROTOCOL_VERSION, AiAnalysisResponse, AiAnalysisResult, AiCallGraph, AiCallNode,
     AiDiagnosticSummary, AiExplainContext, AiRuntimeTrace, AiTraceStep, AiTypeMap, AiTypedBinding,

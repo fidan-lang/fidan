@@ -14,7 +14,6 @@ fidan-ast = { workspace = true }
 fidan-diagnostics = { workspace = true }
 fidan-stdlib = { workspace = true }
 rustc-hash = { workspace = true }
-indexmap = { workspace = true }
 
 [dev-dependencies]
 fidan-parser = { workspace = true }

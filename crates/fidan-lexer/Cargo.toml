@@ -9,8 +9,5 @@ repository.workspace = true
 [dependencies]
 fidan-source = { workspace = true }
 fidan-diagnostics = { workspace = true }
-phf = { workspace = true }
-smol_str = { workspace = true }
-dashmap = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }

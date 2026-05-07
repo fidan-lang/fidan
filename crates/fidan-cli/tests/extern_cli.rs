@@ -1,3 +1,5 @@
+#![allow(unused_crate_dependencies)]
+
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};

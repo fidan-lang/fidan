@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(unused_crate_dependencies))]
+
 //! `fidan-interp` — MIR interpreter (Phase 6).
 //!
 //! Executes a compiled `MirProgram` by walking its SSA/CFG representation.
