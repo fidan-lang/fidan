@@ -44,9 +44,25 @@ enum Command {
 }
 
 fn main() {
-    if let Err(error) = run() {
-        eprintln!("fidan-ai-analysis-helper: {error:#}");
-        std::process::exit(1);
+    let exit_code = match fidan_secrets::init_default_store() {
+        Ok(secret_store) => {
+            let _secret_store = secret_store;
+            match run() {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("fidan-ai-analysis-helper: {error:#}");
+                    1
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("fidan-ai-analysis-helper: {error:#}");
+            1
+        }
+    };
+
+    if exit_code != 0 {
+        std::process::exit(exit_code);
     }
 }
 
