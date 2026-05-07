@@ -1,10 +1,13 @@
 use anyhow::{Context, Result, bail};
-use keyring_core::{CredentialStore, Entry};
-use std::sync::Arc;
+use keyring_core::{CredentialStore, Entry, get_default_store};
+use std::sync::{Arc, LazyLock, Mutex};
 
 pub struct SecretStoreGuard {
     previous_store: Option<Arc<CredentialStore>>,
 }
+
+static LAZY_DEFAULT_STORE: LazyLock<Mutex<Option<Arc<CredentialStore>>>> =
+    LazyLock::new(|| Mutex::new(None));
 
 impl SecretStoreGuard {
     fn install(store: Arc<CredentialStore>) -> Self {
@@ -33,6 +36,10 @@ pub struct SecretSpec<'a> {
 
 pub fn init_default_store() -> Result<SecretStoreGuard> {
     Ok(SecretStoreGuard::install(build_default_store()?))
+}
+
+pub fn init_default_store_best_effort() -> Option<SecretStoreGuard> {
+    init_default_store().ok()
 }
 
 pub fn resolve_secret(spec: &SecretSpec<'_>, explicit: Option<&str>) -> Result<Option<String>> {
@@ -101,12 +108,37 @@ pub fn clear_secret(spec: &SecretSpec<'_>) -> Result<()> {
 }
 
 fn keychain_entry(spec: &SecretSpec<'_>) -> Result<Entry> {
+    ensure_default_store()?;
     Entry::new(spec.service, spec.account).with_context(|| {
         format!(
             "failed to initialize OS keychain entry for {}",
             spec.display_name
         )
     })
+}
+
+fn ensure_default_store() -> Result<()> {
+    if get_default_store().is_some() {
+        return Ok(());
+    }
+
+    let mut installed_store = LAZY_DEFAULT_STORE
+        .lock()
+        .expect("Poisoned keyring lazy store mutex: please report a bug!");
+    if installed_store.is_none() {
+        *installed_store = Some(build_default_store()?);
+    }
+
+    if get_default_store().is_none() {
+        keyring_core::set_default_store(
+            installed_store
+                .as_ref()
+                .expect("lazy default store must be initialized before installation")
+                .clone(),
+        );
+    }
+
+    Ok(())
 }
 
 fn is_no_entry_error(err: &keyring_core::Error) -> bool {

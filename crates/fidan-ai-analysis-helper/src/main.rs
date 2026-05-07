@@ -44,17 +44,9 @@ enum Command {
 }
 
 fn main() {
-    let exit_code = match fidan_secrets::init_default_store() {
-        Ok(secret_store) => {
-            let _secret_store = secret_store;
-            match run() {
-                Ok(()) => 0,
-                Err(error) => {
-                    eprintln!("fidan-ai-analysis-helper: {error:#}");
-                    1
-                }
-            }
-        }
+    let _secret_store = fidan_secrets::init_default_store_best_effort();
+    let exit_code = match run() {
+        Ok(()) => 0,
         Err(error) => {
             eprintln!("fidan-ai-analysis-helper: {error:#}");
             1
