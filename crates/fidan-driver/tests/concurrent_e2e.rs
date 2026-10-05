@@ -833,6 +833,28 @@ fn llvm_available() -> bool {
 }
 
 #[test]
+fn strength_reduction_preserves_values_and_types_across_aot_backends() {
+    let sandbox = temp_dir("fidan_strength_reduction");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM optimizer regression: no installed LLVM toolchain");
+            continue;
+        }
+        let output = sandbox.join(format!(
+            "optimizer-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/strength_reduction_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "strength reduction ok");
+    }
+    fs::remove_dir_all(sandbox).expect("remove optimizer regression sandbox");
+}
+
+#[test]
 fn integer_arithmetic_reports_consistent_errors_across_aot_backends() {
     let sandbox = temp_dir("fidan_integer_arithmetic");
     let output = sandbox.join(if cfg!(windows) {

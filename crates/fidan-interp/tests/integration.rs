@@ -181,6 +181,173 @@ fn run_src(src: &str) -> Result<(), RunError> {
 }
 
 #[test]
+fn strength_reduction_preserves_values_and_runtime_types() {
+    let source = format!(
+        "{}\n assert_eq(arithmetic[0](\"text\"), \"text0\")\n\
+         assert_eq(arithmetic[1](\"text\"), \"0text\")",
+        include_str!("../../../test/examples/strength_reduction_regression.fdn")
+    );
+    for threshold in [0, 1] {
+        run_src_with_threshold(&source, threshold).unwrap_or_else(|error| {
+            panic!("optimized strength reduction: {}", error.message);
+        });
+    }
+}
+
+#[test]
+fn strength_reduction_requires_proven_integer_or_boolean_operands() {
+    let mut cases = Vec::new();
+    for (ty, expressions) in [
+        (
+            "integer",
+            &[
+                "x + 0", "0 + x", "x - 0", "x * 1", "1 * x", "x * 0", "0 * x", "x / 1", "x ** 0",
+                "x ** 1",
+            ][..],
+        ),
+        (
+            "boolean",
+            &[
+                "x and true",
+                "true and x",
+                "x and false",
+                "false and x",
+                "x or false",
+                "false or x",
+                "x or true",
+                "true or x",
+            ][..],
+        ),
+    ] {
+        for expression in expressions {
+            let literal = if ty == "integer" { "3" } else { "true" };
+            cases.push((
+                format!(
+                    "action calculate returns flexible {{ var x = {literal}; return {expression} }}"
+                ),
+                true,
+            ));
+            for parameter in [
+                format!("certain x oftype {ty}"),
+                format!("x oftype {ty}"),
+                "certain x oftype flexible".to_owned(),
+                "certain x oftype float".to_owned(),
+            ] {
+                let source = format!(
+                    "action calculate with ({parameter}) returns flexible {{ return {expression} }}"
+                );
+                cases.push((source, false));
+            }
+        }
+    }
+
+    for (source, should_reduce) in [
+        (
+            "action calculate returns flexible { var x = 3; var copy = x; return copy * 0 }",
+            true,
+        ),
+        (
+            "action calculate returns flexible { var x = 3; return x * 0 }",
+            true,
+        ),
+        (
+            "action calculate with (certain x oftype integer) returns flexible { var copy oftype float = x; return copy * 0 }",
+            false,
+        ),
+        (
+            "var x = 3\n action calculate returns flexible { return x * 0 }",
+            false,
+        ),
+        (
+            "action calculate with (certain flag oftype boolean) returns flexible { var x oftype flexible = 1; if flag { x = \"text\" }; return x + 0 }",
+            false,
+        ),
+    ] {
+        cases.push((source.to_owned(), should_reduce));
+    }
+    for (source, should_reduce) in cases {
+        let (mut mir, interner) = build_mir(&source);
+        fidan_passes::run_all(&mut mir);
+        let function = mir
+            .functions
+            .iter()
+            .find(|function| interner.resolve(function.name).as_ref() == "calculate")
+            .unwrap();
+        let has_binary = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instr| {
+                matches!(
+                    instr,
+                    fidan_mir::Instr::Assign {
+                        rhs: fidan_mir::Rvalue::Binary { .. },
+                        ..
+                    }
+                )
+            });
+        assert_eq!(has_binary, !should_reduce, "{source}");
+    }
+}
+
+#[test]
+fn strength_reduction_preserves_dynamic_type_errors() {
+    for (expression, argument) in [
+        ("x + 0", "true"),
+        ("0 + x", "true"),
+        ("x - 0", "\"invalid\""),
+        ("x * 1", "\"invalid\""),
+        ("1 * x", "\"invalid\""),
+        ("x * 0", "\"invalid\""),
+        ("0 * x", "\"invalid\""),
+        ("x / 1", "\"invalid\""),
+        ("x ** 0", "\"invalid\""),
+        ("x ** 1", "\"invalid\""),
+        ("x and true", "\"invalid\""),
+        ("true and x", "\"invalid\""),
+        ("x and false", "\"invalid\""),
+        ("false and x", "\"invalid\""),
+        ("x or false", "\"invalid\""),
+        ("false or x", "\"invalid\""),
+        ("x or true", "\"invalid\""),
+        ("true or x", "\"invalid\""),
+    ] {
+        let source = format!(
+            "action calculate with (certain x oftype flexible) returns flexible {{ return {expression} }}\n\
+             var functions oftype list oftype flexible = [calculate]\n print(functions[0]({argument}))"
+        );
+        for threshold in [0, 1] {
+            let error = run_src_with_threshold(&source, threshold)
+                .expect_err("invalid dynamic operand must retain its runtime error");
+            assert!(
+                error.message.contains("type error"),
+                "{expression}: {}",
+                error.message
+            );
+        }
+    }
+    for (ty, expression) in [
+        ("integer", "x * 0"),
+        ("integer", "x ** 0"),
+        ("boolean", "x and false"),
+        ("boolean", "x or true"),
+    ] {
+        let source = format!(
+            "action calculate with (certain x oftype {ty}) returns flexible {{ return {expression} }}\n\
+             var functions oftype list oftype flexible = [calculate]\n print(functions[0](\"invalid\"))"
+        );
+        // Parameter annotations are not runtime type checks for flexible calls.
+        let error = run_src_with_threshold(&source, 0)
+            .expect_err("annotated parameter must not erase a dynamic runtime type error");
+        assert!(
+            error.message.contains("type error"),
+            "{expression}: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
 fn integer_arithmetic_reports_runtime_errors_without_host_panics() {
     let source = include_str!("../../../test/examples/integer_overflow_regression.fdn");
     for threshold in [0, 1] {

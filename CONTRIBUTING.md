@@ -31,7 +31,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 Before submitting a pull request, make sure the project builds successfully and all relevant tests pass.
 
-Use Rust 1.96 or newer and a host C/C++ toolchain. The current lockfile was tested with Rust 1.99. Linux builds also need `pkg-config` and `libdbus-1-dev` (Debian/Ubuntu names). Default workspace builds do not require LLVM; optional backend setup is documented in the [README](README.md#build-from-source). Commit the lockfile with dependency updates and repeat workspace/backend validation: the broad Cranelift `0` requirement also permits future minor versions with API or compiler-requirement changes.
+Use Rust 1.96 or newer and a host C/C++ toolchain. The current lockfile was tested with Rust 1.99. Linux builds also need `pkg-config` and `libdbus-1-dev` (Debian/Ubuntu names). Default workspace builds do not require LLVM; optional backend setup is documented in the [README](README.md#build-from-source). All six Cranelift crates are constrained to the compatible `0.136` series, currently locked at `0.136.2`. Commit the lockfile with dependency updates and repeat workspace/backend validation before changing the supported series.
 
 ---
 

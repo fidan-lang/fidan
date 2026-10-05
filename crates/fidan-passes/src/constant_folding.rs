@@ -5,19 +5,45 @@
 //   - `x + 0`, `x * 1`, `x ** 0`, `x && true`, etc. → simpler rvalue
 
 use fidan_ast::{BinOp, UnOp};
-use fidan_mir::{Instr, MirLit, Operand, Rvalue};
+use fidan_mir::{Instr, LocalId, MirLit, MirTy, Operand, Rvalue};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub struct ConstantFolding;
 
 impl crate::Pass for ConstantFolding {
     fn run(&self, prog: &mut fidan_mir::MirProgram) {
         for func in &mut prog.functions {
+            let dropped: FxHashSet<_> = func
+                .blocks
+                .iter()
+                .flat_map(|bb| &bb.instructions)
+                .filter_map(|instr| match instr {
+                    Instr::Drop { local } => Some(*local),
+                    _ => None,
+                })
+                .collect();
+            // Parameter annotations (even certain) do not validate runtime types
+            // for flexible calls. Only literal values and their SSA copies prove
+            // types here; globals, phis and other definitions remain unknown.
+            let mut known_types = FxHashMap::default();
             for bb in &mut func.blocks {
                 for instr in &mut bb.instructions {
-                    if let Instr::Assign { rhs, .. } = instr
-                        && let Some(reduced) = try_reduce(rhs)
-                    {
-                        *rhs = reduced;
+                    if let Instr::Assign { dest, ty, rhs } = instr {
+                        if let Some(reduced) = try_reduce(rhs, ty, &known_types) {
+                            *rhs = reduced;
+                        }
+                        let known_type = match rhs {
+                            Rvalue::Literal(MirLit::Int(_)) => Some(MirTy::Integer),
+                            Rvalue::Literal(MirLit::Bool(_)) => Some(MirTy::Boolean),
+                            Rvalue::Use(operand) => operand_type(operand, &known_types),
+                            _ => None,
+                        };
+                        if let Some(known_type) = known_type
+                            && !dropped.contains(dest)
+                            && (matches!(ty, MirTy::Dynamic | MirTy::Error) || *ty == known_type)
+                        {
+                            known_types.insert(*dest, known_type);
+                        }
                     }
                 }
             }
@@ -27,7 +53,11 @@ impl crate::Pass for ConstantFolding {
 
 /// Returns a simplified `Rvalue` if any folding or strength reduction applies,
 /// or `None` if the expression should be left unchanged.
-fn try_reduce(rhs: &Rvalue) -> Option<Rvalue> {
+fn try_reduce(
+    rhs: &Rvalue,
+    result_ty: &MirTy,
+    known_types: &FxHashMap<LocalId, MirTy>,
+) -> Option<Rvalue> {
     match rhs {
         // ── Full constant fold ─────────────────────────────────────────────
         Rvalue::Binary {
@@ -42,7 +72,7 @@ fn try_reduce(rhs: &Rvalue) -> Option<Rvalue> {
         } => fold_unary(*op, a).map(Rvalue::Literal),
 
         // ── Strength reduction: Binary with one constant operand ───────────
-        Rvalue::Binary { op, lhs, rhs } => strength_reduce(*op, lhs, rhs),
+        Rvalue::Binary { op, lhs, rhs } => strength_reduce(*op, lhs, rhs, result_ty, known_types),
 
         // ── Identity unary : +x → x ────────────────────────────────────────
         Rvalue::Unary {
@@ -55,51 +85,86 @@ fn try_reduce(rhs: &Rvalue) -> Option<Rvalue> {
 }
 
 /// Strength-reduce one binary operand being a known constant.
-fn strength_reduce(op: BinOp, lhs: &Operand, rhs: &Operand) -> Option<Rvalue> {
+fn strength_reduce(
+    op: BinOp,
+    lhs: &Operand,
+    rhs: &Operand,
+    result_ty: &MirTy,
+    known_types: &FxHashMap<LocalId, MirTy>,
+) -> Option<Rvalue> {
     use MirLit::*;
     // Helper: is operand a specific integer?
     let is_int = |op: &Operand, n: i64| matches!(op, Operand::Const(Int(v)) if *v == n);
-    let is_float = |op: &Operand, v: f64| matches!(op, Operand::Const(Float(f)) if *f == v);
     let is_bool = |op: &Operand, b: bool| matches!(op, Operand::Const(Bool(v)) if *v == b);
 
-    match op {
-        // x + 0  or  0 + x  →  x
-        BinOp::Add if is_int(rhs, 0) || is_float(rhs, 0.0) => Some(Rvalue::Use(lhs.clone())),
-        BinOp::Add if is_int(lhs, 0) || is_float(lhs, 0.0) => Some(Rvalue::Use(rhs.clone())),
+    // Only matching integer/boolean values permit these identities. Float
+    // rewrites can change signed zero/NaN; mixed operations can change types.
+    match (
+        operand_type(lhs, known_types),
+        operand_type(rhs, known_types),
+    ) {
+        (Some(MirTy::Integer), Some(MirTy::Integer))
+            if matches!(result_ty, MirTy::Integer | MirTy::Dynamic | MirTy::Error) =>
+        {
+            match op {
+                // x + 0  or  0 + x  →  x
+                BinOp::Add if is_int(rhs, 0) => Some(Rvalue::Use(lhs.clone())),
+                BinOp::Add if is_int(lhs, 0) => Some(Rvalue::Use(rhs.clone())),
 
-        // x - 0  →  x
-        BinOp::Sub if is_int(rhs, 0) || is_float(rhs, 0.0) => Some(Rvalue::Use(lhs.clone())),
+                // x - 0  →  x
+                BinOp::Sub if is_int(rhs, 0) => Some(Rvalue::Use(lhs.clone())),
 
-        // x * 1  or  1 * x  →  x
-        BinOp::Mul if is_int(rhs, 1) || is_float(rhs, 1.0) => Some(Rvalue::Use(lhs.clone())),
-        BinOp::Mul if is_int(lhs, 1) || is_float(lhs, 1.0) => Some(Rvalue::Use(rhs.clone())),
+                // x * 1  or  1 * x  →  x
+                BinOp::Mul if is_int(rhs, 1) => Some(Rvalue::Use(lhs.clone())),
+                BinOp::Mul if is_int(lhs, 1) => Some(Rvalue::Use(rhs.clone())),
 
-        // x * 0  or  0 * x  →  0  (integers only; floats have -0.0/NaN edge cases)
-        BinOp::Mul if is_int(rhs, 0) => Some(Rvalue::Literal(Int(0))),
-        BinOp::Mul if is_int(lhs, 0) => Some(Rvalue::Literal(Int(0))),
+                // x * 0  or  0 * x  →  0  (integers only; floats have -0.0/NaN edge cases)
+                BinOp::Mul if is_int(rhs, 0) => Some(Rvalue::Literal(Int(0))),
+                BinOp::Mul if is_int(lhs, 0) => Some(Rvalue::Literal(Int(0))),
 
-        // x / 1  →  x
-        BinOp::Div if is_int(rhs, 1) || is_float(rhs, 1.0) => Some(Rvalue::Use(lhs.clone())),
+                // x / 1  →  x
+                BinOp::Div if is_int(rhs, 1) => Some(Rvalue::Use(lhs.clone())),
 
-        // x ** 0  →  1  (integer base only)
-        BinOp::Pow if is_int(rhs, 0) => Some(Rvalue::Literal(Int(1))),
-        // x ** 1  →  x
-        BinOp::Pow if is_int(rhs, 1) => Some(Rvalue::Use(lhs.clone())),
-
-        // x && true  or  true && x  →  x
-        BinOp::And if is_bool(rhs, true) => Some(Rvalue::Use(lhs.clone())),
-        BinOp::And if is_bool(lhs, true) => Some(Rvalue::Use(rhs.clone())),
-        // x && false  or  false && x  →  false
-        BinOp::And if is_bool(rhs, false) || is_bool(lhs, false) => {
-            Some(Rvalue::Literal(Bool(false)))
+                // x ** 0  →  1  (integer base only)
+                BinOp::Pow if is_int(rhs, 0) => Some(Rvalue::Literal(Int(1))),
+                // x ** 1  →  x
+                BinOp::Pow if is_int(rhs, 1) => Some(Rvalue::Use(lhs.clone())),
+                _ => None,
+            }
         }
 
-        // x || false  or  false || x  →  x
-        BinOp::Or if is_bool(rhs, false) => Some(Rvalue::Use(lhs.clone())),
-        BinOp::Or if is_bool(lhs, false) => Some(Rvalue::Use(rhs.clone())),
-        // x || true  or  true || x  →  true
-        BinOp::Or if is_bool(rhs, true) || is_bool(lhs, true) => Some(Rvalue::Literal(Bool(true))),
+        (Some(MirTy::Boolean), Some(MirTy::Boolean))
+            if matches!(result_ty, MirTy::Boolean | MirTy::Dynamic | MirTy::Error) =>
+        {
+            match op {
+                // x && true  or  true && x  →  x
+                BinOp::And if is_bool(rhs, true) => Some(Rvalue::Use(lhs.clone())),
+                BinOp::And if is_bool(lhs, true) => Some(Rvalue::Use(rhs.clone())),
+                // x && false  or  false && x  →  false
+                BinOp::And if is_bool(rhs, false) || is_bool(lhs, false) => {
+                    Some(Rvalue::Literal(Bool(false)))
+                }
 
+                // x || false  or  false || x  →  x
+                BinOp::Or if is_bool(rhs, false) => Some(Rvalue::Use(lhs.clone())),
+                BinOp::Or if is_bool(lhs, false) => Some(Rvalue::Use(rhs.clone())),
+                // x || true  or  true || x  →  true
+                BinOp::Or if is_bool(rhs, true) || is_bool(lhs, true) => {
+                    Some(Rvalue::Literal(Bool(true)))
+                }
+
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn operand_type(operand: &Operand, known_types: &FxHashMap<LocalId, MirTy>) -> Option<MirTy> {
+    match operand {
+        Operand::Local(local) => known_types.get(local).cloned(),
+        Operand::Const(MirLit::Int(_)) => Some(MirTy::Integer),
+        Operand::Const(MirLit::Bool(_)) => Some(MirTy::Boolean),
         _ => None,
     }
 }
