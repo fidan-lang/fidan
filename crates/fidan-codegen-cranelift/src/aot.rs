@@ -469,6 +469,15 @@ struct RuntimeDecls {
     truthy: cranelift_module::FuncId,
     null_coalesce: cranelift_module::FuncId,
     // Dynamic arithmetic
+    float_div: cranelift_module::FuncId,
+    int_add: cranelift_module::FuncId,
+    int_sub: cranelift_module::FuncId,
+    int_mul: cranelift_module::FuncId,
+    int_div: cranelift_module::FuncId,
+    int_rem: cranelift_module::FuncId,
+    int_pow: cranelift_module::FuncId,
+    int_neg: cranelift_module::FuncId,
+    int_abs: cranelift_module::FuncId,
     dyn_add: cranelift_module::FuncId,
     dyn_sub: cranelift_module::FuncId,
     dyn_mul: cranelift_module::FuncId,
@@ -597,6 +606,11 @@ impl RuntimeDecls {
                 $(s.params.push(AbiParam::new($p));)*
                 s.returns.push(AbiParam::new(I64)); s
             }};
+            (($($p:expr),*) -> f64) => {{
+                let mut s = module.make_signature();
+                $(s.params.push(AbiParam::new($p));)*
+                s.returns.push(AbiParam::new(F64)); s
+            }};
             (($($p:expr),*) -> i8) => {{
                 let mut s = module.make_signature();
                 $(s.params.push(AbiParam::new($p));)*
@@ -635,6 +649,15 @@ impl RuntimeDecls {
             drop_any: decl!("fdn_drop", sig!((p) -> void)),
             truthy: decl!("fdn_truthy", sig!((p) -> i8)),
             null_coalesce: decl!("fdn_null_coalesce", sig!((p, p) -> ptr)),
+            float_div: decl!("fdn_float_div", sig!((f64t, f64t) -> f64)),
+            int_add: decl!("fdn_int_add", sig!((i64t, i64t) -> i64)),
+            int_sub: decl!("fdn_int_sub", sig!((i64t, i64t) -> i64)),
+            int_mul: decl!("fdn_int_mul", sig!((i64t, i64t) -> i64)),
+            int_div: decl!("fdn_int_div", sig!((i64t, i64t) -> i64)),
+            int_rem: decl!("fdn_int_rem", sig!((i64t, i64t) -> i64)),
+            int_pow: decl!("fdn_int_pow", sig!((i64t, i64t) -> i64)),
+            int_abs: decl!("fdn_int_abs", sig!((i64t) -> i64)),
+            int_neg: decl!("fdn_int_neg", sig!((i64t) -> i64)),
             dyn_add: decl!("fdn_dyn_add", sig!((p, p) -> ptr)),
             dyn_sub: decl!("fdn_dyn_sub", sig!((p, p) -> ptr)),
             dyn_mul: decl!("fdn_dyn_mul", sig!((p, p) -> ptr)),
@@ -1401,16 +1424,19 @@ fn lower_instr(
                 val
             };
             builder.def_var(cl_vars[dest.0 as usize], val);
-            if let Rvalue::Call { callee, args } = rhs
-                && call_may_throw(
+            let may_throw = match rhs {
+                rhs if rhs.arithmetic_may_fail() => true,
+                Rvalue::Call { callee, args } => call_may_throw(
                     callee,
                     args,
                     local_types,
                     namespace_locals,
                     function_throw_map,
                     interner,
-                )?
-            {
+                )?,
+                _ => false,
+            };
+            if may_throw {
                 emit_pending_exception_check(
                     module,
                     rt,
@@ -2395,10 +2421,6 @@ fn lower_binary(
 ) -> Result<cranelift_codegen::ir::Value> {
     use fidan_ast::BinOp::*;
 
-    fn known_nonzero_integer(op: &Operand) -> bool {
-        matches!(op, Operand::Const(MirLit::Int(value)) if *value != 0)
-    }
-
     let lhs_mir = operand_mir_ty(local_types, lhs);
     let rhs_mir = operand_mir_ty(local_types, rhs);
     let lhs_ty = mir_ty_to_cl(&lhs_mir);
@@ -2410,57 +2432,12 @@ fn lower_binary(
         let l = lower_operand(builder, cl_vars, lhs);
         let r = lower_operand(builder, cl_vars, rhs);
         return Ok(match op {
-            Add => builder.ins().iadd(l, r),
-            Sub => builder.ins().isub(l, r),
-            Mul => builder.ins().imul(l, r),
-            Div => {
-                if !known_nonzero_integer(rhs) {
-                    // Guard against divide-by-zero only when the divisor is not a known nonzero literal.
-                    let zero = builder.ins().iconst(I64, 0);
-                    let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
-                    let ok_block = builder.create_block();
-                    let trap_block = builder.create_block();
-                    builder.ins().brif(is_zero, trap_block, &[], ok_block, &[]);
-                    builder.switch_to_block(trap_block);
-                    builder.seal_block(trap_block);
-                    let (mp, ml) = str_const(module, builder, "division by zero")?;
-                    let msg_ptr = {
-                        let r2 = module.declare_func_in_func(rt.box_str, builder.func);
-                        let inst = builder.ins().call(r2, &[mp, ml]);
-                        builder.inst_results(inst)[0]
-                    };
-                    let panic_ref = module.declare_func_in_func(rt.panic_fn, builder.func);
-                    builder.ins().call(panic_ref, &[msg_ptr]);
-                    builder.ins().trap(TrapCode::unwrap_user(1));
-                    builder.switch_to_block(ok_block);
-                    builder.seal_block(ok_block);
-                }
-                builder.ins().sdiv(l, r)
-            }
-            Rem => {
-                if !known_nonzero_integer(rhs) {
-                    // Guard against divide-by-zero only when the divisor is not a known nonzero literal.
-                    let zero = builder.ins().iconst(I64, 0);
-                    let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
-                    let ok_block = builder.create_block();
-                    let trap_block = builder.create_block();
-                    builder.ins().brif(is_zero, trap_block, &[], ok_block, &[]);
-                    builder.switch_to_block(trap_block);
-                    builder.seal_block(trap_block);
-                    let (mp, ml) = str_const(module, builder, "remainder by zero")?;
-                    let msg_ptr = {
-                        let r2 = module.declare_func_in_func(rt.box_str, builder.func);
-                        let inst = builder.ins().call(r2, &[mp, ml]);
-                        builder.inst_results(inst)[0]
-                    };
-                    let panic_ref = module.declare_func_in_func(rt.panic_fn, builder.func);
-                    builder.ins().call(panic_ref, &[msg_ptr]);
-                    builder.ins().trap(TrapCode::unwrap_user(1));
-                    builder.switch_to_block(ok_block);
-                    builder.seal_block(ok_block);
-                }
-                builder.ins().srem(l, r)
-            }
+            Add => call_rt(module, builder, rt.int_add, &[l, r])?.unwrap(),
+            Sub => call_rt(module, builder, rt.int_sub, &[l, r])?.unwrap(),
+            Mul => call_rt(module, builder, rt.int_mul, &[l, r])?.unwrap(),
+            Div => call_rt(module, builder, rt.int_div, &[l, r])?.unwrap(),
+            Rem => call_rt(module, builder, rt.int_rem, &[l, r])?.unwrap(),
+            Pow => call_rt(module, builder, rt.int_pow, &[l, r])?.unwrap(),
             Eq => builder.ins().icmp(IntCC::Equal, l, r),
             NotEq => builder.ins().icmp(IntCC::NotEqual, l, r),
             Lt => builder.ins().icmp(IntCC::SignedLessThan, l, r),
@@ -2479,7 +2456,7 @@ fn lower_binary(
                 return Ok(call_rt(module, builder, rt.make_range, &[l, r, inc])?
                     .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)));
             }
-            Pow | And | Or => {
+            And | Or => {
                 // Box and dispatch through C ABI.
                 let lb = call_rt(module, builder, rt.box_int, &[l])?.unwrap();
                 let rb = call_rt(module, builder, rt.box_int, &[r])?.unwrap();
@@ -2496,7 +2473,7 @@ fn lower_binary(
             Add => builder.ins().fadd(l, r),
             Sub => builder.ins().fsub(l, r),
             Mul => builder.ins().fmul(l, r),
-            Div => builder.ins().fdiv(l, r),
+            Div => call_rt(module, builder, rt.float_div, &[l, r])?.unwrap(),
             Rem => {
                 let lb = call_rt(module, builder, rt.box_float, &[l])?.unwrap();
                 let rb = call_rt(module, builder, rt.box_float, &[r])?.unwrap();
@@ -2627,9 +2604,9 @@ fn lower_unary(
     use fidan_ast::UnOp::*;
     let oty = operand_ty(cl_vars, local_types, operand);
     match (op, oty) {
-        (Neg, I64) => {
+        (Neg, I64) if operand_mir_ty(local_types, operand) == MirTy::Integer => {
             let v = lower_operand(builder, cl_vars, operand);
-            Ok(builder.ins().ineg(v))
+            call_rt(module, builder, rt.int_neg, &[v]).map(Option::unwrap)
         }
         (Neg, F64) => {
             let v = lower_operand(builder, cl_vars, operand);
@@ -3101,7 +3078,7 @@ fn emit_stdlib_method_call(
             if arg_ty == F64 {
                 StdlibResultValue::Float(builder.ins().fabs(arg))
             } else {
-                StdlibResultValue::Integer(builder.ins().iabs(arg))
+                StdlibResultValue::Integer(call_rt(module, builder, rt.int_abs, &[arg])?.unwrap())
             }
         }
         StdlibIntrinsic::Math(MathIntrinsic::Floor) => {
@@ -4799,7 +4776,9 @@ fn call_may_throw(
             Ok(
                 infer_stdlib_method(namespace.as_str(), method_name.as_str(), &arg_kinds)
                     .and_then(|info| info.intrinsic)
-                    .is_none(),
+                    .is_none_or(|intrinsic| {
+                        matches!(intrinsic, StdlibIntrinsic::Math(MathIntrinsic::Abs))
+                    }),
             )
         }
         _ => Ok(true),

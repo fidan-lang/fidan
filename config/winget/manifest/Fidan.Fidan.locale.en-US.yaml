@@ -15,27 +15,20 @@ License: Apache-2.0
 LicenseUrl: https://github.com/fidan-lang/fidan/blob/main/LICENSE
 Copyright: Copyright © 2025 Kaan Gönüldinc. All rights reserved.
 CopyrightUrl: https://github.com/fidan-lang/fidan/blob/main/LICENSE
-ShortDescription: Fidan is the world's first AI-native next-generation language
-  that lets you prototype like Python, run like C, and ship with Rust-level
-  safety.
-Description: Fidan is for people who are tired of choosing between Python-level
-  ergonomics, Rust-level ceremony, and C++-level legacy drag. You get
-  interpreter, JIT, Cranelift AOT, and LLVM AOT in one coherent toolchain, with
-  real concurrency, direct native interop, tracing, replay, and AI-assisted
-  explain, fix, and improve workflows that belong to the product instead of
-  sitting beside it.
+ShortDescription: A statically typed programming language and Rust-based toolchain.
+Description: Fidan provides a MIR interpreter, selective Cranelift JIT,
+  Cranelift AOT, and optional LLVM AOT through a separately installed toolchain.
+  It includes native interop, concurrency, editor tooling, and compiler-grounded
+  analysis for AI and MCP tools. Backend support varies by language feature;
+  consult the repository documentation for current capabilities and limitations.
 Moniker: fidan
 Tags:
   - fidan
   - programming-language
-  - high-performance
   - jit
   - aot
-  - bytecode
-  - virtual-machine
-  - ai-native
   - cross-platform
   - developer-tools
-ReleaseNotes: Improved performance, minor bug fixes, and additional features.
+ReleaseNotesUrl: https://github.com/fidan-lang/fidan/blob/main/CHANGELOG.md
 ManifestType: defaultLocale
 ManifestVersion: 1.12.0

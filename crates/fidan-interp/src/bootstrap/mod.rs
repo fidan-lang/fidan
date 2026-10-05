@@ -1,9 +1,7 @@
 //! Bootstrap method dispatch — single entry point that routes to per-type files.
 //!
-//! These are placeholder implementations that make receiver methods work before
-//! Phase 7 stdlib (`std.string`, `std.collections`, `std.math`) is built.
-//! Once a stdlib module defines an extension action for a method, the normal
-//! extension-action dispatch fires first and these become unreachable.
+//! Built-in receivers run here after user extension-action dispatch. Shared
+//! runtime helpers keep interpreted receiver semantics aligned with native code.
 
 pub mod dict_methods;
 pub mod hashset_methods;
@@ -21,18 +19,27 @@ pub fn call_bootstrap_method(
     receiver: FidanValue,
     method: &str,
     args: Vec<FidanValue>,
-) -> Result<Option<FidanValue>, String> {
+) -> Result<Option<FidanValue>, fidan_runtime::stdlib::StdlibRuntimeError> {
     Ok(match receiver {
         FidanValue::String(s) => string_methods::dispatch(s, method, args),
         FidanValue::List(l) => list_methods::dispatch(l, method, args),
         FidanValue::Dict(d) => dict_methods::dispatch(d, method, args),
         FidanValue::HashSet(s) => hashset_methods::dispatch(s, method, args),
-        v @ (FidanValue::Integer(_) | FidanValue::Float(_)) => numeric_methods::dispatch(v, method),
+        v @ (FidanValue::Integer(_) | FidanValue::Float(_)) => {
+            numeric_methods::dispatch_result(v, method)?
+        }
         FidanValue::Range {
             start,
             end,
             inclusive,
-        } => fidan_runtime::range_method(start, end, inclusive, method, args)?,
+        } => {
+            fidan_runtime::range_method(start, end, inclusive, method, args).map_err(|message| {
+                fidan_runtime::stdlib::StdlibRuntimeError::new(
+                    fidan_diagnostics::diag_code!("R2002"),
+                    message,
+                )
+            })?
+        }
         _ => None,
     })
 }

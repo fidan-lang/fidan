@@ -1,4 +1,4 @@
-//! Bootstrap string methods — placeholder until `std.string` (Phase 7).
+//! String receiver methods for interpreted execution.
 
 use fidan_config::{ReceiverBuiltinKind, infer_receiver_member};
 use fidan_runtime::{FidanList, FidanString, FidanValue, OwnedRef};
@@ -71,49 +71,11 @@ pub fn dispatch(s: FidanString, method: &str, args: Vec<FidanValue>) -> Option<F
             }
             Some(FidanValue::List(OwnedRef::new(list)))
         }
-        "indexOf" => {
-            let target = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            if let FidanValue::String(pat) = target {
-                let idx = s
-                    .as_str()
-                    .find(pat.as_str())
-                    .map(|i| FidanValue::Integer(i as i64))
-                    .unwrap_or(FidanValue::Integer(-1));
-                Some(idx)
-            } else {
-                Some(FidanValue::Integer(-1))
-            }
-        }
-        "substring" => {
-            let mut iter = args.into_iter();
-            let start = iter.next().unwrap_or(FidanValue::Nothing);
-            let end = iter.next().unwrap_or(FidanValue::Nothing);
-            let chars: Vec<char> = s.as_str().chars().collect();
-            let len = chars.len();
-            let si = match start {
-                FidanValue::Integer(n) => n.max(0) as usize,
-                _ => 0,
-            };
-            let ei = match end {
-                FidanValue::Integer(n) => (n as usize).min(len),
-                _ => len,
-            };
-            let sub: String = chars[si.min(len)..ei.min(len)].iter().collect();
-            Some(FidanValue::String(FidanString::new(&sub)))
-        }
-        "charAt" => {
-            let idx = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            if let FidanValue::Integer(i) = idx {
-                Some(
-                    s.as_str()
-                        .chars()
-                        .nth(i as usize)
-                        .map(|c| FidanValue::String(FidanString::new(&c.to_string())))
-                        .unwrap_or(FidanValue::Nothing),
-                )
-            } else {
-                Some(FidanValue::Nothing)
-            }
+        "indexOf" | "lastIndexOf" | "substring" | "charAt" => {
+            let mut values = Vec::with_capacity(args.len() + 1);
+            values.push(FidanValue::String(s));
+            values.extend(args);
+            fidan_runtime::stdlib::string::dispatch(method, values)
         }
         // Returns a new string with characters in reversed order.
         // Strings are immutable so this always produces a fresh value.

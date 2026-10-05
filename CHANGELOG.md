@@ -30,9 +30,18 @@ compiler releases.
   replace fields without a `RefCell` panic.
 - Native Unicode indexing/length, list bounds/assignment errors, range methods,
   and structural collection assertions now match the tested interpreter cases.
-- Integer addition, subtraction, multiplication, and negation wrap consistently
-  in the interpreter, including debug builds. Added the former `crash.fdn`
-  workload as an interpreter/native regression.
+- Integer arithmetic preserves documented R2003 overflow errors across the
+  interpreter, selective JIT, and both AOT backends, including negation, powers,
+  and MIN / -1 or MIN % -1. Division/remainder by zero reports R2001 for typed
+  and flexible values. Fractional reciprocal powers require a float operand;
+  negative integer powers of 1 and -1 retain their exact integer results.
+- Integer absolute value reports R2003 for MIN in standard-library calls,
+  receiver methods, and native intrinsics, without a host arithmetic panic.
+- Selective JIT scalar operations check MIR operand types so boxed flexible
+  values use interpreter fallback instead of treating pointers as integers.
+- String receiver searches use Unicode scalar indices; substring aliases safely
+  clamp bounds and return empty reversed ranges. charAt boundary behavior agrees
+  between interpreter and native execution.
 - LSP positions and document edits handle UTF-16 columns and reject ranges
   splitting surrogate pairs.
 - LLVM bitcode serialization retains trailing bytes, fixing full LTO, and CPU

@@ -20,7 +20,6 @@
 
 mod check;
 mod infer;
-mod parallel_check;
 mod scope;
 mod types;
 

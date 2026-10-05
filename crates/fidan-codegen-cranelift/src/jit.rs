@@ -445,6 +445,16 @@ pub struct JitCompiler {
     load_global_raw_id: FuncId,
     store_global_raw_id: FuncId,
     call_fn_raw_id: FuncId,
+    int_add_id: FuncId,
+    int_sub_id: FuncId,
+    int_mul_id: FuncId,
+    int_div_id: FuncId,
+    int_rem_id: FuncId,
+    int_pow_id: FuncId,
+    int_neg_id: FuncId,
+    int_abs_id: FuncId,
+    float_div_id: FuncId,
+    has_exception_id: FuncId,
     box_int_scoped_id: FuncId,
     box_float_scoped_id: FuncId,
     box_bool_scoped_id: FuncId,
@@ -504,6 +514,22 @@ impl JitCompiler {
         builder.symbol(
             "fdn_jit_store_global_raw",
             fdn_jit_store_global_raw as *const u8,
+        );
+        builder.symbol("fdn_int_add", fidan_runtime::ffi::fdn_int_add as *const u8);
+        builder.symbol("fdn_int_sub", fidan_runtime::ffi::fdn_int_sub as *const u8);
+        builder.symbol("fdn_int_mul", fidan_runtime::ffi::fdn_int_mul as *const u8);
+        builder.symbol("fdn_int_div", fidan_runtime::ffi::fdn_int_div as *const u8);
+        builder.symbol("fdn_int_rem", fidan_runtime::ffi::fdn_int_rem as *const u8);
+        builder.symbol("fdn_int_pow", fidan_runtime::ffi::fdn_int_pow as *const u8);
+        builder.symbol("fdn_int_abs", fidan_runtime::ffi::fdn_int_abs as *const u8);
+        builder.symbol("fdn_int_neg", fidan_runtime::ffi::fdn_int_neg as *const u8);
+        builder.symbol(
+            "fdn_float_div",
+            fidan_runtime::ffi::fdn_float_div as *const u8,
+        );
+        builder.symbol(
+            "fdn_has_exception",
+            fidan_runtime::ffi::fdn_has_exception as *const u8,
         );
         builder.symbol("fdn_jit_call_fn_raw", fdn_jit_call_fn_raw as *const u8);
         builder.symbol(
@@ -638,6 +664,16 @@ impl JitCompiler {
         };
         let box_int_scoped_id =
             declare_import_fn(&mut module, "fdn_jit_box_int_scoped", &[I64], Some(I64));
+        let int_add_id = declare_import_fn(&mut module, "fdn_int_add", &[I64, I64], Some(I64));
+        let int_sub_id = declare_import_fn(&mut module, "fdn_int_sub", &[I64, I64], Some(I64));
+        let int_mul_id = declare_import_fn(&mut module, "fdn_int_mul", &[I64, I64], Some(I64));
+        let int_div_id = declare_import_fn(&mut module, "fdn_int_div", &[I64, I64], Some(I64));
+        let int_rem_id = declare_import_fn(&mut module, "fdn_int_rem", &[I64, I64], Some(I64));
+        let int_pow_id = declare_import_fn(&mut module, "fdn_int_pow", &[I64, I64], Some(I64));
+        let int_abs_id = declare_import_fn(&mut module, "fdn_int_abs", &[I64], Some(I64));
+        let int_neg_id = declare_import_fn(&mut module, "fdn_int_neg", &[I64], Some(I64));
+        let float_div_id = declare_import_fn(&mut module, "fdn_float_div", &[F64, F64], Some(F64));
+        let has_exception_id = declare_import_fn(&mut module, "fdn_has_exception", &[], Some(I8));
         let box_float_scoped_id =
             declare_import_fn(&mut module, "fdn_jit_box_float_scoped", &[F64], Some(I64));
         let box_bool_scoped_id =
@@ -765,6 +801,16 @@ impl JitCompiler {
             load_global_raw_id,
             store_global_raw_id,
             call_fn_raw_id,
+            int_add_id,
+            int_sub_id,
+            int_mul_id,
+            int_div_id,
+            int_rem_id,
+            int_pow_id,
+            int_neg_id,
+            int_abs_id,
+            float_div_id,
+            has_exception_id,
             box_int_scoped_id,
             box_float_scoped_id,
             box_bool_scoped_id,
@@ -901,6 +947,36 @@ impl JitCompiler {
                 .module
                 .declare_func_in_func(self.call_fn_raw_id, builder.func);
             let rt = JitRuntimeRefs {
+                int_abs: self
+                    .module
+                    .declare_func_in_func(self.int_abs_id, builder.func),
+                float_div: self
+                    .module
+                    .declare_func_in_func(self.float_div_id, builder.func),
+                int_add: self
+                    .module
+                    .declare_func_in_func(self.int_add_id, builder.func),
+                int_sub: self
+                    .module
+                    .declare_func_in_func(self.int_sub_id, builder.func),
+                int_mul: self
+                    .module
+                    .declare_func_in_func(self.int_mul_id, builder.func),
+                int_div: self
+                    .module
+                    .declare_func_in_func(self.int_div_id, builder.func),
+                int_rem: self
+                    .module
+                    .declare_func_in_func(self.int_rem_id, builder.func),
+                int_pow: self
+                    .module
+                    .declare_func_in_func(self.int_pow_id, builder.func),
+                int_neg: self
+                    .module
+                    .declare_func_in_func(self.int_neg_id, builder.func),
+                has_exception: self
+                    .module
+                    .declare_func_in_func(self.has_exception_id, builder.func),
                 box_int_scoped_ref: self
                     .module
                     .declare_func_in_func(self.box_int_scoped_id, builder.func),
@@ -1043,6 +1119,9 @@ impl JitCompiler {
                                 &emit_ctx,
                             )?;
                             builder.def_var(cl_vars[dest.0 as usize], val);
+                            if rhs.arithmetic_may_fail() || matches!(rhs, Rvalue::Call { .. }) {
+                                emit_jit_exception_check(&mut builder, &rt)?;
+                            }
                         }
 
                         Instr::LoadGlobal { dest, global } => {
@@ -1078,6 +1157,7 @@ impl JitCompiler {
                                             ns.as_str(),
                                             mname.as_ref(),
                                             args,
+                                            &rt,
                                         )?
                                     } else {
                                         let dest_ty = dest
@@ -1114,6 +1194,7 @@ impl JitCompiler {
                             if let Some(d) = dest {
                                 builder.def_var(cl_vars[d.0 as usize], val);
                             }
+                            emit_jit_exception_check(&mut builder, &rt)?;
                         }
                         Instr::GetIndex {
                             dest,
@@ -1291,6 +1372,16 @@ struct RvalueEmitCtx<'a> {
 }
 
 struct JitRuntimeRefs {
+    int_add: cranelift_codegen::ir::FuncRef,
+    int_sub: cranelift_codegen::ir::FuncRef,
+    int_mul: cranelift_codegen::ir::FuncRef,
+    int_div: cranelift_codegen::ir::FuncRef,
+    int_rem: cranelift_codegen::ir::FuncRef,
+    int_pow: cranelift_codegen::ir::FuncRef,
+    int_neg: cranelift_codegen::ir::FuncRef,
+    int_abs: cranelift_codegen::ir::FuncRef,
+    float_div: cranelift_codegen::ir::FuncRef,
+    has_exception: cranelift_codegen::ir::FuncRef,
     box_int_scoped_ref: cranelift_codegen::ir::FuncRef,
     box_float_scoped_ref: cranelift_codegen::ir::FuncRef,
     box_bool_scoped_ref: cranelift_codegen::ir::FuncRef,
@@ -1516,14 +1607,17 @@ fn emit_rvalue(
         Rvalue::Use(op) => Some(load_operand(builder, ctx.vars, op)),
 
         Rvalue::Binary { op, lhs, rhs } => {
+            operand_scalar_kind(lhs, ctx.local_types)?;
+            operand_scalar_kind(rhs, ctx.local_types)?;
             let lv = load_operand(builder, ctx.vars, lhs);
             let rv = load_operand(builder, ctx.vars, rhs);
-            emit_binop(builder, *op, lv, rv, dest_ty)
+            emit_binop(builder, *op, lv, rv, dest_ty, ctx.rt)
         }
 
         Rvalue::Unary { op, operand } => {
+            operand_scalar_kind(operand, ctx.local_types)?;
             let v = load_operand(builder, ctx.vars, operand);
-            emit_unop(builder, *op, v, dest_ty)
+            emit_unop(builder, *op, v, dest_ty, ctx.rt)
         }
 
         Rvalue::Call {
@@ -1558,6 +1652,7 @@ fn emit_rvalue(
                 ns.as_ref(),
                 mname.as_ref(),
                 args,
+                ctx.rt,
             )
         }
 
@@ -1767,12 +1862,27 @@ fn str_const(
     Some((ptr, len))
 }
 
+fn emit_jit_exception_check(builder: &mut FunctionBuilder, rt: &JitRuntimeRefs) -> Option<()> {
+    let pending = call_runtime(builder, rt.has_exception, &[])?;
+    let failure = builder.create_block();
+    let success = builder.create_block();
+    builder.ins().brif(pending, failure, &[], success, &[]);
+    builder.switch_to_block(failure);
+    builder.seal_block(failure);
+    let zero = builder.ins().iconst(I64, 0);
+    builder.ins().return_(&[zero]);
+    builder.switch_to_block(success);
+    builder.seal_block(success);
+    Some(())
+}
+
 fn emit_binop(
     builder: &mut FunctionBuilder,
     op: fidan_ast::BinOp,
     lv: Value,
     rv: Value,
     dest_ty: &MirTy,
+    rt: &JitRuntimeRefs,
 ) -> Option<Value> {
     use fidan_ast::BinOp;
 
@@ -1795,16 +1905,18 @@ fn emit_binop(
     };
 
     let val = match op {
-        BinOp::Add if dest_ty == &MirTy::Integer => builder.ins().iadd(lv2, rv2),
-        BinOp::Sub if dest_ty == &MirTy::Integer => builder.ins().isub(lv2, rv2),
-        BinOp::Mul if dest_ty == &MirTy::Integer => builder.ins().imul(lv2, rv2),
-        BinOp::Div if dest_ty == &MirTy::Integer => builder.ins().sdiv(lv2, rv2),
-        BinOp::Rem if dest_ty == &MirTy::Integer => builder.ins().srem(lv2, rv2),
+        BinOp::Add if dest_ty == &MirTy::Integer => call_runtime(builder, rt.int_add, &[lv2, rv2])?,
+        BinOp::Sub if dest_ty == &MirTy::Integer => call_runtime(builder, rt.int_sub, &[lv2, rv2])?,
+        BinOp::Mul if dest_ty == &MirTy::Integer => call_runtime(builder, rt.int_mul, &[lv2, rv2])?,
+        BinOp::Div if dest_ty == &MirTy::Integer => call_runtime(builder, rt.int_div, &[lv2, rv2])?,
+        BinOp::Rem if dest_ty == &MirTy::Integer => call_runtime(builder, rt.int_rem, &[lv2, rv2])?,
 
         BinOp::Add if dest_ty == &MirTy::Float => builder.ins().fadd(lv2, rv2),
         BinOp::Sub if dest_ty == &MirTy::Float => builder.ins().fsub(lv2, rv2),
         BinOp::Mul if dest_ty == &MirTy::Float => builder.ins().fmul(lv2, rv2),
-        BinOp::Div if dest_ty == &MirTy::Float => builder.ins().fdiv(lv2, rv2),
+        BinOp::Div if dest_ty == &MirTy::Float => call_runtime(builder, rt.float_div, &[lv2, rv2])?,
+
+        BinOp::Pow if dest_ty == &MirTy::Integer => call_runtime(builder, rt.int_pow, &[lv2, rv2])?,
 
         // Comparisons — coerce to matching types
         BinOp::Eq => {
@@ -1880,6 +1992,7 @@ fn emit_unop(
     op: fidan_ast::UnOp,
     v: Value,
     _dest_ty: &MirTy,
+    rt: &JitRuntimeRefs,
 ) -> Option<Value> {
     use fidan_ast::UnOp;
     let vty = builder.func.dfg.value_type(v);
@@ -1888,7 +2001,7 @@ fn emit_unop(
             if vty == F64 {
                 Some(builder.ins().fneg(v))
             } else {
-                Some(builder.ins().ineg(v))
+                call_runtime(builder, rt.int_neg, &[v])
             }
         }
         UnOp::Not => {
@@ -1903,14 +2016,16 @@ fn emit_unop(
 fn emit_stdlib_method_call(
     builder: &mut FunctionBuilder,
     vars: &[Variable],
-    _local_types: &HashMap<LocalId, MirTy>,
+    local_types: &HashMap<LocalId, MirTy>,
     ns: &str,
     method: &str,
     args: &[Operand],
+    rt: &JitRuntimeRefs,
 ) -> Option<Value> {
-    let arg = load_operand(builder, vars, args.first()?);
+    let operand = args.first()?;
+    let arg_kinds = [operand_scalar_kind(operand, local_types)?];
+    let arg = load_operand(builder, vars, operand);
     let arg_ty = builder.func.dfg.value_type(arg);
-    let arg_kinds = [value_type_to_stdlib_kind(arg_ty)];
     let info = infer_stdlib_method(ns, method, &arg_kinds)?;
     match info.intrinsic {
         Some(StdlibIntrinsic::Math(MathIntrinsic::Sqrt)) => {
@@ -1921,7 +2036,7 @@ fn emit_stdlib_method_call(
             if arg_ty == F64 {
                 Some(builder.ins().fabs(arg))
             } else {
-                Some(builder.ins().iabs(arg))
+                call_runtime(builder, rt.int_abs, &[arg])
             }
         }
         Some(StdlibIntrinsic::Math(MathIntrinsic::Floor)) => {
@@ -2168,15 +2283,23 @@ fn jit_abi_ffi_type(_ty: &MirTy) -> Type {
     Type::i64()
 }
 
-fn value_type_to_stdlib_kind(ty: cranelift_codegen::ir::Type) -> StdlibValueKind {
-    if ty == F64 {
-        StdlibValueKind::Float
-    } else if ty == I8 {
-        StdlibValueKind::Boolean
-    } else if ty == I64 {
-        StdlibValueKind::Integer
-    } else {
-        StdlibValueKind::Dynamic
+fn operand_scalar_kind(
+    operand: &Operand,
+    local_types: &HashMap<LocalId, MirTy>,
+) -> Option<StdlibValueKind> {
+    // Boxed values also use I64 in Cranelift, but contain pointers, not numbers.
+    // Unsupported boxed operations must use the interpreter fallback.
+    match operand {
+        Operand::Local(local) => match local_types.get(local)? {
+            MirTy::Integer => Some(StdlibValueKind::Integer),
+            MirTy::Float => Some(StdlibValueKind::Float),
+            MirTy::Boolean => Some(StdlibValueKind::Boolean),
+            _ => None,
+        },
+        Operand::Const(MirLit::Int(_)) => Some(StdlibValueKind::Integer),
+        Operand::Const(MirLit::Float(_)) => Some(StdlibValueKind::Float),
+        Operand::Const(MirLit::Bool(_)) => Some(StdlibValueKind::Boolean),
+        _ => None,
     }
 }
 
@@ -2197,6 +2320,61 @@ mod tests {
         let mut mir = fidan_mir::lower_program(&hir, &interner, &[]);
         fidan_passes::run_all(&mut mir);
         (mir, interner)
+    }
+
+    #[test]
+    fn checked_integer_arithmetic_compiles_and_reports_native_errors() {
+        for (expression, a, b, code) in [
+            ("a + b", i64::MAX, 1, "R2003"),
+            ("a - b", i64::MIN, 1, "R2003"),
+            ("a * b", i64::MAX, 2, "R2003"),
+            ("-a", i64::MIN, 0, "R2003"),
+            ("math.abs(a)", i64::MIN, 0, "R2003"),
+            ("a ** b", 2, 63, "R2003"),
+            ("a ** b", 2, -1, "R2003"),
+            ("a / b", i64::MIN, -1, "R2003"),
+            ("a % b", i64::MIN, -1, "R2003"),
+            ("a / b", 1, 0, "R2001"),
+            ("a % b", 1, 0, "R2001"),
+        ] {
+            let (mir, interner) = lower(&format!(
+                "use std.math\n action calculate with (certain a oftype integer, certain b oftype integer) returns integer {{ return {expression} }}"
+            ));
+            let func = mir
+                .functions
+                .iter()
+                .find(|func| interner.resolve(func.name).as_ref() == "calculate")
+                .unwrap();
+            let mut jit = JitCompiler::new();
+            let entry = jit.compile_function(func, &mir, &interner);
+            assert!(entry.is_native(), "{expression} must exercise native JIT");
+            let _ = with_jit_runtime_context(std::ptr::null_mut(), || {
+                call_jit_fn(&entry, &[FidanValue::Integer(a), FidanValue::Integer(b)])
+            });
+            assert_ne!(fidan_runtime::ffi::fdn_has_exception(), 0);
+            let exception = unsafe { Box::from_raw(fidan_runtime::ffi::fdn_catch_exception()) };
+            assert!(fidan_runtime::display(&exception).contains(code));
+        }
+    }
+
+    #[test]
+    fn boxed_arithmetic_uses_interpreter_fallback() {
+        for expression in ["math.abs(a)", "-a", "a + 1.0", "a == 1"] {
+            let (mir, interner) = lower(&format!(
+                "use std.math\n action calculate with (certain a oftype flexible) returns flexible {{ return {expression} }}"
+            ));
+            let func = mir
+                .functions
+                .iter()
+                .find(|func| interner.resolve(func.name).as_ref() == "calculate")
+                .unwrap();
+            let mut jit = JitCompiler::new();
+            let entry = jit.compile_function(func, &mir, &interner);
+            assert!(
+                !entry.is_native(),
+                "{expression} must not treat a pointer as a scalar"
+            );
+        }
     }
 
     #[test]

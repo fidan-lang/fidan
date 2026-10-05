@@ -1,4 +1,4 @@
-//! Bootstrap list methods — placeholder until `std.collections` (Phase 7).
+//! List receiver methods for interpreted execution.
 
 use fidan_config::{ReceiverBuiltinKind, infer_receiver_member};
 use fidan_runtime::{FidanList, FidanString, FidanValue, OwnedRef};

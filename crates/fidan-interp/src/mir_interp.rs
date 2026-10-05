@@ -340,6 +340,7 @@ pub struct MirMachine {
     jit_flags: Arc<Vec<AtomicBool>>,
     /// Number of calls after which the JIT kicks in (0 = disabled).
     jit_threshold: u32,
+    jit_signal: Option<MirSignal>,
     /// Same-thread deferred tasks created by `spawn` / `concurrent`.
     pending_tasks: FxHashMap<u64, PendingTaskState>,
     pending_ready: VecDeque<u64>,
@@ -435,13 +436,52 @@ unsafe fn jit_call_fn_raw(ctx: *mut c_void, fn_id: u32, args_ptr: *const i64, ar
             machine.decode_jit_abi_value(*raw, ty)
         })
         .collect::<Vec<_>>();
-    let result = machine
-        .call_function(func_id, args)
-        .unwrap_or(FidanValue::Nothing);
+    let result = match machine.call_function(func_id, args) {
+        Ok(value) => value,
+        Err(signal) => {
+            machine.jit_signal = Some(signal);
+            // Native callers stop on the same exception flag as arithmetic.
+            unsafe {
+                let exception = fidan_runtime::ffi::fdn_box_nothing();
+                fidan_runtime::ffi::fdn_store_exception(exception);
+                fidan_runtime::ffi::fdn_drop(exception);
+            }
+            return 0;
+        }
+    };
     machine.encode_jit_abi_value(&result, &return_ty)
 }
 
 impl MirMachine {
+    fn call_native_jit(
+        &mut self,
+        ctx: *mut c_void,
+        entry: &JitFnEntry,
+        args: &[FidanValue],
+    ) -> MirResult {
+        let result = with_jit_runtime_context(ctx, || call_jit_fn(entry, args));
+        if fidan_runtime::ffi::fdn_has_exception() != 0 {
+            let exception = unsafe { *Box::from_raw(fidan_runtime::ffi::fdn_catch_exception()) };
+            if let Some(signal) = self.jit_signal.take() {
+                return Err(signal);
+            }
+            if let FidanValue::String(message) = &exception {
+                for code in [
+                    fidan_diagnostics::diag_code!("R2001"),
+                    fidan_diagnostics::diag_code!("R2003"),
+                ] {
+                    if let Some(message) =
+                        message.as_str().strip_prefix(&format!("error [{code}]: "))
+                    {
+                        return Err(MirSignal::RuntimeError(code, message.to_owned()));
+                    }
+                }
+            }
+            return Err(MirSignal::Throw(exception));
+        }
+        Ok(result)
+    }
+
     fn register_jit_hooks() {
         register_jit_runtime_hooks(JitRuntimeHooks {
             load_global_raw: jit_load_global_raw,
@@ -590,6 +630,7 @@ impl MirMachine {
             jit_fns,
             jit_flags,
             jit_threshold: 500,
+            jit_signal: None,
             pending_tasks: FxHashMap::default(),
             pending_ready: VecDeque::new(),
             next_pending_task_id: 1,
@@ -729,6 +770,7 @@ impl MirMachine {
             jit_fns: Arc::clone(&self.jit_fns),
             jit_flags: Arc::clone(&self.jit_flags),
             jit_threshold: self.jit_threshold,
+            jit_signal: None,
             pending_tasks: FxHashMap::default(),
             pending_ready: VecDeque::new(),
             next_pending_task_id: 1,
@@ -1213,9 +1255,7 @@ impl MirMachine {
                     && entry.is_native()
                 {
                     let self_ptr = self as *mut MirMachine as *mut c_void;
-                    return Ok(with_jit_runtime_context(self_ptr, || {
-                        call_jit_fn(&entry, &args)
-                    }));
+                    return self.call_native_jit(self_ptr, &entry, &args);
                 }
             } else {
                 let prev = self.call_counters[idx].fetch_add(1, Ordering::Relaxed);
@@ -1236,9 +1276,7 @@ impl MirMachine {
                         };
                         if let Some(entry) = entry {
                             let self_ptr = self as *mut MirMachine as *mut c_void;
-                            return Ok(with_jit_runtime_context(self_ptr, || {
-                                call_jit_fn(&entry, &args)
-                            }));
+                            return self.call_native_jit(self_ptr, &entry, &args);
                         }
                     }
                 }
@@ -2087,31 +2125,28 @@ impl MirMachine {
             return Ok(None);
         };
 
+        if matches!(op, BinOp::Div | BinOp::Rem)
+            && matches!(right, ScalarOperand::Integer(0) | ScalarOperand::Float(0.0))
+        {
+            return Err(MirSignal::RuntimeError(
+                fidan_diagnostics::diag_code!("R2001"),
+                if op == BinOp::Div {
+                    "division by zero"
+                } else {
+                    "modulo by zero"
+                }
+                .into(),
+            ));
+        }
         use FidanValue::*;
         Ok(match (left, right) {
             (ScalarOperand::Integer(left), ScalarOperand::Integer(right)) => Some(match op {
-                BinOp::Add => Integer(left.wrapping_add(right)),
-                BinOp::Sub => Integer(left.wrapping_sub(right)),
-                BinOp::Mul => Integer(left.wrapping_mul(right)),
-                BinOp::Div => {
-                    if right == 0 {
-                        return Err(MirSignal::RuntimeError(
-                            fidan_diagnostics::diag_code!("R2001"),
-                            "division by zero".into(),
-                        ));
-                    }
-                    Integer(left / right)
-                }
-                BinOp::Rem => {
-                    if right == 0 {
-                        return Err(MirSignal::RuntimeError(
-                            fidan_diagnostics::diag_code!("R2001"),
-                            "modulo by zero".into(),
-                        ));
-                    }
-                    Integer(left % right)
-                }
-                BinOp::Pow => Integer(left.wrapping_pow(right as u32)),
+                BinOp::Add => Integer(fidan_runtime::integer::add(left, right)?),
+                BinOp::Sub => Integer(fidan_runtime::integer::sub(left, right)?),
+                BinOp::Mul => Integer(fidan_runtime::integer::mul(left, right)?),
+                BinOp::Div => Integer(fidan_runtime::integer::div(left, right)?),
+                BinOp::Rem => Integer(fidan_runtime::integer::rem(left, right)?),
+                BinOp::Pow => Integer(fidan_runtime::integer::pow(left, right)?),
                 BinOp::Eq => Boolean(left == right),
                 BinOp::NotEq => Boolean(left != right),
                 BinOp::Lt => Boolean(left < right),
@@ -2402,7 +2437,7 @@ impl MirMachine {
             return Ok(result);
         }
         crate::bootstrap::call_bootstrap_method(receiver, &method_name, args)
-            .map_err(MirSignal::Panic)?
+            .map_err(MirSignal::from)?
             .ok_or_else(|| MirSignal::Panic(format!("no method `{}` found", method_name)))
     }
 
@@ -2922,6 +2957,12 @@ enum MirSignal {
     SandboxViolation(fidan_diagnostics::DiagCode, String),
 }
 
+impl From<fidan_runtime::stdlib::StdlibRuntimeError> for MirSignal {
+    fn from(error: fidan_runtime::stdlib::StdlibRuntimeError) -> Self {
+        Self::RuntimeError(error.code, error.message)
+    }
+}
+
 type MirResult = Result<FidanValue, MirSignal>;
 
 // ── Value equality helper (used by assert_eq / assert_ne) ────────────────────
@@ -3018,30 +3059,25 @@ fn mir_lit_to_value(lit: &MirLit) -> FidanValue {
 
 fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, MirSignal> {
     use FidanValue::*;
+    if matches!(op, BinOp::Div | BinOp::Rem) && matches!(r, Integer(0) | Float(0.0)) {
+        return Err(MirSignal::RuntimeError(
+            fidan_diagnostics::diag_code!("R2001"),
+            if op == BinOp::Div {
+                "division by zero"
+            } else {
+                "modulo by zero"
+            }
+            .into(),
+        ));
+    }
     Ok(match (op, &l, &r) {
         // Arithmetic — integer
-        (BinOp::Add, Integer(a), Integer(b)) => Integer(a.wrapping_add(*b)),
-        (BinOp::Sub, Integer(a), Integer(b)) => Integer(a.wrapping_sub(*b)),
-        (BinOp::Mul, Integer(a), Integer(b)) => Integer(a.wrapping_mul(*b)),
-        (BinOp::Div, Integer(a), Integer(b)) => {
-            if *b == 0 {
-                return Err(MirSignal::RuntimeError(
-                    fidan_diagnostics::diag_code!("R2001"),
-                    "division by zero".into(),
-                ));
-            }
-            Integer(a / b)
-        }
-        (BinOp::Rem, Integer(a), Integer(b)) => {
-            if *b == 0 {
-                return Err(MirSignal::RuntimeError(
-                    fidan_diagnostics::diag_code!("R2001"),
-                    "modulo by zero".into(),
-                ));
-            }
-            Integer(a % b)
-        }
-        (BinOp::Pow, Integer(a), Integer(b)) => Integer(a.wrapping_pow(*b as u32)),
+        (BinOp::Add, Integer(a), Integer(b)) => Integer(fidan_runtime::integer::add(*a, *b)?),
+        (BinOp::Sub, Integer(a), Integer(b)) => Integer(fidan_runtime::integer::sub(*a, *b)?),
+        (BinOp::Mul, Integer(a), Integer(b)) => Integer(fidan_runtime::integer::mul(*a, *b)?),
+        (BinOp::Div, Integer(a), Integer(b)) => Integer(fidan_runtime::integer::div(*a, *b)?),
+        (BinOp::Rem, Integer(a), Integer(b)) => Integer(fidan_runtime::integer::rem(*a, *b)?),
+        (BinOp::Pow, Integer(a), Integer(b)) => Integer(fidan_runtime::integer::pow(*a, *b)?),
         (BinOp::Pow, Float(a), Float(b)) => Float(a.powf(*b)),
         (BinOp::Pow, Integer(a), Float(b)) => Float((*a as f64).powf(*b)),
         (BinOp::Pow, Float(a), Integer(b)) => Float(a.powf(*b as f64)),
@@ -3060,6 +3096,8 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
         (BinOp::Mul, Float(a), Integer(b)) => Float(a * *b as f64),
         (BinOp::Div, Integer(a), Float(b)) => Float(*a as f64 / b),
         (BinOp::Div, Float(a), Integer(b)) => Float(a / *b as f64),
+        (BinOp::Rem, Integer(a), Float(b)) => Float(*a as f64 % b),
+        (BinOp::Rem, Float(a), Integer(b)) => Float(a % *b as f64),
         // String concatenation — any value on either side coerces to string
         (BinOp::Add, String(a), String(b)) => {
             let mut s = std::string::String::with_capacity(a.len() + b.len());
@@ -3160,7 +3198,7 @@ fn eval_unary(op: UnOp, v: FidanValue) -> Result<FidanValue, MirSignal> {
     use FidanValue::*;
     Ok(match (op, v) {
         (UnOp::Pos, v) => v,
-        (UnOp::Neg, Integer(n)) => Integer(n.wrapping_neg()),
+        (UnOp::Neg, Integer(n)) => Integer(fidan_runtime::integer::neg(n)?),
         (UnOp::Neg, Float(f)) => Float(-f),
         (UnOp::Not, Boolean(b)) => Boolean(!b),
         (op, v) => {
@@ -3184,20 +3222,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn boxed_integer_arithmetic_wraps_at_i64_boundaries() {
-        for (op, left, right, expected) in [
-            (BinOp::Add, i64::MAX, 1, i64::MIN),
-            (BinOp::Sub, i64::MIN, 1, i64::MAX),
-            (BinOp::Mul, i64::MAX, 2, -2),
+    fn boxed_integer_arithmetic_reports_overflow_at_i64_boundaries() {
+        for (op, left, right) in [
+            (BinOp::Add, i64::MAX, 1),
+            (BinOp::Sub, i64::MIN, 1),
+            (BinOp::Mul, i64::MAX, 2),
         ] {
             assert!(matches!(
                 eval_binary(op, FidanValue::Integer(left), FidanValue::Integer(right)),
-                Ok(FidanValue::Integer(actual)) if actual == expected
+                Err(MirSignal::RuntimeError(code, _)) if code == fidan_diagnostics::diag_code!("R2003")
             ));
         }
         assert!(matches!(
             eval_unary(UnOp::Neg, FidanValue::Integer(i64::MIN)),
-            Ok(FidanValue::Integer(i64::MIN))
+            Err(MirSignal::RuntimeError(code, _)) if code == fidan_diagnostics::diag_code!("R2003")
         ));
     }
 }

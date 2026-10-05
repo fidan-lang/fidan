@@ -229,11 +229,22 @@ var pi oftype float = 3.14159     # explicit type + value
 
 Types can be inferred from expressions or declared with `oftype`; the type checker validates explicit annotations.
 
-Integers are signed 64-bit values. Integer addition, subtraction, multiplication,
-and negation wrap on overflow; integer division truncates toward zero. Use
-floating-point operands when fractional results are needed. The runnable
+Integers are signed 64-bit values. Addition, subtraction, multiplication,
+negation, and integer powers report runtime error `R2003` when the result cannot
+be represented. Integer division truncates toward zero; `MIN / -1` and `MIN % -1`
+also report `R2003`. Division and remainder by zero report `R2001`.
+Integer `abs` also reports `R2003` for `MIN`, whose magnitude cannot fit in i64.
+Negative integer powers remain integers for bases `1` and `-1`; other bases
+report `R2003`. Use a float operand for fractional reciprocal powers. The runnable
 [integer arithmetic regression](test/examples/integer_overflow_regression.fdn)
-checks the same boundary cases and workload through the interpreter and native backends.
+checks boundaries and catchable errors through the interpreter and native backends.
+
+String lengths, bracket indices, slices, `indexOf`, and `lastIndexOf` count Unicode
+scalar values. Receiver `substring`, `substr`, and `slice` use half-open character
+ranges: bounds clamp to `[0, len]`, and reversed bounds return an empty string.
+Receiver `charAt` returns an empty string for negative or out-of-range positions.
+Bracket access supports negative indices and reports `R2002` for invalid indices;
+bracket slicing also supports negative bounds and steps.
 
 Multi-line strings are supported directly in both normal and raw string literals. Normal strings still process escapes and interpolation; raw strings preserve the body verbatim.
 
@@ -1217,7 +1228,7 @@ cargo run -- run test/examples/test.fdn --emit mir
 
 ```
 
-The default workspace builds do not link LLVM. To use LLVM AOT, install a compatible packaged toolchain with `fidan toolchain install llvm`, then build with `fidan build --backend llvm file.fdn`. Contributors building the helper from source need LLVM 21.1 libraries and headers, `LLVM_SYS_211_PREFIX`, and `cargo build -p fidan-llvm-helper --features llvm-toolchain-21`. Use [scripts/package-toolchain.ps1](scripts/package-toolchain.ps1) for distributable toolchain builds; the [engineering audit](docs/ENGINEERING_AUDIT.md) records the tested configuration. `llvm-sys` remains on version 211.
+The default workspace builds do not link LLVM. To use LLVM AOT, install a compatible packaged toolchain with `fidan toolchain add llvm`, then build with `fidan build --backend llvm file.fdn`. Contributors building the helper from source need LLVM 21.1 libraries and headers, `LLVM_SYS_211_PREFIX`, and `cargo build -p fidan-llvm-helper --features llvm-toolchain-21`. Use [scripts/package-toolchain.ps1](scripts/package-toolchain.ps1) for distributable toolchain builds; the [engineering audit](docs/ENGINEERING_AUDIT.md) records the tested configuration. `llvm-sys` remains on version 211.
 
 Benchmark programs and runners live under `test/`. Their timings depend on the host, backend, build profile, and workload; they are not general performance guarantees.
 

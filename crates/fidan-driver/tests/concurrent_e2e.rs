@@ -833,7 +833,7 @@ fn llvm_available() -> bool {
 }
 
 #[test]
-fn integer_arithmetic_wraps_consistently_across_aot_backends() {
+fn integer_arithmetic_reports_consistent_errors_across_aot_backends() {
     let sandbox = temp_dir("fidan_integer_arithmetic");
     let output = sandbox.join(if cfg!(windows) {
         "integers.exe"
@@ -853,6 +853,29 @@ fn integer_arithmetic_wraps_consistently_across_aot_backends() {
         run_compiled_binary_clean(&output, "integer arithmetic ok");
     }
     fs::remove_dir_all(sandbox).expect("remove integer regression sandbox");
+}
+
+#[test]
+fn string_receiver_unicode_and_bounds_across_aot_backends() {
+    let sandbox = temp_dir("fidan_string_receivers");
+    let output = sandbox.join(if cfg!(windows) {
+        "strings.exe"
+    } else {
+        "strings"
+    });
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM string regression: no installed LLVM toolchain");
+            continue;
+        }
+        compile_program(
+            include_str!("../../../test/examples/string_receiver_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "string receivers ok");
+    }
+    fs::remove_dir_all(sandbox).expect("remove string regression sandbox");
 }
 
 #[test]

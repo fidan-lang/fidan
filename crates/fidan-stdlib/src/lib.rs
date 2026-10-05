@@ -741,6 +741,12 @@ pub fn dispatch_stdlib(
                 message: err.message,
             })
         }),
+        "math" => fidan_runtime::stdlib::math::dispatch_result(name, args).map(|res| {
+            res.map(StdlibResult::Value).map_err(|err| StdlibError {
+                code: err.code,
+                message: err.message,
+            })
+        }),
         "json" => fidan_runtime::stdlib::dispatch_json_module(name, args).map(|res| {
             res.map(StdlibResult::Value).map_err(|err| StdlibError {
                 code: err.code,

@@ -108,18 +108,18 @@ fn fold_binary(op: BinOp, l: &MirLit, r: &MirLit) -> Option<MirLit> {
     use MirLit::*;
     Some(match (op, l, r) {
         // Integer arithmetic
-        (BinOp::Add, Int(a), Int(b)) => Int(a.wrapping_add(*b)),
-        (BinOp::Sub, Int(a), Int(b)) => Int(a.wrapping_sub(*b)),
-        (BinOp::Mul, Int(a), Int(b)) => Int(a.wrapping_mul(*b)),
-        (BinOp::Div, Int(a), Int(b)) if *b != 0 => Int(a.wrapping_div(*b)),
-        (BinOp::Rem, Int(a), Int(b)) if *b != 0 => Int(a.wrapping_rem(*b)),
-        (BinOp::Pow, Int(a), Int(b)) if *b >= 0 => Int(a.wrapping_pow(*b as u32)),
+        (BinOp::Add, Int(a), Int(b)) => Int(a.checked_add(*b)?),
+        (BinOp::Sub, Int(a), Int(b)) => Int(a.checked_sub(*b)?),
+        (BinOp::Mul, Int(a), Int(b)) => Int(a.checked_mul(*b)?),
+        (BinOp::Div, Int(a), Int(b)) if *b != 0 => Int(a.checked_div(*b)?),
+        (BinOp::Rem, Int(a), Int(b)) if *b != 0 => Int(a.checked_rem(*b)?),
+        (BinOp::Pow, Int(a), Int(b)) if *b >= 0 => Int(a.checked_pow(u32::try_from(*b).ok()?)?),
         // Float arithmetic
         (BinOp::Add, Float(a), Float(b)) => Float(a + b),
         (BinOp::Sub, Float(a), Float(b)) => Float(a - b),
         (BinOp::Mul, Float(a), Float(b)) => Float(a * b),
-        (BinOp::Div, Float(a), Float(b)) => Float(a / b),
-        (BinOp::Rem, Float(a), Float(b)) => Float(a % b),
+        (BinOp::Div, Float(a), Float(b)) if *b != 0.0 => Float(a / b),
+        (BinOp::Rem, Float(a), Float(b)) if *b != 0.0 => Float(a % b),
         // Integer comparisons
         (BinOp::Eq, Int(a), Int(b)) => Bool(a == b),
         (BinOp::NotEq, Int(a), Int(b)) => Bool(a != b),
@@ -158,9 +158,37 @@ fn fold_unary(op: UnOp, val: &MirLit) -> Option<MirLit> {
     Some(match (op, val) {
         (UnOp::Pos, Int(a)) => Int(*a),
         (UnOp::Pos, Float(a)) => Float(*a),
-        (UnOp::Neg, Int(a)) => Int(-a),
+        (UnOp::Neg, Int(a)) => Int(a.checked_neg()?),
         (UnOp::Neg, Float(a)) => Float(-a),
         (UnOp::Not, Bool(a)) => Bool(!a),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_folding_preserves_runtime_arithmetic_errors() {
+        for (op, a, b) in [
+            (BinOp::Add, i64::MAX, 1),
+            (BinOp::Sub, i64::MIN, 1),
+            (BinOp::Mul, i64::MAX, 2),
+            (BinOp::Div, i64::MIN, -1),
+            (BinOp::Rem, i64::MIN, -1),
+            (BinOp::Div, 1, 0),
+            (BinOp::Rem, 1, 0),
+            (BinOp::Pow, 2, 63),
+            (BinOp::Pow, 2, -1),
+            (BinOp::Pow, 2, 4_294_967_296),
+        ] {
+            assert!(fold_binary(op, &MirLit::Int(a), &MirLit::Int(b)).is_none());
+        }
+        assert!(fold_unary(UnOp::Neg, &MirLit::Int(i64::MIN)).is_none());
+        assert!(matches!(
+            fold_binary(BinOp::Pow, &MirLit::Int(-2), &MirLit::Int(63)),
+            Some(MirLit::Int(i64::MIN))
+        ));
+    }
 }

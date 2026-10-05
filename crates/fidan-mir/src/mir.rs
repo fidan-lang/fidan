@@ -200,6 +200,19 @@ pub enum Rvalue {
     },
 }
 
+impl Rvalue {
+    /// Arithmetic that can raise R2001 or R2003, depending on operand values.
+    pub fn arithmetic_may_fail(&self) -> bool {
+        matches!(
+            self,
+            Self::Binary {
+                op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow,
+                ..
+            } | Self::Unary { op: UnOp::Neg, .. }
+        )
+    }
+}
+
 // ── Instructions ──────────────────────────────────────────────────────────────
 
 /// A single MIR instruction (not a terminator).

@@ -372,6 +372,85 @@ pub unsafe extern "C" fn fdn_null_coalesce(
 // ── Dynamic arithmetic ─────────────────────────────────────────────────────────
 // All borrow their args and return a new owned allocation.
 
+// Arithmetic failures use the existing exception slot, never unwind across C.
+fn checked_integer_result(result: Result<i64, stdlib::StdlibRuntimeError>) -> i64 {
+    match result {
+        Ok(value) => value,
+        Err(error) => {
+            let exception = runtime_error_to_exception_ptr("error", error.code, error.message);
+            unsafe {
+                fdn_store_exception(exception);
+                drop(Box::from_raw(exception));
+            }
+            0 // The caller checks the exception slot before using this value.
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_int_add(a: i64, b: i64) -> i64 {
+    checked_integer_result(crate::integer::add(a, b))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_int_sub(a: i64, b: i64) -> i64 {
+    checked_integer_result(crate::integer::sub(a, b))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_int_mul(a: i64, b: i64) -> i64 {
+    checked_integer_result(crate::integer::mul(a, b))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_int_div(a: i64, b: i64) -> i64 {
+    checked_integer_result(crate::integer::div(a, b))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_int_rem(a: i64, b: i64) -> i64 {
+    checked_integer_result(crate::integer::rem(a, b))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_int_pow(a: i64, b: i64) -> i64 {
+    checked_integer_result(crate::integer::pow(a, b))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_int_abs(a: i64) -> i64 {
+    checked_integer_result(crate::integer::abs(a))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_int_neg(a: i64) -> i64 {
+    checked_integer_result(crate::integer::neg(a))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_float_div(a: f64, b: f64) -> f64 {
+    if b == 0.0 {
+        checked_integer_result(Err(stdlib::StdlibRuntimeError::new(
+            fidan_diagnostics::diag_code!("R2001"),
+            "division by zero",
+        )));
+        return 0.0;
+    }
+    a / b
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_float_rem(a: f64, b: f64) -> f64 {
+    if b == 0.0 {
+        checked_integer_result(Err(stdlib::StdlibRuntimeError::new(
+            fidan_diagnostics::diag_code!("R2001"),
+            "modulo by zero",
+        )));
+        return 0.0;
+    }
+    a % b
+}
+
 macro_rules! numeric_binop {
     ($name:ident, $int_op:expr, $float_op:expr) => {
         #[unsafe(no_mangle)]
@@ -423,7 +502,7 @@ pub unsafe extern "C" fn fdn_dyn_add(a: *mut FidanValue, b: *mut FidanValue) -> 
     let bv = borrow(b);
     match (av, bv) {
         (FidanValue::Integer(x), FidanValue::Integer(y)) => {
-            into_raw(FidanValue::Integer(x.wrapping_add(*y)))
+            into_raw(FidanValue::Integer(fdn_int_add(*x, *y)))
         }
         (FidanValue::Float(x), FidanValue::Float(y)) => into_raw(FidanValue::Float(x + y)),
         (FidanValue::Integer(x), FidanValue::Float(y)) => {
@@ -442,23 +521,23 @@ pub unsafe extern "C" fn fdn_dyn_add(a: *mut FidanValue, b: *mut FidanValue) -> 
 
 numeric_binop!(
     fdn_dyn_sub,
-    |x: i64, y: i64| x.wrapping_sub(y),
+    |x: i64, y: i64| fdn_int_sub(x, y),
     |x: f64, y: f64| x - y
 );
 numeric_binop!(
     fdn_dyn_mul,
-    |x: i64, y: i64| x.wrapping_mul(y),
+    |x: i64, y: i64| fdn_int_mul(x, y),
     |x: f64, y: f64| x * y
 );
 numeric_binop!(
     fdn_dyn_div,
-    |x: i64, y: i64| if y == 0 { 0 } else { x / y },
-    |x: f64, y: f64| x / y
+    |x: i64, y: i64| fdn_int_div(x, y),
+    |x: f64, y: f64| fdn_float_div(x, y)
 );
 numeric_binop!(
     fdn_dyn_rem,
-    |x: i64, y: i64| if y == 0 { 0 } else { x % y },
-    |x: f64, y: f64| x % y
+    |x: i64, y: i64| fdn_int_rem(x, y),
+    |x: f64, y: f64| fdn_float_rem(x, y)
 );
 
 #[unsafe(no_mangle)]
@@ -467,15 +546,11 @@ pub unsafe extern "C" fn fdn_dyn_pow(a: *mut FidanValue, b: *mut FidanValue) -> 
     let bv = borrow(b);
     let result = match (av, bv) {
         (FidanValue::Integer(x), FidanValue::Integer(y)) => {
-            if *y >= 0 {
-                FidanValue::Integer(x.wrapping_pow(*y as u32))
-            } else {
-                FidanValue::Float((*x as f64).powi(*y as i32))
-            }
+            FidanValue::Integer(fdn_int_pow(*x, *y))
         }
         (FidanValue::Float(x), FidanValue::Float(y)) => FidanValue::Float(x.powf(*y)),
         (FidanValue::Integer(x), FidanValue::Float(y)) => FidanValue::Float((*x as f64).powf(*y)),
-        (FidanValue::Float(x), FidanValue::Integer(y)) => FidanValue::Float(x.powi(*y as i32)),
+        (FidanValue::Float(x), FidanValue::Integer(y)) => FidanValue::Float(x.powf(*y as f64)),
         _ => FidanValue::Nothing,
     };
     into_raw(result)
@@ -616,7 +691,7 @@ pub unsafe extern "C" fn fdn_dyn_not(ptr: *mut FidanValue) -> *mut FidanValue {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_dyn_neg(ptr: *mut FidanValue) -> *mut FidanValue {
     let result = match borrow(ptr) {
-        FidanValue::Integer(n) => FidanValue::Integer(n.wrapping_neg()),
+        FidanValue::Integer(n) => FidanValue::Integer(fdn_int_neg(*n)),
         FidanValue::Float(f) => FidanValue::Float(-f),
         _ => FidanValue::Nothing,
     };
@@ -1294,6 +1369,10 @@ pub unsafe extern "C" fn fdn_obj_invoke(
             );
             into_raw(FidanValue::Nothing)
         }
+        FidanValue::Integer(n) if method_name == "abs" => {
+            into_raw(FidanValue::Integer(fdn_int_abs(*n)))
+        }
+        FidanValue::Float(f) if method_name == "abs" => into_raw(FidanValue::Float(f.abs())),
         FidanValue::String(s) => dispatch_string_method(s.clone(), &method_name, extra),
         FidanValue::List(l) => dispatch_list_method(l, &method_name, extra),
         FidanValue::Dict(d) => {
@@ -1495,19 +1574,11 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
             let pat = args.first().map(as_str_val).unwrap_or_default();
             into_raw(FidanValue::Boolean(str_val.ends_with(pat.as_str())))
         }
-        "indexOf" => {
-            let pat = args.first().map(as_str_val).unwrap_or_default();
-            match str_val.find(pat.as_str()) {
-                Some(i) => into_raw(FidanValue::Integer(i as i64)),
-                None => into_raw(FidanValue::Integer(-1)),
-            }
-        }
-        "lastIndexOf" => {
-            let pat = args.first().map(as_str_val).unwrap_or_default();
-            match str_val.rfind(pat.as_str()) {
-                Some(i) => into_raw(FidanValue::Integer(i as i64)),
-                None => into_raw(FidanValue::Integer(-1)),
-            }
+        "indexOf" | "lastIndexOf" => {
+            let mut values = Vec::with_capacity(args.len() + 1);
+            values.push(FidanValue::String(s));
+            values.extend(args);
+            into_raw(stdlib::string::dispatch(method, values).unwrap_or(FidanValue::Nothing))
         }
 
         // ── Mutation / transformation ─────────────────────────────────────────
@@ -1554,48 +1625,11 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
         }
 
         // ── Indexing / slicing ────────────────────────────────────────────────
-        "charAt" => {
-            let idx = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-            match str_val.chars().nth(idx.max(0) as usize) {
-                Some(c) => into_raw(FidanValue::String(FidanString::new(&c.to_string()))),
-                None => into_raw(FidanValue::String(FidanString::new(""))),
-            }
-        }
-        "substring" => {
-            let start = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0)
-                .max(0) as usize;
-            let chars: Vec<char> = str_val.chars().collect();
-            let end = args
-                .get(1)
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .map(|e| (e.max(0) as usize).min(chars.len()))
-                .unwrap_or(chars.len());
-            let sliced: String = chars[start.min(chars.len())..end].iter().collect();
-            into_raw(FidanValue::String(FidanString::new(&sliced)))
+        "charAt" | "substring" => {
+            let mut values = Vec::with_capacity(args.len() + 1);
+            values.push(FidanValue::String(s));
+            values.extend(args);
+            into_raw(stdlib::string::dispatch(method, values).unwrap_or(FidanValue::Nothing))
         }
 
         // ── Parsing ───────────────────────────────────────────────────────────
@@ -2701,9 +2735,14 @@ fn dispatch_stdlib_inline(
 // ── math module ───────────────────────────────────────────────────────────────
 
 fn dispatch_math(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    stdlib::math::dispatch(func, args)
-        .map(into_raw)
-        .unwrap_or_else(|| into_raw(FidanValue::Nothing))
+    match stdlib::math::dispatch_result(func, args) {
+        Some(Ok(value)) => into_raw(value),
+        Some(Err(error)) => {
+            checked_integer_result(Err(error));
+            into_raw(FidanValue::Nothing)
+        }
+        None => into_raw(FidanValue::Nothing),
+    }
 }
 
 // ── string module (free-function API) ─────────────────────────────────────────
@@ -3497,6 +3536,47 @@ pub unsafe extern "C" fn fdn_call_dynamic(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dynamic_arithmetic_reports_checked_errors() {
+        type Binary = unsafe extern "C" fn(*mut FidanValue, *mut FidanValue) -> *mut FidanValue;
+        let cases: [(Binary, i64, i64, &str); 9] = [
+            (fdn_dyn_add, i64::MAX, 1, "R2003"),
+            (fdn_dyn_sub, i64::MIN, 1, "R2003"),
+            (fdn_dyn_mul, i64::MAX, 2, "R2003"),
+            (fdn_dyn_div, i64::MIN, -1, "R2003"),
+            (fdn_dyn_rem, i64::MIN, -1, "R2003"),
+            (fdn_dyn_div, 10, 0, "R2001"),
+            (fdn_dyn_rem, 10, 0, "R2001"),
+            (fdn_dyn_pow, 2, 63, "R2003"),
+            (fdn_dyn_pow, 2, -1, "R2003"),
+        ];
+        unsafe {
+            for (function, a, b, code) in cases {
+                let a = into_raw(FidanValue::Integer(a));
+                let b = into_raw(FidanValue::Integer(b));
+                let result = function(a, b);
+                assert!(display(&drain_exception().expect("runtime diagnostic")).contains(code));
+                for value in [a, b, result] {
+                    fdn_drop(value);
+                }
+            }
+            let a = into_raw(FidanValue::Integer(i64::MIN));
+            let result = fdn_dyn_neg(a);
+            assert!(display(&drain_exception().expect("negation overflow")).contains("R2003"));
+            fdn_drop(a);
+            fdn_drop(result);
+            for function in [fdn_dyn_div as Binary, fdn_dyn_rem as Binary] {
+                let a = into_raw(FidanValue::Float(1.0));
+                let b = into_raw(FidanValue::Float(-0.0));
+                let result = function(a, b);
+                assert!(display(&drain_exception().expect("float zero divisor")).contains("R2001"));
+                for value in [a, b, result] {
+                    fdn_drop(value);
+                }
+            }
+        }
+    }
 
     #[test]
     fn native_indexing_preserves_nothing_elements_and_reports_invalid_indices() {

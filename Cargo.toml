@@ -91,12 +91,12 @@ indicatif = "0.18"
 notify = { version = "8", features = ["macos_fsevent"] }
 sha2 = "0.11"
 globset = "0.4"
-cranelift-jit = "0"
-cranelift-codegen = { version = "0", features = ["x86"] }
-cranelift-frontend = "0"
-cranelift-native = "0"
-cranelift-module = "0"
-cranelift-object = "0"
+cranelift-jit = "0.136"
+cranelift-codegen = { version = "0.136", features = ["x86"] }
+cranelift-frontend = "0.136"
+cranelift-native = "0.136"
+cranelift-module = "0.136"
+cranelift-object = "0.136"
 target-lexicon = "0.13"
 libffi = "5.1.0"
 inkwell = { version = "0.10.0", default-features = false }

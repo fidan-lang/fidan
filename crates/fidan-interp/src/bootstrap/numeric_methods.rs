@@ -1,15 +1,27 @@
-//! Bootstrap numeric receiver methods — placeholder until `std.math` (Phase 7).
+//! Numeric receiver methods for interpreted execution.
 //!
 //! These allow `x.abs()`, `f.sqrt()`, `f.floor()`, etc. on numeric values.
-//! Free-standing forms (`abs(x)`, `sqrt(x)`) remain in `builtins::call_builtin`.
+//! Free-standing forms (`abs(x)`, `sqrt(x)`) require the corresponding std.math import.
 
 use fidan_runtime::FidanValue;
 
 /// Dispatch a method call on an integer or float receiver.
 /// `receiver` is guaranteed to be `Integer` or `Float` by the caller.
+pub fn dispatch_result(
+    receiver: FidanValue,
+    method: &str,
+) -> Result<Option<FidanValue>, fidan_runtime::stdlib::StdlibRuntimeError> {
+    if method == "abs"
+        && let FidanValue::Integer(n) = &receiver
+    {
+        return fidan_runtime::integer::abs(*n).map(|n| Some(FidanValue::Integer(n)));
+    }
+    Ok(dispatch(receiver, method))
+}
+
 pub fn dispatch(receiver: FidanValue, method: &str) -> Option<FidanValue> {
     match (receiver, method) {
-        (FidanValue::Integer(n), "abs") => Some(FidanValue::Integer(n.abs())),
+        (FidanValue::Integer(n), "abs") => n.checked_abs().map(FidanValue::Integer),
         (FidanValue::Float(f), "abs") => Some(FidanValue::Float(f.abs())),
         (FidanValue::Integer(n), "sqrt") => Some(FidanValue::Float((n as f64).sqrt())),
         (FidanValue::Float(f), "sqrt") => Some(FidanValue::Float(f.sqrt())),

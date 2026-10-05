@@ -151,7 +151,7 @@ Please write commit messages that clearly explain the purpose of the change.
 Good examples:
 
 - `parser: fix precedence handling for null-coalescing operator`
-- `runtime: reduce allocation overhead in bytecode VM`
+- `runtime: reduce allocation overhead in the runtime`
 - `docs: add syntax examples for extension actions`
 
 Avoid vague commit messages like:

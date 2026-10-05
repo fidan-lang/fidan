@@ -1152,6 +1152,49 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 .void_type()
                 .fn_type(&[self.ptr_type.into()], false),
         );
+        self.declare_runtime_fn(
+            "fdn_float_div",
+            self.f64_type
+                .fn_type(&[self.f64_type.into(), self.f64_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_int_add",
+            self.i64_type
+                .fn_type(&[self.i64_type.into(), self.i64_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_int_sub",
+            self.i64_type
+                .fn_type(&[self.i64_type.into(), self.i64_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_int_mul",
+            self.i64_type
+                .fn_type(&[self.i64_type.into(), self.i64_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_int_div",
+            self.i64_type
+                .fn_type(&[self.i64_type.into(), self.i64_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_int_rem",
+            self.i64_type
+                .fn_type(&[self.i64_type.into(), self.i64_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_int_pow",
+            self.i64_type
+                .fn_type(&[self.i64_type.into(), self.i64_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_int_abs",
+            self.i64_type.fn_type(&[self.i64_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_int_neg",
+            self.i64_type.fn_type(&[self.i64_type.into()], false),
+        );
         self.declare_runtime_fn("fdn_has_exception", self.i8_type.fn_type(&[], false));
         self.declare_runtime_fn("fdn_catch_exception", self.ptr_type.fn_type(&[], false));
         self.declare_runtime_fn(
@@ -1871,9 +1914,12 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     }
                     _ => {}
                 }
-                if let Rvalue::Call { callee, args } = rhs
-                    && self.call_may_throw(callee, args)?
-                {
+                let may_throw = match rhs {
+                    rhs if rhs.arithmetic_may_fail() => true,
+                    Rvalue::Call { callee, args } => self.call_may_throw(callee, args)?,
+                    _ => false,
+                };
+                if may_throw {
                     self.emit_pending_exception_check(current_catch_stack)?;
                 }
                 Ok(())
@@ -2930,7 +2976,9 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 Ok(
                     infer_stdlib_method(namespace.as_str(), method_name.as_str(), &arg_kinds)
                         .and_then(|info| info.intrinsic)
-                        .is_none(),
+                        .is_none_or(|intrinsic| {
+                            matches!(intrinsic, StdlibIntrinsic::Math(MathIntrinsic::Abs))
+                        }),
                 )
             }
             _ => Ok(true),
@@ -3012,30 +3060,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     let value = self
                         .lower_native_operand(first_arg, &MirTy::Integer)?
                         .into_int_value();
-                    let cmp_name = self.temp("iabs.neg");
-                    let is_negative = self
-                        .module
-                        .builder
-                        .build_int_compare(
-                            IntPredicate::SLT,
-                            value,
-                            self.module.i64_type.const_zero(),
-                            &cmp_name,
-                        )
-                        .map_err(|err| anyhow!("{err}"))?;
-                    let neg_name = self.temp("iabs.negv");
-                    let negated = self
-                        .module
-                        .builder
-                        .build_int_neg(value, &neg_name)
-                        .map_err(|err| anyhow!("{err}"))?;
-                    let select_name = self.temp("iabs");
-                    self.module
-                        .builder
-                        .build_select(is_negative, negated, value, &select_name)
-                        .map_err(|err| anyhow!("{err}"))?
-                        .into_int_value()
-                        .into()
+                    self.call_i64("fdn_int_abs", &[value.into()])?.into()
                 }
                 MirTy::Float => {
                     let intrinsic = self.llvm_unary_f64_intrinsic("llvm.fabs.f64");
@@ -3324,46 +3349,24 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 .lower_native_operand(rhs, &MirTy::Integer)?
                 .into_int_value();
             let value = match op {
-                BinOp::Add if matches!(ty, MirTy::Integer) => {
-                    let name = self.temp("iadd");
-                    self.module
-                        .builder
-                        .build_int_add(lhs_value, rhs_value, &name)
-                        .map_err(|err| anyhow!("{err}"))?
-                        .into()
-                }
-                BinOp::Sub if matches!(ty, MirTy::Integer) => {
-                    let name = self.temp("isub");
-                    self.module
-                        .builder
-                        .build_int_sub(lhs_value, rhs_value, &name)
-                        .map_err(|err| anyhow!("{err}"))?
-                        .into()
-                }
-                BinOp::Mul if matches!(ty, MirTy::Integer) => {
-                    let name = self.temp("imul");
-                    self.module
-                        .builder
-                        .build_int_mul(lhs_value, rhs_value, &name)
-                        .map_err(|err| anyhow!("{err}"))?
-                        .into()
-                }
-                BinOp::Div if matches!(ty, MirTy::Integer) => {
-                    let name = self.temp("idiv");
-                    self.module
-                        .builder
-                        .build_int_signed_div(lhs_value, rhs_value, &name)
-                        .map_err(|err| anyhow!("{err}"))?
-                        .into()
-                }
-                BinOp::Rem if matches!(ty, MirTy::Integer) => {
-                    let name = self.temp("irem");
-                    self.module
-                        .builder
-                        .build_int_signed_rem(lhs_value, rhs_value, &name)
-                        .map_err(|err| anyhow!("{err}"))?
-                        .into()
-                }
+                BinOp::Add if matches!(ty, MirTy::Integer) => self
+                    .call_i64("fdn_int_add", &[lhs_value.into(), rhs_value.into()])?
+                    .into(),
+                BinOp::Sub if matches!(ty, MirTy::Integer) => self
+                    .call_i64("fdn_int_sub", &[lhs_value.into(), rhs_value.into()])?
+                    .into(),
+                BinOp::Mul if matches!(ty, MirTy::Integer) => self
+                    .call_i64("fdn_int_mul", &[lhs_value.into(), rhs_value.into()])?
+                    .into(),
+                BinOp::Div if matches!(ty, MirTy::Integer) => self
+                    .call_i64("fdn_int_div", &[lhs_value.into(), rhs_value.into()])?
+                    .into(),
+                BinOp::Rem if matches!(ty, MirTy::Integer) => self
+                    .call_i64("fdn_int_rem", &[lhs_value.into(), rhs_value.into()])?
+                    .into(),
+                BinOp::Pow if matches!(ty, MirTy::Integer) => self
+                    .call_i64("fdn_int_pow", &[lhs_value.into(), rhs_value.into()])?
+                    .into(),
                 BinOp::Eq if matches!(ty, MirTy::Boolean) => {
                     let name = self.temp("ieq");
                     self.module
@@ -3451,14 +3454,9 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                         .map_err(|err| anyhow!("{err}"))?
                         .into()
                 }
-                BinOp::Div if matches!(ty, MirTy::Float) => {
-                    let name = self.temp("fdiv");
-                    self.module
-                        .builder
-                        .build_float_div(lhs_value, rhs_value, &name)
-                        .map_err(|err| anyhow!("{err}"))?
-                        .into()
-                }
+                BinOp::Div if matches!(ty, MirTy::Float) => self
+                    .call_f64("fdn_float_div", &[lhs_value.into(), rhs_value.into()])?
+                    .into(),
                 BinOp::Eq if matches!(ty, MirTy::Boolean) => {
                     let name = self.temp("feq");
                     self.module
@@ -3608,13 +3606,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             }
             (UnOp::Neg, MirTy::Integer) => {
                 let value = self.lower_native_operand(operand, ty)?.into_int_value();
-                let name = self.temp("ineg");
-                Ok(self
-                    .module
-                    .builder
-                    .build_int_neg(value, &name)
-                    .map_err(|err| anyhow!("{err}"))?
-                    .into())
+                Ok(self.call_i64("fdn_int_neg", &[value.into()])?.into())
             }
             (UnOp::Neg, MirTy::Float) => {
                 let value = self.lower_native_operand(operand, ty)?.into_float_value();

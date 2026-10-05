@@ -1,8 +1,7 @@
 ## ============================================================
 ## Fidan Language — Complete Syntax Reference
 ## Every statement, expression, and construct in one file.
-## Lines marked [PROPOSED] use syntax not yet finalised —
-## tweak to your vision before Phase 3.5 is closed.
+## Executable syntax coverage; backend support varies by construct.
 ## ============================================================
 
 
@@ -500,16 +499,18 @@ action demonstrateConcurrency {
 
     # ── Shared oftype T — thread-safe mutable value (Arc<Mutex>) ─────────────
     var counter oftype Shared oftype integer = Shared(0)
+    var firstResult = Shared(0)
+    var secondResult = Shared(0)
     parallel {
         task inc1 {
-            var cur1 = counter.get()
-            counter.set(cur1 + 1)
+            firstResult.set(1)
         }
         task inc2 {
-            var cur2 = counter.get()
-            counter.set(cur2 + 1)
+            secondResult.set(1)
         }
     }
+    # get/set pairs are not atomic. Combine task results after the parallel join.
+    counter.set(firstResult.get() + secondResult.get())
     print("Counter = {counter.get()}")    # 2
 
     # ── WeakShared oftype T — non-owning weak handle to a Shared value ───────

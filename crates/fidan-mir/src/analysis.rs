@@ -434,6 +434,7 @@ fn function_may_throw(function: &MirFunction, throw_map: &HashMap<FunctionId, bo
                 {
                     return true;
                 }
+                Instr::Assign { rhs, .. } if rhs.arithmetic_may_fail() => return true,
                 Instr::GetField { .. }
                 | Instr::SetField { .. }
                 | Instr::GetIndex { .. }

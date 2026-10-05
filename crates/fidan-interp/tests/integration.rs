@@ -181,11 +181,21 @@ fn run_src(src: &str) -> Result<(), RunError> {
 }
 
 #[test]
-fn integer_arithmetic_wraps_without_host_panics() {
+fn integer_arithmetic_reports_runtime_errors_without_host_panics() {
     let source = include_str!("../../../test/examples/integer_overflow_regression.fdn");
     for threshold in [0, 1] {
         if let Err(error) = run_src_with_threshold(source, threshold) {
             panic!("integer arithmetic semantics: {}", error.message);
+        }
+    }
+}
+
+#[test]
+fn string_receiver_unicode_and_bounds_with_and_without_jit() {
+    let source = include_str!("../../../test/examples/string_receiver_regression.fdn");
+    for threshold in [0, 1] {
+        if let Err(error) = run_src_with_threshold(source, threshold) {
+            panic!("string receiver semantics: {}", error.message);
         }
     }
 }

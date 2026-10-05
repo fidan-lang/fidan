@@ -1,20 +1,307 @@
-# Integers wrap at signed 64-bit boundaries, independent of the Rust build profile.
-action verify_integer_arithmetic {
-    var maximum = 9223372036854775807
-    var minimum = -maximum - 1
-    assert_eq(maximum + 1, minimum)
-    assert_eq(minimum - 1, maximum)
-    assert_eq(maximum * 2, -2)
-    assert_eq(-minimum, minimum)
-    assert_eq(100000 ** 4, 7766279631452241920)
-
-    # Original crash.fdn loop: inclusive endpoint, integer division, integer powers.
-    var total = 0
-    for n in 1...100000 {
-        total += n * n / (n + 1)
-        total -= n ** (n % 5)
-    }
-    assert_eq(total, 1091749166503164576)
-    print("integer arithmetic ok")
+# Checked integer arithmetic: every failure is catchable, without a host trap.
+use std.math
+action checked_abs with (certain a oftype integer) returns integer { return math.abs(a) }
+action dynamic_abs with (certain a oftype flexible) returns flexible { return math.abs(a) }
+action receiver_abs with (certain a oftype integer) returns integer { return a.abs() }
+action add with (certain a oftype integer, certain b oftype integer) returns integer { return a + b }
+action dynamic_add with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a + b }
+action sub with (certain a oftype integer, certain b oftype integer) returns integer { return a - b }
+action dynamic_sub with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a - b }
+action mul with (certain a oftype integer, certain b oftype integer) returns integer { return a * b }
+action dynamic_mul with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a * b }
+action div with (certain a oftype integer, certain b oftype integer) returns integer { return a / b }
+action dynamic_div with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a / b }
+action rem with (certain a oftype integer, certain b oftype integer) returns integer { return a % b }
+action dynamic_rem with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a % b }
+action integer_power with (certain a oftype integer, certain b oftype integer) returns integer { return a ** b }
+action dynamic_pow with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a ** b }
+action negate with (certain a oftype integer) returns integer { return -a }
+action dynamic_negate with (certain a oftype flexible) returns flexible { return -a }
+var reached_after_error = false
+action nested returns integer {
+    var result = add(9223372036854775807, 1)
+    reached_after_error = true
+    return result
 }
-verify_integer_arithmetic()
+
+# Indirect calls keep flexible parameter operations from becoming scalar
+# arithmetic through inlining; native runs must execute the dynamic helpers.
+var dynamic_actions oftype list oftype flexible = [dynamic_add, dynamic_sub, dynamic_mul, dynamic_div, dynamic_rem, dynamic_pow, dynamic_negate, dynamic_abs]
+var maximum = 9223372036854775807
+var minimum = -maximum - 1
+assert_eq(add(maximum, 0), maximum)
+assert_eq(checked_abs(-42), 42)
+assert_eq(dynamic_actions[7](-42), 42)
+assert_eq(receiver_abs(-42), 42)
+assert_eq(sub(minimum, 0), minimum)
+assert_eq(mul(minimum, 1), minimum)
+assert_eq(div(minimum, 1), minimum)
+assert_eq(rem(minimum, 1), 0)
+assert_eq(integer_power(-2, 63), minimum)
+assert_eq(integer_power(-1, maximum), -1)
+assert_eq(integer_power(1, maximum), 1)
+assert_eq(integer_power(0, maximum), 0)
+assert_eq(integer_power(0, 0), 1)
+assert_eq(2.0 ** -2, 0.25)
+assert_eq(math.pow(2, -2), 0.25)
+assert_eq(integer_power(1, minimum), 1)
+assert_eq(integer_power(-1, minimum), 1)
+assert_eq(integer_power(-1, -1), -1)
+assert_eq(dynamic_actions[5](1, -1), 1)
+assert_eq(dynamic_actions[5](-1, -1), -1)
+var caught_0 = false
+attempt {
+    var result = add(maximum, 1)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_0 = true
+}
+assert(caught_0)
+var caught_1 = false
+attempt {
+    var result = sub(minimum, 1)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_1 = true
+}
+assert(caught_1)
+var caught_2 = false
+attempt {
+    var result = mul(maximum, 2)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_2 = true
+}
+assert(caught_2)
+var caught_3 = false
+attempt {
+    var result = negate(minimum)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_3 = true
+}
+assert(caught_3)
+var caught_4 = false
+attempt {
+    var result = integer_power(2, 63)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_4 = true
+}
+assert(caught_4)
+var caught_5 = false
+attempt {
+    var result = integer_power(2, 4294967296)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_5 = true
+}
+assert(caught_5)
+var caught_6 = false
+attempt {
+    var result = integer_power(2, -1)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_6 = true
+}
+assert(caught_6)
+var caught_7 = false
+attempt {
+    var result = div(minimum, -1)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_7 = true
+}
+assert(caught_7)
+var caught_8 = false
+attempt {
+    var result = rem(minimum, -1)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_8 = true
+}
+assert(caught_8)
+var caught_9 = false
+attempt {
+    var result = div(10, 0)
+} catch error {
+    assert(error.contains("[R2001]"))
+    caught_9 = true
+}
+assert(caught_9)
+var caught_10 = false
+attempt {
+    var result = rem(10, 0)
+} catch error {
+    assert(error.contains("[R2001]"))
+    caught_10 = true
+}
+assert(caught_10)
+var caught_11 = false
+attempt {
+    var result = dynamic_actions[0](maximum, 1)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_11 = true
+}
+assert(caught_11)
+var caught_12 = false
+attempt {
+    var result = dynamic_actions[1](minimum, 1)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_12 = true
+}
+assert(caught_12)
+var caught_13 = false
+attempt {
+    var result = dynamic_actions[2](maximum, 2)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_13 = true
+}
+assert(caught_13)
+var caught_14 = false
+attempt {
+    var result = dynamic_actions[6](minimum)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_14 = true
+}
+assert(caught_14)
+var caught_15 = false
+attempt {
+    var result = dynamic_actions[5](2, 63)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_15 = true
+}
+assert(caught_15)
+var caught_16 = false
+attempt {
+    var result = dynamic_actions[5](2, 4294967296)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_16 = true
+}
+assert(caught_16)
+var caught_17 = false
+attempt {
+    var result = dynamic_actions[5](2, -1)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_17 = true
+}
+assert(caught_17)
+var caught_18 = false
+attempt {
+    var result = dynamic_actions[3](minimum, -1)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_18 = true
+}
+assert(caught_18)
+var caught_19 = false
+attempt {
+    var result = dynamic_actions[4](minimum, -1)
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_19 = true
+}
+assert(caught_19)
+var caught_20 = false
+attempt {
+    var result = dynamic_actions[3](10, 0)
+} catch error {
+    assert(error.contains("[R2001]"))
+    caught_20 = true
+}
+assert(caught_20)
+var caught_21 = false
+attempt {
+    var result = dynamic_actions[4](10, 0)
+} catch error {
+    assert(error.contains("[R2001]"))
+    caught_21 = true
+}
+assert(caught_21)
+var caught_22 = false
+attempt {
+    var result = nested()
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_22 = true
+}
+assert(caught_22)
+var caught_23 = false
+attempt {
+    var result = 9223372036854775807 + 1
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_23 = true
+}
+assert(caught_23)
+var caught_24 = false
+attempt {
+    var result = 100000 ** 4
+} catch error {
+    assert(error.contains("[R2003]"))
+    caught_24 = true
+}
+assert(caught_24)
+assert(not reached_after_error)
+var float_zero_0 = false
+attempt { var result = dynamic_actions[3](1.0, 0.0) } catch error {
+    assert(error.contains("[R2001]"))
+    float_zero_0 = true
+}
+assert(float_zero_0)
+var float_zero_1 = false
+attempt { var result = dynamic_actions[4](1.0, 0.0) } catch error {
+    assert(error.contains("[R2001]"))
+    float_zero_1 = true
+}
+assert(float_zero_1)
+var float_zero_2 = false
+attempt { var result = dynamic_actions[3](1, 0.0) } catch error {
+    assert(error.contains("[R2001]"))
+    float_zero_2 = true
+}
+assert(float_zero_2)
+var float_zero_3 = false
+attempt { var result = dynamic_actions[4](1.0, 0) } catch error {
+    assert(error.contains("[R2001]"))
+    float_zero_3 = true
+}
+assert(float_zero_3)
+var float_zero_4 = false
+attempt { var result = 1.0 / 0.0 } catch error {
+    assert(error.contains("[R2001]"))
+    float_zero_4 = true
+}
+assert(float_zero_4)
+var float_zero_5 = false
+attempt { var result = 1.0 % 0.0 } catch error {
+    assert(error.contains("[R2001]"))
+    float_zero_5 = true
+}
+assert(float_zero_5)
+var abs_error_0 = false
+attempt { var result = checked_abs(minimum) } catch error {
+    assert(error.contains("[R2003]"))
+    abs_error_0 = true
+}
+assert(abs_error_0)
+var abs_error_1 = false
+attempt { var result = dynamic_actions[7](minimum) } catch error {
+    assert(error.contains("[R2003]"))
+    abs_error_1 = true
+}
+assert(abs_error_1)
+var abs_error_2 = false
+attempt { var result = receiver_abs(minimum) } catch error {
+    assert(error.contains("[R2003]"))
+    abs_error_2 = true
+}
+assert(abs_error_2)
+print("integer arithmetic ok")
