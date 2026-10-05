@@ -180,6 +180,64 @@ fn run_src(src: &str) -> Result<(), RunError> {
     run_src_with_threshold(src, 500)
 }
 
+#[test]
+fn integer_arithmetic_wraps_without_host_panics() {
+    let source = include_str!("../../../test/examples/integer_overflow_regression.fdn");
+    for threshold in [0, 1] {
+        if let Err(error) = run_src_with_threshold(source, threshold) {
+            panic!("integer arithmetic semantics: {}", error.message);
+        }
+    }
+}
+
+#[test]
+fn boolean_negation_is_logical_with_and_without_jit() {
+    let source = include_str!("../../../test/examples/boolean_negation_regression.fdn");
+    for threshold in [0, 1] {
+        if let Err(error) = run_src_with_threshold(source, threshold) {
+            panic!("boolean negation semantics: {}", error.message);
+        }
+    }
+}
+
+#[test]
+fn slicing_regression_interpreter_and_jit_fallback() {
+    let source = include_str!("../../../test/examples/slice_regression.fdn");
+    for threshold in [0, 1] {
+        if let Err(error) = run_src_with_threshold(source, threshold) {
+            panic!("slicing semantics: {}", error.message);
+        }
+    }
+}
+
+#[test]
+fn slicing_invalid_dynamic_components_report_errors() {
+    for (component, source) in [
+        ("step cannot be zero", r#"var result = "abc"[::0]"#),
+        (
+            "step must be an integer",
+            r#"action bad returns dynamic { return "x" }
+var result = "abc"[::bad()]"#,
+        ),
+        (
+            "index must be an integer",
+            r#"action bad returns dynamic { return "x" }
+var result = "abc"[bad():]"#,
+        ),
+        (
+            "list index -2 out of range",
+            "var items = [1]\nitems[-2] = 7",
+        ),
+        (
+            "range length cannot be represented",
+            "var size = len(0...9223372036854775807)",
+        ),
+    ] {
+        let error = run_src(source).expect_err("invalid slice should fail");
+        assert!(error.message.contains(component), "{}", error.message);
+    }
+}
+
 fn run_src_preserving_call_frames(src: &str) -> Result<(), RunError> {
     let source_map = Arc::new(SourceMap::new());
     let interner = make_interner();

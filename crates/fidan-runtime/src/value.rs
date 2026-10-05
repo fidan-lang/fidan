@@ -12,14 +12,14 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FunctionId(pub u32);
 
-/// The universal Fidan value type used in the interpreter.
+/// The universal boxed value type used by the interpreter and native runtime.
 ///
-/// In AOT mode, this is replaced by typed native LLVM values.
+/// AOT uses native scalars where possible and boxed values at runtime boundaries.
 ///
 /// ## Memory model
 /// - Primitives (`Integer`, `Float`, `Boolean`, `Nothing`) are always **copied**.
 /// - `String`, `List`, `Dict` are Copy-on-Write: cheap to clone, copy on mutation.
-/// - `Object` is owned by an `OwnedRef<T>` (interpreter-internal Rc<RefCell<T>>).
+/// - `Object` is owned by an `OwnedRef<T>` (runtime Rc<RefCell<T>>).
 /// - `Shared` is the only variant backed by `Arc<Mutex<T>>` — explicit opt-in.
 #[derive(Debug, Clone)]
 pub enum FidanValue {

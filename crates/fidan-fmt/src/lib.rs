@@ -64,6 +64,18 @@ pub fn check_formatted(src: &str, opts: &FormatOptions) -> bool {
 
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
+#[test]
+fn colon_slices_round_trip_through_canonical_range_syntax() {
+    let source = "var text = \"abcdef\"\nassert_eq(text[1:5:2], \"bd\")\nassert_eq(text[::-1], \"fedcba\")\n";
+    let formatted = format_source(source, &FormatOptions::default());
+    assert!(formatted.contains("[1..5 step 2]"), "{formatted}");
+    assert!(formatted.contains("[.. step -1]"), "{formatted}");
+    assert_eq!(
+        format_source(&formatted, &FormatOptions::default()),
+        formatted
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       toolchain_version:
-        description: "Fidan toolchain package version (defaults to workspace version)"
+        description: "Fidan toolchain package version (defaults to the AI helper version)"
         required: false
         type: string
       tool_version:
-        description: "AI analysis helper tool version (defaults to workspace version)"
+        description: "AI analysis helper tool version (defaults to the AI helper version)"
         required: false
         type: string
   pull_request:
@@ -23,6 +23,7 @@ on:
       - "crates/fidan-secrets/**"
       - "crates/fidan-runtime/**"
       - "Cargo.toml"
+      - "Cargo.lock"
 
 jobs:
   validate:

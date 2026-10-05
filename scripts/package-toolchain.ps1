@@ -553,6 +553,18 @@ function Invoke-HelperBuild {
         throw "LLVM helper build requires -LlvmRoot"
       }
 
+      if ($IsWindows) {
+        # Select the DLL CRT used by Rust and x64-windows-static-md dependencies.
+        # Upstream LLVM archives also request LIBCMT; linking both CRTs conflicts.
+        $dynamicCrtFlag = "-C link-arg=/NODEFAULTLIB:libcmt"
+        $env:RUSTFLAGS = if ($hadRustFlags -and $previousRustFlags) {
+          "$previousRustFlags $dynamicCrtFlag"
+        }
+        else {
+          $dynamicCrtFlag
+        }
+      }
+
       $llvmBinDir = Join-Path $LlvmRoot "bin"
       $llvmLibDir = Join-Path $LlvmRoot "lib"
       if (Test-Path -LiteralPath $llvmBinDir) {
@@ -648,6 +660,18 @@ function Invoke-HelperBuild {
     }
     if ($LASTEXITCODE -ne 0) {
       throw "Failed to build $HelperPackage"
+    }
+    if ($Kind -eq "llvm" -and $HelperCargoFeatures) {
+      # Run the feature-gated backend tests while the full LLVM development
+      # libraries are still available, before the distribution is pruned.
+      cargo test -p fidan-codegen-llvm --lib --release --locked --features $HelperCargoFeatures
+      if ($LASTEXITCODE -ne 0) {
+        throw "LLVM backend tests failed"
+      }
+      cargo clippy -p fidan-codegen-llvm --all-targets --release --locked --features $HelperCargoFeatures -- -D warnings
+      if ($LASTEXITCODE -ne 0) {
+        throw "LLVM backend lint checks failed"
+      }
     }
   }
   finally {

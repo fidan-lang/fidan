@@ -25,7 +25,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use cranelift_codegen::{
     Context,
     ir::{
-        AbiParam, BlockArg, Function, InstBuilder, MemFlags, TrapCode, UserFuncName,
+        AbiParam, BlockArg, Function, InstBuilder, MemFlagsData, TrapCode, UserFuncName,
         condcodes::{FloatCC, IntCC},
         types::{F64, I8, I32, I64},
     },
@@ -1084,7 +1084,7 @@ fn lower_extern_wrapper(
         }
     }
 
-    builder.finalize();
+    builder.finalize(module.target_config());
 
     Ok(())
 }
@@ -1260,7 +1260,7 @@ fn lower_function(
     }
 
     builder.seal_all_blocks();
-    builder.finalize();
+    builder.finalize(module.target_config());
     Ok(())
 }
 
@@ -1313,7 +1313,9 @@ fn build_boxed_value_array(
         3u8,
     ));
     for (index, value) in values.iter().enumerate() {
-        builder.ins().stack_store(*value, slot, (index as i32) * 8);
+        builder
+            .ins()
+            .stack_store(PTR_TY, *value, slot, (index as i32) * 8);
     }
     let ptr = builder.ins().stack_addr(PTR_TY, slot, 0);
     let cnt = builder.ins().iconst(I64, values.len() as i64);
@@ -1326,7 +1328,7 @@ fn coalesce_null_ptr_to_nothing(
     builder: &mut FunctionBuilder<'_>,
     value: cranelift_codegen::ir::Value,
 ) -> Result<cranelift_codegen::ir::Value> {
-    let is_null = builder.ins().icmp_imm(IntCC::Equal, value, 0);
+    let is_null = builder.ins().icmp_imm_s(IntCC::Equal, value, 0);
     let nothing = call_rt(module, builder, rt.box_nothing, &[])?.unwrap();
     Ok(builder.ins().select(is_null, nothing, value))
 }
@@ -1616,8 +1618,8 @@ fn lower_instr(
                     namespace_locals.remove(dest);
                 }
                 let gv = module.declare_data_in_func(data_id, builder.func);
-                let addr = builder.ins().global_value(PTR_TY, gv);
-                let val = builder.ins().load(PTR_TY, MemFlags::new(), addr, 0);
+                let addr = builder.ins().symbol_value(PTR_TY, gv);
+                let val = builder.ins().load(PTR_TY, MemFlagsData::new(), addr, 0);
                 store_local_from_boxed(builder, cl_vars, local_types, *dest, val, rt, module)?;
             } else {
                 namespace_locals.remove(dest);
@@ -1630,11 +1632,11 @@ fn lower_instr(
             let GlobalId(gid) = global;
             if let Some(&data_id) = global_data_ids.get(*gid as usize) {
                 let gv = module.declare_data_in_func(data_id, builder.func);
-                let addr = builder.ins().global_value(PTR_TY, gv);
+                let addr = builder.ins().symbol_value(PTR_TY, gv);
                 let val = lower_operand_boxed(builder, cl_vars, local_types, value, rt, module)?;
                 let cloned = call_rt(module, builder, rt.clone_any, &[val])?
                     .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
-                builder.ins().store(MemFlags::new(), cloned, addr, 0);
+                builder.ins().store(MemFlagsData::new(), cloned, addr, 0);
             }
         }
 
@@ -2635,7 +2637,8 @@ fn lower_unary(
         }
         (Not, I8) => {
             let v = lower_operand(builder, cl_vars, operand);
-            Ok(builder.ins().bnot(v))
+            let zero = builder.ins().iconst(I8, 0);
+            Ok(builder.ins().icmp(IntCC::Equal, v, zero))
         }
         (Pos, _) => Ok(lower_operand(builder, cl_vars, operand)),
         _ => {
@@ -2878,7 +2881,7 @@ fn emit_container_method_call(
         }
         (ReceiverBuiltinKind::Dict, ReceiverMethodOp::IsEmpty) => {
             let len = call_rt(module, builder, rt.dict_len, &[recv])?.unwrap_or(recv);
-            let is_empty = builder.ins().icmp_imm(IntCC::Equal, len, 0);
+            let is_empty = builder.ins().icmp_imm_s(IntCC::Equal, len, 0);
             let is_empty = builder.ins().uextend(I8, is_empty);
             return box_container_scalar_result(
                 module,
@@ -2966,7 +2969,7 @@ fn emit_container_method_call(
         }
         (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::IsEmpty) => {
             let len = call_rt(module, builder, rt.len_fn, &[recv])?.unwrap_or(recv);
-            let is_empty = builder.ins().icmp_imm(IntCC::Equal, len, 0);
+            let is_empty = builder.ins().icmp_imm_s(IntCC::Equal, len, 0);
             let is_empty = builder.ins().uextend(I8, is_empty);
             return box_container_scalar_result(
                 module,
@@ -3364,7 +3367,7 @@ fn lower_string_interp(
                 }
             }
         };
-        builder.ins().stack_store(boxed, slot, offset);
+        builder.ins().stack_store(PTR_TY, boxed, slot, offset);
     }
     let arr_ptr = builder.ins().stack_addr(PTR_TY, slot, 0);
     let count = builder.ins().iconst(I64, n);
@@ -3454,7 +3457,7 @@ fn emit_trampolines(
         for (j, param) in mf.params.iter().enumerate() {
             let have_arg = builder
                 .ins()
-                .icmp_imm(IntCC::UnsignedGreaterThan, args_cnt, j as i64);
+                .icmp_imm_s(IntCC::UnsignedGreaterThan, args_cnt, j as i64);
             let present_block = builder.create_block();
             let missing_block = builder.create_block();
             let cont_block = builder.create_block();
@@ -3468,7 +3471,7 @@ fn emit_trampolines(
             let offset = (j as i32) * 8;
             let raw = builder
                 .ins()
-                .load(PTR_TY, MemFlags::new(), args_ptr, offset);
+                .load(PTR_TY, MemFlagsData::new(), args_ptr, offset);
             let present_val = match &param.ty {
                 MirTy::Integer => {
                     let r = module.declare_func_in_func(rt.unbox_int, builder.func);
@@ -3559,7 +3562,7 @@ fn emit_trampolines(
 
         builder.ins().return_(&[boxed]);
         builder.seal_all_blocks();
-        builder.finalize();
+        builder.finalize(module.target_config());
 
         module
             .define_function(tramp_id, ctx)
@@ -3650,7 +3653,7 @@ fn emit_c_main(
     let zero = builder.ins().iconst(I32, 0);
     builder.ins().return_(&[zero]);
     builder.seal_all_blocks();
-    builder.finalize();
+    builder.finalize(module.target_config());
 
     let mut main_sig = module.make_signature();
     main_sig.params.push(AbiParam::new(I32));
@@ -4013,7 +4016,7 @@ fn widen_to_i8(
     }
 
     match operand_mir_ty(local_types, op) {
-        MirTy::Integer | MirTy::Handle => Ok(builder.ins().icmp_imm(IntCC::NotEqual, val, 0)),
+        MirTy::Integer | MirTy::Handle => Ok(builder.ins().icmp_imm_s(IntCC::NotEqual, val, 0)),
         MirTy::Dynamic
         | MirTy::String
         | MirTy::List(_)
@@ -4028,7 +4031,7 @@ fn widen_to_i8(
         | MirTy::Function
         | MirTy::Nothing
         | MirTy::Error => Ok(call_rt(module, builder, rt.truthy, &[val])?.unwrap_or(val)),
-        MirTy::Boolean => Ok(builder.ins().icmp_imm(IntCC::NotEqual, val, 0)),
+        MirTy::Boolean => Ok(builder.ins().icmp_imm_s(IntCC::NotEqual, val, 0)),
         MirTy::Float => {
             let zero = builder.ins().f64const(0.0);
             Ok(builder.ins().fcmp(FloatCC::NotEqual, val, zero))
@@ -4072,7 +4075,7 @@ fn str_const(
         .define_data(data_id, &desc)
         .context("defining string constant")?;
     let gref = module.declare_data_in_func(data_id, builder.func);
-    let ptr = builder.ins().global_value(PTR_TY, gref);
+    let ptr = builder.ins().symbol_value(PTR_TY, gref);
     let len = builder.ins().iconst(I64, s.len() as i64);
     Ok((ptr, len))
 }
@@ -4100,7 +4103,7 @@ fn build_ptr_array(
     ));
     for (i, op) in args.iter().enumerate() {
         let v = lower_operand_boxed(builder, cl_vars, local_types, op, rt, module)?;
-        builder.ins().stack_store(v, slot, (i as i32) * 8);
+        builder.ins().stack_store(PTR_TY, v, slot, (i as i32) * 8);
     }
     let ptr = builder.ins().stack_addr(PTR_TY, slot, 0);
     let cnt = builder.ins().iconst(I64, n);

@@ -1,18 +1,21 @@
 //! `fidan-typeck` — Symbol tables, type inference, type checking, parallel safety.
 //!
 //! # Entry point
-//! ```rust,ignore
+//! ```rust
 //! use std::sync::Arc;
-//! use fidan_lexer::SymbolInterner;
-//!
-//! let module: fidan_ast::Module = unimplemented!();
+//! use fidan_lexer::{Lexer, SymbolInterner};
+//! use fidan_source::{FileId, SourceFile};
+//! let file = SourceFile::new(FileId(0), "example.fdn", "print(1 + 2)");
 //! let interner = Arc::new(SymbolInterner::new());
+//! let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+//! let (module, _) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
 //!
 //! // Lightweight: returns only diagnostics.
 //! let diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
 //!
 //! // Full: returns type map + diagnostics for HIR lowering.
 //! let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+//! assert_eq!(diags.len(), typed.diagnostics.len());
 //! ```
 
 mod check;
@@ -230,6 +233,22 @@ mod tests {
     #[test]
     fn string_var_is_clean() {
         assert!(check_errors(r#"var s = "hello""#).is_empty());
+    }
+
+    #[test]
+    fn slicing_rejects_non_integer_components() {
+        for source in [
+            r#"var result = "abc"["x":]"#,
+            r#"var result = "abc"[:true]"#,
+            r#"var result = "abc"[::1.5]"#,
+        ] {
+            assert!(
+                check_errors(source)
+                    .iter()
+                    .any(|error| error.contains("must be an integer")),
+                "{source}"
+            );
+        }
     }
 
     #[test]

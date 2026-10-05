@@ -833,6 +833,147 @@ fn llvm_available() -> bool {
 }
 
 #[test]
+fn integer_arithmetic_wraps_consistently_across_aot_backends() {
+    let sandbox = temp_dir("fidan_integer_arithmetic");
+    let output = sandbox.join(if cfg!(windows) {
+        "integers.exe"
+    } else {
+        "integers"
+    });
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM integer regression: no installed LLVM toolchain");
+            continue;
+        }
+        compile_program(
+            include_str!("../../../test/examples/integer_overflow_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "integer arithmetic ok");
+    }
+    fs::remove_dir_all(sandbox).expect("remove integer regression sandbox");
+}
+
+#[test]
+fn boolean_negation_is_logical_across_aot_backends() {
+    let sandbox = temp_dir("fidan_boolean_negation");
+    let output = sandbox.join(if cfg!(windows) {
+        "booleans.exe"
+    } else {
+        "booleans"
+    });
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM boolean regression: no installed LLVM toolchain");
+            continue;
+        }
+        compile_program(
+            include_str!("../../../test/examples/boolean_negation_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "boolean negation ok");
+    }
+    fs::remove_dir_all(sandbox).expect("remove boolean regression sandbox");
+}
+
+#[test]
+fn syntax_reference_parallel_results_are_deterministic() {
+    let sandbox = temp_dir("fidan_syntax_reference");
+    let output = sandbox.join(if cfg!(windows) {
+        "syntax.exe"
+    } else {
+        "syntax"
+    });
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM syntax reference regression: no installed LLVM toolchain");
+            continue;
+        }
+        compile_program(include_str!("../../../test/syntax.fdn"), backend, &output);
+        for _ in 0..20 {
+            run_compiled_binary_clean(&output, "All done!");
+        }
+    }
+    fs::remove_dir_all(sandbox).expect("remove syntax reference sandbox");
+}
+
+#[test]
+fn slicing_cranelift_aot_regression() {
+    let sandbox = temp_dir("fidan_slice_cranelift");
+    let output = sandbox.join(if cfg!(windows) {
+        "slicing.exe"
+    } else {
+        "slicing"
+    });
+    compile_program(
+        include_str!("../../../test/examples/slice_regression.fdn"),
+        Backend::Cranelift,
+        &output,
+    );
+    run_compiled_binary_clean(&output, "slicing ok");
+    fs::remove_dir_all(&sandbox).expect("remove slicing sandbox");
+}
+
+#[test]
+fn slicing_llvm_aot_regression() {
+    if !llvm_available() {
+        eprintln!("skipping LLVM slicing regression: no installed LLVM toolchain");
+        return;
+    }
+    let sandbox = temp_dir("fidan_slice_llvm");
+    let output = sandbox.join(if cfg!(windows) {
+        "slicing.exe"
+    } else {
+        "slicing"
+    });
+    compile_program(
+        include_str!("../../../test/examples/slice_regression.fdn"),
+        Backend::Llvm,
+        &output,
+    );
+    run_compiled_binary_clean(&output, "slicing ok");
+    fs::remove_dir_all(&sandbox).expect("remove slicing sandbox");
+}
+
+#[test]
+fn slicing_aot_rejects_invalid_components() {
+    let sandbox = temp_dir("fidan_slice_invalid");
+    let output = sandbox.join(if cfg!(windows) {
+        "slicing.exe"
+    } else {
+        "slicing"
+    });
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM invalid slicing regression: no installed LLVM toolchain");
+            continue;
+        }
+        for (source, message) in [
+            (r#"var result = "abc"[::0]"#, "slice step cannot be zero"),
+            (
+                "var items = [1]\nitems[-2] = 7",
+                "list index -2 out of range",
+            ),
+            (
+                "var size = len(0...9223372036854775807)",
+                "range length cannot be represented",
+            ),
+            (
+                r#"action bad returns dynamic { return "x" }
+var result = "abc"[::bad()]"#,
+                "slice step must be an integer",
+            ),
+        ] {
+            compile_program(source, backend, &output);
+            run_compiled_binary_expect_failure(&output, message);
+        }
+    }
+    fs::remove_dir_all(&sandbox).expect("remove slicing sandbox");
+}
+
+#[test]
 fn concurrent_cranelift_aot_same_thread_ok() {
     let sandbox = temp_dir("fidan_concurrent_cranelift");
     let output = if cfg!(windows) {

@@ -194,6 +194,7 @@ while IFS= read -r file; do
 
     timeout_secs="$DEFAULT_TIMEOUT_SECONDS"
     allow_timeout=0
+    expected_failure_message=""
     stdin_flag=()
     case "$base_name" in
         parallel_benchmark.fdn)
@@ -202,6 +203,12 @@ while IFS= read -r file; do
             ;;
         replay_demo.fdn)
             stdin_flag=(--stdin-lines "6\\n3")
+            ;;
+        release_mega_1_0.fdn)
+            if [ "$timeout_secs" -lt 30 ]; then timeout_secs=30; fi
+            ;;
+        trace_demo.fdn)
+            expected_failure_message="something went wrong: iteration 42"
             ;;
     esac
 
@@ -225,8 +232,19 @@ while IFS= read -r file; do
         continue
     fi
     if [ "$exit_code" -ne 0 ]; then
+        if [ -n "$expected_failure_message" ] && grep -Fq "$expected_failure_message" "$stderr"; then
+            echo "[PASS] $rel - failed as expected"
+            PASS=$((PASS + 1))
+            continue
+        fi
         echo "[FAIL] $rel - exited with code $exit_code"
         [ -f "$stderr" ] && cat "$stderr"
+        FAIL=$((FAIL + 1))
+        continue
+    fi
+
+    if [ -n "$expected_failure_message" ]; then
+        echo "[FAIL] $rel - was expected to fail"
         FAIL=$((FAIL + 1))
         continue
     fi

@@ -53,7 +53,11 @@ struct TargetCpuSpec {
 fn resolve_target_cpu(request: &CompileRequest, target_triple: &str) -> Result<TargetCpuSpec> {
     match request.target_cpu.as_deref().map(str::trim) {
         Some(spec) if spec.eq_ignore_ascii_case("native") => native_target_cpu(target_triple),
-        Some(spec) if spec.len() >= 7 && spec[..7].eq_ignore_ascii_case("native,") => {
+        Some(spec)
+            if spec
+                .get(..7)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("native,")) =>
+        {
             let mut native = native_target_cpu(target_triple)?;
             native.features = merge_feature_strings(&native.features, &spec[7..])?;
             Ok(native)
@@ -192,30 +196,6 @@ fn current_host_triple() -> Result<String> {
         other => bail!("unsupported architecture `{other}`"),
     };
     Ok(format!("{arch}-{os}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{merge_feature_strings, normalize_feature_string, parse_custom_cpu_spec};
-
-    #[test]
-    fn parse_custom_cpu_spec_splits_cpu_and_features() {
-        let spec = parse_custom_cpu_spec("znver4,+avx2,-avx512f").unwrap();
-        assert_eq!(spec.cpu, "znver4");
-        assert_eq!(spec.features, "+avx2,-avx512f");
-    }
-
-    #[test]
-    fn normalize_feature_string_last_override_wins() {
-        let normalized = normalize_feature_string("+avx2,-fma,+fma").unwrap();
-        assert_eq!(normalized, "+avx2,+fma");
-    }
-
-    #[test]
-    fn merge_feature_strings_preserves_base_order_and_overrides() {
-        let merged = merge_feature_strings("+avx2,-fma", "+fma,+bmi2").unwrap();
-        assert_eq!(merged, "+avx2,+fma,+bmi2");
-    }
 }
 
 pub fn compile_and_link_module(
@@ -405,8 +385,6 @@ pub fn compile_and_link_module(
     }
     trace("inkwell:drop_machine");
     drop(machine);
-    trace("inkwell:drop_target");
-    drop(target);
     trace("inkwell:drop_target_triple");
     drop(target_triple);
     trace("inkwell:drop_context");
@@ -421,9 +399,7 @@ fn write_bitcode_to_path(module: &Module<'_>, path: &std::path::Path) -> Result<
         let memory_buffer = LLVMWriteBitcodeToMemoryBuffer(module.as_mut_ptr());
         MemoryBuffer::new(memory_buffer)
     };
-    let bytes = buffer.as_slice();
-    let payload = bytes.strip_suffix(&[0]).unwrap_or(bytes);
-    std::fs::write(path, payload)
+    std::fs::write(path, buffer.as_slice())
         .with_context(|| format!("failed to write LLVM bitcode to `{}`", path.display()))?;
     Ok(())
 }
@@ -2479,7 +2455,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             if is_native_scalar_ty(&phi.ty) {
                 let value = match incoming {
                     Some(operand) => self.lower_native_operand(&operand, &phi.ty)?,
-                    None => native_zero(self.module, &phi.ty)?.into(),
+                    None => native_zero(self.module, &phi.ty)?,
                 };
                 self.store_local_native(phi.result, value)?;
             } else {
@@ -3652,11 +3628,22 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             }
             (UnOp::Not, MirTy::Boolean) => {
                 let value = self.lower_native_operand(operand, ty)?.into_int_value();
-                let name = self.temp("bnot");
+                let name = self.temp("logical_not");
+                let inverse = self
+                    .module
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::EQ,
+                        value,
+                        self.module.i8_type.const_zero(),
+                        &name,
+                    )
+                    .map_err(|err| anyhow!("{err}"))?;
+                let extend_name = self.temp("logical_not_i8");
                 Ok(self
                     .module
                     .builder
-                    .build_not(value, &name)
+                    .build_int_z_extend(inverse, self.module.i8_type, &extend_name)
                     .map_err(|err| anyhow!("{err}"))?
                     .into())
             }
@@ -4548,5 +4535,68 @@ fn literal_name(literal: &MirLit) -> &'static str {
         MirLit::StdlibFn { .. } => "stdlib_fn",
         MirLit::EnumType(_) => "enum_type",
         MirLit::ClassType(_) => "class_type",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{merge_feature_strings, normalize_feature_string, parse_custom_cpu_spec};
+
+    #[test]
+    fn emitted_bitcode_preserves_trailing_binary_bytes() {
+        let context = inkwell::context::Context::create();
+        let module = context.create_module("bitcode_round_trip");
+        let path =
+            std::env::temp_dir().join(format!("fidan-bitcode-test-{}.bc", std::process::id()));
+        super::write_bitcode_to_path(&module, &path).expect("write bitcode");
+        let emitted = std::fs::read(&path).expect("read emitted bitcode");
+        let expected = module.write_bitcode_to_memory();
+        assert_eq!(emitted, expected.as_slice());
+        let buffer = inkwell::memory_buffer::MemoryBuffer::create_from_file(&path)
+            .expect("load emitted bitcode");
+        inkwell::module::Module::parse_bitcode_from_buffer(&buffer, &context)
+            .expect("parse emitted bitcode");
+        std::fs::remove_file(path).expect("remove test bitcode");
+    }
+
+    #[test]
+    fn unicode_target_cpu_spec_does_not_panic_at_prefix_boundary() {
+        let request = crate::model::CompileRequest {
+            input: "input.fdn".into(),
+            output: "output".into(),
+            runtime_dir: ".".into(),
+            payload: crate::model::BackendPayload {
+                program: fidan_mir::MirProgram::new(),
+                symbols: vec![],
+            },
+            opt_level: crate::model::OptLevel::O0,
+            lto: crate::model::LtoMode::Off,
+            strip: crate::model::StripMode::Off,
+            emit_obj: false,
+            extra_lib_dirs: vec![],
+            link_dynamic: false,
+            target_cpu: Some("aaaaaaé".into()),
+        };
+        let spec = super::resolve_target_cpu(&request, "x86_64-pc-windows-msvc").unwrap();
+        assert_eq!(spec.cpu, "aaaaaaé");
+    }
+
+    #[test]
+    fn parse_custom_cpu_spec_splits_cpu_and_features() {
+        let spec = parse_custom_cpu_spec("znver4,+avx2,-avx512f").unwrap();
+        assert_eq!(spec.cpu, "znver4");
+        assert_eq!(spec.features, "+avx2,-avx512f");
+    }
+
+    #[test]
+    fn normalize_feature_string_last_override_wins() {
+        let normalized = normalize_feature_string("+avx2,-fma,+fma").unwrap();
+        assert_eq!(normalized, "+avx2,+fma");
+    }
+
+    #[test]
+    fn merge_feature_strings_preserves_base_order_and_overrides() {
+        let merged = merge_feature_strings("+avx2,-fma", "+fma,+bmi2").unwrap();
+        assert_eq!(merged, "+avx2,+fma,+bmi2");
     }
 }

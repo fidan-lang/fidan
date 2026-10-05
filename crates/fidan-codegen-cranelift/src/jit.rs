@@ -20,7 +20,7 @@
 // are released automatically when the outermost call returns.
 
 use cranelift_codegen::ir::{
-    AbiParam, Block, BlockArg, Function, InstBuilder, MemFlags, TrapCode, UserFuncName, Value,
+    AbiParam, Block, BlockArg, Function, InstBuilder, MemFlagsData, TrapCode, UserFuncName, Value,
     condcodes::{FloatCC, IntCC},
     types::{F64, I8, I64},
 };
@@ -1257,7 +1257,7 @@ impl JitCompiler {
             }
 
             builder.seal_all_blocks();
-            builder.finalize();
+            builder.finalize(self.module.target_config());
         }
 
         // ── Register and compile ──────────────────────────────────────────────
@@ -1365,7 +1365,7 @@ fn emit_container_method_call(
         }
         (ReceiverBuiltinKind::Dict, ReceiverMethodOp::IsEmpty) => {
             let len = call_runtime(builder, rt.dict_len_raw_ref, &[recv])?;
-            let is_empty = builder.ins().icmp_imm(IntCC::Equal, len, 0);
+            let is_empty = builder.ins().icmp_imm_s(IntCC::Equal, len, 0);
             builder.ins().uextend(I64, is_empty)
         }
         (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Get) => {
@@ -1411,7 +1411,7 @@ fn emit_container_method_call(
         }
         (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::IsEmpty) => {
             let len = call_runtime(builder, rt.hashset_len_raw_ref, &[recv])?;
-            let is_empty = builder.ins().icmp_imm(IntCC::Equal, len, 0);
+            let is_empty = builder.ins().icmp_imm_s(IntCC::Equal, len, 0);
             builder.ins().uextend(I64, is_empty)
         }
         (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::Insert) => {
@@ -1762,7 +1762,7 @@ fn str_const(
     let data_id = module.declare_anonymous_data(false, false).ok()?;
     module.define_data(data_id, &desc).ok()?;
     let gref = module.declare_data_in_func(data_id, builder.func);
-    let ptr = builder.ins().global_value(I64, gref);
+    let ptr = builder.ins().symbol_value(I64, gref);
     let len = builder.ins().iconst(I64, s.len() as i64);
     Some((ptr, len))
 }
@@ -1996,7 +1996,9 @@ fn stack_i64_array(builder: &mut FunctionBuilder, values: &[Value]) -> (Value, V
         3u8,
     ));
     for (index, value) in values.iter().enumerate() {
-        builder.ins().stack_store(*value, slot, (index as i32) * 8);
+        builder
+            .ins()
+            .stack_store(I64, *value, slot, (index as i32) * 8);
     }
     let ptr = builder.ins().stack_addr(I64, slot, 0);
     let cnt = builder.ins().iconst(I64, values.len() as i64);
@@ -2035,7 +2037,9 @@ fn collect_phi_args(
                         // Type mismatch — coerce safely.
                         match (val_ty, expected_ty) {
                             (t, F64) if t != F64 => ensure_f64(builder, val, t),
-                            (F64, t) if t != F64 => builder.ins().bitcast(t, MemFlags::new(), val),
+                            (F64, t) if t != F64 => {
+                                builder.ins().bitcast(t, MemFlagsData::new(), val)
+                            }
                             (I8, I64) => builder.ins().uextend(I64, val),
                             (I64, I8) => builder.ins().ireduce(I8, val),
                             _ => val,
@@ -2098,7 +2102,7 @@ fn coerce_same(
 
 fn abi_i64_to_native(builder: &mut FunctionBuilder, raw: Value, ty: &MirTy) -> Value {
     match ty {
-        MirTy::Float => builder.ins().bitcast(F64, MemFlags::new(), raw),
+        MirTy::Float => builder.ins().bitcast(F64, MemFlagsData::new(), raw),
         MirTy::Boolean => builder.ins().ireduce(I8, raw),
         _ => raw,
     }
@@ -2107,7 +2111,7 @@ fn abi_i64_to_native(builder: &mut FunctionBuilder, raw: Value, ty: &MirTy) -> V
 fn native_to_abi_i64(builder: &mut FunctionBuilder, val: Value, ty: &MirTy) -> Value {
     let vty = builder.func.dfg.value_type(val);
     match ty {
-        MirTy::Float => builder.ins().bitcast(I64, MemFlags::new(), val),
+        MirTy::Float => builder.ins().bitcast(I64, MemFlagsData::new(), val),
         MirTy::Boolean => builder.ins().uextend(I64, val),
         _ => ensure_i64(builder, val, vty),
     }

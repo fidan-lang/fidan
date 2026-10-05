@@ -15,8 +15,10 @@ pub use explanations::explain;
 
 /// Validate a diagnostic code string at **compile time** and return a [`DiagCode`].
 ///
-/// ```rust,ignore
-/// Diagnostic::error(diag_code!("E0101"), message, span);
+/// ```rust
+/// use fidan_diagnostics::{DiagCode, diag_code};
+/// let code: DiagCode = diag_code!("E0101");
+/// assert_eq!(code.to_string(), "E0101");
 /// ```
 ///
 /// Passing a code not present in `CODES` is a **compile error**.

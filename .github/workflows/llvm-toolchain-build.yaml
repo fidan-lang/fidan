@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       toolchain_version:
-        description: "Fidan toolchain package version (defaults to workspace version)"
+        description: "Fidan toolchain package version (defaults to the LLVM helper version)"
         required: false
         default: ""
         type: string
@@ -45,10 +45,12 @@ jobs:
             source_key: macos
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@v2
@@ -63,7 +65,7 @@ jobs:
 
       - name: Cache Windows vcpkg artifacts
         if: runner.os == 'Windows'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             .vcpkg

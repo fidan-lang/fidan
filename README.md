@@ -6,7 +6,7 @@
 
 # Fidan
 
-**A modern, expressive, human-readable programming language built for clarity, safety, native performance, and compiler-grounded AI tooling.**
+**A statically typed general-purpose language and toolchain, implemented in Rust.**
 
 [![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; [![CI](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml/badge.svg)](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://marketplace.visualstudio.com/items?itemName=fidan.fidan)
 
@@ -18,17 +18,16 @@
 
 ## What is Fidan?
 
-Fidan is a general-purpose programming language that prioritizes **human readability without sacrificing power**. It reads almost like English, yet compiles to native code and runs real threads. It is statically typed with full inference, null-safe by design, and ships a complete toolchain: formatter, linter, fixer, LSP server, REPL, interpreter, Cranelift JIT, Cranelift AOT, optional LLVM AOT, package manager, self/toolchain installer, and compiler-backed AI explain/fix/improve workflows.
+Fidan combines English-like syntax with static type checking, type inference, nullable values, and explicit concurrency constructs. The Cargo workspace contains a compiler frontend, typed IR lowering and optimization, a MIR interpreter with selective Cranelift JIT, Cranelift AOT, and optional LLVM AOT. It also includes a formatter, LSP server, REPL, package tooling, embedding APIs, and compiler-grounded AI analysis tooling.
 
 ```fidan
-object Person extends Creature {
+object Person {
     var name oftype string
     var age  oftype integer
 
     new with (certain name oftype string, optional age oftype integer = 18) {
         this.name = name
         this.age  = age
-        parent(species set "Human")
     }
 
     action introduce returns nothing {
@@ -51,50 +50,19 @@ still be called before their textual declaration in the same module.
 
 ---
 
-## Why Fidan?
+## Project status
 
-Most languages make a trade-off: either **readable** (Python) or **fast** (C++/Rust) or **safe** (Rust) — but rarely all three at once without significant ceremony. Fidan's goal is to hit all three without requiring you to understand lifetimes, borrow checkers, or cryptic syntax.
+Fidan is an actively developed language implementation. Examples and regression tests exercise objects, control flow, collections, concurrency, native interop, and tooling. Language APIs and compiler behavior may evolve; the existence of a compiler stage does not imply complete support for every construct in every backend.
 
-| Goal | How Fidan achieves it |
-|---|---|
-| **Readable code** | English-like syntax (`and`, `or`, `not`, `is`, `certain`, `otherwise when`…) |
-| **Safety without ceremony** | Null-safety analysis, `certain` non-null guarantees, data-race detection at compile time |
-| **Performance** | MIR-level optimization passes + Cranelift JIT (`@precompile`, auto hot-path with safe interpreter fallback) + Cranelift/LLVM AOT |
-| **Real concurrency** | `parallel` uses OS threads; `spawn`/`await` and `concurrent` provide structured same-thread async-style scheduling |
-| **AI-native tooling** | `explain --ai`, `fix --ai`, `fix --improve`, and `exec ai mcp` are grounded in compiler facts: diagnostics, inferred types, reads/writes, call graphs, type maps, and static traces |
-| **Great tooling** | Formatter, linter, fixer, REPL, LSP, VS Code extension, package flow, self updates, optional toolchains — all built-in, not plugins |
-| **Reproducible debugging** | `--replay` captures stdin and replays crashes exactly |
-| **Readable errors** | Ariadne-rendered diagnostics with source context, inline carets, fix-it patches |
+- `fidan run` executes MIR and can JIT eligible functions. Unsupported JIT functions stay in the interpreter. `--jit-threshold 0` disables JIT.
+- `fidan build --backend cranelift` produces native executables using the Rust backend and a host linker.
+- `fidan build --backend llvm` uses a separately installed LLVM helper. `--backend auto` prefers a compatible installed LLVM toolchain and otherwise uses Cranelift. `--release` selects optimization defaults, not a backend.
+- AI explain/fix/improve requires the optional AI helper and a configured provider. Compiler analysis, diagnostics, formatting, and deterministic fixes do not require a model.
+- Backend regression tests cover specific programs; general backend parity is not guaranteed. The interpreter's file/environment policy is not an OS security boundary for arbitrary native interop.
+
+See [the engineering audit](docs/ENGINEERING_AUDIT.md) for verified configurations, dependency decisions, and remaining limitations.
 
 ---
-
-## Feature Comparison
-
-| Feature | Fidan | Python | TypeScript | Go | Rust |
-|---|:---:|:---:|:---:|:---:|:---:|
-| English-like readable syntax | ✅ | ⚠️ partial | ❌ | ❌ | ❌ |
-| Static typing + full inference | ✅ | ❌ | ✅ | ✅ | ✅ |
-| Null safety (compile-time) | ✅ | ❌ | ⚠️ opt-in | ⚠️ partial | ✅ |
-| `certain` non-null parameter contract | ✅ | ❌ | ❌ | ❌ | ⚠️ (via type system) |
-| Data-race detection (compile-time) | ✅ | N/A | N/A | ⚠️ runtime | ✅ |
-| Real OS thread parallelism | ✅ | ❌ (GIL) | ❌ | ✅ | ✅ |
-| Built-in `spawn`/`await` model | ✅ | ⚠️ asyncio | ✅ | ✅ goroutines | ✅ |
-| JIT compilation (`@precompile`) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Built-in formatter | ✅ | ❌ (black) | ❌ (prettier) | ✅ | ✅ |
-| Built-in linter + auto-fixer | ✅ | ❌ (ruff) | ❌ | ⚠️ | ✅ clippy |
-| Built-in REPL | ✅ | ✅ | ❌ | ❌ | ❌ |
-| Built-in LSP server | ✅ | ❌ (pylsp) | ✅ (tsserver) | ⚠️ | ⚠️ (rust-analyzer) |
-| Replay-based crash reproduction | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `explain` line-level static analysis | ✅ | ❌ | ❌ | ❌ | ❌ |
-| Compiler-grounded AI explain/fix/improve | ✅ | ❌ | ❌ | ❌ | ❌ |
-| First-class test blocks | ✅ | ❌ (unittest) | ❌ (jest) | ✅ | ✅ |
-| Hot reload (`--reload`) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| String synonyms (`is`, `equals`, `and`, …) | ✅ | ❌ | ❌ | ❌ | ❌ |
-| `check` pattern matching | ✅ | ⚠️ (match 3.10+) | ❌ | ❌ | ✅ |
-| Multi-line comments (nested) | ✅ | ❌ | ❌ | ❌ | ✅ |
-
----
-
 ## Getting Started
 
 ### Install from a published release
@@ -180,12 +148,14 @@ fidan self remove
 
 #### Prerequisites
 
-- To build from source: **Rust toolchain** (1.82+): [rustup.rs](https://rustup.rs)
+- **Rust 1.96 or newer**: [rustup.rs](https://rustup.rs). The locked Cranelift 0.136 dependencies require this compiler version; this release was tested with Rust 1.99. Use `--locked` for reproducible builds. Future dependency updates may require a newer compiler.
+- A native linker/toolchain: Visual Studio C++ Build Tools on Windows, Xcode Command Line Tools on macOS, or a C compiler/linker on Linux. Native interop tests compile C/C++ fixtures.
+- On Linux, install `pkg-config` and `libdbus-1-dev` (Debian/Ubuntu names) for the OS keyring backend. Headless commands that do not access the keyring can run without a Secret Service session.
 
 ```bash
 git clone https://github.com/fidan-lang/fidan.git
-cd Fidan
-cargo build --release
+cd fidan
+cargo build --workspace --release --locked
 ```
 
 The `fidan` binary will be at `target/release/fidan`. Add it to your `PATH`:
@@ -257,7 +227,13 @@ var count oftype integer          # declared, not yet assigned — defaults to n
 var pi oftype float = 3.14159     # explicit type + value
 ```
 
-Type inference is full and bidirectional. Explicit `oftype` annotations are optional but always respected.
+Types can be inferred from expressions or declared with `oftype`; the type checker validates explicit annotations.
+
+Integers are signed 64-bit values. Integer addition, subtraction, multiplication,
+and negation wrap on overflow; integer division truncates toward zero. Use
+floating-point operands when fractional results are needed. The runnable
+[integer arithmetic regression](test/examples/integer_overflow_regression.fdn)
+checks the same boundary cases and workload through the interpreter and native backends.
 
 Multi-line strings are supported directly in both normal and raw string literals. Normal strings still process escapes and interpolation; raw strings preserve the body verbatim.
 
@@ -465,6 +441,27 @@ Nested multi-line comments are fully supported:
 
 ---
 
+### Indexing and slicing
+
+Strings use Unicode character indices; lists and lazy integer ranges use element indices. Negative indices count from the end. Slice endpoints are clamped and the stop is exclusive:
+
+```fidan
+var text = "somestring"
+assert_eq(text[1:4], "ome")
+assert_eq(text[:4], "some")
+assert_eq(text[3:], "estring")
+assert_eq(text[:], text)
+assert_eq(text[::2], "smsrn")
+assert_eq(text[1:7:2], "oet")
+assert_eq(text[::-1], "gnirtsemos")
+```
+
+The default step is `1`. For negative steps, omitted bounds run from the last character to before the first; an explicit `-1` stop refers to the last character. `nothing` components use the omitted-bound defaults. A zero step or a non-integer bound reports an error. Strings count Unicode scalar values, not grapheme clusters.
+
+Existing syntax remains available: `text[1..4]`, `text[.. step 2]`, and `text[1...4]` (inclusive stop). The formatter emits this range syntax. See [the slicing regression example](test/examples/slice_regression.fdn) for executable cases shared by the backend tests.
+
+File paths in `std.io` and `std.json` resolve relative to the process working directory, not the source file's directory. For example, running `fidan run LOCAL/test_file_manager.fdn` from the repository root reads/writes `./tasks.json` in that root. `io.cwd()` shows the working directory; `io.join(...)` builds a platform path. `io.file_exists(path)` returns `false` for missing paths and reports other filesystem inspection failures.
+
 ### Error handling
 
 ```fidan
@@ -577,16 +574,16 @@ parallel {
 #### `Shared` — thread-safe shared state
 
 ```fidan
-var counter = Shared(0)
-
-parallel for i in 1..100 {
-    counter.update(action with (val) { return val + 1 })
+var first = Shared(0)
+var second = Shared(0)
+parallel {
+    task one { first.set(1) }
+    task two { second.set(1) }
 }
-
-print(counter.get())   # 99 (safe, no data races)
+print(first.get() + second.get())   # 2, after both tasks join
 ```
 
-The compiler enforces this: writing to a non-`Shared` variable from a `parallel` block is a **compile-time error (E0401)**.
+`Shared.get()` and `Shared.set()` synchronize individual accesses. A sequence such as `counter.set(counter.get() + 1)` is not an atomic increment; use separate task results and combine them after joining. The compiler rejects direct writes to captured non-`Shared` variables in a `parallel` block with E0401.
 
 ---
 
@@ -722,7 +719,7 @@ For AOT builds, add `link = "..."` so the native import library is available at 
 action addNative with (a oftype integer, b oftype integer) returns integer
 ```
 
-There is a complete local smoke demo in `LOCAL/extern-cpp/`.
+Runnable native interop fixtures are in `crates/fidan-extern-fixture`. Run `cargo test -p fidan-driver --test extern_e2e` to exercise scalar and boxed calls, including AOT linking.
 
 ---
 
@@ -786,9 +783,9 @@ fidan profile test/examples/profiling_showcase.fdn
 
 ---
 
-## AI-native tooling
+## Compiler-grounded AI tooling
 
-Fidan's AI features are implemented as first-party tooling around the compiler, not as a prompt-only layer beside it.
+The optional AI helper combines provider responses with compiler diagnostics and analysis.
 
 The deterministic analysis path can produce structured context for a file or line range:
 
@@ -1118,55 +1115,9 @@ print(PI)            # 3.141592653589793
 
 ![VS Code Extension](./assets/github/vscode-ext.png)
 
-Install from the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=fidan.fidan) or build locally:
+The extension is distributed separately through the [VS Code Marketplace](https://marketplace.visualstudio.com/items?itemName=fidan.fidan); its source and setup instructions live in [fidan-editors](https://github.com/fidan-lang/fidan-editors).
 
-```bash
-git clone https://github.com/fidan-lang/fidan-editors.git
-cd fidan-editors/vscode
-npm install
-npm run compile
-# Press F5 to launch the Extension Development Host
-```
-
-**Features:**
-
-| Feature | Status |
-|---|---|
-| Syntax highlighting (TextMate grammar) | ✅ |
-| Semantic token highlighting | ✅ |
-| Error and warning diagnostics (LSP) | ✅ |
-| Hover documentation (type + declaration) | ✅ |
-| Auto-completion (dot-trigger, named args, cross-module) | ✅ |
-| Signature help | ✅ |
-| Go to definition | ✅ |
-| Find all references | ✅ |
-| Rename symbol | ✅ |
-| Format on save | ✅ |
-| Inlay hints (inferred types) | ✅ |
-| Code actions / fix-it patches | ✅ |
-| Folding ranges | ✅ |
-| Document outline | ✅ |
-| 19 built-in code snippets | ✅ |
-| Bracket / comment auto-close | ✅ |
-| All CLI commands in Command Palette | ✅ |
-| Debug adapter | 🔜 planned |
-
-**Commands available in the Command Palette (`Ctrl+Shift+P`):**
-
-| Command | Description |
-|---|---|
-| `Fidan: Run Current File` | Run the open file (with mode picker: once / reload) |
-| `Fidan: Check File` | Type-check and lint (with strict mode option) |
-| `Fidan: Fix File` | Apply fixes (apply or dry-run preview) |
-| `Fidan: Format Current File` | Format via LSP |
-| `Fidan: Build File` | Build binary (debug or release) |
-| `Fidan: Run Tests in Current File` | Run `test {}` blocks |
-| `Fidan: Profile Current File` | Profile execution |
-| `Fidan: Explain Diagnostic Code` | Prompt for a code → `fidan explain --diagnostic` |
-| `Fidan: Explain Current Line(s)` | Selection-aware `fidan explain` |
-| `Fidan: New Project` | Scaffold project with folder picker |
-| `Fidan: Open REPL` | Open the interactive REPL |
-| `Fidan: Restart Language Server` | Restart LSP |
+This repository contains the `fidan lsp` server, with diagnostics, completion, hover, signature help, navigation, references, rename, formatting, inlay hints, code actions, folding, and semantic tokens. Editor integration depends on the extension version; extension packaging and commands are maintained in the editor repository.
 
 ---
 
@@ -1175,25 +1126,15 @@ npm run compile
 Fidan is written in Rust and organized as a Cargo workspace of focused crates:
 
 ```
-Source Text → Lexer → Parser → AST
-                                 ↓
-                    Type Checker + Symbol Resolution
-                                 ↓
-                         HIR  (typed, desugared)
-                                 ↓
-                    MIR  (SSA / control-flow graph)
-                                 ↓
-              Optimization Passes (constant folding, inlining,
-                copy propagation, DCE, unreachable pruning)
-                                 ↓
-           ┌─────────────────────┼──────────────────────┐
-     Interpreter            Cranelift JIT          LLVM AOT
-   (always works)         (@precompile, hot        (fidan build
-                           functions ≥ N calls)    --release)
+Source -> lexer/parser -> AST -> type checking -> typed HIR -> MIR -> passes
+                                                               |
+                                     +-------------------------+-------------------+
+                                     |                         |                   |
+                              MIR interpreter           Cranelift AOT          LLVM AOT
+                              + selective JIT           (host linker)         (optional helper)
 ```
 
-The same MIR feeds all three backends — no behavioral divergence between run modes.
-
+All execution paths consume MIR. Native backends call the shared Rust runtime for boxed values, collections, slicing, and standard-library operations. The JIT supports a subset of MIR and falls back per function; AOT builds report unsupported lowering rather than promising universal parity.
 | Crate | Role |
 |---|---|
 | `fidan-config` | Shared language metadata for builtins, decorators, types, aliases, and receiver methods |
@@ -1202,7 +1143,7 @@ The same MIR feeds all three backends — no behavioral divergence between run m
 | `fidan-ast` | All AST node types, arena allocator |
 | `fidan-parser` | Recursive-descent + Pratt expression parser |
 | `fidan-secrets` | OS keychain / credential storage helpers used by registry and AI tooling |
-| `fidan-diagnostics` | Diagnostic types, ariadne rendering, fix engine, stable code explanations |
+| `fidan-diagnostics` | Diagnostic types, terminal/source rendering, fix engine, stable code explanations |
 | `fidan-typeck` | Symbol tables, type inference, null-safety, data-race detection |
 | `fidan-hir` | Typed, desugared high-level IR |
 | `fidan-mir` | SSA-form mid-level IR, CFG |
@@ -1212,39 +1153,15 @@ The same MIR feeds all three backends — no behavioral divergence between run m
 | `fidan-extern-fixture` | Native interop test fixture library |
 | `libfidan` | C ABI embedding surface |
 | `fidan-embed` | Safe Rust wrapper around `libfidan` |
-| `fidan-codegen-cranelift` | Cranelift JIT backend |
+| `fidan-codegen-cranelift` | Cranelift JIT and AOT backends |
 | `fidan-codegen-llvm` | LLVM AOT backend |
 | `fidan-llvm-helper` | Packaged helper binary for the optional LLVM toolchain |
 | `fidan-ai-analysis-helper` | Packaged helper binary for AI explain/fix/improve and MCP workflows |
 | `fidan-stdlib` | Rust-backed standard library |
 | `fidan-driver` | Compiler driver and CLI-facing orchestration across frontends/backends/toolchains |
 | `fidan-fmt` | Canonical source formatter |
-| `fidan-lsp` | Full LSP server |
+| `fidan-lsp` | LSP server: diagnostics, completion, navigation, semantic tokens, and formatting |
 | `fidan-cli` | `fidan` binary — all subcommands |
-
----
-
-## Roadmap
-
-| Milestone | Status |
-|---|---|
-| Lexer + Parser | ✅ Complete |
-| Type checker + null safety + data-race detection | ✅ Complete |
-| HIR + MIR lowering | ✅ Complete |
-| MIR optimization passes | ✅ Complete |
-| Interpreter (tree-walking + MIR) | ✅ Complete |
-| Real OS thread parallelism (`parallel`, `spawn`/`await`) | ✅ Complete |
-| Cranelift JIT (`@precompile`, auto hot-path with interpreter fallback for unsupported MIR) | ✅ Complete |
-| Standard library (`std.async`, `std.collections`, `std.env`, `std.io`, `std.json`, `std.math`, `std.parallel`, `std.regex`, `std.string`, `std.test`, `std.time`) | ✅ Complete |
-| Full LSP server | ✅ Complete |
-| VS Code extension | ✅ Complete |
-| Hot reload (`--reload`) | ✅ Complete |
-| Replay-based crash reproduction (`--replay`) | ✅ Complete |
-| LLVM AOT backend (`fidan build --release`) | ✅ Complete |
-| Package manager (DAL) | ✅ Complete |
-| AI analysis toolchain (`explain --ai`, `fix --ai`, `fix --improve`, MCP) | ✅ Complete |
-| Debug adapter (VS Code breakpoints) | 🔜 Planned |
-| Playground (browser WASM) | 🔜 Planned |
 
 ---
 
@@ -1282,11 +1199,15 @@ The current `pre-commit` hook automatically runs `cargo fmt --all` when staged `
 **Development setup:**
 
 ```bash
-# Build all crates
-cargo build
+# Build all crates (LLVM itself is optional)
+cargo build --workspace --locked
 
 # Run all tests
-cargo test --workspace
+cargo test --workspace --locked
+
+# Formatting and lint checks
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
 
 # Run a specific example
 cargo run -- run test/examples/test.fdn
@@ -1294,10 +1215,11 @@ cargo run -- run test/examples/test.fdn
 # Run with MIR dump
 cargo run -- run test/examples/test.fdn --emit mir
 
-# Build the VS Code extension
-git clone https://github.com/fidan-lang/fidan-editors.git
-cd fidan-editors/vscode && npm install && npm run compile
 ```
+
+The default workspace builds do not link LLVM. To use LLVM AOT, install a compatible packaged toolchain with `fidan toolchain install llvm`, then build with `fidan build --backend llvm file.fdn`. Contributors building the helper from source need LLVM 21.1 libraries and headers, `LLVM_SYS_211_PREFIX`, and `cargo build -p fidan-llvm-helper --features llvm-toolchain-21`. Use [scripts/package-toolchain.ps1](scripts/package-toolchain.ps1) for distributable toolchain builds; the [engineering audit](docs/ENGINEERING_AUDIT.md) records the tested configuration. `llvm-sys` remains on version 211.
+
+Benchmark programs and runners live under `test/`. Their timings depend on the host, backend, build profile, and workload; they are not general performance guarantees.
 
 ---
 

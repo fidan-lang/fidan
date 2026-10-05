@@ -127,7 +127,7 @@ fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
         (FidanValue::Nothing, FidanValue::Nothing) => true,
         (FidanValue::Integer(x), FidanValue::Float(y)) => (*x as f64 - y).abs() < 1e-12,
         (FidanValue::Float(x), FidanValue::Integer(y)) => (x - *y as f64).abs() < 1e-12,
-        _ => false,
+        _ => crate::ffi::values_equal(a, b),
     }
 }
 
@@ -161,4 +161,32 @@ pub fn exported_names() -> &'static [&'static str] {
         "fail",
         "skip",
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stdlib::common::list_value;
+
+    #[test]
+    fn assertions_compare_nested_collections_structurally() {
+        let lhs = list_value([FidanValue::Tuple(vec![
+            FidanValue::Integer(42),
+            FidanValue::Nothing,
+        ])]);
+        let rhs = list_value([FidanValue::Tuple(vec![
+            FidanValue::Integer(42),
+            FidanValue::Nothing,
+        ])]);
+        assert!(
+            dispatch("assertEq", vec![lhs.clone(), rhs])
+                .unwrap()
+                .is_ok()
+        );
+        assert!(
+            dispatch("assertNe", vec![lhs, list_value([])])
+                .unwrap()
+                .is_ok()
+        );
+    }
 }

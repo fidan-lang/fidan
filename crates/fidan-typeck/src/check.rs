@@ -2394,15 +2394,33 @@ impl TypeChecker {
                 step,
                 ..
             } => {
+                self.require_non_nullable(
+                    target,
+                    "slice target (requires list, range, or string)",
+                    module,
+                );
                 let tgt_ty = self.infer_expr(target, module);
-                if let Some(e) = start {
-                    self.infer_expr(e, module);
-                }
-                if let Some(e) = end {
-                    self.infer_expr(e, module);
-                }
-                if let Some(e) = step {
-                    self.infer_expr(e, module);
+                for (component, expr) in [("start", start), ("stop", end), ("step", step)] {
+                    if let Some(expr) = expr {
+                        let ty = self.infer_expr(expr, module);
+                        if !matches!(
+                            ty,
+                            FidanType::Integer
+                                | FidanType::Nothing
+                                | FidanType::Dynamic
+                                | FidanType::Unknown
+                                | FidanType::Error
+                        ) {
+                            self.emit_error(
+                                fidan_diagnostics::diag_code!("E0302"),
+                                format!(
+                                    "slice {component} must be an integer, found `{}`",
+                                    self.ty_name(&ty)
+                                ),
+                                module.arena.get_expr(expr).span(),
+                            );
+                        }
+                    }
                 }
                 // A slice of a list is still a list of the same element type;
                 // a slice of a string is a string; anything else is dynamic.

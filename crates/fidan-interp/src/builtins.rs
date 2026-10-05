@@ -137,7 +137,7 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanVal
         BuiltinSemantic::Len => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             let n = match &v {
-                FidanValue::String(s) => s.len() as i64,
+                FidanValue::String(s) => s.char_len() as i64,
                 FidanValue::List(l) => l.borrow().len() as i64,
                 FidanValue::Dict(d) => d.borrow().len() as i64,
                 FidanValue::HashSet(s) => s.borrow().len() as i64,
@@ -146,13 +146,8 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanVal
                     start,
                     end,
                     inclusive,
-                } => {
-                    if *inclusive {
-                        (end - start + 1).max(0)
-                    } else {
-                        (end - start).max(0)
-                    }
-                }
+                } => fidan_runtime::range_length(*start, *end, *inclusive)
+                    .map_err(BuiltinError::runtime)?,
                 _ => {
                     return Err(BuiltinError::runtime(format!(
                         "len() is not supported for {}",

@@ -1,5 +1,6 @@
 //! tower-lsp `LanguageServer` implementation for Fidan.
 
+use crate::convert::offset_to_lsp_pos;
 use crate::{
     analysis, convert, document::Document, semantic, store::DocumentStore, symbols::SymKind,
     symbols::SymbolEntry,
@@ -1046,10 +1047,8 @@ fn resolve_document_imports(
 fn resolve_file_import_url(current_path: Option<&Path>, rel_path: &str) -> Option<Url> {
     let abs = if rel_path.starts_with('/') || rel_path.contains(':') {
         std::path::PathBuf::from(rel_path)
-    } else if let Some(parent) = current_path.and_then(|path| path.parent()) {
-        parent.join(rel_path)
     } else {
-        return None;
+        current_path.and_then(|path| path.parent())?.join(rel_path)
     };
     Url::from_file_path(&abs).ok()
 }
@@ -1723,10 +1722,17 @@ fn range_to_offsets(text: &str, range: &Range) -> Option<(usize, usize)> {
         for segment in text.split_inclusive('\n') {
             if line == position.line {
                 let line_text = segment.strip_suffix('\n').unwrap_or(segment);
-                let mut chars = line_text.chars();
                 let mut line_offset = 0usize;
-                for _ in 0..position.character {
-                    line_offset += chars.next()?.len_utf8();
+                let mut utf16_offset = 0;
+                for ch in line_text.chars() {
+                    if utf16_offset >= position.character {
+                        break;
+                    }
+                    line_offset += ch.len_utf8();
+                    utf16_offset += ch.len_utf16() as u32;
+                }
+                if utf16_offset != position.character {
+                    return None;
                 }
                 return Some(offset + line_offset);
             }
@@ -1748,6 +1754,19 @@ fn range_to_offsets(text: &str, range: &Range) -> Option<(usize, usize)> {
 }
 
 // ── LanguageServer implementation ─────────────────────────────────────────────
+
+#[test]
+fn unicode_edit_ranges_resolve_utf16_and_reject_split_surrogates() {
+    let text = "é🌱x\n中z";
+    assert_eq!(
+        range_to_offsets(text, &Range::new(Position::new(0, 3), Position::new(1, 1))),
+        Some((6, 11))
+    );
+    assert_eq!(
+        range_to_offsets(text, &Range::new(Position::new(0, 2), Position::new(0, 3))),
+        None
+    );
+}
 
 #[tower_lsp::async_trait]
 impl LanguageServer for FidanLsp {
@@ -4057,36 +4076,6 @@ fn lsp_pos_to_offset(file: &SourceFile, pos: &Position) -> u32 {
         utf16 += ch.len_utf16() as u32;
     }
     (line_start + line_str.len()) as u32
-}
-
-/// Convert a byte offset to an LSP `Position` (0-based line, UTF-16 character).
-fn offset_to_lsp_pos(file: &SourceFile, offset: u32) -> Position {
-    let off = offset as usize;
-    let line = match file.line_starts.binary_search(&(off as u32)) {
-        Ok(l) => l,
-        Err(l) => l.saturating_sub(1),
-    };
-    let line_start = file.line_starts[line] as usize;
-    let col_bytes = off.saturating_sub(line_start);
-    // Convert the byte column to UTF-16 code units.
-    let line_text = file.src.get(line_start..).unwrap_or("");
-    let mut utf16_col = 0u32;
-    let mut remaining = col_bytes;
-    for ch in line_text.chars() {
-        if remaining == 0 {
-            break;
-        }
-        let byte_len = ch.len_utf8();
-        if remaining < byte_len {
-            break;
-        }
-        remaining -= byte_len;
-        utf16_col += ch.len_utf16() as u32;
-    }
-    Position {
-        line: line as u32,
-        character: utf16_col,
-    }
 }
 
 // ── Named-argument go-to-definition ────────────────────────────────────────────────

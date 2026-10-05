@@ -227,9 +227,9 @@ pub fn compute(
         // regardless of which TextMate scope happens to apply nearby.
         let span_len = tok.span.end - tok.span.start;
         if matches!(tok.kind, TokenKind::Comma | TokenKind::Semicolon) && span_len > 1 {
-            let (line1, col1) = file.line_col(tok.span.start);
-            let line = line1.saturating_sub(1);
-            let start = col1.saturating_sub(1);
+            let range = crate::convert::span_to_range(file, tok.span);
+            let line = range.start.line;
+            let start = range.start.character;
             raw.push((line, start, span_len, TT_KEYWORD, 0));
             prev_emitted_tt = None;
             continue;
@@ -244,10 +244,10 @@ pub fn compute(
         let sym_str = interner.resolve(sym);
 
         if enum_variant_decl_starts.contains(&tok.span.start) {
-            let (line1, col1) = file.line_col(tok.span.start);
-            let line = line1.saturating_sub(1);
-            let start = col1.saturating_sub(1);
-            let len = tok.span.end - tok.span.start;
+            let range = crate::convert::span_to_range(file, tok.span);
+            let line = range.start.line;
+            let start = range.start.character;
+            let len = range.end.character - range.start.character;
             raw.push((line, start, len, TT_ENUM_MEMBER, TM_DECLARATION));
             prev_emitted_tt = Some(TT_ENUM_MEMBER);
             continue;
@@ -272,10 +272,10 @@ pub fn compute(
         };
 
         if import_namespace_decl_starts.contains(&tok.span.start) {
-            let (line1, col1) = file.line_col(tok.span.start);
-            let line = line1.saturating_sub(1);
-            let start = col1.saturating_sub(1);
-            let len = tok.span.end - tok.span.start;
+            let range = crate::convert::span_to_range(file, tok.span);
+            let line = range.start.line;
+            let start = range.start.character;
+            let len = range.end.character - range.start.character;
             let mods = if matches!(prev, Some(TokenKind::As)) {
                 TM_DECLARATION
             } else {
@@ -345,10 +345,10 @@ pub fn compute(
         };
         prev_emitted_tt = Some(tt);
 
-        let (line1, col1) = file.line_col(tok.span.start);
-        let line = line1.saturating_sub(1);
-        let start = col1.saturating_sub(1);
-        let len = tok.span.end - tok.span.start;
+        let range = crate::convert::span_to_range(file, tok.span);
+        let line = range.start.line;
+        let start = range.start.character;
+        let len = range.end.character - range.start.character;
 
         raw.push((line, start, len, tt, mods));
     }
@@ -532,6 +532,34 @@ mod tests {
     use fidan_lexer::Lexer;
     use fidan_source::{FileId, SourceFile};
     use std::sync::Arc;
+
+    #[test]
+    fn semantic_identifiers_after_unicode_use_utf16_offsets() {
+        let source = "var text = \"é🌱\"; print(text)";
+        let interner = Arc::new(SymbolInterner::new());
+        let file = SourceFile::new(FileId(0), "<unicode>", source);
+        let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        let (module, _) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+        let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+        let symbols = crate::symbols::build(&module, &typed, &interner);
+        let mut start = 0;
+        let mut found = false;
+        for token in compute(&tokens, &file, &interner, &module, &symbols) {
+            start += token.delta_start;
+            if start
+                == source[..source.find("print").unwrap()]
+                    .encode_utf16()
+                    .count() as u32
+            {
+                assert_eq!(token.length, 5);
+                found = true;
+            }
+        }
+        assert!(
+            found,
+            "print semantic token must follow the Unicode literal"
+        );
+    }
 
     fn semantic_token_types_for(src: &str) -> Vec<u32> {
         let interner = Arc::new(SymbolInterner::new());

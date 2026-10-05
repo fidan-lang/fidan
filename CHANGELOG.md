@@ -12,6 +12,56 @@ compiler releases.
 
 ---
 
+## [1.0.15] — 2026-10-05
+
+### Fixed
+- Implemented colon slicing with omitted bounds, positive/negative steps,
+  negative indices, Unicode string elements, and safe extreme bounds. Shared
+  runtime semantics cover interpreter and native slices; invalid components
+  and zero steps produce errors.
+- `file_exists` now propagates filesystem inspection failures instead of
+  converting them to false. Missing paths still return false; relative paths
+  resolve against the process working directory.
+- Fixed boolean `not` in both AOT backends. Negation previously complemented
+  the entire boolean byte, leaving `not true` truthy; this made the original
+  LOCAL file manager incorrectly take the missing-file branch after saving.
+- Native object method dispatch releases its field borrow before executing a
+  user method, allowing methods such as the file manager's `loadData()` to
+  replace fields without a `RefCell` panic.
+- Native Unicode indexing/length, list bounds/assignment errors, range methods,
+  and structural collection assertions now match the tested interpreter cases.
+- Integer addition, subtraction, multiplication, and negation wrap consistently
+  in the interpreter, including debug builds. Added the former `crash.fdn`
+  workload as an interpreter/native regression.
+- LSP positions and document edits handle UTF-16 columns and reject ranges
+  splitting surrogate pairs.
+- LLVM bitcode serialization retains trailing bytes, fixing full LTO, and CPU
+  argument parsing handles Unicode without panicking.
+- Native fixture builds use isolated Cargo artifacts; Windows file-manager
+  tests keep executable artifacts separate from their temporary IO fixtures.
+- The concurrent syntax reference avoids a lost-update race.
+
+### Changed
+- Refreshed compatible dependencies, including Cranelift 0.136.2 and Inkwell
+  0.10.0. LLVM remains 21.1 with `llvm-sys` restricted to the 211 series
+  (locked at 211.1.0). The locked graph requires Rust 1.96 or newer and was
+  validated with Rust 1.99.
+- Prepared LLVM helper/toolchain 1.0.6. AI helper stays at 1.0.4. Wire formats
+  are unchanged: LLVM backend protocol 5, AI analysis protocol 1, and AI helper
+  protocol 2 remain compatible.
+- Workspace formatting and strict Clippy cover all targets and optional
+  features. Toolchain release workflows validate their packages before upload.
+- README and contributor guidance describe actual backend coverage, build and
+  test commands, optional LLVM requirements, and current limitations. Detailed
+  verification and findings are recorded in `docs/ENGINEERING_AUDIT.md`.
+
+### Tests
+- Added shared slicing, integer-overflow, and boolean/object-mutation fixtures, cross-backend error
+  checks, filesystem/path/persistence coverage, UTF-16 regressions, range and
+  assertion tests, LLVM bitcode round trips, and repeated syntax-reference runs.
+
+---
+
 ## [1.0.14] — 2026-04-24
 
 ### Added
@@ -481,7 +531,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.14...HEAD
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.15...HEAD
+[1.0.15]: https://github.com/fidan-lang/fidan/compare/v1.0.14...v1.0.15
 [1.0.14]: https://github.com/fidan-lang/fidan/compare/v1.0.13...v1.0.14
 [1.0.13]: https://github.com/fidan-lang/fidan/compare/v1.0.12...v1.0.13
 [1.0.12]: https://github.com/fidan-lang/fidan/compare/v1.0.10...v1.0.12

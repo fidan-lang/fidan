@@ -1,0 +1,20 @@
+# Integers wrap at signed 64-bit boundaries, independent of the Rust build profile.
+action verify_integer_arithmetic {
+    var maximum = 9223372036854775807
+    var minimum = -maximum - 1
+    assert_eq(maximum + 1, minimum)
+    assert_eq(minimum - 1, maximum)
+    assert_eq(maximum * 2, -2)
+    assert_eq(-minimum, minimum)
+    assert_eq(100000 ** 4, 7766279631452241920)
+
+    # Original crash.fdn loop: inclusive endpoint, integer division, integer powers.
+    var total = 0
+    for n in 1...100000 {
+        total += n * n / (n + 1)
+        total -= n ** (n % 5)
+    }
+    assert_eq(total, 1091749166503164576)
+    print("integer arithmetic ok")
+}
+verify_integer_arithmetic()

@@ -17,7 +17,7 @@ pub fn dispatch(s: FidanString, method: &str, args: Vec<FidanValue>) -> Option<F
             s.as_str().trim_start(),
         ))),
         "trimEnd" => Some(FidanValue::String(FidanString::new(s.as_str().trim_end()))),
-        "len" => Some(FidanValue::Integer(s.len() as i64)),
+        "len" => Some(FidanValue::Integer(s.char_len() as i64)),
         "contains" => {
             let pat = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             if let FidanValue::String(p) = pat {

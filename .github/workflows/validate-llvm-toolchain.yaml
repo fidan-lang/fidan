@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       toolchain_version:
-        description: "Fidan toolchain package version (defaults to workspace version)"
+        description: "Fidan toolchain package version (defaults to the LLVM helper version)"
         required: false
         type: string
       llvm_tool_version:
@@ -14,6 +14,11 @@ on:
         type: string
   pull_request:
     paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "test/examples/slice_regression.fdn"
+      - "test/examples/integer_overflow_regression.fdn"
+      - "test/examples/boolean_negation_regression.fdn"
       - ".github/workflows/llvm-toolchain-build.yaml"
       - ".github/workflows/validate-llvm-toolchain.yaml"
       - ".github/workflows/release-toolchain.yaml"

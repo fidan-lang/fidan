@@ -9,7 +9,6 @@ pub mod dict_methods;
 pub mod hashset_methods;
 pub mod list_methods;
 pub mod numeric_methods;
-pub mod range_methods;
 pub mod string_methods;
 
 use fidan_runtime::FidanValue;
@@ -22,8 +21,8 @@ pub fn call_bootstrap_method(
     receiver: FidanValue,
     method: &str,
     args: Vec<FidanValue>,
-) -> Option<FidanValue> {
-    match receiver {
+) -> Result<Option<FidanValue>, String> {
+    Ok(match receiver {
         FidanValue::String(s) => string_methods::dispatch(s, method, args),
         FidanValue::List(l) => list_methods::dispatch(l, method, args),
         FidanValue::Dict(d) => dict_methods::dispatch(d, method, args),
@@ -33,7 +32,7 @@ pub fn call_bootstrap_method(
             start,
             end,
             inclusive,
-        } => range_methods::dispatch(start, end, inclusive, method, args),
+        } => fidan_runtime::range_method(start, end, inclusive, method, args)?,
         _ => None,
-    }
+    })
 }

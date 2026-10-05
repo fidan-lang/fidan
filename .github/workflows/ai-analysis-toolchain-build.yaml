@@ -4,12 +4,12 @@ on:
   workflow_call:
     inputs:
       toolchain_version:
-        description: "Fidan toolchain package version (defaults to workspace version)"
+        description: "Fidan toolchain package version (defaults to the AI helper version)"
         required: false
         default: ""
         type: string
       tool_version:
-        description: "AI analysis helper tool version (defaults to workspace version)"
+        description: "AI analysis helper tool version (defaults to the AI helper version)"
         required: false
         default: ""
         type: string
@@ -41,7 +41,7 @@ jobs:
             artifact_name: ai-analysis-toolchain-macos
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -57,21 +57,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y pkg-config libdbus-1-dev
 
-      - name: Resolve workspace version
+      - name: Resolve helper version
         id: version
         shell: pwsh
         run: |
-          $cargoToml = Get-Content "Cargo.toml" -Raw
-          $match = [regex]::Match($cargoToml, '(?ms)\[workspace\.package\].*?version\s*=\s*"([^"]+)"')
+          $cargoToml = Get-Content "crates/fidan-ai-analysis-helper/Cargo.toml" -Raw
+          $match = [regex]::Match($cargoToml, '(?m)^version\s*=\s*"([^"]+)"')
           if (-not $match.Success) {
-            throw "Failed to determine workspace version from Cargo.toml"
+            throw "Failed to determine AI helper version from Cargo.toml"
           }
-          $workspaceVersion = $match.Groups[1].Value
+          $helperVersion = $match.Groups[1].Value
           $toolVersion = "${{ inputs.tool_version }}"
           if (-not $toolVersion) {
-            $toolVersion = $workspaceVersion
+            $toolVersion = $helperVersion
           }
-          "workspace_version=$workspaceVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tool_version=$toolVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Package AI analysis toolchain artifact

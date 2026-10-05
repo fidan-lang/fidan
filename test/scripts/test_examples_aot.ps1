@@ -218,6 +218,7 @@ try {
         $stdinLines = $null
         $allowTimeout = $false
         $expectFailure = $false
+        $expectedFailureMessage = ""
 
         switch ($baseName) {
             "parallel_benchmark.fdn" {
@@ -232,6 +233,7 @@ try {
             }
             "trace_demo.fdn" {
                 $expectFailure = $true
+                $expectedFailureMessage = "something went wrong: iteration 42"
             }
         }
 
@@ -259,7 +261,7 @@ try {
 
         if ($exitCode -ne 0) {
             $stderrText = Read-TextFile $stderr
-            if ($expectFailure) {
+            if ($expectFailure -and $stderrText.Contains($expectedFailureMessage)) {
                 Write-Host "[PASS] $rel - failed as expected"
                 if ($stderrText) {
                     Write-Host $stderrText

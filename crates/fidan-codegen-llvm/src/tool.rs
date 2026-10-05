@@ -240,55 +240,6 @@ fn append_unix_link_input(command: &mut Command, input: &str) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::resolve_windows_link_input;
-
-    #[test]
-    fn windows_link_input_prefers_dll_lib_sidecar() {
-        let temp = std::env::temp_dir().join(format!(
-            "fidan_llvm_link_input_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock before unix epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&temp).expect("create temp dir");
-        let dll = temp.join("ffi_demo.dll");
-        let dll_lib = temp.join("ffi_demo.dll.lib");
-        std::fs::write(&dll, []).expect("write dll placeholder");
-        std::fs::write(&dll_lib, []).expect("write import lib placeholder");
-
-        let resolved = resolve_windows_link_input(&dll.to_string_lossy());
-        assert_eq!(resolved, dll_lib.to_string_lossy());
-
-        std::fs::remove_dir_all(&temp).ok();
-    }
-
-    #[test]
-    fn windows_link_input_falls_back_to_plain_lib_sidecar() {
-        let temp = std::env::temp_dir().join(format!(
-            "fidan_llvm_link_input_{}_{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock before unix epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&temp).expect("create temp dir");
-        let dll = temp.join("ffi_demo.dll");
-        let lib = temp.join("ffi_demo.lib");
-        std::fs::write(&dll, []).expect("write dll placeholder");
-        std::fs::write(&lib, []).expect("write import lib placeholder");
-
-        let resolved = resolve_windows_link_input(&dll.to_string_lossy());
-        assert_eq!(resolved, lib.to_string_lossy());
-
-        std::fs::remove_dir_all(&temp).ok();
-    }
-}
-
 fn resolve_windows_linker(layout: &ToolchainLayout) -> Result<PathBuf> {
     let linker = std::env::var_os("FIDAN_LINKER")
         .filter(|value| !value.is_empty())
@@ -370,20 +321,19 @@ fn strip_binary(layout: &ToolchainLayout, request: &CompileRequest) -> Result<()
     Ok(())
 }
 
-fn configure_unix_link_environment(_command: &mut Command, layout: &ToolchainLayout) {
-    if !layout.lib_dir.is_dir() {
-        return;
-    }
-
-    #[cfg(target_os = "linux")]
-    prepend_env_path(_command, "LD_LIBRARY_PATH", &layout.lib_dir);
-    #[cfg(target_os = "macos")]
-    {
-        // Do not force LLVM's bundled libc++/libunwind onto the packaged clang
-        // driver via DYLD_* on macOS. The official archive's driver expects the
-        // host runtime layout, and overriding it breaks clang startup itself.
-        _command.env_remove("DYLD_LIBRARY_PATH");
-        _command.env_remove("DYLD_FALLBACK_LIBRARY_PATH");
+fn configure_unix_link_environment(_command: &mut Command, _layout: &ToolchainLayout) {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if _layout.lib_dir.is_dir() {
+        #[cfg(target_os = "linux")]
+        prepend_env_path(_command, "LD_LIBRARY_PATH", &_layout.lib_dir);
+        #[cfg(target_os = "macos")]
+        {
+            // Do not force LLVM's bundled libc++/libunwind onto the packaged clang
+            // driver via DYLD_* on macOS. The official archive's driver expects the
+            // host runtime layout, and overriding it breaks clang startup itself.
+            _command.env_remove("DYLD_LIBRARY_PATH");
+            _command.env_remove("DYLD_FALLBACK_LIBRARY_PATH");
+        }
     }
 }
 
@@ -557,4 +507,53 @@ fn query_registry_value(key: &str, value_name: &str) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_windows_link_input;
+
+    #[test]
+    fn windows_link_input_prefers_dll_lib_sidecar() {
+        let temp = std::env::temp_dir().join(format!(
+            "fidan_llvm_link_input_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).expect("create temp dir");
+        let dll = temp.join("ffi_demo.dll");
+        let dll_lib = temp.join("ffi_demo.dll.lib");
+        std::fs::write(&dll, []).expect("write dll placeholder");
+        std::fs::write(&dll_lib, []).expect("write import lib placeholder");
+
+        let resolved = resolve_windows_link_input(&dll.to_string_lossy());
+        assert_eq!(resolved, dll_lib.to_string_lossy());
+
+        std::fs::remove_dir_all(&temp).ok();
+    }
+
+    #[test]
+    fn windows_link_input_falls_back_to_plain_lib_sidecar() {
+        let temp = std::env::temp_dir().join(format!(
+            "fidan_llvm_link_input_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock before unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&temp).expect("create temp dir");
+        let dll = temp.join("ffi_demo.dll");
+        let lib = temp.join("ffi_demo.lib");
+        std::fs::write(&dll, []).expect("write dll placeholder");
+        std::fs::write(&lib, []).expect("write import lib placeholder");
+
+        let resolved = resolve_windows_link_input(&dll.to_string_lossy());
+        assert_eq!(resolved, lib.to_string_lossy());
+
+        std::fs::remove_dir_all(&temp).ok();
+    }
 }

@@ -18,16 +18,20 @@ cd fidan
 ### 2. Build the workspace
 
 ```bash
-cargo build
+cargo build --workspace --locked
 ```
 
 ### 3. Run tests
 
 ```bash
-cargo test
+cargo test --workspace --locked
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 Before submitting a pull request, make sure the project builds successfully and all relevant tests pass.
+
+Use Rust 1.96 or newer and a host C/C++ toolchain. The current lockfile was tested with Rust 1.99. Linux builds also need `pkg-config` and `libdbus-1-dev` (Debian/Ubuntu names). Default workspace builds do not require LLVM; optional backend setup is documented in the [README](README.md#build-from-source). Commit the lockfile with dependency updates and repeat workspace/backend validation: the broad Cranelift `0` requirement also permits future minor versions with API or compiler-requirement changes.
 
 ---
 
@@ -37,11 +41,11 @@ The repository is organized as a Cargo workspace.
 
 ```text
 crates/
-    lexer
-    parser
-    ast
-    compiler
-    runtime
+    fidan-lexer / fidan-parser / fidan-ast / fidan-typeck
+    fidan-hir / fidan-mir / fidan-passes
+    fidan-interp / fidan-codegen-cranelift / fidan-codegen-llvm
+    fidan-runtime / fidan-stdlib
+    fidan-driver / fidan-cli / fidan-lsp / fidan-fmt
 
 test/
     ...
@@ -49,6 +53,8 @@ test/
 
 Core language components live inside `crates/`.  
 Tests and examples live inside `test/`.
+
+See the [workspace architecture](README.md#architecture) for all 25 crates, including embedding and optional analysis/toolchain helpers. Crate-local tests also live under `crates/*/tests`.
 
 As the project evolves, additional crates and tooling may be added. Please try to keep contributions aligned with the existing project structure.
 

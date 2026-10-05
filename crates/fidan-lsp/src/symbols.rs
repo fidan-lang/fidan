@@ -948,7 +948,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
                 span: info.span,
                 detail,
                 ty_name: Some(name.clone()),
-                parent_type_name: info.parent.map(&res),
+                parent_type_name: info.parent.map(res),
                 param_types: vec![],
                 param_required: vec![],
                 return_type: None,

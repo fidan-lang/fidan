@@ -2090,9 +2090,9 @@ impl MirMachine {
         use FidanValue::*;
         Ok(match (left, right) {
             (ScalarOperand::Integer(left), ScalarOperand::Integer(right)) => Some(match op {
-                BinOp::Add => Integer(left + right),
-                BinOp::Sub => Integer(left - right),
-                BinOp::Mul => Integer(left * right),
+                BinOp::Add => Integer(left.wrapping_add(right)),
+                BinOp::Sub => Integer(left.wrapping_sub(right)),
+                BinOp::Mul => Integer(left.wrapping_mul(right)),
                 BinOp::Div => {
                     if right == 0 {
                         return Err(MirSignal::RuntimeError(
@@ -2402,6 +2402,7 @@ impl MirMachine {
             return Ok(result);
         }
         crate::bootstrap::call_bootstrap_method(receiver, &method_name, args)
+            .map_err(MirSignal::Panic)?
             .ok_or_else(|| MirSignal::Panic(format!("no method `{}` found", method_name)))
     }
 
@@ -2747,143 +2748,9 @@ impl MirMachine {
         inclusive: bool,
         step: Option<FidanValue>,
     ) -> Result<FidanValue, MirSignal> {
-        // Extract step (default 1; must not be 0).
-        let step_i = match step {
-            Some(FidanValue::Integer(n)) => {
-                if n == 0 {
-                    return Err(MirSignal::Panic("slice step cannot be zero".to_string()));
-                }
-                n
-            }
-            Some(other) => {
-                return Err(MirSignal::Panic(format!(
-                    "slice step must be an integer, got `{}`",
-                    other.type_name()
-                )));
-            }
-            None => 1,
-        };
-
-        // Helper: extract i64 from an optional index value.
-        let to_i64 = |v: Option<FidanValue>| -> Result<Option<i64>, MirSignal> {
-            match v {
-                None => Ok(None),
-                Some(FidanValue::Integer(n)) => Ok(Some(n)),
-                Some(other) => Err(MirSignal::Panic(format!(
-                    "slice index must be an integer, got `{}`",
-                    other.type_name()
-                ))),
-            }
-        };
-        let start_raw = to_i64(start)?;
-        let end_raw = to_i64(end)?;
-
-        match tgt {
-            FidanValue::List(r) => {
-                let list = r.borrow();
-                let len = list.len() as i64;
-                let norm = |i: i64| if i < 0 { (len + i).max(0) } else { i.min(len) };
-                let si = start_raw
-                    .map(norm)
-                    .unwrap_or(if step_i > 0 { 0 } else { len - 1 });
-                let ei = end_raw
-                    .map(|e| {
-                        let n = norm(e);
-                        if inclusive { n + 1 } else { n }
-                    })
-                    .unwrap_or(if step_i > 0 { len } else { -1 });
-
-                let mut out = FidanList::new();
-                let mut idx = si;
-                while (step_i > 0 && idx < ei) || (step_i < 0 && idx > ei) {
-                    if let Some(v) = list.get(idx as usize) {
-                        out.append(v.clone());
-                    }
-                    idx += step_i;
-                }
-                Ok(FidanValue::List(OwnedRef::new(out)))
-            }
-            FidanValue::String(s) => {
-                let str_ref = s.as_str();
-                let len = str_ref.chars().count() as i64;
-                let norm = |i: i64| if i < 0 { (len + i).max(0) } else { i.min(len) };
-                let si = start_raw
-                    .map(norm)
-                    .unwrap_or(if step_i > 0 { 0 } else { len - 1 });
-                let ei = end_raw
-                    .map(|e| {
-                        let n = norm(e);
-                        if inclusive { n + 1 } else { n }
-                    })
-                    .unwrap_or(if step_i > 0 { len } else { -1 });
-
-                // Fast path: contiguous forward slice — skip + take, no Vec.
-                if step_i == 1 && si >= 0 && ei >= si {
-                    let out: String = str_ref
-                        .chars()
-                        .skip(si as usize)
-                        .take((ei - si) as usize)
-                        .collect();
-                    return Ok(FidanValue::String(FidanString::new(&out)));
-                }
-
-                // General path: arbitrary step \u2014 collect once then index.
-                let chars: Vec<char> = str_ref.chars().collect();
-                let mut out = String::new();
-                let mut idx = si;
-                while (step_i > 0 && idx < ei) || (step_i < 0 && idx > ei) {
-                    if let Some(c) = chars.get(idx as usize) {
-                        out.push(*c);
-                    }
-                    idx += step_i;
-                }
-                Ok(FidanValue::String(FidanString::new(&out)))
-            }
-            FidanValue::Range {
-                start,
-                end,
-                inclusive: range_inclusive,
-            } => {
-                // Materialise a sub-slice of a lazy range into a List.
-                let range_len = if range_inclusive {
-                    (end - start + 1).max(0)
-                } else {
-                    (end - start).max(0)
-                };
-                let norm = |i: i64| {
-                    if i < 0 {
-                        (range_len + i).max(0)
-                    } else {
-                        i.min(range_len)
-                    }
-                };
-                let si = start_raw
-                    .map(norm)
-                    .unwrap_or(if step_i > 0 { 0 } else { range_len - 1 });
-                let ei = end_raw
-                    .map(|e| {
-                        let n = norm(e);
-                        if inclusive { n + 1 } else { n }
-                    })
-                    .unwrap_or(if step_i > 0 { range_len } else { -1 });
-
-                let mut out = FidanList::new();
-                let mut idx = si;
-                while (step_i > 0 && idx < ei) || (step_i < 0 && idx > ei) {
-                    if idx >= 0 && idx < range_len {
-                        out.append(FidanValue::Integer(start + idx));
-                    }
-                    idx += step_i;
-                }
-                Ok(FidanValue::List(OwnedRef::new(out)))
-            }
-            other => Err(MirSignal::Panic(format!(
-                "cannot slice `{}`",
-                other.type_name()
-            ))),
-        }
+        fidan_runtime::slice_value(&tgt, start.as_ref(), end.as_ref(), inclusive, step.as_ref())
+            .map_err(MirSignal::Panic)
     }
-
     fn index_get(&self, obj: FidanValue, idx: FidanValue) -> Result<FidanValue, MirSignal> {
         match (obj, idx) {
             (FidanValue::List(r), FidanValue::Integer(i)) => {
@@ -2936,19 +2803,19 @@ impl MirMachine {
                 FidanValue::Integer(i),
             ) => {
                 // Index into a lazy range without materialising it.
-                let len = if inclusive {
-                    (end - start + 1).max(0)
+                let len = (i128::from(end) - i128::from(start) + i128::from(inclusive)).max(0);
+                let norm = if i < 0 {
+                    len + i128::from(i)
                 } else {
-                    (end - start).max(0)
+                    i128::from(i)
                 };
-                let norm = if i < 0 { len + i } else { i };
                 if norm < 0 || norm >= len {
                     return Err(MirSignal::RuntimeError(
                         fidan_diagnostics::diag_code!("R2002"),
                         format!("range index {} out of range", i),
                     ));
                 }
-                Ok(FidanValue::Integer(start + norm))
+                Ok(FidanValue::Integer((i128::from(start) + norm) as i64))
             }
             (FidanValue::Tuple(items), FidanValue::Integer(i)) => {
                 let len = items.len() as i64;
@@ -3153,9 +3020,9 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
     use FidanValue::*;
     Ok(match (op, &l, &r) {
         // Arithmetic — integer
-        (BinOp::Add, Integer(a), Integer(b)) => Integer(a + b),
-        (BinOp::Sub, Integer(a), Integer(b)) => Integer(a - b),
-        (BinOp::Mul, Integer(a), Integer(b)) => Integer(a * b),
+        (BinOp::Add, Integer(a), Integer(b)) => Integer(a.wrapping_add(*b)),
+        (BinOp::Sub, Integer(a), Integer(b)) => Integer(a.wrapping_sub(*b)),
+        (BinOp::Mul, Integer(a), Integer(b)) => Integer(a.wrapping_mul(*b)),
         (BinOp::Div, Integer(a), Integer(b)) => {
             if *b == 0 {
                 return Err(MirSignal::RuntimeError(
@@ -3293,7 +3160,7 @@ fn eval_unary(op: UnOp, v: FidanValue) -> Result<FidanValue, MirSignal> {
     use FidanValue::*;
     Ok(match (op, v) {
         (UnOp::Pos, v) => v,
-        (UnOp::Neg, Integer(n)) => Integer(-n),
+        (UnOp::Neg, Integer(n)) => Integer(n.wrapping_neg()),
         (UnOp::Neg, Float(f)) => Float(-f),
         (UnOp::Not, Boolean(b)) => Boolean(!b),
         (op, v) => {
@@ -3311,3 +3178,26 @@ pub use api::{
     MirReplState, run_mir, run_mir_repl_line, run_mir_with_jit, run_mir_with_profile,
     run_mir_with_replay, run_tests,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boxed_integer_arithmetic_wraps_at_i64_boundaries() {
+        for (op, left, right, expected) in [
+            (BinOp::Add, i64::MAX, 1, i64::MIN),
+            (BinOp::Sub, i64::MIN, 1, i64::MAX),
+            (BinOp::Mul, i64::MAX, 2, -2),
+        ] {
+            assert!(matches!(
+                eval_binary(op, FidanValue::Integer(left), FidanValue::Integer(right)),
+                Ok(FidanValue::Integer(actual)) if actual == expected
+            ));
+        }
+        assert!(matches!(
+            eval_unary(UnOp::Neg, FidanValue::Integer(i64::MIN)),
+            Ok(FidanValue::Integer(i64::MIN))
+        ));
+    }
+}
