@@ -4,6 +4,8 @@ This pass reviewed the existing toolchain, repaired exposed behavior, refreshed 
 
 ## Architecture and scope
 
+Fidan is an AI-native general-purpose programming language and compiler toolchain. Its architectural thesis is that AI development tools should use structured compiler knowledge alongside source text. Static typing and the Rust implementation describe its technical foundation; they do not replace this project identity.
+
 The 25-crate workspace separates source mapping, lexing, arena AST parsing, diagnostics, type checking, typed HIR, SSA/CFG MIR, optimization passes, runtime values, and execution. The MIR interpreter selectively invokes Cranelift JIT where lowering is supported; native executables use Cranelift AOT or an optional external LLVM helper. Boxed native operations and standard-library semantics live in `fidan-runtime`; `fidan-stdlib` supplies compiler metadata and wrappers.
 
 The driver and CLI coordinate imports, DAL/package operations, diagnostics, toolchain installation, REPL, profiling, and test execution. The formatter and LSP share the compiler frontend. The AI helper contains provider integration and compiler-grounded analysis/MCP commands. `libfidan` and `fidan-embed` expose C and Rust embedding; `fidan-secrets` handles credential storage. Native interop fixtures, crate tests, examples, replay fixtures, benchmark runners, CI, release/installation scripts, and platform branches were included in the review.
@@ -259,6 +261,75 @@ Logs are retained under ignored `target/followup-*.log`. The example-sweep build
 commands also validate the CLI-only release configuration. Existing W5003
 precompile advisory hints can appear for the integer fixture's catch CFG; these
 are separate from the clean Rust/Clippy checks and were not suppressed.
+
+## Final pre-merge optimizer and positioning follow-up
+
+The complete `main...polish/repo-audit` diff and tracked repository text were
+reviewed for public-facing identity changes, including documentation, Cargo and
+WinGet metadata, installer copy, workflow descriptions, scripts, and source
+documentation. The substantive identity regressions were the README headline,
+introduction, and AI section, plus WinGet descriptions and the removed `ai-native`
+tag. These now identify Fidan as an AI-native general-purpose programming language
+and compiler toolchain. CONTRIBUTING, CHANGELOG, and this report explicitly align
+with that identity. Technical component descriptions and honest backend/provider
+limitations remain. Unsupported novelty, comparative performance, safety,
+universal parity, bytecode, and VM claims were not restored.
+
+The wording is grounded in implemented interfaces:
+
+- `fidan-driver/src/ai_analysis.rs` defines structured diagnostics, inferred
+  types, symbols, reads/writes, call graphs, type maps, and static trace schemas.
+- `fidan-cli/src/ai_analysis.rs` parses and type-checks source and constructs
+  those analyses. Static traces walk statements with value hints and a 250-step
+  cap; they are not observed runtime executions. Types may remain unknown and
+  source-level call graphs do not establish complete runtime call coverage.
+- `fidan-ai-analysis-helper/src/fidan_client.rs` requests compiler analysis from
+  the installed CLI. The provider integration and CLI fix workflow use that
+  context for explain/fix/improve; source edits are validated before application.
+- `fidan-ai-analysis-helper/src/mcp.rs` exposes ten implemented tools, including
+  diagnostics, symbol information, call graphs, type maps, static traces, and
+  validated fix suggestions/previews. Model-assisted workflows require an
+  optional helper and configured provider; deterministic analysis does not
+  require a model.
+
+The preceding optimizer commit removes unsound strength reductions without
+changing language semantics. Every binary identity requires proven matching
+integer or boolean operands and a compatible MIR result type. Proof comes from
+literal definitions and SSA copies, not parameter annotations: flexible calls
+can currently pass values that contradict even certain parameter annotations.
+Globals, phis, dropped locals, unknown values, floats, and mixed numeric operands
+remain conservative. Checked constant arithmetic continues to leave failing
+expressions for runtime diagnostics.
+
+Three normal optimized interpreter/MIR regressions cover flexible string-plus-zero,
+all arithmetic/boolean identities, retained type errors, safe reductions, result
+types, NaN, and signed zero. The fourth regression executes the shared
+`strength_reduction_regression.fdn` fixture through Cranelift and LLVM AOT at O2.
+Native boxed string-plus-integer and invalid-operand handling retain existing
+runtime limitations; their optimizer regressions exercise interpreter/JIT rather
+than claiming unsupported native parity. No additional compiler changes were
+needed in the positioning follow-up. CONTRIBUTING already documents all six
+Cranelift `0.136` constraints and locked `0.136.2`; no obsolete broad-version
+policy remains outside the historical account above.
+
+Final validation for this follow-up on Windows with Rust/Cargo 1.99.0:
+
+| Command or scenario | Result |
+|---|---|
+| `cargo fmt --all --check` | Pass |
+| `cargo build --workspace --locked` | Pass |
+| `cargo test --workspace --locked` with installed LLVM helper 1.0.6 | **866 passed**, zero failed/ignored across 54 suites, including doctests and existing interpreter/JIT/AOT regressions |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | Pass |
+| Targeted optimized interpreter/MIR regressions | **3 passed** |
+| Targeted shared O2 optimizer fixture | **1 passed**, executing both Cranelift and LLVM AOT |
+| Compiler analysis request for the optimizer fixture | Structured line analyses, related symbols, call graph, type map, and static trace returned successfully |
+| Local MCP `tools/list` smoke check | **10 tools** returned successfully, without a model/provider request |
+| Documentation local file links and `git diff --check` | Pass |
+
+Logs and analysis outputs are retained under ignored `target/positioning-*`.
+Earlier validation tables describe their respective historical trees. This
+follow-up changes only five documentation/metadata files; release versions,
+protocols, compiler/runtime code, dependencies, and `llvm-sys` 211 remain unchanged.
 
 ## Release preparation
 

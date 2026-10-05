@@ -6,7 +6,7 @@
 
 # Fidan
 
-**A statically typed general-purpose language and toolchain, implemented in Rust.**
+**An AI-native general-purpose programming language and compiler toolchain built for human-readable code, native backends, and compiler-grounded AI tooling.**
 
 [![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; [![CI](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml/badge.svg)](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://marketplace.visualstudio.com/items?itemName=fidan.fidan)
 
@@ -18,7 +18,11 @@
 
 ## What is Fidan?
 
-Fidan combines English-like syntax with static type checking, type inference, nullable values, and explicit concurrency constructs. The Cargo workspace contains a compiler frontend, typed IR lowering and optimization, a MIR interpreter with selective Cranelift JIT, Cranelift AOT, and optional LLVM AOT. It also includes a formatter, LSP server, REPL, package tooling, embedding APIs, and compiler-grounded AI analysis tooling.
+Fidan is an **AI-native general-purpose programming language and compiler toolchain**. Its human-readable, English-like syntax combines static type checking, type inference, nullable values, and explicit concurrency constructs.
+
+Fidan is designed around the idea that AI development tools should understand programs through structured compiler knowledge, alongside source text. Its toolchain exposes diagnostics, inferred types, symbol information, reads/writes, call graphs, type maps, and static execution traces to first-party explain/fix/improve workflows and MCP tooling. This compiler-grounded integration is a central architectural direction of the project.
+
+Implemented in Rust, the compiler lowers source through typed HIR and MIR optimization to a MIR interpreter with selective Cranelift JIT, Cranelift AOT, or optional LLVM AOT. The workspace also includes a formatter, LSP server, REPL, package tooling, and embedding APIs. See [AI-native tooling](#ai-native-tooling) for the analysis interfaces and provider requirements.
 
 ```fidan
 object Person {
@@ -794,9 +798,9 @@ fidan profile test/examples/profiling_showcase.fdn
 
 ---
 
-## Compiler-grounded AI tooling
+## AI-native tooling
 
-The optional AI helper combines provider responses with compiler diagnostics and analysis.
+AI-native in Fidan means giving AI development tools structured compiler information to reason about programs. The first-party analysis path uses the parser and type checker to build that context; the optional AI helper connects it to model providers and exposes it through MCP.
 
 The deterministic analysis path can produce structured context for a file or line range:
 
@@ -809,7 +813,9 @@ The deterministic analysis path can produce structured context for a file or lin
 - related symbols
 - call graph
 - type map
-- static runtime trace
+- static execution trace
+
+These analyses describe source structure and compiler-inferred information. Static traces walk source statements and provide value hints; they do not record an actual execution. Types can remain unknown, and source-level call graphs do not establish complete runtime call coverage.
 
 That context feeds the optional AI analysis toolchain used by `explain --ai`, `fix --ai`, `fix --improve`, and editor commands.
 

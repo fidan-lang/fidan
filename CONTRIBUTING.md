@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to **Fidan**. Contributions help improve the language, tooling, and ecosystem. We welcome improvements such as bug fixes, performance optimizations, documentation updates, tooling, editor support, and ecosystem integrations.
 
+Fidan is an AI-native general-purpose programming language and compiler toolchain. Its design connects human-readable code and native backends with AI tools that use structured compiler information. The [AI-native tooling documentation](README.md#ai-native-tooling) describes the implemented analysis interfaces, first-party workflows, and their limitations. Keep public descriptions grounded in those capabilities and distinguish design goals from verified results.
+
 Please read this document before submitting a contribution.
 
 ---

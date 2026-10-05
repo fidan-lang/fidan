@@ -42,6 +42,9 @@ compiler releases.
 - String receiver searches use Unicode scalar indices; substring aliases safely
   clamp bounds and return empty reversed ranges. charAt boundary behavior agrees
   between interpreter and native execution.
+- Strength reduction requires proven integer or boolean operands and compatible
+  result types. Flexible operations retain runtime behavior and errors; mixed
+  numeric and float expressions retain their types, NaN, and signed-zero behavior.
 - LSP positions and document edits handle UTF-16 columns and reject ranges
   splitting surrogate pairs.
 - LLVM bitcode serialization retains trailing bytes, fixing full LTO, and CPU
@@ -61,13 +64,19 @@ compiler releases.
 - Workspace formatting and strict Clippy cover all targets and optional
   features. Toolchain release workflows validate their packages before upload.
 - README and contributor guidance describe actual backend coverage, build and
-  test commands, optional LLVM requirements, and current limitations. Detailed
+  test commands, optional LLVM requirements, and current limitations, while
+  retaining Fidan's AI-native identity through structured compiler analysis,
+  first-party AI workflows, and MCP tooling. Detailed
   verification and findings are recorded in `docs/ENGINEERING_AUDIT.md`.
 
 ### Tests
 - Added shared slicing, integer-overflow, and boolean/object-mutation fixtures, cross-backend error
   checks, filesystem/path/persistence coverage, UTF-16 regressions, range and
   assertion tests, LLVM bitcode round trips, and repeated syntax-reference runs.
+- Optimized-pipeline regressions cover flexible string concatenation and type
+  errors, all strength-reduction rules, safe integer/boolean reductions, float
+  edge cases, and mixed numeric result types in the interpreter/JIT. The shared
+  numeric/boolean fixture also runs through both AOT backends.
 
 ---
 
