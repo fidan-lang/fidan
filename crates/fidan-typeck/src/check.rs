@@ -2864,6 +2864,17 @@ impl TypeChecker {
         };
 
         let method_name = self.interner.resolve(field).to_string();
+        if matches!(ty, FidanType::Shared(_))
+            && method_name == "update"
+            && let Some(callback) = args.first()
+            && let Some(callback_ty) = self.expr_types.get(&callback.value).cloned()
+            && !matches!(
+                callback_ty,
+                FidanType::Function | FidanType::Dynamic | FidanType::Unknown | FidanType::Error
+            )
+        {
+            self.emit_not_callable_error(&callback_ty, callback.span);
+        }
         if args.len() < min_args {
             self.emit_error(
                 fidan_diagnostics::diag_code!("E0301"),

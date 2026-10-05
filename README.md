@@ -589,16 +589,29 @@ parallel {
 #### `Shared` — thread-safe shared state
 
 ```fidan
-var first = Shared(0)
-var second = Shared(0)
+var counter = Shared(0)
 parallel {
-    task one { first.set(1) }
-    task two { second.set(1) }
+    task inc1 {
+        counter.update(action with (value) { return value + 1 })
+    }
+    task inc2 {
+        counter.update(action with (value) { return value + 1 })
+    }
 }
-print(first.get() + second.get())   # 2, after both tasks join
+print(counter.get())   # 2, after both tasks join
 ```
 
-`Shared.get()` and `Shared.set()` synchronize individual accesses. A sequence such as `counter.set(counter.get() + 1)` is not an atomic increment; use separate task results and combine them after joining. The compiler rejects direct writes to captured non-`Shared` variables in a `parallel` block with E0401.
+`get()` and `set()` synchronize individual accesses. A separate get followed by set, such as `counter.set(counter.get() + 1)`, is not an atomic read-modify-write. `update(callback)` holds the Shared mutex while calling the action with the current value and replacing it with the result. It returns the new value. Named actions, inline actions, and captured closures use the normal callable dispatch.
+
+```fidan
+var counter = Shared(0)
+parallel for i in 1..100 {
+    counter.update(action with (value) { return value + 1 })
+}
+assert_eq(counter.get(), 99)
+```
+
+An update callback must not call get/set/update on the same Shared value, including through an alias or upgraded WeakShared: same-thread recursive access reports R0001 instead of deadlocking. JSON serialization of that value also reports an error; string formatting shows a locked marker. If the callback throws, the stored value is not replaced and the lock is released; callback side effects are not rolled back. Avoid waiting for tasks that need the held Shared value, and use a consistent lock order when callbacks access multiple Shared values to prevent cross-thread deadlocks. The compiler rejects unsafe direct writes to non-Shared globals in parallel work with E0401.
 
 ---
 

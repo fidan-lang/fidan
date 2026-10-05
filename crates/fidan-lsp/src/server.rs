@@ -6287,7 +6287,7 @@ Holder.compass.
             let backend = service.inner();
 
             let uri = Url::parse("file:///receiver_signature_hover.fdn").expect("document uri");
-            let text = "action main {\n    var tasks oftype hashset oftype string = hashset()\n    var values oftype list oftype integer = []\n    var lookup oftype dict oftype (string, integer) = {}\n    tasks.contains\n    values.remove\n    lookup.get\n}\n";
+            let text = "action main {\n    var tasks oftype hashset oftype string = hashset()\n    var values oftype list oftype integer = []\n    var lookup oftype dict oftype (string, integer) = {}\n    var counter = Shared(0)\n    tasks.contains\n    values.remove\n    lookup.get\n    counter.update\n}\n";
             backend.refresh(&uri, 1, text).await;
             let file = SourceFile::new(FileId(0), uri.as_str(), text);
 
@@ -6304,6 +6304,7 @@ Holder.compass.
                     "get",
                     "dict.get(key oftype string) -> integer",
                 ),
+                ("update", "Shared.update(callback oftype action) -> integer"),
             ] {
                 let offset = text.find(needle).expect("member offset") as u32;
                 let position = convert::span_to_range(

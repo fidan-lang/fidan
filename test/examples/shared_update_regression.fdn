@@ -1,0 +1,119 @@
+# One Shared value, real parallel tasks, and callback dispatch on every backend.
+use std.json
+use std.math
+action increment with (certain value oftype integer) returns integer {
+    return value + 1
+}
+
+action verifyUpdates {
+    for repetition in 0..100 {
+        var counter = Shared(0)
+        parallel {
+            task one { counter.update(action with (value) { return value + 1 }) }
+            task two { counter.update(action with (value) { return value + 1 }) }
+        }
+        assert_eq(counter.get(), 2)
+    }
+
+    for repetition in 0..10 {
+        var counter = Shared(0)
+        parallel for i in 1..257 {
+            counter.update(increment)
+        }
+        assert_eq(counter.get(), 256)
+    }
+
+    var delta = 3
+    var addCaptured = action with (value) { return value + delta }
+    var capturedCounter = Shared(0)
+    parallel {
+        task one { capturedCounter.update(addCaptured) }
+        task two { capturedCounter.update(addCaptured) }
+    }
+    assert_eq(capturedCounter.get(), 6)
+    assert_eq(capturedCounter.update(increment), 7)
+    assert_eq(capturedCounter.get(), 7)
+
+    var counter = Shared(0)
+    parallel for i in 1..100 {
+        counter.update(action with (value) { return value + 1 })
+    }
+    assert_eq(counter.get(), 99)
+
+    var protected = Shared(10)
+    var weak = protected.weak()
+    var errors = 0
+    attempt {
+        protected.update(action with (value) { return protected.get() })
+    } catch error {
+        assert(error.contains("recursive access to the same Shared value"))
+        errors = errors + 1
+    }
+    attempt {
+        protected.update(action with (value) { protected.set(99); return value })
+    } catch error {
+        assert(error.contains("recursive access to the same Shared value"))
+        errors = errors + 1
+    }
+    attempt {
+        protected.update(action with (value) { return weak.upgrade().update(increment) })
+    } catch error {
+        assert(error.contains("recursive access to the same Shared value"))
+        errors = errors + 1
+    }
+    attempt {
+        protected.update(action with (value) { json.stringify([protected]); return value })
+    } catch error {
+        assert(error.contains("recursive access to the same Shared value"))
+        errors = errors + 1
+    }
+    assert_eq(errors, 4)
+    assert_eq(protected.get(), 10)
+    protected.update(action with (value) {
+        assert_eq(string(protected), "Shared(<locked>)")
+        return value
+    })
+    assert_eq(protected.update(increment), 11)
+
+    var overflowing = Shared(9223372036854775807)
+    var caught = false
+    attempt { overflowing.update(increment) } catch error {
+        assert(error.contains("R2003"))
+        caught = true
+    }
+    assert_eq(caught, true)
+    assert_eq(overflowing.get(), 9223372036854775807)
+    overflowing.set(0)
+    assert_eq(overflowing.update(increment), 1)
+
+    var dynamicCounter oftype flexible = Shared(5)
+    caught = false
+    attempt { dynamicCounter.update(42) } catch error {
+        assert(error.contains("cannot call value of type"))
+        caught = true
+    }
+    assert_eq(caught, true)
+    assert_eq(dynamicCounter.get(), 5)
+    errors = 0
+    attempt { dynamicCounter.update() } catch error {
+        assert(error.contains("expects exactly one callback"))
+        errors = errors + 1
+    }
+    attempt { dynamicCounter.update(increment, increment) } catch error {
+        assert(error.contains("expects exactly one callback"))
+        errors = errors + 1
+    }
+    assert_eq(errors, 2)
+    dynamicCounter.set(-5)
+    assert_eq(dynamicCounter.update(math.abs), 5)
+    assert_eq(dynamicCounter.get(), 5)
+
+    var retained = Shared("owned callback result")
+    for repetition in 0..50 {
+        assert_eq(retained.update(action with (value) { return value }), "owned callback result")
+        assert_eq(retained.get(), "owned callback result")
+    }
+}
+
+verifyUpdates()
+print("shared update ok")

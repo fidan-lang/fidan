@@ -1950,7 +1950,7 @@ fn lower_terminator(
                     // Non-scalar return type (Dynamic, List, Object, etc.):
                     // always return a valid *mut FidanValue.  If the operand is
                     // a native scalar (e.g. an Integer local from arithmetic), box it first.
-                    lower_operand_boxed(builder, cl_vars, local_types, op, rt, module)?
+                    lower_owned_boxed_operand(builder, cl_vars, local_types, op, rt, module)?
                 } else {
                     // Scalar return type (Integer/Float/Boolean).
                     // If the operand is a Dynamic (boxed pointer) value — e.g. the result

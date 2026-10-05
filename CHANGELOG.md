@@ -51,7 +51,11 @@ compiler releases.
   argument parsing handles Unicode without panicking.
 - Native fixture builds use isolated Cargo artifacts; Windows file-manager
   tests keep executable artifacts separate from their temporary IO fixtures.
-- The concurrent syntax reference avoids a lost-update race.
+- Implemented the documented `Shared.update(callback)` atomic read-modify-write
+  operation in interpreter and native dispatch. It returns the new value and
+  rejects same-thread recursive access. Restored same-counter parallel examples.
+- Both AOT backends return owned boxed values, preventing identity callbacks from
+  returning freed borrowed arguments and corrupting the native heap.
 
 ### Changed
 - Refreshed compatible dependencies, including Cranelift 0.136.2 and Inkwell
@@ -77,6 +81,9 @@ compiler releases.
   errors, all strength-reduction rules, safe integer/boolean reductions, float
   edge cases, and mixed numeric result types in the interpreter/JIT. The shared
   numeric/boolean fixture also runs through both AOT backends.
+- Added repeated Shared updates across parallel tasks and loops, captured/named
+  callbacks, callback errors, recursive access, identity returns, metadata/arity,
+  and E0401 checks. Interpreter/JIT and both AOT backends share the fixture.
 
 ---
 

@@ -1447,6 +1447,17 @@ fn parallel_for_accepts_ranges_with_jit_enabled() {
 }
 
 #[test]
+fn shared_update_is_atomic_with_and_without_jit() {
+    for threshold in [0, 1] {
+        run_src_with_threshold(
+            include_str!("../../../test/examples/shared_update_regression.fdn"),
+            threshold,
+        )
+        .unwrap_or_else(|error| panic!("atomic Shared update: {}", error.message));
+    }
+}
+
+#[test]
 fn weak_shared_supports_upgrade_and_collection() {
     assert!(
         run_src(
@@ -2430,6 +2441,24 @@ fn e0401_no_race_with_shared() {
         "unexpected E0401 for Shared variable: {:?}",
         races.iter().map(|r| &r.var_name).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn e0401_shared_update_is_safe_but_global_rebinding_is_not() {
+    for source in [
+        "var counter = Shared(0)\nparallel { task A { counter.update(action with (x) { return x + 1 }) } task B { counter.update(action with (x) { return x + 1 }) } }",
+        "var counter = Shared(0)\nparallel for i in 0..100 { counter.update(action with (x) { return x + 1 }) }",
+    ] {
+        let (mir, interner) = build_mir(source);
+        assert!(fidan_passes::check_parallel_races(&mir, &interner).is_empty());
+    }
+    for source in [
+        "var counter = Shared(0)\nparallel { task A { counter = Shared(1) } task B { counter = Shared(2) } }",
+        "var counter = 0\nparallel for i in 0..100 { counter = counter + 1 }",
+    ] {
+        let (mir, interner) = build_mir(source);
+        assert!(!fidan_passes::check_parallel_races(&mir, &interner).is_empty());
+    }
 }
 
 #[test]

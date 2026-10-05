@@ -321,14 +321,18 @@ pub fn write_display_io<W: io::Write>(out: &mut W, val: &FidanValue) -> io::Resu
             out.write_all(b">")
         }
         FidanValue::Shared(s) => {
-            let inner = s.0.lock().unwrap();
+            let Ok(inner) = s.lock() else {
+                return out.write_all(b"Shared(<locked>)");
+            };
             out.write_all(b"Shared(")?;
             write_display_io(out, &inner)?;
             out.write_all(b")")
         }
         FidanValue::WeakShared(ws) => {
             if let Some(shared) = ws.upgrade() {
-                let inner = shared.0.lock().unwrap();
+                let Ok(inner) = shared.lock() else {
+                    return out.write_all(b"WeakShared(<locked>)");
+                };
                 out.write_all(b"WeakShared(")?;
                 write_display_io(out, &inner)?;
                 out.write_all(b")")
@@ -453,14 +457,20 @@ pub fn display_into(out: &mut String, val: &FidanValue) {
             out.push('>');
         }
         FidanValue::Shared(s) => {
-            let inner = s.0.lock().unwrap();
+            let Ok(inner) = s.lock() else {
+                out.push_str("Shared(<locked>)");
+                return;
+            };
             out.push_str("Shared(");
             display_into(out, &inner);
             out.push(')');
         }
         FidanValue::WeakShared(ws) => {
             if let Some(shared) = ws.upgrade() {
-                let inner = shared.0.lock().unwrap();
+                let Ok(inner) = shared.lock() else {
+                    out.push_str("WeakShared(<locked>)");
+                    return;
+                };
                 out.push_str("WeakShared(");
                 display_into(out, &inner);
                 out.push(')');

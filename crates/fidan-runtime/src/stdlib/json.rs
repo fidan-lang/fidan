@@ -75,48 +75,68 @@ fn decode_tagged_json_object(entries: &JsonMap<String, JsonValue>) -> Option<Fid
     }
 }
 
-fn plain_json_object(dict: &FidanDict) -> Option<JsonMap<String, JsonValue>> {
+fn plain_json_object(
+    dict: &FidanDict,
+) -> Result<Option<JsonMap<String, JsonValue>>, StdlibRuntimeError> {
     let mut map = JsonMap::new();
     for (key, value) in dict.entries_sorted_refs() {
         let FidanValue::String(key) = key else {
-            return None;
+            return Ok(None);
         };
         if key.as_str() == FIDAN_TAG_KEY {
-            return None;
+            return Ok(None);
         }
-        map.insert(key.as_str().to_string(), fidan_to_json(value));
+        map.insert(key.as_str().to_string(), fidan_to_json(value)?);
     }
-    Some(map)
+    Ok(Some(map))
 }
 
-fn fidan_dict_to_json(dict: &FidanDict) -> JsonValue {
-    if let Some(map) = plain_json_object(dict) {
-        return JsonValue::Object(map);
+fn fidan_dict_to_json(dict: &FidanDict) -> Result<JsonValue, StdlibRuntimeError> {
+    if let Some(map) = plain_json_object(dict)? {
+        return Ok(JsonValue::Object(map));
     }
 
     let entries = dict
         .entries_sorted_refs()
         .into_iter()
-        .map(|(key, value)| JsonValue::Array(vec![fidan_to_json(key), fidan_to_json(value)]))
-        .collect();
-    tagged_json_value(FIDAN_DICT_TAG, FIDAN_ENTRIES_KEY, JsonValue::Array(entries))
+        .map(|(key, value)| {
+            Ok(JsonValue::Array(vec![
+                fidan_to_json(key)?,
+                fidan_to_json(value)?,
+            ]))
+        })
+        .collect::<Result<Vec<_>, StdlibRuntimeError>>()?;
+    Ok(tagged_json_value(
+        FIDAN_DICT_TAG,
+        FIDAN_ENTRIES_KEY,
+        JsonValue::Array(entries),
+    ))
 }
 
-fn fidan_hashset_to_json(set: &FidanHashSet) -> JsonValue {
+fn fidan_hashset_to_json(set: &FidanHashSet) -> Result<JsonValue, StdlibRuntimeError> {
     let items = set
         .values_sorted_refs()
         .into_iter()
         .map(fidan_to_json)
-        .collect();
-    tagged_json_value(FIDAN_HASHSET_TAG, FIDAN_ITEMS_KEY, JsonValue::Array(items))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(tagged_json_value(
+        FIDAN_HASHSET_TAG,
+        FIDAN_ITEMS_KEY,
+        JsonValue::Array(items),
+    ))
 }
 
-fn fidan_tuple_to_json(items: &[FidanValue]) -> JsonValue {
-    tagged_json_value(
+fn fidan_tuple_to_json(items: &[FidanValue]) -> Result<JsonValue, StdlibRuntimeError> {
+    Ok(tagged_json_value(
         FIDAN_TUPLE_TAG,
         FIDAN_ITEMS_KEY,
-        JsonValue::Array(items.iter().map(fidan_to_json).collect()),
-    )
+        JsonValue::Array(
+            items
+                .iter()
+                .map(fidan_to_json)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+    ))
 }
 
 fn json_to_fidan(value: serde_json::Value) -> FidanValue {
@@ -145,8 +165,8 @@ fn json_to_fidan(value: serde_json::Value) -> FidanValue {
     }
 }
 
-fn fidan_to_json(value: &FidanValue) -> serde_json::Value {
-    match value {
+fn fidan_to_json(value: &FidanValue) -> Result<JsonValue, StdlibRuntimeError> {
+    Ok(match value {
         FidanValue::Integer(value) => serde_json::Value::Number((*value).into()),
         FidanValue::Float(value) => serde_json::Number::from_f64(*value)
             .map(serde_json::Value::Number)
@@ -154,25 +174,28 @@ fn fidan_to_json(value: &FidanValue) -> serde_json::Value {
         FidanValue::Boolean(value) => serde_json::Value::Bool(*value),
         FidanValue::Nothing => serde_json::Value::Null,
         FidanValue::String(value) => serde_json::Value::String(value.as_str().to_string()),
-        FidanValue::List(values) => {
-            serde_json::Value::Array(values.borrow().iter().map(fidan_to_json).collect())
-        }
-        FidanValue::Dict(entries) => fidan_dict_to_json(&entries.borrow()),
-        FidanValue::HashSet(set) => fidan_hashset_to_json(&set.borrow()),
+        FidanValue::List(values) => serde_json::Value::Array(
+            values
+                .borrow()
+                .iter()
+                .map(fidan_to_json)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        FidanValue::Dict(entries) => fidan_dict_to_json(&entries.borrow())?,
+        FidanValue::HashSet(set) => fidan_hashset_to_json(&set.borrow())?,
         FidanValue::Shared(shared) => {
-            let inner = shared.0.lock().expect("shared json lock poisoned");
-            fidan_to_json(&inner)
+            let inner = shared
+                .lock()
+                .map_err(|error| StdlibRuntimeError::new(diag_code!("R0001"), error))?;
+            fidan_to_json(&inner)?
         }
-        FidanValue::WeakShared(weak) => weak
-            .upgrade()
-            .map(|shared| {
-                let inner = shared.0.lock().expect("shared json lock poisoned");
-                fidan_to_json(&inner)
-            })
-            .unwrap_or(serde_json::Value::Null),
-        FidanValue::Tuple(values) => fidan_tuple_to_json(values),
+        FidanValue::WeakShared(weak) => match weak.upgrade() {
+            Some(shared) => fidan_to_json(&FidanValue::Shared(shared))?,
+            None => serde_json::Value::Null,
+        },
+        FidanValue::Tuple(values) => fidan_tuple_to_json(values)?,
         other => serde_json::Value::String(display(other)),
-    }
+    })
 }
 
 fn soft_arg(args: &[FidanValue], index: usize) -> bool {
@@ -187,13 +210,13 @@ fn parse_json_text(text: &str) -> Result<FidanValue, StdlibRuntimeError> {
         })
 }
 
-fn render_json_text(value: &FidanValue, pretty: bool) -> String {
-    let json = fidan_to_json(value);
-    if pretty {
+fn render_json_text(value: &FidanValue, pretty: bool) -> Result<String, StdlibRuntimeError> {
+    let json = fidan_to_json(value)?;
+    Ok(if pretty {
         serde_json::to_string_pretty(&json).unwrap_or_else(|_| "null".to_string())
     } else {
         json.to_string()
-    }
+    })
 }
 
 fn read_json_file_text(path: &str) -> Result<String, StdlibRuntimeError> {
@@ -233,8 +256,12 @@ fn load_json_file(path: &str, soft: bool) -> Result<FidanValue, StdlibRuntimeErr
     }
 }
 
-fn dump_json_file(path: &str, value: &FidanValue, pretty: bool) -> bool {
-    std::fs::write(path, render_json_text(value, pretty)).is_ok()
+fn dump_json_file(
+    path: &str,
+    value: &FidanValue,
+    pretty: bool,
+) -> Result<bool, StdlibRuntimeError> {
+    Ok(std::fs::write(path, render_json_text(value, pretty)?).is_ok())
 }
 
 pub fn dispatch_result(
@@ -258,16 +285,16 @@ pub fn dispatch_result(
         }
         "stringify" | "dumps" => {
             let value = args.first().unwrap_or(&FidanValue::Nothing);
-            Some(Ok(string_value(&render_json_text(value, false))))
+            Some(render_json_text(value, false).map(|text| string_value(&text)))
         }
         "dump" | "writeFile" | "write_file" => {
             let value = args.first().unwrap_or(&FidanValue::Nothing);
             let path = coerce_string(args.get(1).unwrap_or(&FidanValue::Nothing));
-            Some(Ok(FidanValue::Boolean(dump_json_file(&path, value, false))))
+            Some(dump_json_file(&path, value, false).map(FidanValue::Boolean))
         }
         "pretty" | "prettyPrint" | "pretty_print" => {
             let value = args.first().unwrap_or(&FidanValue::Nothing);
-            Some(Ok(string_value(&render_json_text(value, true))))
+            Some(render_json_text(value, true).map(|text| string_value(&text)))
         }
         "isValid" | "is_valid" => {
             let text = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));

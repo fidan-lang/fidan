@@ -499,18 +499,15 @@ action demonstrateConcurrency {
 
     # ── Shared oftype T — thread-safe mutable value (Arc<Mutex>) ─────────────
     var counter oftype Shared oftype integer = Shared(0)
-    var firstResult = Shared(0)
-    var secondResult = Shared(0)
     parallel {
         task inc1 {
-            firstResult.set(1)
+            counter.update(action with (value) { return value + 1 })
         }
         task inc2 {
-            secondResult.set(1)
+            counter.update(action with (value) { return value + 1 })
         }
     }
-    # get/set pairs are not atomic. Combine task results after the parallel join.
-    counter.set(firstResult.get() + secondResult.get())
+    # update holds the Shared lock across the callback's read-modify-write.
     print("Counter = {counter.get()}")    # 2
 
     # ── WeakShared oftype T — non-owning weak handle to a Shared value ───────

@@ -2327,32 +2327,34 @@ impl MirMachine {
             }
             Callee::Dynamic(op) => {
                 let v = self.eval_operand(op, frame);
-                match v {
-                    FidanValue::Function(RuntimeFnId(id)) => {
-                        self.call_function(FunctionId(id), args)
-                    }
-                    FidanValue::Closure {
-                        fn_id: RuntimeFnId(id),
-                        captured,
-                    } => {
-                        let mut full_args = captured.clone();
-                        full_args.extend(args);
-                        self.call_function(FunctionId(id), full_args)
-                    }
-                    FidanValue::StdlibFn(ref module, ref name) => {
-                        let m = Arc::clone(module);
-                        let n = Arc::clone(name);
-                        self.dispatch_stdlib_call(&m, &n, args)
-                    }
-                    FidanValue::ClassType(ref class_name) => {
-                        self.instantiate_class_value(class_name.as_ref(), args)
-                    }
-                    _ => Err(MirSignal::Panic(format!(
-                        "cannot call value of type `{}`",
-                        v.type_name()
-                    ))),
-                }
+                self.call_value(v, args)
             }
+        }
+    }
+
+    fn call_value(&mut self, value: FidanValue, args: Vec<FidanValue>) -> MirResult {
+        match value {
+            FidanValue::Function(RuntimeFnId(id)) => self.call_function(FunctionId(id), args),
+            FidanValue::Closure {
+                fn_id: RuntimeFnId(id),
+                captured,
+            } => {
+                let mut full_args = captured.clone();
+                full_args.extend(args);
+                self.call_function(FunctionId(id), full_args)
+            }
+            FidanValue::StdlibFn(ref module, ref name) => {
+                let m = Arc::clone(module);
+                let n = Arc::clone(name);
+                self.dispatch_stdlib_call(&m, &n, args)
+            }
+            FidanValue::ClassType(ref class_name) => {
+                self.instantiate_class_value(class_name.as_ref(), args)
+            }
+            _ => Err(MirSignal::Panic(format!(
+                "cannot call value of type `{}`",
+                value.type_name()
+            ))),
         }
     }
 
@@ -2390,11 +2392,55 @@ impl MirMachine {
         if let FidanValue::Shared(ref sr) = receiver {
             let method_name = self.sym_str(method);
             match canonical_receiver_method_name(ReceiverBuiltinKind::Shared, &method_name) {
-                Some("get") => return Ok(sr.0.lock().unwrap().clone()),
+                Some("get") => {
+                    return Ok(sr
+                        .lock()
+                        .map_err(|error| {
+                            MirSignal::RuntimeError(
+                                fidan_diagnostics::diag_code!("R0001"),
+                                error.into(),
+                            )
+                        })?
+                        .clone());
+                }
                 Some("set") => {
                     let val = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-                    *sr.0.lock().unwrap() = val;
+                    *sr.lock().map_err(|error| {
+                        MirSignal::RuntimeError(
+                            fidan_diagnostics::diag_code!("R0001"),
+                            error.into(),
+                        )
+                    })? = val;
                     return Ok(FidanValue::Nothing);
+                }
+                Some("update") => {
+                    if args.len() != 1 {
+                        return Err(MirSignal::RuntimeError(
+                            fidan_diagnostics::diag_code!("R0001"),
+                            "Shared.update expects exactly one callback".into(),
+                        ));
+                    }
+                    let callback = args.into_iter().next().unwrap();
+                    if !matches!(
+                        callback,
+                        FidanValue::Function(_)
+                            | FidanValue::Closure { .. }
+                            | FidanValue::StdlibFn(..)
+                    ) {
+                        return Err(MirSignal::RuntimeError(
+                            fidan_diagnostics::diag_code!("R0001"),
+                            format!("cannot call value of type `{}`", callback.type_name()),
+                        ));
+                    }
+                    let mut current = sr.lock().map_err(|error| {
+                        MirSignal::RuntimeError(
+                            fidan_diagnostics::diag_code!("R0001"),
+                            error.into(),
+                        )
+                    })?;
+                    let result = self.call_value(callback, vec![current.clone()])?;
+                    *current = result.clone();
+                    return Ok(result);
                 }
                 Some("weak") => return Ok(FidanValue::WeakShared(sr.downgrade())),
                 _ => {}

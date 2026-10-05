@@ -864,6 +864,31 @@ var result = choose(true)
     }
 
     #[test]
+    fn shared_update_checks_callback_and_arity() {
+        for (source, expected) in [
+            (
+                "var value = Shared(0)\nvalue.update()",
+                "not enough arguments for `update`",
+            ),
+            (
+                "var value = Shared(0)\nvalue.update(1)",
+                "type `integer` is not callable",
+            ),
+            (
+                "var value = Shared(0)\nvalue.update(action with (x) { return x }, 1)",
+                "expected 1 argument, got 2",
+            ),
+        ] {
+            let errors = check_errors(source);
+            assert!(
+                errors.iter().any(|message| message.contains(expected)),
+                "{errors:?}"
+            );
+        }
+        assert!(check_errors("var value = Shared(0)\nvar updated oftype integer = value.update(action with (x) { return x + 1 })").is_empty());
+    }
+
+    #[test]
     fn integer_literal_is_not_callable() {
         let errors = check_errors("var x = 1()");
         assert!(

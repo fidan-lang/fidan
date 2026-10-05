@@ -22,9 +22,9 @@
 //
 // Only module-level globals can race: task-private captures are value-copied
 // per invocation and mutations are discarded after the task returns. `Shared`
-// globals are deliberately safe (Arc<Mutex> internals), but since we cannot
-// distinguish them at the GlobalId level yet we report all races and the fix
-// suggestion directs users to `Shared`.
+// receiver operations synchronize the inner value and do not StoreGlobal.
+// Rebinding a Shared global is still an unsafe write to the global slot and
+// must be diagnosed; `.update()` mutates the protected value instead.
 
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{FunctionId, GlobalId, Instr, LocalId, MirProgram};

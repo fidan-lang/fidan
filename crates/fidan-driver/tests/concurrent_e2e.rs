@@ -833,6 +833,30 @@ fn llvm_available() -> bool {
 }
 
 #[test]
+fn shared_update_is_atomic_across_aot_backends() {
+    let sandbox = temp_dir("fidan_shared_update");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM Shared.update regression: no installed LLVM toolchain");
+            continue;
+        }
+        let output = sandbox.join(format!(
+            "shared-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/shared_update_regression.fdn"),
+            backend,
+            &output,
+        );
+        for _ in 0..10 {
+            run_compiled_binary_clean(&output, "shared update ok");
+        }
+    }
+    fs::remove_dir_all(sandbox).expect("remove Shared update sandbox");
+}
+
+#[test]
 fn strength_reduction_preserves_values_and_types_across_aot_backends() {
     let sandbox = temp_dir("fidan_strength_reduction");
     for backend in [Backend::Cranelift, Backend::Llvm] {

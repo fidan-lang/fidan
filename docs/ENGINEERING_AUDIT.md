@@ -49,7 +49,7 @@ A separate IO issue was found: `Path::exists` hides filesystem inspection errors
 - LLVM target-CPU prefix inspection no longer slices a UTF-8 string at an invalid byte boundary.
 - Inkwell 0.10 reports exact memory-buffer length. Removed the old trailing-zero stripping workaround, which truncated binary bitcode and broke full LTO; added a bitcode serialization/parse regression.
 - Nested native-fixture Cargo builds now use an isolated target directory. Previously they could overwrite the workspace runtime rlib with a narrower feature set and break subsequent doctests with E0463. Relative CARGO_TARGET_DIR values also resolve consistently against the workspace root rather than each test crate directory.
-- The syntax reference had a lost-update race: two parallel tasks incremented one `Shared` counter with separate get/set calls. It now aggregates independent task results after joining, and a regression runs the reference 20 times per native backend. README's unsupported `Shared.update` example was replaced with runnable get/set usage and explicit atomicity limits.
+- The syntax reference had a lost-update race: two parallel tasks incremented one `Shared` counter with separate get/set calls. The initial separate-result workaround incorrectly avoided finishing the documented `Shared.update` API. The final follow-up implements atomic updates and restores same-counter examples; the reference still runs 20 times per native backend.
 - The loose `crash.fdn` reproduced a debug interpreter panic on integer subtraction overflow. The initial audit incorrectly adopted wrapping behavior from native code. External review identified the older R2003 contract; the follow-up restores checked arithmetic and catchable Fidan diagnostics. The archived workload must now report R2003 rather than a wrapped checksum. `test/examples/integer_overflow_regression.fdn` tests the documented boundary and error semantics.
 - Rust 1.99 exposed two additional LSP Clippy findings, resolved with normal Option propagation and direct closure passing. A Windows file-manager test cleanup hit an executable sharing violation; binaries now live under ignored target artifacts while temporary source/data cleanup stays checked.
 - Original root scratch files are preserved under ignored `LOCAL/scratch/release-1.0.15`. `compare.py` and `compare.cpp` use floating point and exclude the final iteration, unlike the integer Fidan workload. C++ also multiplies signed 32-bit integers before casting, causing overflow undefined behavior. They are not parity or benchmark oracles.
@@ -222,8 +222,9 @@ mistake, not evidence of intended behavior.
   dispatch propagates the typed diagnostic to Fidan callers.
 - Repeating the full suite exposed the syntax reference's existing lost-update
   race in HEAD: separate shared counter get/set calls produced 1 instead of 2.
-  Each parallel task now writes its own Shared result; the parent combines them
-  after joining. The existing 20-run-per-backend assertions remain unchanged.
+  The initial separate-result workaround is superseded by the atomic
+  Shared.update implementation below. Existing 20-run-per-backend assertions
+  remain unchanged and now exercise the intended same-counter API.
 - Receiver substring/substr/slice use the existing std.string half-open scalar
   range semantics: bounds clamp to [0,len], omitted end defaults to len, reversed
   bounds return empty. charAt returns a string, empty for negative/out-of-range
@@ -330,6 +331,87 @@ Logs and analysis outputs are retained under ignored `target/positioning-*`.
 Earlier validation tables describe their respective historical trees. This
 follow-up changes only five documentation/metadata files; release versions,
 protocols, compiler/runtime code, dependencies, and `llvm-sys` 211 remain unchanged.
+
+### Shared.update follow-up
+
+The original README, lambda AST documentation, and E0401 guidance already intended
+`Shared.update(callback)` as the atomic transformation of one shared value. Its
+receiver metadata and interpreter/native dispatch were missing. Separate get/set
+calls were individually synchronized but could lose increments. Replacing the
+same-counter examples with separate task results concealed that incomplete API;
+this follow-up implements it and restores those examples.
+
+`update` takes one callable, holds the existing `Arc<Mutex<FidanValue>>` lock
+through invocation and replacement, and returns the new value. Interpreter
+function dispatch and native dynamic-call trampolines handle named/inline actions,
+captured closures, and standard-library function values. A callback error leaves
+the stored slot unchanged and releases the lock; other callback side effects are
+not rolled back. Metadata supplies the Shared inner return type and callback
+parameter to type checking and LSP signatures. Static non-callable arguments and
+incorrect arity are rejected; flexible invalid calls report runtime errors.
+
+All Fidan Shared accesses use a guard that tracks held Arc identities per thread.
+Recursive get/set/update through the same value or an upgraded WeakShared reports
+R0001 rather than waiting forever. JSON serialization propagates that error,
+including values nested in collections; display uses `Shared(<locked>)` instead
+of recursively locking. Access to a different Shared remains allowed. This does
+not detect cross-thread lock cycles: callbacks must use consistent ordering for
+multiple Shared values and must not join tasks that need their held value.
+
+Identity callbacks exposed a separate native ownership defect: boxed returns
+could alias a borrowed argument that dynamic-call cleanup then freed. Both AOT
+backends now use their existing owned-operand helper at the boxed return boundary.
+Repeated callbacks returning the input string cover the former heap corruption.
+No new callback ABI or wire protocol is introduced.
+
+The normal-pipeline fixture repeats two-task increments 100 times and 256-way
+parallel-for accumulation ten times per run. It also tests captured and named
+callbacks, the original 99-iteration example, returned values, callback overflow,
+invalid flexible calls, recursive aliases, serialization/display, and identity
+returns. It runs with interpreter JIT thresholds zero and one and ten complete
+runs per AOT backend. A mutation check temporarily released the lock between
+reading and writing; the same native regression failed with a counter of one
+instead of two. The atomic implementation was restored before final validation.
+A Rust contention test separately checks eight threads and 8,000 exact updates.
+E0401 regressions preserve rejection of unsafe non-Shared global mutation and
+Shared global rebinding while allowing protected receiver updates. The existing
+race analysis is not a complete analysis of arbitrary callback side effects.
+
+The complete `main...polish/repo-audit` documentation diff was reviewed for
+similarly removed, already-intended functionality. Shared.update and its
+same-counter syntax example were the confirmed case. The other removals concerned
+unsupported performance/safety/parity claims, roadmap text, an invalid standalone
+inheritance introduction, ignored LOCAL demos replaced with tracked examples, and
+an external editor extension inventory. Existing inheritance/parent, native
+interop, replay/hot-reload, and implemented editor capabilities remain documented;
+no other removal established an incomplete intended API requiring implementation.
+
+Final validation on Windows with Rust/Cargo 1.99.0 and the freshly rebuilt LLVM
+helper installed under `target/shared-update-final-home`:
+
+| Command or scenario | Result |
+|---|---|
+| `cargo fmt --all --check` | Pass |
+| `cargo build --workspace --locked` | Pass |
+| `cargo test --workspace --locked` | **872 passed**, zero failed/ignored across 54 suites, including doctests |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | Pass |
+| Shared fixture with interpreter JIT thresholds 0 and 1 | Pass for both thresholds |
+| Shared fixture, Cranelift and LLVM AOT at O2 | Ten full runs per backend pass; 1,000 two-task trials and 25,600 accumulation updates per backend, plus callback/boundary checks |
+| Existing concurrency/backend integration suite | **69 passed**, including 20 syntax-reference runs per AOT backend |
+| Runtime Shared lock/contention and recursion tests | **2 passed**, including eight threads and 8,000 exact increments |
+| E0401 targeted tests | **5 passed**; unsafe global writes/rebinding still rejected |
+| Type-checker callback/arity and LSP typed-hover regressions | Pass |
+| `scripts/package-toolchain.ps1`, same-version LLVM 1.0.6 / LLVM 21.1.8 rebuild | Release helper build, **11 LLVM-enabled tests**, and strict LLVM-enabled Clippy pass |
+| Cranelift AOT example sweep | **39 passed**, zero skips |
+| LLVM full-LTO AOT example sweep | **39 passed**, zero skips |
+| `git diff --check` | Pass |
+
+The workspace run also passes existing slicing, checked arithmetic, Unicode
+receiver, optimizer, IO/file-manager, and native interop regressions. Logs are
+retained under ignored `target/shared-update-*`. The temporary non-atomic mutation
+failed the new concurrency regression as expected and is absent from the final
+patch. Release versions, protocols, dependencies, Cranelift 0.136 constraints,
+llvm-sys 211, and the AI-native positioning remain unchanged.
 
 ## Release preparation
 

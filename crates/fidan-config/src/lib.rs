@@ -775,6 +775,12 @@ const SHARED_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
     ),
     spec(&["set"], "set", None, Some(ReceiverReturnKind::Nothing)),
     spec(
+        &["update"],
+        "update",
+        None,
+        Some(ReceiverReturnKind::SharedInnerValue),
+    ),
+    spec(
         &["weak", "downgrade"],
         "weak",
         None,
@@ -1403,6 +1409,7 @@ pub fn receiver_member_params(
         ReceiverBuiltinKind::Shared => match canonical {
             "get" | "weak" => NO_RECEIVER_PARAMS,
             "set" => SHARED_VALUE_PARAM,
+            "update" => LIST_CALLBACK_PARAM,
             _ => return None,
         },
         ReceiverBuiltinKind::WeakShared => match canonical {

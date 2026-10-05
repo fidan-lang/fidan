@@ -1407,11 +1407,36 @@ pub unsafe extern "C" fn fdn_obj_invoke(
             match infer_receiver_member(ReceiverBuiltinKind::Shared, method_name.as_str())
                 .map(|info| info.canonical_name)
             {
-                Some("get") => into_raw(sr.0.lock().unwrap().clone()),
+                Some("get") => match sr.lock() {
+                    Ok(value) => into_raw(value.clone()),
+                    Err(error) => runtime_call_error(error),
+                },
                 Some("set") => {
                     let val = extra.into_iter().next().unwrap_or(FidanValue::Nothing);
-                    *sr.0.lock().unwrap() = val;
-                    into_raw(FidanValue::Nothing)
+                    match sr.lock() {
+                        Ok(mut value) => {
+                            *value = val;
+                            into_raw(FidanValue::Nothing)
+                        }
+                        Err(error) => runtime_call_error(error),
+                    }
+                }
+                Some("update") => {
+                    if extra.len() != 1 {
+                        return runtime_call_error("Shared.update expects exactly one callback");
+                    }
+                    let mut current = match sr.lock() {
+                        Ok(value) => value,
+                        Err(error) => return runtime_call_error(error),
+                    };
+                    let result = call_dynamic_owned(
+                        extra.into_iter().next().unwrap(),
+                        vec![current.clone()],
+                    );
+                    if fdn_has_exception() == 0 {
+                        *current = result.clone();
+                    }
+                    into_raw(result)
                 }
                 Some("weak") => into_raw(FidanValue::WeakShared(sr.downgrade())),
                 _ => panic_missing_method(recv, &method_name),
@@ -2763,6 +2788,17 @@ fn runtime_error_to_exception_ptr(
     ))))
 }
 
+unsafe fn runtime_call_error(message: impl Into<String>) -> *mut FidanValue {
+    let exception = runtime_error_to_exception_ptr(
+        "error",
+        fidan_diagnostics::diag_code!("R0001"),
+        message.into(),
+    );
+    fdn_store_exception(exception);
+    drop(Box::from_raw(exception));
+    into_raw(FidanValue::Nothing)
+}
+
 // ── io module ─────────────────────────────────────────────────────────────────
 fn dispatch_io(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
     match stdlib::io::dispatch_result(func, args) {
@@ -3492,11 +3528,7 @@ pub unsafe extern "C" fn fdn_call_dynamic(
             captured,
         } => (*id, captured.as_slice()),
         _ => {
-            eprintln!(
-                "AOT: fdn_call_dynamic: not a callable value ({})",
-                fv.type_name()
-            );
-            return into_raw(FidanValue::Nothing);
+            return runtime_call_error(format!("cannot call value of type `{}`", fv.type_name()));
         }
     };
 
@@ -3506,8 +3538,7 @@ pub unsafe extern "C" fn fdn_call_dynamic(
         .and_then(|g| g.get(fn_id as usize).copied().flatten());
 
     let Some(trampoline) = trampoline else {
-        eprintln!("AOT: fdn_call_dynamic: no trampoline for fn_id {}", fn_id);
-        return into_raw(FidanValue::Nothing);
+        return runtime_call_error(format!("no callback trampoline for function {fn_id}"));
     };
 
     // Build the unified args array: captured values first, then call-site args.

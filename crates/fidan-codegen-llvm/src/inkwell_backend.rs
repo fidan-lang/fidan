@@ -2278,7 +2278,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 Ok(())
             }
             Terminator::Return(Some(operand)) => {
-                let value = self.lower_operand(operand)?;
+                let value = self.lower_owned_operand(operand)?;
                 self.module
                     .builder
                     .build_return(Some(&value))
