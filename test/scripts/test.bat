@@ -8,8 +8,7 @@ if errorlevel 1 exit /b 1
 cargo test -q --workspace --lib --bins --tests 2>&1
 if errorlevel 1 exit /b 1
 
-REM Run doctests only for crates that contain Rust doc examples and have not
-REM explicitly disabled doctests in Cargo.toml.
+REM Let Cargo discover every workspace doctest and honor target settings.
 powershell -NoProfile -ExecutionPolicy Bypass -File ".\test\scripts\run-doctests.ps1"
 if errorlevel 1 exit /b 1
 
@@ -45,6 +44,14 @@ for /R ".\test" %%F in (*.fdn) do (
             echo [FAIL] %%F exited unexpectedly
             set "FAILED=1"
         )
+    )
+
+    REM `run` does not execute test blocks. Let the compiler discover them
+    REM for every source; files without test blocks return successfully.
+    .\target\debug\fidan test "%%F"
+    if errorlevel 1 (
+        echo [FAIL] %%F test blocks failed
+        set "FAILED=1"
     )
 )
 

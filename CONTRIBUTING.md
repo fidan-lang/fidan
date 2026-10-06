@@ -33,6 +33,12 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 
 Before submitting a pull request, make sure the project builds successfully and all relevant tests pass.
 
+On Windows, `test\scripts\test.bat` also runs every `.fdn` file under `test/` and its `test {}` blocks. It supplies the replay fixture and treats the trace demo's deliberate failure as expected. `test\scripts\test-runner-coverage.ps1` verifies that a failing test block makes this runner fail; run it separately from example sweeps because it temporarily adds a failing fixture.
+
+Run `test/scripts/test_examples_aot.ps1` (PowerShell) or `test/scripts/test_examples_aot.sh` (Bash) with `--backend cranelift` / `--backend llvm` (PowerShell: `-Backend`). LLVM tests execute the installed helper, so compiler contributors must rebuild/install the matching helper after backend changes; rebuilding the workspace alone does not replace it. Check `fidan toolchain list`, and use the runner's `-FidanHome` / `--fidan-home` option for an isolated toolchain installation. Golden-file checks live in `test/scripts/test_aot.bat` and `test/scripts/test_aot.sh`.
+
+The benchmark helpers use their full default workloads. Unix `performance_bm.sh` additionally requires Valgrind and KCachegrind for Callgrind profiling; it reports missing tools rather than pretending to profile successfully.
+
 Use Rust 1.96 or newer and a host C/C++ toolchain. The current lockfile was tested with Rust 1.99. Linux builds also need `pkg-config` and `libdbus-1-dev` (Debian/Ubuntu names). Default workspace builds do not require LLVM; optional backend setup is documented in the [README](README.md#build-from-source). All six Cranelift crates are constrained to the compatible `0.136` series, currently locked at `0.136.2`. Commit the lockfile with dependency updates and repeat workspace/backend validation before changing the supported series.
 
 ---

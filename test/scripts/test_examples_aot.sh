@@ -156,6 +156,7 @@ MATCHED=0
 
 while IFS= read -r file; do
     [ -z "$file" ] && continue
+    file="$REPO_ROOT/test/$file"
     rel="${file#$REPO_ROOT/}"
     base_name="$(basename "$file")"
 
@@ -264,7 +265,8 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 for path in sorted(root.rglob("*.fdn")):
-    print(path)
+    # Native Windows Python needs POSIX paths and LF for an MSYS shell reader.
+    sys.stdout.buffer.write((path.relative_to(root).as_posix() + '\n').encode('utf-8'))
 PY
 )
 
