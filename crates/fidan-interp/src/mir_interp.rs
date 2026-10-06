@@ -710,11 +710,27 @@ impl MirMachine {
             let fn_name_s = self.sym_str(func.name).to_string();
             let expected = func.params.len();
             let got = args.len();
-            return Err(MirSignal::Panic(format!(
-                "too many arguments to `{fn_name_s}`: expected {expected}, got {got}"
-            )));
+            return Err(MirSignal::RuntimeError(
+                fidan_diagnostics::diag_code!("R0001"),
+                format!("too many arguments to `{fn_name_s}`: expected {expected}, got {got}"),
+            ));
         }
 
+        let minimum = func
+            .params
+            .iter()
+            .rposition(|param| param.default.is_none())
+            .map_or(0, |index| index + 1);
+        if args.len() < minimum {
+            return Err(MirSignal::RuntimeError(
+                fidan_diagnostics::diag_code!("R0001"),
+                format!(
+                    "callback argument count: expected {minimum}..{}, got {}",
+                    func.params.len(),
+                    args.len()
+                ),
+            ));
+        }
         args.resize(func.params.len(), FidanValue::Nothing);
         for (i, param) in func.params.iter().enumerate() {
             if matches!(args[i], FidanValue::Nothing)
@@ -724,10 +740,14 @@ impl MirMachine {
             }
             if param.certain && matches!(args[i], FidanValue::Nothing) {
                 let pname = self.sym_str(param.name);
-                return Err(MirSignal::Panic(format!(
-                    "certain parameter `{pname}` cannot be nothing"
-                )));
+                return Err(MirSignal::RuntimeError(
+                    fidan_diagnostics::diag_code!("R0001"),
+                    format!("certain parameter `{pname}` cannot be nothing"),
+                ));
             }
+            args[i] =
+                fidan_runtime::contracts::prepare(args[i].clone(), &param.ty.runtime_descriptor())
+                    .map_err(MirSignal::from)?;
         }
         Ok(())
     }
@@ -1539,14 +1559,14 @@ impl MirMachine {
                 callee,
                 args,
                 span,
-                ..
+                result_ty,
             } => {
                 // Record the call-site span so call_function can attach it to the frame.
                 self.pending_call_span = Some(*span);
                 // `args` is `&Vec<Operand>` — .iter() already used, no Vec clone.
                 let arg_vals: Vec<FidanValue> =
                     args.iter().map(|a| self.eval_operand(a, frame)).collect();
-                let result = self.dispatch_call(callee, arg_vals, frame)?;
+                let result = self.dispatch_call(callee, arg_vals, frame, result_ty.as_ref())?;
                 if let Some(d) = dest {
                     frame.store(*d, result);
                 }
@@ -1961,7 +1981,7 @@ impl MirMachine {
             Rvalue::Call { callee, args } => {
                 let arg_vals: Vec<FidanValue> =
                     args.iter().map(|a| self.eval_operand(a, frame)).collect();
-                self.dispatch_call(callee, arg_vals, frame)
+                self.dispatch_call(callee, arg_vals, frame, None)
             }
             Rvalue::Construct { ty, fields } => {
                 let field_vals: Vec<(Symbol, FidanValue)> = fields
@@ -2146,7 +2166,10 @@ impl MirMachine {
                 BinOp::Mul => Integer(fidan_runtime::integer::mul(left, right)?),
                 BinOp::Div => Integer(fidan_runtime::integer::div(left, right)?),
                 BinOp::Rem => Integer(fidan_runtime::integer::rem(left, right)?),
-                BinOp::Pow => Integer(fidan_runtime::integer::pow(left, right)?),
+                BinOp::Pow => match fidan_runtime::integer::power(left, right)? {
+                    fidan_runtime::integer::Power::Integer(value) => Integer(value),
+                    fidan_runtime::integer::Power::Float(value) => Float(value),
+                },
                 BinOp::Eq => Boolean(left == right),
                 BinOp::NotEq => Boolean(left != right),
                 BinOp::Lt => Boolean(left < right),
@@ -2219,6 +2242,7 @@ impl MirMachine {
         callee: &Callee,
         args: Vec<FidanValue>,
         frame: &mut CallFrame,
+        result_ty: Option<&MirTy>,
     ) -> Result<FidanValue, MirSignal> {
         match callee {
             Callee::Fn(fn_id) => self.call_function(*fn_id, args),
@@ -2323,7 +2347,7 @@ impl MirMachine {
                     )));
                 }
                 let recv = self.eval_operand(receiver, frame);
-                self.dispatch_method_sym(recv, *method, args)
+                self.dispatch_method_sym_typed(recv, *method, args, result_ty)
             }
             Callee::Dynamic(op) => {
                 let v = self.eval_operand(op, frame);
@@ -2351,10 +2375,10 @@ impl MirMachine {
             FidanValue::ClassType(ref class_name) => {
                 self.instantiate_class_value(class_name.as_ref(), args)
             }
-            _ => Err(MirSignal::Panic(format!(
-                "cannot call value of type `{}`",
-                value.type_name()
-            ))),
+            _ => Err(MirSignal::RuntimeError(
+                fidan_diagnostics::diag_code!("R0001"),
+                format!("cannot call value of type `{}`", value.type_name()),
+            )),
         }
     }
 
@@ -2367,6 +2391,16 @@ impl MirMachine {
         receiver: FidanValue,
         method: Symbol,
         args: Vec<FidanValue>,
+    ) -> Result<FidanValue, MirSignal> {
+        self.dispatch_method_sym_typed(receiver, method, args, None)
+    }
+
+    fn dispatch_method_sym_typed(
+        &mut self,
+        receiver: FidanValue,
+        method: Symbol,
+        args: Vec<FidanValue>,
+        result_ty: Option<&MirTy>,
     ) -> Result<FidanValue, MirSignal> {
         // Enum payload variant construction: `Result.Ok(x)` → EnumVariant { tag: "Ok", payload: [x] }.
         if let FidanValue::EnumType(_) = &receiver {
@@ -2439,6 +2473,12 @@ impl MirMachine {
                         )
                     })?;
                     let result = self.call_value(callback, vec![current.clone()])?;
+                    let result = if let Some(ty) = result_ty {
+                        fidan_runtime::contracts::prepare(result, &ty.runtime_descriptor())
+                            .map_err(MirSignal::from)?
+                    } else {
+                        result
+                    };
                     *current = result.clone();
                     return Ok(result);
                 }
@@ -2833,93 +2873,7 @@ impl MirMachine {
             .map_err(MirSignal::Panic)
     }
     fn index_get(&self, obj: FidanValue, idx: FidanValue) -> Result<FidanValue, MirSignal> {
-        match (obj, idx) {
-            (FidanValue::List(r), FidanValue::Integer(i)) => {
-                let list = r.borrow();
-                let len = list.len() as i64;
-                let norm = if i < 0 { len + i } else { i };
-                list.get(norm as usize).cloned().ok_or_else(|| {
-                    MirSignal::RuntimeError(
-                        fidan_diagnostics::diag_code!("R2002"),
-                        format!("list index {} out of range", i),
-                    )
-                })
-            }
-            (FidanValue::Dict(r), key) => Ok(r
-                .borrow()
-                .get(&key)
-                .ok()
-                .flatten()
-                .cloned()
-                .unwrap_or(FidanValue::Nothing)),
-            (FidanValue::HashSet(r), FidanValue::Integer(i)) => {
-                let set = r.borrow();
-                set.value_at_sorted_index(i).ok_or_else(|| {
-                    MirSignal::RuntimeError(
-                        fidan_diagnostics::diag_code!("R2002"),
-                        format!("hashset index {} out of range", i),
-                    )
-                })
-            }
-            (FidanValue::String(s), FidanValue::Integer(i)) => {
-                // Avoid materialising a Vec<char> — walk with an iterator instead.
-                let str_ref = s.as_str();
-                let len = str_ref.chars().count() as i64;
-                let norm = if i < 0 { len + i } else { i };
-                if norm < 0 || norm >= len {
-                    return Err(MirSignal::RuntimeError(
-                        fidan_diagnostics::diag_code!("R2002"),
-                        format!("string index {} out of range", i),
-                    ));
-                }
-                let c = str_ref.chars().nth(norm as usize).unwrap();
-                Ok(FidanValue::String(FidanString::new(&c.to_string())))
-            }
-            (
-                FidanValue::Range {
-                    start,
-                    end,
-                    inclusive,
-                },
-                FidanValue::Integer(i),
-            ) => {
-                // Index into a lazy range without materialising it.
-                let len = (i128::from(end) - i128::from(start) + i128::from(inclusive)).max(0);
-                let norm = if i < 0 {
-                    len + i128::from(i)
-                } else {
-                    i128::from(i)
-                };
-                if norm < 0 || norm >= len {
-                    return Err(MirSignal::RuntimeError(
-                        fidan_diagnostics::diag_code!("R2002"),
-                        format!("range index {} out of range", i),
-                    ));
-                }
-                Ok(FidanValue::Integer((i128::from(start) + norm) as i64))
-            }
-            (FidanValue::Tuple(items), FidanValue::Integer(i)) => {
-                let len = items.len() as i64;
-                let norm = if i < 0 { len + i } else { i };
-                if norm < 0 || norm >= len {
-                    return Err(MirSignal::RuntimeError(
-                        fidan_diagnostics::diag_code!("R2002"),
-                        format!("tuple index {} out of range", i),
-                    ));
-                }
-                items.into_iter().nth(norm as usize).ok_or_else(|| {
-                    MirSignal::RuntimeError(
-                        fidan_diagnostics::diag_code!("R2002"),
-                        format!("tuple index {} out of range", i),
-                    )
-                })
-            }
-            (obj, idx) => Err(MirSignal::Panic(format!(
-                "cannot index `{}` with `{}`",
-                obj.type_name(),
-                idx.type_name()
-            ))),
-        }
+        fidan_runtime::index::get(&obj, &idx).map_err(Into::into)
     }
 
     fn iterable_items_snapshot(&self, collection: FidanValue) -> Option<Vec<FidanValue>> {
@@ -2954,34 +2908,7 @@ impl MirMachine {
         idx: FidanValue,
         val: FidanValue,
     ) -> Result<(), MirSignal> {
-        match (obj, idx) {
-            (FidanValue::List(r), FidanValue::Integer(i)) => {
-                let norm = {
-                    let list = r.borrow();
-                    let len = list.len() as i64;
-                    (if i < 0 { len + i } else { i }) as usize
-                };
-                let mut list = r.borrow_mut();
-                if norm < list.len() {
-                    list.set_at(norm, val);
-                    Ok(())
-                } else {
-                    Err(MirSignal::RuntimeError(
-                        fidan_diagnostics::diag_code!("R2002"),
-                        format!("list index {} out of range", i),
-                    ))
-                }
-            }
-            (FidanValue::Dict(r), key) => {
-                let _ = r.borrow_mut().insert(key, val);
-                Ok(())
-            }
-            (obj, idx) => Err(MirSignal::Panic(format!(
-                "cannot index-set `{}` with `{}`",
-                obj.type_name(),
-                idx.type_name()
-            ))),
-        }
+        fidan_runtime::index::set(&obj, &idx, val).map_err(Into::into)
     }
 }
 
@@ -3123,7 +3050,10 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
         (BinOp::Mul, Integer(a), Integer(b)) => Integer(fidan_runtime::integer::mul(*a, *b)?),
         (BinOp::Div, Integer(a), Integer(b)) => Integer(fidan_runtime::integer::div(*a, *b)?),
         (BinOp::Rem, Integer(a), Integer(b)) => Integer(fidan_runtime::integer::rem(*a, *b)?),
-        (BinOp::Pow, Integer(a), Integer(b)) => Integer(fidan_runtime::integer::pow(*a, *b)?),
+        (BinOp::Pow, Integer(a), Integer(b)) => match fidan_runtime::integer::power(*a, *b)? {
+            fidan_runtime::integer::Power::Integer(value) => Integer(value),
+            fidan_runtime::integer::Power::Float(value) => Float(value),
+        },
         (BinOp::Pow, Float(a), Float(b)) => Float(a.powf(*b)),
         (BinOp::Pow, Integer(a), Float(b)) => Float((*a as f64).powf(*b)),
         (BinOp::Pow, Float(a), Integer(b)) => Float(a.powf(*b as f64)),
@@ -3181,6 +3111,18 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
         (BinOp::Gt, String(a), String(b)) => Boolean(a.as_str() > b.as_str()),
         (BinOp::GtEq, String(a), String(b)) => Boolean(a.as_str() >= b.as_str()),
         // Boolean logic
+        (BinOp::Eq, Integer(a), Float(b)) => Boolean((*a as f64) == *b),
+        (BinOp::Eq, Float(a), Integer(b)) => Boolean(*a == (*b as f64)),
+        (BinOp::NotEq, Integer(a), Float(b)) => Boolean((*a as f64) != *b),
+        (BinOp::NotEq, Float(a), Integer(b)) => Boolean(*a != (*b as f64)),
+        (BinOp::Lt, Integer(a), Float(b)) => Boolean((*a as f64) < *b),
+        (BinOp::Lt, Float(a), Integer(b)) => Boolean(*a < (*b as f64)),
+        (BinOp::LtEq, Integer(a), Float(b)) => Boolean((*a as f64) <= *b),
+        (BinOp::LtEq, Float(a), Integer(b)) => Boolean(*a <= (*b as f64)),
+        (BinOp::Gt, Integer(a), Float(b)) => Boolean((*a as f64) > *b),
+        (BinOp::Gt, Float(a), Integer(b)) => Boolean(*a > (*b as f64)),
+        (BinOp::GtEq, Integer(a), Float(b)) => Boolean((*a as f64) >= *b),
+        (BinOp::GtEq, Float(a), Integer(b)) => Boolean(*a >= (*b as f64)),
         (BinOp::And, Boolean(a), Boolean(b)) => Boolean(*a && *b),
         (BinOp::Or, Boolean(a), Boolean(b)) => Boolean(*a || *b),
         (BinOp::Eq, Boolean(a), Boolean(b)) => Boolean(a == b),
@@ -3230,12 +3172,15 @@ fn eval_binary(op: BinOp, l: FidanValue, r: FidanValue) -> Result<FidanValue, Mi
             inclusive: true,
         },
         _ => {
-            return Err(MirSignal::Panic(format!(
-                "type error: `{:?}` on {} and {}",
-                op,
-                l.type_name(),
-                r.type_name()
-            )));
+            return Err(MirSignal::RuntimeError(
+                fidan_diagnostics::diag_code!("R0001"),
+                format!(
+                    "type error: `{:?}` on {} and {}",
+                    op,
+                    l.type_name(),
+                    r.type_name()
+                ),
+            ));
         }
     })
 }
@@ -3248,11 +3193,10 @@ fn eval_unary(op: UnOp, v: FidanValue) -> Result<FidanValue, MirSignal> {
         (UnOp::Neg, Float(f)) => Float(-f),
         (UnOp::Not, Boolean(b)) => Boolean(!b),
         (op, v) => {
-            return Err(MirSignal::Panic(format!(
-                "type error: `{:?}` on {}",
-                op,
-                v.type_name()
-            )));
+            return Err(MirSignal::RuntimeError(
+                fidan_diagnostics::diag_code!("R0001"),
+                format!("type error: `{:?}` on {}", op, v.type_name()),
+            ));
         }
     })
 }

@@ -33,8 +33,8 @@ compiler releases.
 - Integer arithmetic preserves documented R2003 overflow errors across the
   interpreter, selective JIT, and both AOT backends, including negation, powers,
   and MIN / -1 or MIN % -1. Division/remainder by zero reports R2001 for typed
-  and flexible values. Fractional reciprocal powers require a float operand;
-  negative integer powers of 1 and -1 retain their exact integer results.
+  and flexible values. Negative integer powers of 1 and -1 retain exact integer
+  results; other nonzero bases produce floats, and zero reports R2001.
 - Integer absolute value reports R2003 for MIN in standard-library calls,
   receiver methods, and native intrinsics, without a host arithmetic panic.
 - Selective JIT scalar operations check MIR operand types so boxed flexible
@@ -74,6 +74,9 @@ compiler releases.
   verification and findings are recorded in `docs/ENGINEERING_AUDIT.md`.
 
 ### Tests
+- Added final semantic fixtures for receiver generic/callback contracts, dynamic
+  operators/indexing, checked constants, negative powers, recursive equality,
+  canonical slices and owned direct/dynamic returns.
 - Added shared slicing, integer-overflow, and boolean/object-mutation fixtures, cross-backend error
   checks, filesystem/path/persistence coverage, UTF-16 regressions, range and
   assertion tests, LLVM bitcode round trips, and repeated syntax-reference runs.

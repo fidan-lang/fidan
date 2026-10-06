@@ -986,8 +986,8 @@ Fix: check the index before accessing:
             r#"An arithmetic operation produced a result that cannot be represented
 in the target integer type (64-bit signed integer).  Fidan's integer
 arithmetic reports R2003 on overflow in every build profile. Integer
-negative powers are integers only for bases 1 and -1; use a float operand
-for other reciprocal powers.
+negative powers remain exact integers for bases 1 and -1. Other nonzero
+integer bases produce floating-point results; a zero base reports R2001.
 
 Example:
 

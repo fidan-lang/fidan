@@ -1109,6 +1109,7 @@ dependencies = [
  "fidan-typeck",
  "rustc-hash",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1128,6 +1129,7 @@ dependencies = [
  "fidan-ast",
  "fidan-lexer",
  "fidan-mir",
+ "fidan-runtime",
  "fidan-source",
  "rustc-hash",
 ]
@@ -1182,6 +1184,7 @@ dependencies = [
  "fidan-diagnostics",
  "fidan-lexer",
  "fidan-parser",
+ "fidan-runtime",
  "fidan-source",
  "fidan-stdlib",
  "rustc-hash",

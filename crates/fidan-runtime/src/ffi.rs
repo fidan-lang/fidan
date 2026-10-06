@@ -30,10 +30,14 @@
 //
 // ## Temp-box leaks (Phase 11.1)
 //
-// `aot.rs` boxes scalars with `fdn_box_int/float/bool` and passes the
-// result to a C-ABI call.  With borrow semantics the callee never frees these
-// temporary boxes; they leak for the process lifetime.  Each leak is ≤ 32 B.
-// Phase 11.2 will insert explicit `fdn_drop` calls for dead temporaries.
+// Both AOT backends release fresh list/dict construction boxes after the
+// collection helper clones them, and release prepared dynamic-call arguments.
+// Both backends release explicitly cloned direct-call arguments, fresh boxed
+// operator inputs, and owned operator results after scalar unboxing.
+// Other call sites still create temporary boxes without a matching `fdn_drop`,
+// including interpolation and some direct-call arguments.
+// These allocations remain live for the process lifetime; a broader temporary
+// ownership pass is still needed. Borrowed locals must never be freed as temps.
 
 #![allow(clippy::missing_safety_doc)]
 // In Rust 2024 edition, unsafe operations inside `unsafe fn` bodies require
@@ -470,7 +474,13 @@ macro_rules! numeric_binop {
                 (FidanValue::Float(x), FidanValue::Integer(y)) => {
                     FidanValue::Float($float_op(*x, *y as f64))
                 }
-                _ => FidanValue::Nothing,
+                _ => {
+                    return runtime_call_error(format!(
+                        "type error: arithmetic on {} and {}",
+                        av.type_name(),
+                        bv.type_name()
+                    ))
+                }
             };
             into_raw(result)
         }
@@ -515,7 +525,12 @@ pub unsafe extern "C" fn fdn_dyn_add(a: *mut FidanValue, b: *mut FidanValue) -> 
         (FidanValue::String(sa), FidanValue::String(sb)) => {
             into_raw(FidanValue::String(sa.append(sb)))
         }
-        _ => into_raw(FidanValue::Nothing),
+        (FidanValue::String(_), _) | (_, FidanValue::String(_)) => fdn_dyn_concat(a, b),
+        _ => runtime_call_error(format!(
+            "type error: Add on {} and {}",
+            av.type_name(),
+            bv.type_name()
+        )),
     }
 }
 
@@ -545,13 +560,26 @@ pub unsafe extern "C" fn fdn_dyn_pow(a: *mut FidanValue, b: *mut FidanValue) -> 
     let av = borrow(a);
     let bv = borrow(b);
     let result = match (av, bv) {
-        (FidanValue::Integer(x), FidanValue::Integer(y)) => {
-            FidanValue::Integer(fdn_int_pow(*x, *y))
-        }
+        (FidanValue::Integer(x), FidanValue::Integer(y)) => match crate::integer::power(*x, *y) {
+            Ok(crate::integer::Power::Integer(value)) => FidanValue::Integer(value),
+            Ok(crate::integer::Power::Float(value)) => FidanValue::Float(value),
+            Err(error) => {
+                let exception = runtime_error_to_exception_ptr("error", error.code, error.message);
+                fdn_store_exception(exception);
+                drop(Box::from_raw(exception));
+                return into_raw(FidanValue::Nothing);
+            }
+        },
         (FidanValue::Float(x), FidanValue::Float(y)) => FidanValue::Float(x.powf(*y)),
         (FidanValue::Integer(x), FidanValue::Float(y)) => FidanValue::Float((*x as f64).powf(*y)),
         (FidanValue::Float(x), FidanValue::Integer(y)) => FidanValue::Float(x.powf(*y as f64)),
-        _ => FidanValue::Nothing,
+        _ => {
+            return runtime_call_error(format!(
+                "type error: Pow on {} and {}",
+                av.type_name(),
+                bv.type_name()
+            ));
+        }
     };
     into_raw(result)
 }
@@ -588,10 +616,16 @@ macro_rules! cmp_binop {
                 (FidanValue::String(sa), FidanValue::String(sb)) => {
                     $str_cmp(sa.as_str(), sb.as_str())
                 }
-                (FidanValue::Boolean(x), FidanValue::Boolean(y)) => {
+                (FidanValue::Boolean(x), FidanValue::Boolean(y))
+                    if matches!(stringify!($name), "fdn_dyn_eq" | "fdn_dyn_ne") =>
+                {
                     $int_cmp(&(*x as i64), &(*y as i64))
                 }
-                (FidanValue::Nothing, FidanValue::Nothing) => (stringify!($name) == "fdn_dyn_eq"),
+                (FidanValue::Nothing, FidanValue::Nothing)
+                    if matches!(stringify!($name), "fdn_dyn_eq" | "fdn_dyn_ne") =>
+                {
+                    (stringify!($name) == "fdn_dyn_eq")
+                }
                 (
                     FidanValue::EnumVariant {
                         tag: ta,
@@ -610,14 +644,68 @@ macro_rules! cmp_binop {
                     } else if stringify!($name) == "fdn_dyn_ne" {
                         !eq
                     } else {
+                        drop(Box::from_raw(runtime_call_error(
+                            "type error: ordering enum values",
+                        )));
                         false
                     }
                 }
                 // One operand is Nothing, the other is not: for eq→false, ne→true, ordering→false.
-                (FidanValue::Nothing, _) | (_, FidanValue::Nothing) => {
+                (FidanValue::Nothing, _) | (_, FidanValue::Nothing)
+                    if matches!(stringify!($name), "fdn_dyn_eq" | "fdn_dyn_ne") =>
+                {
                     stringify!($name) == "fdn_dyn_ne"
                 }
-                _ => false,
+                (FidanValue::EnumType(a), FidanValue::EnumType(b))
+                    if stringify!($name) == "fdn_dyn_eq" =>
+                {
+                    a == b
+                }
+                (FidanValue::EnumType(a), FidanValue::EnumType(b))
+                    if stringify!($name) == "fdn_dyn_ne" =>
+                {
+                    a != b
+                }
+                (FidanValue::EnumType(_), FidanValue::EnumVariant { .. })
+                | (FidanValue::EnumVariant { .. }, FidanValue::EnumType(_))
+                    if stringify!($name) == "fdn_dyn_eq" =>
+                {
+                    false
+                }
+                (FidanValue::EnumType(_), FidanValue::EnumVariant { .. })
+                | (FidanValue::EnumVariant { .. }, FidanValue::EnumType(_))
+                    if stringify!($name) == "fdn_dyn_ne" =>
+                {
+                    true
+                }
+                (FidanValue::ClassType(a), FidanValue::ClassType(b))
+                    if stringify!($name) == "fdn_dyn_eq" =>
+                {
+                    a == b
+                }
+                (FidanValue::ClassType(a), FidanValue::ClassType(b))
+                    if stringify!($name) == "fdn_dyn_ne" =>
+                {
+                    a != b
+                }
+                (FidanValue::Object(a), FidanValue::Object(b))
+                    if stringify!($name) == "fdn_dyn_eq" =>
+                {
+                    a.identity() == b.identity()
+                }
+                (FidanValue::Object(a), FidanValue::Object(b))
+                    if stringify!($name) == "fdn_dyn_ne" =>
+                {
+                    a.identity() != b.identity()
+                }
+                _ => {
+                    drop(Box::from_raw(runtime_call_error(format!(
+                        "type error: comparison on {} and {}",
+                        av.type_name(),
+                        bv.type_name()
+                    ))));
+                    false
+                }
             };
             result as i8
         }
@@ -663,29 +751,38 @@ cmp_binop!(
 
 // ── Dynamic logical / unary ────────────────────────────────────────────────────
 
-/// Short-circuit `and`: returns a clone of `a` if falsy, else a clone of `b`.
+/// MIR controls evaluation order; logical operators require Boolean operands.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_dyn_and(a: *mut FidanValue, b: *mut FidanValue) -> *mut FidanValue {
-    if is_truthy(borrow(a)) {
-        into_raw(borrow(b).clone())
-    } else {
-        into_raw(borrow(a).clone())
+    match (borrow(a), borrow(b)) {
+        (FidanValue::Boolean(a), FidanValue::Boolean(b)) => into_raw(FidanValue::Boolean(*a && *b)),
+        (a, b) => runtime_call_error(format!(
+            "type error: And on {} and {}",
+            a.type_name(),
+            b.type_name()
+        )),
     }
 }
 
-/// Short-circuit `or`: returns a clone of `a` if truthy, else a clone of `b`.
+/// Boolean logical disjunction.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_dyn_or(a: *mut FidanValue, b: *mut FidanValue) -> *mut FidanValue {
-    if is_truthy(borrow(a)) {
-        into_raw(borrow(a).clone())
-    } else {
-        into_raw(borrow(b).clone())
+    match (borrow(a), borrow(b)) {
+        (FidanValue::Boolean(a), FidanValue::Boolean(b)) => into_raw(FidanValue::Boolean(*a || *b)),
+        (a, b) => runtime_call_error(format!(
+            "type error: Or on {} and {}",
+            a.type_name(),
+            b.type_name()
+        )),
     }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_dyn_not(ptr: *mut FidanValue) -> *mut FidanValue {
-    into_raw(FidanValue::Boolean(!is_truthy(borrow(ptr))))
+    match borrow(ptr) {
+        FidanValue::Boolean(value) => into_raw(FidanValue::Boolean(!value)),
+        value => runtime_call_error(format!("type error: Not on {}", value.type_name())),
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -693,7 +790,7 @@ pub unsafe extern "C" fn fdn_dyn_neg(ptr: *mut FidanValue) -> *mut FidanValue {
     let result = match borrow(ptr) {
         FidanValue::Integer(n) => FidanValue::Integer(fdn_int_neg(*n)),
         FidanValue::Float(f) => FidanValue::Float(-f),
-        _ => FidanValue::Nothing,
+        value => return runtime_call_error(format!("type error: Neg on {}", value.type_name())),
     };
     into_raw(result)
 }
@@ -974,90 +1071,23 @@ pub unsafe extern "C" fn fdn_list_push(list: *mut FidanValue, val: *mut FidanVal
 }
 
 /// Get the element at `idx` (negative indexing supported).
-/// Returns a new owned clone, or `nothing` on out-of-bounds.  Borrows `list`.
+/// Returns an owned clone; bounds/type failures populate the exception slot.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_list_get(
     list: *mut FidanValue,
     idx: *mut FidanValue,
 ) -> *mut FidanValue {
-    let idx_val = borrow(idx);
-    let target = borrow(list);
-    if let FidanValue::Dict(dict) = target {
-        return into_raw(
-            dict.borrow()
-                .get(idx_val)
-                .ok()
-                .flatten()
-                .cloned()
-                .unwrap_or(FidanValue::Nothing),
-        );
-    }
-    let result = match (target, idx_val) {
-        (FidanValue::List(list), FidanValue::Integer(index)) => {
-            let list = list.borrow();
-            let index = if *index < 0 {
-                list.len() as i64 + index
-            } else {
-                *index
-            };
-            list.get(index as usize).cloned()
-        }
-        (FidanValue::Tuple(items), FidanValue::Integer(index)) => {
-            let index = if *index < 0 {
-                items.len() as i64 + index
-            } else {
-                *index
-            };
-            items.get(index as usize).cloned()
-        }
-        (FidanValue::HashSet(set), FidanValue::Integer(index)) => {
-            set.borrow().value_at_sorted_index(*index)
-        }
-        (FidanValue::String(text), FidanValue::Integer(index)) => {
-            let len = text.as_str().chars().count() as i64;
-            let index = if *index < 0 { len + index } else { *index };
-            text.as_str()
-                .chars()
-                .nth(index as usize)
-                .map(|ch| FidanValue::String(FidanString::new(&ch.to_string())))
-        }
-        (
-            FidanValue::Range {
-                start,
-                end,
-                inclusive,
-            },
-            FidanValue::Integer(index),
-        ) => {
-            let len = (i128::from(*end) - i128::from(*start) + i128::from(*inclusive)).max(0);
-            let index = if *index < 0 {
-                len + i128::from(*index)
-            } else {
-                i128::from(*index)
-            };
-            (index >= 0 && index < len)
-                .then(|| FidanValue::Integer((i128::from(*start) + index) as i64))
-        }
-        _ => None,
-    };
-    match result {
-        Some(value) => into_raw(value),
-        None => {
-            let exception = runtime_error_to_exception_ptr(
-                "error",
-                fidan_diagnostics::diag_code!("R2002"),
-                format!(
-                    "{} index {} out of range",
-                    target.type_name(),
-                    crate::display(idx_val)
-                ),
-            );
+    match crate::index::get(borrow(list), borrow(idx)) {
+        Ok(value) => into_raw(value),
+        Err(error) => {
+            let exception = runtime_error_to_exception_ptr("error", error.code, error.message);
             fdn_store_exception(exception);
             drop(Box::from_raw(exception));
             into_raw(FidanValue::Nothing)
         }
     }
 }
+
 /// Set `list[idx]` to a clone of `val`.  Borrows both.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_list_set(
@@ -1065,34 +1095,10 @@ pub unsafe extern "C" fn fdn_list_set(
     idx: *mut FidanValue,
     val: *mut FidanValue,
 ) {
-    let idx_val = borrow(idx);
-    match borrow(list) {
-        FidanValue::List(l) => {
-            if let FidanValue::Integer(n) = idx_val {
-                let mut b = l.borrow_mut();
-                let len = b.len() as i64;
-                let i = if *n < 0 {
-                    (len + n) as usize
-                } else {
-                    *n as usize
-                };
-                if i < b.len() {
-                    b.set_at(i, borrow(val).clone());
-                } else {
-                    let exception = runtime_error_to_exception_ptr(
-                        "error",
-                        fidan_diagnostics::diag_code!("R2002"),
-                        format!("list index {n} out of range"),
-                    );
-                    fdn_store_exception(exception);
-                    drop(Box::from_raw(exception));
-                }
-            }
-        }
-        FidanValue::Dict(d) => {
-            let _ = d.borrow_mut().insert(idx_val.clone(), borrow(val).clone());
-        }
-        _ => {}
+    if let Err(error) = crate::index::set(borrow(list), borrow(idx), borrow(val).clone()) {
+        let exception = runtime_error_to_exception_ptr("error", error.code, error.message);
+        fdn_store_exception(exception);
+        drop(Box::from_raw(exception));
     }
 }
 
@@ -1151,17 +1157,7 @@ pub unsafe extern "C" fn fdn_dict_get(
     dict: *mut FidanValue,
     key: *mut FidanValue,
 ) -> *mut FidanValue {
-    let result = if let FidanValue::Dict(d) = borrow(dict) {
-        d.borrow()
-            .get(borrow(key))
-            .ok()
-            .flatten()
-            .cloned()
-            .unwrap_or(FidanValue::Nothing)
-    } else {
-        FidanValue::Nothing
-    };
-    into_raw(result)
+    fdn_list_get(dict, key)
 }
 
 /// Insert a clone of `val` under `key`.  Borrows `dict`, `key`, and `val`.
@@ -1171,11 +1167,7 @@ pub unsafe extern "C" fn fdn_dict_set(
     key: *mut FidanValue,
     val: *mut FidanValue,
 ) {
-    if let FidanValue::Dict(d) = borrow(dict) {
-        let _ = d
-            .borrow_mut()
-            .insert(borrow(key).clone(), borrow(val).clone());
-    }
+    fdn_list_set(dict, key, val);
 }
 
 /// Return the number of entries.  Borrows `dict`.
@@ -1425,18 +1417,7 @@ pub unsafe extern "C" fn fdn_obj_invoke(
                     if extra.len() != 1 {
                         return runtime_call_error("Shared.update expects exactly one callback");
                     }
-                    let mut current = match sr.lock() {
-                        Ok(value) => value,
-                        Err(error) => return runtime_call_error(error),
-                    };
-                    let result = call_dynamic_owned(
-                        extra.into_iter().next().unwrap(),
-                        vec![current.clone()],
-                    );
-                    if fdn_has_exception() == 0 {
-                        *current = result.clone();
-                    }
-                    into_raw(result)
+                    shared_update(sr, extra.into_iter().next().unwrap(), None)
                 }
                 Some("weak") => into_raw(FidanValue::WeakShared(sr.downgrade())),
                 _ => panic_missing_method(recv, &method_name),
@@ -1497,6 +1478,61 @@ fn try_take_async_value_ready(value: &FidanValue) -> Option<Result<FidanValue, S
     match value {
         FidanValue::Pending(pending) => pending.try_take_ready(),
         other => Some(Ok(other.clone())),
+    }
+}
+
+unsafe fn shared_update(
+    shared: &crate::SharedRef<FidanValue>,
+    callback: FidanValue,
+    contract: Option<&str>,
+) -> *mut FidanValue {
+    let mut current = match shared.lock() {
+        Ok(value) => value,
+        Err(error) => return runtime_call_error(error),
+    };
+    let result = call_dynamic_owned(callback, vec![current.clone()]);
+    if fdn_has_exception() != 0 {
+        return into_raw(result);
+    }
+    let result = if let Some(contract) = contract {
+        match crate::contracts::prepare(result, contract) {
+            Ok(value) => value,
+            Err(error) => return runtime_call_error(error.message),
+        }
+    } else {
+        result
+    };
+    *current = result.clone();
+    into_raw(result)
+}
+
+/// Atomic typed transformation. Arguments are borrowed; the result is owned.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_shared_update_typed(
+    shared: *mut FidanValue,
+    callback: *mut FidanValue,
+    contract: *const u8,
+    length: i64,
+) -> *mut FidanValue {
+    let FidanValue::Shared(shared) = borrow(shared) else {
+        return runtime_call_error("type error: expected Shared receiver");
+    };
+    let descriptor = std::str::from_utf8(std::slice::from_raw_parts(contract, length as usize))
+        .expect("compiler contract is UTF-8");
+    shared_update(shared, borrow(callback).clone(), Some(descriptor))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_check_argument(
+    value: *mut FidanValue,
+    contract: *const u8,
+    length: i64,
+) -> *mut FidanValue {
+    let descriptor = std::str::from_utf8(std::slice::from_raw_parts(contract, length as usize))
+        .expect("compiler contract is UTF-8");
+    match crate::contracts::prepare(borrow(value).clone(), descriptor) {
+        Ok(value) => into_raw(value),
+        Err(error) => runtime_call_error(error.message),
     }
 }
 
@@ -2012,11 +2048,7 @@ fn dispatch_list_method(
                 .position(|v| values_equal(v, &target))
                 .map(|i| i as i64)
                 .unwrap_or(-1);
-            if idx >= 0 {
-                into_raw(FidanValue::Integer(idx))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
+            into_raw(FidanValue::Integer(idx))
         }
 
         "firstWhere" => {
@@ -2383,12 +2415,22 @@ fn dispatch_range_method(
 }
 // ── Value comparison helpers ───────────────────────────────────────────────────
 
-pub(crate) fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
+/// Exact recursive value equality used by collection search.
+pub fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
+    values_equal_with(a, b, |x, y| x == y)
+}
+
+/// Test assertions supply their float comparator without changing language equality.
+pub fn values_equal_with(
+    a: &FidanValue,
+    b: &FidanValue,
+    float_equal: fn(f64, f64) -> bool,
+) -> bool {
     match (a, b) {
         (FidanValue::Integer(x), FidanValue::Integer(y)) => x == y,
-        (FidanValue::Float(x), FidanValue::Float(y)) => x == y,
-        (FidanValue::Integer(x), FidanValue::Float(y)) => (*x as f64) == *y,
-        (FidanValue::Float(x), FidanValue::Integer(y)) => *x == (*y as f64),
+        (FidanValue::Float(x), FidanValue::Float(y)) => float_equal(*x, *y),
+        (FidanValue::Integer(x), FidanValue::Float(y)) => float_equal(*x as f64, *y),
+        (FidanValue::Float(x), FidanValue::Integer(y)) => float_equal(*x, *y as f64),
         (FidanValue::Boolean(x), FidanValue::Boolean(y)) => x == y,
         (FidanValue::String(x), FidanValue::String(y)) => x.as_str() == y.as_str(),
         (FidanValue::Nothing, FidanValue::Nothing) => true,
@@ -2399,14 +2441,14 @@ pub(crate) fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
                 && lhs
                     .iter()
                     .zip(rhs.iter())
-                    .all(|(left, right)| values_equal(left, right))
+                    .all(|(left, right)| values_equal_with(left, right, float_equal))
         }
         (FidanValue::Tuple(lhs), FidanValue::Tuple(rhs)) => {
             lhs.len() == rhs.len()
                 && lhs
                     .iter()
                     .zip(rhs.iter())
-                    .all(|(left, right)| values_equal(left, right))
+                    .all(|(left, right)| values_equal_with(left, right, float_equal))
         }
         (FidanValue::Dict(lhs), FidanValue::Dict(rhs)) => {
             let lhs = lhs.borrow();
@@ -2416,7 +2458,7 @@ pub(crate) fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
                     rhs.get(key)
                         .ok()
                         .flatten()
-                        .is_some_and(|right| values_equal(left, right))
+                        .is_some_and(|right| values_equal_with(left, right, float_equal))
                 })
         }
         (FidanValue::HashSet(lhs), FidanValue::HashSet(rhs)) => {
@@ -2440,7 +2482,7 @@ pub(crate) fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
                 && left
                     .iter()
                     .zip(right.iter())
-                    .all(|(left, right)| values_equal(left, right))
+                    .all(|(left, right)| values_equal_with(left, right, float_equal))
         }
         (FidanValue::Namespace(lhs), FidanValue::Namespace(rhs)) => lhs == rhs,
         (FidanValue::StdlibFn(lhs_mod, lhs_name), FidanValue::StdlibFn(rhs_mod, rhs_name)) => {
@@ -2479,7 +2521,10 @@ pub(crate) fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
         ) => {
             ta == tb
                 && pa.len() == pb.len()
-                && pa.iter().zip(pb.iter()).all(|(a, b)| values_equal(a, b))
+                && pa
+                    .iter()
+                    .zip(pb.iter())
+                    .all(|(a, b)| values_equal_with(a, b, float_equal))
         }
         _ => false,
     }
@@ -2797,6 +2842,36 @@ unsafe fn runtime_call_error(message: impl Into<String>) -> *mut FidanValue {
     fdn_store_exception(exception);
     drop(Box::from_raw(exception));
     into_raw(FidanValue::Nothing)
+}
+
+/// Check positional dynamic-call arity before a trampoline reads or discards args.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_validate_call(count: i64, minimum: i64, maximum: i64) -> i8 {
+    if count < minimum || count > maximum {
+        drop(Box::from_raw(runtime_call_error(format!(
+            "callback argument count: expected {minimum}..{maximum}, got {count}"
+        ))));
+        return 0;
+    }
+    1
+}
+
+/// Prepare one owned callback argument from borrowed input/default values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_prepare_argument(
+    argument: *mut FidanValue,
+    default: *mut FidanValue,
+    certain: i8,
+) -> *mut FidanValue {
+    let value = if argument.is_null() || matches!(borrow(argument), FidanValue::Nothing) {
+        borrow(default)
+    } else {
+        borrow(argument)
+    };
+    if certain != 0 && matches!(value, FidanValue::Nothing) {
+        return runtime_call_error("certain callback parameter cannot be nothing");
+    }
+    into_raw(value.clone())
 }
 
 // ── io module ─────────────────────────────────────────────────────────────────
@@ -3580,7 +3655,7 @@ mod tests {
             (fdn_dyn_div, 10, 0, "R2001"),
             (fdn_dyn_rem, 10, 0, "R2001"),
             (fdn_dyn_pow, 2, 63, "R2003"),
-            (fdn_dyn_pow, 2, -1, "R2003"),
+            (fdn_dyn_pow, 0, -1, "R2001"),
         ];
         unsafe {
             for (function, a, b, code) in cases {

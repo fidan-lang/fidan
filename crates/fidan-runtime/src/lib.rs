@@ -5,6 +5,7 @@ use std::sync::{OnceLock, RwLock};
 mod dict;
 pub mod ffi;
 mod hashset;
+pub mod index;
 pub mod integer;
 mod list;
 mod object;
@@ -64,3 +65,5 @@ pub fn current_program_args() -> Vec<String> {
         .expect("program argv override lock poisoned");
     slot.clone().unwrap_or_else(|| std::env::args().collect())
 }
+
+pub mod contracts;

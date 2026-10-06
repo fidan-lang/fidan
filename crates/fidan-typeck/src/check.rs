@@ -153,6 +153,7 @@ pub struct TypeChecker {
     pub(crate) actions: FxHashMap<Symbol, ActionInfo>,
     /// Lexically-scoped nested action signatures, one map per active scope.
     local_actions: Vec<FxHashMap<Symbol, ActionInfo>>,
+    expr_actions: FxHashMap<ExprId, ActionInfo>,
     /// `@deprecated` markers for lexically-scoped nested actions.
     local_deprecated_actions: Vec<rustc_hash::FxHashSet<Symbol>>,
     /// Set of action names decorated with `@deprecated`.
@@ -195,6 +196,7 @@ impl TypeChecker {
             registering: false,
             expr_types: FxHashMap::default(),
             actions: FxHashMap::default(),
+            expr_actions: FxHashMap::default(),
             local_actions: vec![FxHashMap::default()],
             local_deprecated_actions: vec![rustc_hash::FxHashSet::default()],
             deprecated_actions: rustc_hash::FxHashSet::default(),
@@ -1208,6 +1210,7 @@ impl TypeChecker {
                 span,
             } => {
                 self.check_assignment_target(*target, *span, module);
+                self.forget_callable_assignment(*target, module);
                 let rhs = self.infer_expr(*value, module);
                 let lhs = self.infer_expr(*target, module);
                 if !lhs.is_assignable_from(&rhs) {
@@ -1410,6 +1413,7 @@ impl TypeChecker {
                 span,
             } => {
                 self.check_assignment_target(target, span, module);
+                self.forget_callable_assignment(target, module);
                 let rhs = self.infer_expr(value, module);
                 let lhs = self.infer_expr(target, module);
                 if !lhs.is_assignable_from(&rhs) {
@@ -1840,6 +1844,10 @@ impl TypeChecker {
         span: Span,
         module: &Module,
     ) {
+        // Shadowing invalidates any outer alias proof for this name.
+        for scope in &mut self.local_actions {
+            scope.remove(&name);
+        }
         // A `const var` with no initialiser is always `nothing` and can never
         // be changed — that is never useful.
         if is_const && init.is_none() {
@@ -1903,6 +1911,9 @@ impl TypeChecker {
             Some(d) => d,
             None => inferred,
         };
+        if let Some(info) = init.and_then(|expr| self.callable_info(expr, module)) {
+            self.define_local_action(name, info, false);
+        }
         self.table.define(
             name,
             SymbolInfo {
@@ -2463,7 +2474,22 @@ impl TypeChecker {
                         self.require_non_nullable(rhs, desc, module);
                     }
                 }
-                self.binary_result(op, &l, &r, span)
+                if op == BinOp::Pow && l == FidanType::Integer && r == FidanType::Integer {
+                    let base = self.eval_const_value(lhs, module);
+                    let exponent = self.eval_const_value(rhs, module);
+                    match (base, exponent) {
+                        (_, Some(ConstValue::Int(exponent))) if exponent >= 0 => FidanType::Integer,
+                        (Some(ConstValue::Int(1 | -1)), _) => FidanType::Integer,
+                        (Some(ConstValue::Int(base)), Some(ConstValue::Int(exponent)))
+                            if base != 0 && exponent < 0 =>
+                        {
+                            FidanType::Float
+                        }
+                        _ => FidanType::Dynamic,
+                    }
+                } else {
+                    self.binary_result(op, &l, &r, span)
+                }
             }
 
             Expr::Unary { op, operand, .. } => {
@@ -2508,6 +2534,7 @@ impl TypeChecker {
                 span,
             } => {
                 self.check_assignment_target(target, span, module);
+                self.forget_callable_assignment(target, module);
                 let rhs = self.infer_expr(value, module);
                 let lhs = self.infer_expr(target, module);
                 if !lhs.is_assignable_from(&rhs) && !lhs.is_error() {
@@ -2528,6 +2555,7 @@ impl TypeChecker {
                 span,
             } => {
                 self.check_assignment_target(target, span, module);
+                self.forget_callable_assignment(target, module);
                 let rhs = self.infer_expr(value, module);
                 let lhs = self.infer_expr(target, module);
                 self.binary_result(op, &lhs, &rhs, span)
@@ -2689,7 +2717,7 @@ impl TypeChecker {
                 span,
             } => {
                 // Typecheck the lambda body in its own action scope.
-                self.check_action_body(
+                let return_ty = self.check_action_body(
                     ActionBody {
                         params: &params,
                         return_ty: &return_ty,
@@ -2699,6 +2727,24 @@ impl TypeChecker {
                         span,
                     },
                     module,
+                );
+                let params = params
+                    .iter()
+                    .map(|param| ParamInfo {
+                        name: param.name,
+                        ty: self.resolve_type_expr(&param.ty),
+                        certain: param.certain,
+                        optional: param.optional,
+                        has_default: param.default.is_some(),
+                    })
+                    .collect();
+                self.expr_actions.insert(
+                    expr_id,
+                    ActionInfo {
+                        params,
+                        return_ty,
+                        span,
+                    },
                 );
                 FidanType::Function
             }
@@ -2852,28 +2898,187 @@ impl TypeChecker {
         receiver_method_arity_bounds(receiver_kind, self.interner.resolve(field).as_ref())
     }
 
+    fn receiver_parameter_type(&self, receiver: &FidanType, name: &str) -> FidanType {
+        match name {
+            "T" => match receiver {
+                FidanType::List(inner)
+                | FidanType::HashSet(inner)
+                | FidanType::Shared(inner)
+                | FidanType::WeakShared(inner)
+                | FidanType::Pending(inner) => *inner.clone(),
+                _ => FidanType::Dynamic,
+            },
+            "K" => match receiver {
+                FidanType::Dict(key, _) => *key.clone(),
+                _ => FidanType::Dynamic,
+            },
+            "V" => match receiver {
+                FidanType::Dict(_, value) => *value.clone(),
+                _ => FidanType::Dynamic,
+            },
+            _ => {
+                if let Some(inner) = name.strip_prefix("list oftype ") {
+                    return FidanType::List(Box::new(
+                        self.receiver_parameter_type(receiver, inner),
+                    ));
+                }
+                if let Some(inner) = name.strip_prefix("hashset oftype ") {
+                    return FidanType::HashSet(Box::new(
+                        self.receiver_parameter_type(receiver, inner),
+                    ));
+                }
+                fidan_stdlib::parse_stdlib_type_spec(name)
+                    .map(|spec| self.stdlib_spec_to_fidan_type(&spec))
+                    .unwrap_or(FidanType::Dynamic)
+            }
+        }
+    }
+
+    fn forget_callable_assignment(&mut self, target: ExprId, module: &Module) {
+        if let Expr::Ident { name, .. } = module.arena.get_expr(target) {
+            for scope in &mut self.local_actions {
+                scope.remove(name);
+            }
+        }
+    }
+
+    fn callable_info(&self, expr: ExprId, module: &Module) -> Option<ActionInfo> {
+        if let Some(info) = self.expr_actions.get(&expr) {
+            return Some(info.clone());
+        }
+        let (module_name, member_name) = match module.arena.get_expr(expr) {
+            Expr::Ident { name, .. } => {
+                if let Some(info) = self.lookup_action_info(*name) {
+                    return Some(info);
+                }
+                let import = self.stdlib_imports.get(name)?;
+                (
+                    self.interner.resolve(import.module).to_string(),
+                    self.interner.resolve(import.export).to_string(),
+                )
+            }
+            Expr::Field { object, field, .. } => {
+                let Expr::Ident { name, .. } = module.arena.get_expr(*object) else {
+                    return None;
+                };
+                let namespace = self.stdlib_namespace_imports.get(name)?;
+                (
+                    self.interner.resolve(*namespace).to_string(),
+                    self.interner.resolve(*field).to_string(),
+                )
+            }
+            _ => return None,
+        };
+        let params = fidan_stdlib::member_params(&module_name, &member_name)?;
+        if params.iter().any(|param| param.variadic) {
+            return None;
+        }
+        Some(ActionInfo {
+            params: params
+                .iter()
+                .map(|param| ParamInfo {
+                    name: self.interner.intern(&param.name),
+                    ty: self.receiver_parameter_type(&FidanType::Dynamic, param.type_name),
+                    certain: false,
+                    optional: param.optional,
+                    has_default: false,
+                })
+                .collect(),
+            return_ty: self.receiver_parameter_type(
+                &FidanType::Dynamic,
+                fidan_stdlib::member_return_type(&module_name, &member_name)?,
+            ),
+            span: module.arena.get_expr(expr).span(),
+        })
+    }
+
     fn check_builtin_method_arguments(
         &mut self,
         ty: &FidanType,
         field: Symbol,
         args: &[CallArgInfo],
         span: Span,
+        module: &Module,
     ) {
         let Some((min_args, max_args)) = self.builtin_method_arity_bounds(ty, field) else {
             return;
         };
 
         let method_name = self.interner.resolve(field).to_string();
-        if matches!(ty, FidanType::Shared(_))
+        let kind = self.receiver_builtin_kind(ty).unwrap();
+        if let Some(params) = fidan_config::receiver_member_params(kind, &method_name) {
+            for (index, arg) in args.iter().enumerate() {
+                let param = arg
+                    .name
+                    .and_then(|name| {
+                        params
+                            .iter()
+                            .find(|param| self.interner.resolve(name).as_ref() == param.name)
+                    })
+                    .or_else(|| params.get(index))
+                    .or_else(|| params.last().filter(|param| param.variadic));
+                let Some(param) = param else { continue };
+                let expected = self.receiver_parameter_type(ty, param.type_name);
+                let actual = self
+                    .expr_types
+                    .get(&arg.value)
+                    .cloned()
+                    .unwrap_or(FidanType::Unknown);
+                if expected == FidanType::Function && !expected.is_assignable_from(&actual) {
+                    self.emit_not_callable_error(&actual, arg.span);
+                } else if !expected.is_assignable_from(&actual) {
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0302"),
+                        format!(
+                            "argument `{}` for `{method_name}` expects type `{}`, found `{}`",
+                            param.name,
+                            self.ty_name(&expected),
+                            self.ty_name(&actual)
+                        ),
+                        arg.span,
+                    );
+                }
+                self.validate_literal_against_expected_type(&expected, arg.value, module);
+            }
+        }
+        if let FidanType::Shared(inner) = ty
             && method_name == "update"
             && let Some(callback) = args.first()
-            && let Some(callback_ty) = self.expr_types.get(&callback.value).cloned()
-            && !matches!(
-                callback_ty,
-                FidanType::Function | FidanType::Dynamic | FidanType::Unknown | FidanType::Error
-            )
+            && let Some(info) = self.callable_info(callback.value, module)
         {
-            self.emit_not_callable_error(&callback_ty, callback.span);
+            if info.params.is_empty()
+                || info
+                    .params
+                    .iter()
+                    .skip(1)
+                    .any(|param| !param.optional && !param.has_default)
+            {
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0301"),
+                    "Shared.update callback must accept one argument",
+                    callback.span,
+                );
+            } else if !info.params[0].ty.is_assignable_from(inner) {
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0302"),
+                    format!(
+                        "Shared.update callback parameter must accept `{}`",
+                        self.ty_name(inner)
+                    ),
+                    callback.span,
+                );
+            }
+            if !inner.is_assignable_from(&info.return_ty) {
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0302"),
+                    format!(
+                        "Shared.update callback must return `{}`, found `{}`",
+                        self.ty_name(inner),
+                        self.ty_name(&info.return_ty)
+                    ),
+                    callback.span,
+                );
+            }
         }
         if args.len() < min_args {
             self.emit_error(
@@ -3618,7 +3823,7 @@ impl TypeChecker {
                     }
                     _ => {
                         if let Some(ret) = self.builtin_method_return(&recv, field) {
-                            self.check_builtin_method_arguments(&recv, field, args, span);
+                            self.check_builtin_method_arguments(&recv, field, args, span, module);
                             ret
                         } else if self.should_emit_member_error(&recv) {
                             self.emit_unknown_member_error(&recv, field, span, "method");
@@ -4094,7 +4299,7 @@ impl TypeChecker {
                     (UnOp::Not, ConstValue::Bool(value)) => Some(ConstValue::Bool(!value)),
                     (UnOp::Pos, ConstValue::Int(value)) => Some(ConstValue::Int(value)),
                     (UnOp::Pos, ConstValue::Float(value)) => Some(ConstValue::Float(value)),
-                    (UnOp::Neg, ConstValue::Int(value)) => Some(ConstValue::Int(-value)),
+                    (UnOp::Neg, ConstValue::Int(value)) => value.checked_neg().map(ConstValue::Int),
                     (UnOp::Neg, ConstValue::Float(value)) => Some(ConstValue::Float(-value)),
                     _ => None,
                 }
@@ -4112,6 +4317,18 @@ impl TypeChecker {
         use ConstValue as C;
 
         match op {
+            BinOp::Pow => match (lhs, rhs) {
+                (C::Int(base), C::Int(exponent)) => {
+                    match fidan_runtime::integer::power(base, exponent).ok()? {
+                        fidan_runtime::integer::Power::Integer(value) => Some(C::Int(value)),
+                        fidan_runtime::integer::Power::Float(value) => Some(C::Float(value)),
+                    }
+                }
+                (C::Float(base), C::Float(exponent)) => Some(C::Float(base.powf(exponent))),
+                (C::Int(base), C::Float(exponent)) => Some(C::Float((base as f64).powf(exponent))),
+                (C::Float(base), C::Int(exponent)) => Some(C::Float(base.powf(exponent as f64))),
+                _ => None,
+            },
             BinOp::And => match (lhs, rhs) {
                 (C::Bool(lhs), C::Bool(rhs)) => Some(C::Bool(lhs && rhs)),
                 _ => None,
@@ -4122,36 +4339,36 @@ impl TypeChecker {
             },
             BinOp::Eq => Some(C::Bool(lhs == rhs)),
             BinOp::NotEq => Some(C::Bool(lhs != rhs)),
-            BinOp::Lt => self.eval_order_compare(lhs, rhs, |lhs, rhs| lhs < rhs),
-            BinOp::LtEq => self.eval_order_compare(lhs, rhs, |lhs, rhs| lhs <= rhs),
-            BinOp::Gt => self.eval_order_compare(lhs, rhs, |lhs, rhs| lhs > rhs),
-            BinOp::GtEq => self.eval_order_compare(lhs, rhs, |lhs, rhs| lhs >= rhs),
+            BinOp::Lt => self.eval_order_compare(lhs, rhs, |order| order.is_lt()),
+            BinOp::LtEq => self.eval_order_compare(lhs, rhs, |order| order.is_le()),
+            BinOp::Gt => self.eval_order_compare(lhs, rhs, |order| order.is_gt()),
+            BinOp::GtEq => self.eval_order_compare(lhs, rhs, |order| order.is_ge()),
             BinOp::Add => match (lhs, rhs) {
-                (C::Int(lhs), C::Int(rhs)) => Some(C::Int(lhs + rhs)),
+                (C::Int(lhs), C::Int(rhs)) => lhs.checked_add(rhs).map(C::Int),
                 (C::Float(lhs), C::Float(rhs)) => Some(C::Float(lhs + rhs)),
                 (C::String(lhs), C::String(rhs)) => Some(C::String(lhs + &rhs)),
                 _ => None,
             },
             BinOp::Sub => match (lhs, rhs) {
-                (C::Int(lhs), C::Int(rhs)) => Some(C::Int(lhs - rhs)),
+                (C::Int(lhs), C::Int(rhs)) => lhs.checked_sub(rhs).map(C::Int),
                 (C::Float(lhs), C::Float(rhs)) => Some(C::Float(lhs - rhs)),
                 _ => None,
             },
             BinOp::Mul => match (lhs, rhs) {
-                (C::Int(lhs), C::Int(rhs)) => Some(C::Int(lhs * rhs)),
+                (C::Int(lhs), C::Int(rhs)) => lhs.checked_mul(rhs).map(C::Int),
                 (C::Float(lhs), C::Float(rhs)) => Some(C::Float(lhs * rhs)),
                 _ => None,
             },
             BinOp::Div => match (lhs, rhs) {
                 (C::Int(_), C::Int(0)) => None,
-                (C::Int(lhs), C::Int(rhs)) => Some(C::Int(lhs / rhs)),
+                (C::Int(lhs), C::Int(rhs)) => lhs.checked_div(rhs).map(C::Int),
                 (C::Float(_), C::Float(0.0)) => None,
                 (C::Float(lhs), C::Float(rhs)) => Some(C::Float(lhs / rhs)),
                 _ => None,
             },
             BinOp::Rem => match (lhs, rhs) {
                 (C::Int(_), C::Int(0)) => None,
-                (C::Int(lhs), C::Int(rhs)) => Some(C::Int(lhs % rhs)),
+                (C::Int(lhs), C::Int(rhs)) => lhs.checked_rem(rhs).map(C::Int),
                 _ => None,
             },
             _ => None,
@@ -4162,15 +4379,19 @@ impl TypeChecker {
         &self,
         lhs: ConstValue,
         rhs: ConstValue,
-        cmp: impl FnOnce(f64, f64) -> bool,
+        cmp: impl FnOnce(std::cmp::Ordering) -> bool,
     ) -> Option<ConstValue> {
         use ConstValue as C;
 
         match (lhs, rhs) {
-            (C::Int(lhs), C::Int(rhs)) => Some(C::Bool(cmp(lhs as f64, rhs as f64))),
-            (C::Float(lhs), C::Float(rhs)) => Some(C::Bool(cmp(lhs, rhs))),
-            (C::Int(lhs), C::Float(rhs)) => Some(C::Bool(cmp(lhs as f64, rhs))),
-            (C::Float(lhs), C::Int(rhs)) => Some(C::Bool(cmp(lhs, rhs as f64))),
+            (C::Int(lhs), C::Int(rhs)) => Some(C::Bool(cmp(lhs.cmp(&rhs)))),
+            (C::Float(lhs), C::Float(rhs)) => Some(C::Bool(lhs.partial_cmp(&rhs).is_some_and(cmp))),
+            (C::Int(lhs), C::Float(rhs)) => {
+                Some(C::Bool((lhs as f64).partial_cmp(&rhs).is_some_and(cmp)))
+            }
+            (C::Float(lhs), C::Int(rhs)) => {
+                Some(C::Bool(lhs.partial_cmp(&(rhs as f64)).is_some_and(cmp)))
+            }
             _ => None,
         }
     }
@@ -4418,7 +4639,8 @@ impl TypeChecker {
         match op {
             BinOp::Add => match (lhs, rhs) {
                 (FidanType::String, _) | (_, FidanType::String) => FidanType::String,
-                (FidanType::Float, _) | (_, FidanType::Float) => FidanType::Float,
+                (FidanType::Float, FidanType::Float | FidanType::Integer)
+                | (FidanType::Integer, FidanType::Float) => FidanType::Float,
                 (FidanType::Integer, FidanType::Integer) => FidanType::Integer,
                 _ if either_dynamic => FidanType::Dynamic,
                 _ => {
@@ -4441,7 +4663,8 @@ impl TypeChecker {
             | BinOp::BitOr
             | BinOp::Shl
             | BinOp::Shr => match (lhs, rhs) {
-                (FidanType::Float, _) | (_, FidanType::Float) => FidanType::Float,
+                (FidanType::Float, FidanType::Float | FidanType::Integer)
+                | (FidanType::Integer, FidanType::Float) => FidanType::Float,
                 (FidanType::Integer, FidanType::Integer) => FidanType::Integer,
                 _ if either_dynamic => FidanType::Dynamic,
                 _ => {
@@ -5169,5 +5392,48 @@ impl TypeChecker {
 
     fn ty_name(&self, ty: &FidanType) -> String {
         ty.display_name(&|sym| self.interner.resolve(sym).to_string())
+    }
+}
+
+#[cfg(test)]
+mod const_regressions {
+    use super::*;
+    #[test]
+    fn full_width_integer_constant_ordering_and_checked_arithmetic() {
+        let checker = TypeChecker::new(Arc::new(SymbolInterner::new()), FileId(0));
+        for (left, right) in [
+            (9007199254740992, 9007199254740993),
+            (i64::MAX - 1, i64::MAX),
+            (i64::MIN, i64::MIN + 1),
+        ] {
+            assert_eq!(
+                checker.eval_const_binary(BinOp::Lt, ConstValue::Int(left), ConstValue::Int(right)),
+                Some(ConstValue::Bool(true))
+            );
+            assert_eq!(
+                checker.eval_const_binary(
+                    BinOp::GtEq,
+                    ConstValue::Int(left),
+                    ConstValue::Int(right)
+                ),
+                Some(ConstValue::Bool(false))
+            );
+        }
+        for (op, left, right) in [
+            (BinOp::Add, i64::MAX, 1),
+            (BinOp::Sub, i64::MIN, 1),
+            (BinOp::Mul, i64::MAX, 2),
+            (BinOp::Div, i64::MIN, -1),
+            (BinOp::Rem, i64::MIN, -1),
+        ] {
+            assert_eq!(
+                checker.eval_const_binary(op, ConstValue::Int(left), ConstValue::Int(right)),
+                None
+            );
+        }
+        assert_eq!(
+            checker.eval_const_binary(BinOp::Pow, ConstValue::Int(2), ConstValue::Int(-3)),
+            Some(ConstValue::Float(0.125))
+        );
     }
 }

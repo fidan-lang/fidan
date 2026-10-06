@@ -7,6 +7,32 @@ fn overflow() -> StdlibRuntimeError {
     StdlibRuntimeError::new(diag_code!("R2003"), "arithmetic overflow")
 }
 
+/// Integer powers can produce a reciprocal Float for a negative exponent.
+#[derive(Debug, PartialEq)]
+pub enum Power {
+    Integer(i64),
+    Float(f64),
+}
+
+pub fn power(base: i64, exponent: i64) -> Result<Power, StdlibRuntimeError> {
+    if exponent >= 0 || base == 1 || base == -1 {
+        return pow(base, exponent).map(Power::Integer);
+    }
+    if base == 0 {
+        return Err(StdlibRuntimeError::new(
+            diag_code!("R2001"),
+            "division by zero",
+        ));
+    }
+    // Preserve parity even for exponents that cannot be represented exactly as f64.
+    let magnitude = (base as f64).abs().powf(exponent as f64);
+    Ok(Power::Float(if base < 0 && exponent & 1 != 0 {
+        -magnitude
+    } else {
+        magnitude
+    }))
+}
+
 pub fn add(a: i64, b: i64) -> Result<i64, StdlibRuntimeError> {
     a.checked_add(b).ok_or_else(overflow)
 }
@@ -48,8 +74,8 @@ pub fn abs(a: i64) -> Result<i64, StdlibRuntimeError> {
 }
 
 pub fn pow(mut base: i64, exponent: i64) -> Result<i64, StdlibRuntimeError> {
-    // Integer ** integer has an integer result. Preserve the exact reciprocal
-    // powers of unit bases; other reciprocal results require a float operand.
+    // Scalar ABI helper, used only when the compiler proves an integer result.
+    // General language exponentiation goes through power().
     if exponent < 0 {
         if base == 1 {
             return Ok(1);
@@ -58,8 +84,8 @@ pub fn pow(mut base: i64, exponent: i64) -> Result<i64, StdlibRuntimeError> {
             return Ok(if exponent & 1 == 0 { 1 } else { -1 });
         }
         return Err(StdlibRuntimeError::new(
-            diag_code!("R2003"),
-            "negative integer exponent requires a float operand",
+            diag_code!("R0001"),
+            "integer-only ABI used for a non-integer power result",
         ));
     }
     let mut exponent = exponent as u64;
@@ -81,6 +107,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn negative_powers_follow_the_numeric_result_contract() {
+        assert_eq!(power(2, -3).unwrap(), Power::Float(0.125));
+        assert_eq!(power(10, -2).unwrap(), Power::Float(0.01));
+        assert_eq!(power(1, -999).unwrap(), Power::Integer(1));
+        assert_eq!(power(-1, -3).unwrap(), Power::Integer(-1));
+        assert_eq!(power(-1, i64::MIN).unwrap(), Power::Integer(1));
+        assert_eq!(power(0, -1).unwrap_err().code, diag_code!("R2001"));
+        assert_eq!(power(2, 63).unwrap_err().code, diag_code!("R2003"));
+    }
+
+    #[test]
     fn checked_boundaries_and_full_width_exponents() {
         for result in [
             add(i64::MAX, 1),
@@ -91,7 +128,6 @@ mod tests {
             div(i64::MIN, -1),
             rem(i64::MIN, -1),
             pow(2, 63),
-            pow(2, -1),
         ] {
             assert_eq!(result.unwrap_err().code, diag_code!("R2003"));
         }

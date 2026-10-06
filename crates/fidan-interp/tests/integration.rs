@@ -1458,6 +1458,22 @@ fn shared_update_is_atomic_with_and_without_jit() {
 }
 
 #[test]
+fn release_semantics_with_and_without_jit() {
+    for threshold in [0, 1] {
+        run_src_with_threshold(
+            include_str!("../../../test/examples/release_semantics_regression.fdn"),
+            threshold,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "release semantics at JIT threshold {threshold}: {}\n{:?}",
+                error.message, error.trace
+            )
+        });
+    }
+}
+
+#[test]
 fn weak_shared_supports_upgrade_and_collection() {
     assert!(
         run_src(

@@ -857,6 +857,33 @@ fn shared_update_is_atomic_across_aot_backends() {
 }
 
 #[test]
+fn release_semantics_across_aot_backends() {
+    let sandbox = temp_dir("fidan_release_semantics");
+    // Windows image scanners can retain an exited executable's handle. Keep
+    // ignored build artifacts separate from the sandbox whose cleanup we check.
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create semantic artifact directory");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let output = artifacts.join(format!(
+            "semantics-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/release_semantics_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "release semantics ok");
+    }
+    fs::remove_dir_all(sandbox).expect("remove semantic sandbox");
+}
+
+#[test]
 fn strength_reduction_preserves_values_and_types_across_aot_backends() {
     let sandbox = temp_dir("fidan_strength_reduction");
     for backend in [Backend::Cranelift, Backend::Llvm] {
@@ -881,16 +908,21 @@ fn strength_reduction_preserves_values_and_types_across_aot_backends() {
 #[test]
 fn integer_arithmetic_reports_consistent_errors_across_aot_backends() {
     let sandbox = temp_dir("fidan_integer_arithmetic");
-    let output = sandbox.join(if cfg!(windows) {
-        "integers.exe"
-    } else {
-        "integers"
-    });
+    // Executables can remain locked by Windows image scanning after exit.
+    // Keep build artifacts under target and clean the source/data sandbox.
+    let artifact_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().unwrap());
+    fs::create_dir_all(&artifact_dir).expect("create integer artifacts");
     for backend in [Backend::Cranelift, Backend::Llvm] {
         if backend == Backend::Llvm && !llvm_available() {
             eprintln!("skipping LLVM integer regression: no installed LLVM toolchain");
             continue;
         }
+        let output = artifact_dir.join(format!(
+            "integers-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
         compile_program(
             include_str!("../../../test/examples/integer_overflow_regression.fdn"),
             backend,
@@ -927,16 +959,21 @@ fn string_receiver_unicode_and_bounds_across_aot_backends() {
 #[test]
 fn boolean_negation_is_logical_across_aot_backends() {
     let sandbox = temp_dir("fidan_boolean_negation");
-    let output = sandbox.join(if cfg!(windows) {
-        "booleans.exe"
-    } else {
-        "booleans"
-    });
+    // Keep executable artifacts out of the checked data sandbox: Windows may
+    // retain an image handle after process exit.
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create boolean artifact directory");
     for backend in [Backend::Cranelift, Backend::Llvm] {
         if backend == Backend::Llvm && !llvm_available() {
             eprintln!("skipping LLVM boolean regression: no installed LLVM toolchain");
             continue;
         }
+        let output = artifacts.join(format!(
+            "booleans-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
         compile_program(
             include_str!("../../../test/examples/boolean_negation_regression.fdn"),
             backend,

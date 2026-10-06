@@ -881,6 +881,42 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 .ok_or_else(|| anyhow!("missing trampoline args count"))?
                 .into_int_value();
 
+            let minimum = function
+                .params
+                .iter()
+                .rposition(|param| param.default.is_none())
+                .map_or(0, |index| index + 1);
+            let valid = self.call_runtime_i8(
+                "fdn_validate_call",
+                &[
+                    args_cnt.into(),
+                    self.i64_type.const_int(minimum as u64, false).into(),
+                    self.i64_type
+                        .const_int(function.params.len() as u64, false)
+                        .into(),
+                ],
+            )?;
+            let valid = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    valid,
+                    self.i8_type.const_zero(),
+                    "arity.valid",
+                )
+                .map_err(|err| anyhow!("{err}"))?;
+            let valid_bb = self.context.append_basic_block(trampoline, "arity.valid");
+            let invalid_bb = self.context.append_basic_block(trampoline, "arity.invalid");
+            self.builder
+                .build_conditional_branch(valid, valid_bb, invalid_bb)
+                .map_err(|err| anyhow!("{err}"))?;
+            self.builder.position_at_end(invalid_bb);
+            let nothing = self.call_runtime_ptr("fdn_box_nothing", &[])?;
+            self.builder
+                .build_return(Some(&nothing))
+                .map_err(|err| anyhow!("{err}"))?;
+            self.builder.position_at_end(valid_bb);
+            let mut owned_args = Vec::new();
             let mut call_args = Vec::with_capacity(function.params.len());
             for (index, param) in function.params.iter().enumerate() {
                 let present_bb = self
@@ -930,7 +966,7 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                     .map_err(|err| anyhow!("{err}"))?;
 
                 self.builder.position_at_end(missing_bb);
-                let missing_value = self.trampoline_default_value(param.default.as_ref())?;
+                let missing_value = self.ptr_type.const_null();
                 let missing_end = self
                     .builder
                     .get_insert_block()
@@ -947,9 +983,53 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 let present_basic = present_value.as_basic_value_enum();
                 let missing_basic = missing_value.as_basic_value_enum();
                 phi.add_incoming(&[(&present_basic, present_end), (&missing_basic, missing_end)]);
-                call_args.push(phi.as_basic_value().into_pointer_value());
+                let raw = phi.as_basic_value().into_pointer_value();
+                let default = self.trampoline_default_value(param.default.as_ref())?;
+                let prepared = self.call_runtime_ptr(
+                    "fdn_prepare_argument",
+                    &[
+                        raw.into(),
+                        default.into(),
+                        self.i8_type
+                            .const_int(u64::from(param.certain), false)
+                            .into(),
+                    ],
+                )?;
+                self.call_runtime_void("fdn_drop", &[default.into()])?;
+                let (contract, length) = self.module_string_bytes(&param.ty.runtime_descriptor());
+                let checked = self.call_runtime_ptr(
+                    "fdn_check_argument",
+                    &[prepared.into(), contract.into(), length.into()],
+                )?;
+                self.call_runtime_void("fdn_drop", &[prepared.into()])?;
+                owned_args.push(checked);
+                call_args.push(checked);
             }
 
+            let failed = self.call_runtime_i8("fdn_has_exception", &[])?;
+            let failed = self
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    failed,
+                    self.i8_type.const_zero(),
+                    "args.failed",
+                )
+                .map_err(|err| anyhow!("{err}"))?;
+            let call_bb = self.context.append_basic_block(trampoline, "args.valid");
+            let error_bb = self.context.append_basic_block(trampoline, "args.invalid");
+            self.builder
+                .build_conditional_branch(failed, error_bb, call_bb)
+                .map_err(|err| anyhow!("{err}"))?;
+            self.builder.position_at_end(error_bb);
+            for argument in &owned_args {
+                self.call_runtime_void("fdn_drop", &[(*argument).into()])?;
+            }
+            let nothing = self.call_runtime_ptr("fdn_box_nothing", &[])?;
+            self.builder
+                .build_return(Some(&nothing))
+                .map_err(|err| anyhow!("{err}"))?;
+            self.builder.position_at_end(call_bb);
             let callee = self
                 .functions
                 .get(&function.id.0)
@@ -961,6 +1041,9 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 .map(Into::into)
                 .collect::<Vec<BasicMetadataValueEnum<'ctx>>>();
             let result = self.call_decl_value(callee, &call_args)?;
+            for argument in owned_args {
+                self.call_runtime_void("fdn_drop", &[argument.into()])?;
+            }
             self.builder
                 .build_return(Some(&result))
                 .map_err(|err| anyhow!("{err}"))?;
@@ -997,6 +1080,51 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             self.ptr_type.fn_type(&[self.i64_type.into()], false),
         );
         self.declare_runtime_fn("fdn_box_nothing", self.ptr_type.fn_type(&[], false));
+        self.declare_runtime_fn(
+            "fdn_validate_call",
+            self.i8_type.fn_type(
+                &[
+                    self.i64_type.into(),
+                    self.i64_type.into(),
+                    self.i64_type.into(),
+                ],
+                false,
+            ),
+        );
+        self.declare_runtime_fn(
+            "fdn_check_argument",
+            self.ptr_type.fn_type(
+                &[
+                    self.ptr_type.into(),
+                    self.ptr_type.into(),
+                    self.i64_type.into(),
+                ],
+                false,
+            ),
+        );
+        self.declare_runtime_fn(
+            "fdn_shared_update_typed",
+            self.ptr_type.fn_type(
+                &[
+                    self.ptr_type.into(),
+                    self.ptr_type.into(),
+                    self.ptr_type.into(),
+                    self.i64_type.into(),
+                ],
+                false,
+            ),
+        );
+        self.declare_runtime_fn(
+            "fdn_prepare_argument",
+            self.ptr_type.fn_type(
+                &[
+                    self.ptr_type.into(),
+                    self.ptr_type.into(),
+                    self.i8_type.into(),
+                ],
+                false,
+            ),
+        );
         self.declare_runtime_fn(
             "fdn_box_str",
             self.ptr_type
@@ -2018,6 +2146,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 let value = self.call_ptr(runtime_fn, &[object.into(), index.into()])?;
                 self.store_local_boxed(*dest, value)?;
                 self.namespace_locals.remove(dest);
+                self.emit_pending_exception_check(current_catch_stack)?;
                 Ok(())
             }
             Instr::SetIndex {
@@ -2032,7 +2161,8 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 let object = self.lower_operand(object)?;
                 let index = self.lower_operand(index)?;
                 let value = self.lower_operand(value)?;
-                self.call_void(runtime_fn, &[object.into(), index.into(), value.into()])
+                self.call_void(runtime_fn, &[object.into(), index.into(), value.into()])?;
+                self.emit_pending_exception_check(current_catch_stack)
             }
             Instr::Drop { local } => {
                 let local_ty = self.local_type(*local);
@@ -2854,6 +2984,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 let mir_function = self.module.backend.program().function(*function_id);
                 let mut call_args =
                     Vec::<BasicMetadataValueEnum<'ctx>>::with_capacity(mir_function.params.len());
+                let mut cloned_args = Vec::new();
                 for (index, param) in mir_function.params.iter().enumerate() {
                     let value = if let Some(arg) = args.get(index) {
                         self.lower_owned_operand(arg)?
@@ -2861,9 +2992,21 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                         self.module
                             .trampoline_default_value(param.default.as_ref())?
                     };
+                    // lower_owned_operand explicitly calls fdn_clone for this
+                    // case. Release only those clones after the borrowed call;
+                    // fresh scalar/default temporaries are tracked separately.
+                    if let Some(Operand::Local(local)) = args.get(index)
+                        && !is_native_scalar_ty(&self.local_type(*local))
+                    {
+                        cloned_args.push(value);
+                    }
                     call_args.push(value.into());
                 }
-                self.call_decl(function, &call_args)
+                let result = self.call_decl(function, &call_args)?;
+                for argument in cloned_args {
+                    self.call_void("fdn_drop", &[argument.into()])?;
+                }
+                Ok(result)
             }
             Callee::Method { receiver, method } => {
                 let method_name = self.module.backend.symbol_name(*method)?.to_owned();
@@ -2898,6 +3041,23 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     self.lower_container_method_call(receiver, method_name.as_str(), args)?
                 {
                     return Ok(boxed);
+                }
+                if method_name == "update"
+                    && let MirTy::Shared(inner) = self.operand_type(receiver)
+                    && args.len() == 1
+                {
+                    let receiver = self.lower_operand(receiver)?;
+                    let callback = self.lower_operand(&args[0])?;
+                    let (contract, length) = self.string_bytes(&inner.runtime_descriptor());
+                    return self.call_ptr(
+                        "fdn_shared_update_typed",
+                        &[
+                            receiver.into(),
+                            callback.into(),
+                            contract.into(),
+                            length.into(),
+                        ],
+                    );
                 }
                 let receiver = self.lower_operand(receiver)?;
                 let args = args
@@ -3229,9 +3389,15 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
         lhs: &Operand,
         rhs: &Operand,
     ) -> Result<PointerValue<'ctx>> {
+        // lower_operand allocates boxes for constants/native scalar locals;
+        // non-scalar locals instead supply borrowed pointers from their slots.
+        let drop_lhs =
+            matches!(lhs, Operand::Const(_)) || is_native_scalar_ty(&self.operand_type(lhs));
+        let drop_rhs =
+            matches!(rhs, Operand::Const(_)) || is_native_scalar_ty(&self.operand_type(rhs));
         let lhs = self.lower_operand(lhs)?;
         let rhs = self.lower_operand(rhs)?;
-        match op {
+        let result = match op {
             BinOp::Add => self.call_ptr("fdn_dyn_add", &[lhs.into(), rhs.into()]),
             BinOp::Sub => self.call_ptr("fdn_dyn_sub", &[lhs.into(), rhs.into()]),
             BinOp::Mul => self.call_ptr("fdn_dyn_mul", &[lhs.into(), rhs.into()]),
@@ -3267,7 +3433,14 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     &[lhs_raw.into(), rhs_raw.into(), inclusive.into()],
                 )
             }
+        }?;
+        if drop_lhs {
+            self.call_void("fdn_drop", &[lhs.into()])?;
         }
+        if drop_rhs {
+            self.call_void("fdn_drop", &[rhs.into()])?;
+        }
+        Ok(result)
     }
 
     fn lower_native_rvalue(&mut self, rhs: &Rvalue, ty: &MirTy) -> Result<BasicValueEnum<'ctx>> {
@@ -3417,7 +3590,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 }
                 _ => {
                     let boxed = self.lower_binary(op, lhs, rhs)?;
-                    return self.unbox_to_native(boxed, ty);
+                    return self.unbox_owned_to_native(boxed, ty);
                 }
             };
             return Ok(value);
@@ -3537,7 +3710,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 }
                 _ => {
                     let boxed = self.lower_binary(op, lhs, rhs)?;
-                    return self.unbox_to_native(boxed, ty);
+                    return self.unbox_owned_to_native(boxed, ty);
                 }
             };
             return Ok(value);
@@ -3584,14 +3757,14 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 }
                 _ => {
                     let boxed = self.lower_binary(op, lhs, rhs)?;
-                    return self.unbox_to_native(boxed, ty);
+                    return self.unbox_owned_to_native(boxed, ty);
                 }
             };
             return Ok(value);
         }
 
         let boxed = self.lower_binary(op, lhs, rhs)?;
-        self.unbox_to_native(boxed, ty)
+        self.unbox_owned_to_native(boxed, ty)
     }
 
     fn lower_native_unary(
@@ -3600,15 +3773,18 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
         operand: &Operand,
         ty: &MirTy,
     ) -> Result<BasicValueEnum<'ctx>> {
+        // The result category alone does not prove the operand's category:
+        // `not flexible` returns Boolean but still needs strict runtime checking.
+        let operand_ty = self.operand_type(operand);
         match (op, ty) {
             (UnOp::Pos, MirTy::Integer | MirTy::Float | MirTy::Boolean | MirTy::Handle) => {
                 self.lower_native_operand(operand, ty)
             }
-            (UnOp::Neg, MirTy::Integer) => {
+            (UnOp::Neg, MirTy::Integer) if operand_ty == MirTy::Integer => {
                 let value = self.lower_native_operand(operand, ty)?.into_int_value();
                 Ok(self.call_i64("fdn_int_neg", &[value.into()])?.into())
             }
-            (UnOp::Neg, MirTy::Float) => {
+            (UnOp::Neg, MirTy::Float) if operand_ty == MirTy::Float => {
                 let value = self.lower_native_operand(operand, ty)?.into_float_value();
                 let name = self.temp("fneg");
                 Ok(self
@@ -3618,7 +3794,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     .map_err(|err| anyhow!("{err}"))?
                     .into())
             }
-            (UnOp::Not, MirTy::Boolean) => {
+            (UnOp::Not, MirTy::Boolean) if operand_ty == MirTy::Boolean => {
                 let value = self.lower_native_operand(operand, ty)?.into_int_value();
                 let name = self.temp("logical_not");
                 let inverse = self
@@ -3641,18 +3817,27 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             }
             _ => {
                 let boxed = self.lower_unary(op, operand)?;
-                self.unbox_to_native(boxed, ty)
+                self.unbox_owned_to_native(boxed, ty)
             }
         }
     }
 
     fn lower_unary(&mut self, op: UnOp, operand: &Operand) -> Result<PointerValue<'ctx>> {
+        if op == UnOp::Pos {
+            return self.lower_owned_operand(operand);
+        }
+        let drop_operand = matches!(operand, Operand::Const(_))
+            || is_native_scalar_ty(&self.operand_type(operand));
         let operand = self.lower_operand(operand)?;
-        match op {
+        let result = match op {
             UnOp::Pos => Ok(operand),
             UnOp::Neg => self.call_ptr("fdn_dyn_neg", &[operand.into()]),
             UnOp::Not => self.call_ptr("fdn_dyn_not", &[operand.into()]),
+        }?;
+        if drop_operand {
+            self.call_void("fdn_drop", &[operand.into()])?;
         }
+        Ok(result)
     }
 
     fn lower_cmp(
@@ -3826,9 +4011,15 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
 
     fn lower_list(&mut self, values: &[Operand]) -> Result<PointerValue<'ctx>> {
         let list = self.call_ptr("fdn_list_new", &[])?;
-        for value in values {
-            let value = self.lower_operand(value)?;
+        for operand in values {
+            let value = self.lower_operand(operand)?;
             self.call_void("fdn_list_push", &[list.into(), value.into()])?;
+            // list_push clones borrowed inputs; only fresh boxes belong here.
+            if matches!(operand, Operand::Const(_))
+                || is_native_scalar_ty(&self.operand_type(operand))
+            {
+                self.call_void("fdn_drop", &[value.into()])?;
+            }
         }
         Ok(list)
     }
@@ -3844,10 +4035,17 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
 
     fn lower_dict(&mut self, pairs: &[(Operand, Operand)]) -> Result<PointerValue<'ctx>> {
         let dict = self.call_ptr("fdn_dict_new", &[])?;
-        for (key, value) in pairs {
-            let key = self.lower_operand(key)?;
-            let value = self.lower_operand(value)?;
+        for (key_operand, value_operand) in pairs {
+            let key = self.lower_operand(key_operand)?;
+            let value = self.lower_operand(value_operand)?;
             self.call_void("fdn_dict_set", &[dict.into(), key.into(), value.into()])?;
+            for (operand, temporary) in [(key_operand, key), (value_operand, value)] {
+                if matches!(operand, Operand::Const(_))
+                    || is_native_scalar_ty(&self.operand_type(operand))
+                {
+                    self.call_void("fdn_drop", &[temporary.into()])?;
+                }
+            }
         }
         Ok(dict)
     }
@@ -4223,6 +4421,17 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 .map_err(|err| anyhow!("{err}"))?;
             Ok(())
         }
+    }
+
+    /// Operator helpers return owned boxes; retain only the copied native scalar.
+    fn unbox_owned_to_native(
+        &mut self,
+        boxed: PointerValue<'ctx>,
+        ty: &MirTy,
+    ) -> Result<BasicValueEnum<'ctx>> {
+        let value = self.unbox_to_native(boxed, ty)?;
+        self.call_void("fdn_drop", &[boxed.into()])?;
+        Ok(value)
     }
 
     fn unbox_to_native(

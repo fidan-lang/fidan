@@ -65,15 +65,39 @@ pub fn check_formatted(src: &str, opts: &FormatOptions) -> bool {
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[test]
-fn colon_slices_round_trip_through_canonical_range_syntax() {
+fn slices_round_trip_through_canonical_colon_syntax() {
     let source = "var text = \"abcdef\"\nassert_eq(text[1:5:2], \"bd\")\nassert_eq(text[::-1], \"fedcba\")\n";
     let formatted = format_source(source, &FormatOptions::default());
-    assert!(formatted.contains("[1..5 step 2]"), "{formatted}");
-    assert!(formatted.contains("[.. step -1]"), "{formatted}");
+    assert!(formatted.contains("[1:5:2]"), "{formatted}");
+    assert!(formatted.contains("[::-1]"), "{formatted}");
     assert_eq!(
         format_source(&formatted, &FormatOptions::default()),
         formatted
     );
+}
+
+#[test]
+fn legacy_slices_canonicalize_without_changing_ranges_or_inclusive_slices() {
+    for (legacy, canonical) in [
+        ("[1..5]", "[1:5]"),
+        ("[..5]", "[:5]"),
+        ("[1..]", "[1:]"),
+        ("[.. step -1]", "[::-1]"),
+        ("[1..10 step 2]", "[1:10:2]"),
+    ] {
+        let output = format_source(
+            &format!("var result = value{legacy}\n"),
+            &FormatOptions::default(),
+        );
+        assert!(output.contains(canonical), "{output}");
+        assert_eq!(format_source(&output, &FormatOptions::default()), output);
+    }
+    let output = format_source(
+        "var range = 1..5\nvar inclusive = value[1...-1]\n",
+        &FormatOptions::default(),
+    );
+    assert!(output.contains("1 .. 5"), "{output}");
+    assert!(output.contains("[1...-1]"));
 }
 
 #[cfg(test)]
@@ -252,7 +276,7 @@ enum Result {
 action demo with (optional name oftype dynamic = r"{literal}") returns dynamic {
     var values oftype tuple = (1, 2, 3)
     var first = values[0]
-    var slice = [1, 2, 3, 4][1..3]
+    var slice = [1, 2, 3, 4][1:3]
     var maybe = nothing ?? "fallback"
     var comp = [x * 2 for x in [1, 2, 3] if x > 1]
     var map = {x: x + 1 for x in [1, 2, 3] if x > 1}
@@ -295,7 +319,7 @@ enum Result {
 action demo with (optional name oftype dynamic = "\{literal\}") returns dynamic {
     var values oftype tuple = (1, 2, 3)
     var first = values[0]
-    var slice = [1, 2, 3, 4][1..3]
+    var slice = [1, 2, 3, 4][1:3]
     var maybe = nothing ?? "fallback"
     var comp = [x * 2 for x in [1, 2, 3] if x > 1]
     var map = {x: x + 1 for x in [1, 2, 3] if x > 1}

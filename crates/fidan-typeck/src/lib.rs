@@ -889,6 +889,62 @@ var result = choose(true)
     }
 
     #[test]
+    fn receiver_generics_and_shared_transform_signatures_are_checked() {
+        for source in [
+            "var xs oftype list oftype integer = []\nxs.append(\"wrong\")",
+            "var xs oftype list oftype integer = []\nxs.extend([\"wrong\"])",
+            "var s = Shared(1)\ns.set(\"wrong\")",
+            "var d oftype dict oftype (string, integer) = {}\nd.set(1, 2)",
+            "var d oftype dict oftype (string, integer) = {}\nd.set(\"key\", \"wrong\")",
+            "var s = Shared(1)\ns.update(action { return 1 })",
+            "var s = Shared(1)\ns.update(action with (certain x oftype integer, certain y oftype integer) { return x + y })",
+            "var s = Shared(1)\ns.update(action with (certain x oftype string) { return 1 })",
+            "var s = Shared(1)\ns.update(action with (x) { return \"wrong\" })",
+            "action wrong with (x) returns string { return \"wrong\" }\nvar s = Shared(1)\ns.update(wrong)",
+            "var wrong = action with (x) { return \"wrong\" }\nvar s = Shared(1)\ns.update(wrong)",
+        ] {
+            assert!(
+                !check_errors(source).is_empty(),
+                "accepted incompatible receiver call: {source}"
+            );
+        }
+        assert!(check_errors("var s = Shared(1)\ns.update(action with (certain x oftype integer, optional delta oftype integer = 1) { return x + delta })").is_empty());
+    }
+
+    #[test]
+    fn integer_power_types_reflect_value_dependent_results() {
+        for (source, expected) in [
+            ("var result = 2 ** 3", "integer"),
+            ("var result = 2 ** -3", "float"),
+            ("var result = (-1) ** -3", "integer"),
+            (
+                "const var exponent = -3\nvar result = 2 ** exponent",
+                "float",
+            ),
+            (
+                "var base = 2\nvar exponent = -3\nvar result = base ** exponent",
+                "dynamic",
+            ),
+        ] {
+            assert_eq!(top_level_var_type(source, "result"), expected);
+        }
+    }
+
+    #[test]
+    fn overflowing_const_expressions_do_not_panic_the_compiler() {
+        for expression in [
+            "9223372036854775807 + 1",
+            "(-9223372036854775807 - 1) - 1",
+            "-(-9223372036854775807 - 1)",
+            "(-9223372036854775807 - 1) / -1",
+            "(-9223372036854775807 - 1) % -1",
+            "9223372036854775807 * 2",
+        ] {
+            assert!(check_errors(&format!("const var value = {expression}")).is_empty());
+        }
+    }
+
+    #[test]
     fn integer_literal_is_not_callable() {
         let errors = check_errors("var x = 1()");
         assert!(

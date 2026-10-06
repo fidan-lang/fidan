@@ -213,6 +213,10 @@ fn count_rvalue_reads(rv: &Rvalue, add: &mut impl FnMut(&Operand)) {
 
 /// Returns `true` if evaluating this `Rvalue` has no observable side effects.
 fn is_pure_rvalue(rv: &Rvalue) -> bool {
+    // Runtime diagnostics are observable even when the result is discarded.
+    if rv.arithmetic_may_fail() || matches!(rv, Rvalue::Slice { .. }) {
+        return false;
+    }
     matches!(
         rv,
         Rvalue::Use(_)

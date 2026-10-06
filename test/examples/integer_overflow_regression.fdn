@@ -13,7 +13,7 @@ action div with (certain a oftype integer, certain b oftype integer) returns int
 action dynamic_div with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a / b }
 action rem with (certain a oftype integer, certain b oftype integer) returns integer { return a % b }
 action dynamic_rem with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a % b }
-action integer_power with (certain a oftype integer, certain b oftype integer) returns integer { return a ** b }
+action integer_power with (certain a oftype integer, certain b oftype integer) returns flexible { return a ** b }
 action dynamic_pow with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a ** b }
 action negate with (certain a oftype integer) returns integer { return -a }
 action dynamic_negate with (certain a oftype flexible) returns flexible { return -a }
@@ -97,14 +97,7 @@ attempt {
     caught_5 = true
 }
 assert(caught_5)
-var caught_6 = false
-attempt {
-    var result = integer_power(2, -1)
-} catch error {
-    assert(error.contains("[R2003]"))
-    caught_6 = true
-}
-assert(caught_6)
+assert_eq(integer_power(2, -1), 0.5)
 var caught_7 = false
 attempt {
     var result = div(minimum, -1)
@@ -185,14 +178,7 @@ attempt {
     caught_16 = true
 }
 assert(caught_16)
-var caught_17 = false
-attempt {
-    var result = dynamic_actions[5](2, -1)
-} catch error {
-    assert(error.contains("[R2003]"))
-    caught_17 = true
-}
-assert(caught_17)
+assert_eq(dynamic_actions[5](2, -1), 0.5)
 var caught_18 = false
 attempt {
     var result = dynamic_actions[3](minimum, -1)

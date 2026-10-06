@@ -178,7 +178,10 @@ fn fold_binary(op: BinOp, l: &MirLit, r: &MirLit) -> Option<MirLit> {
         (BinOp::Mul, Int(a), Int(b)) => Int(a.checked_mul(*b)?),
         (BinOp::Div, Int(a), Int(b)) if *b != 0 => Int(a.checked_div(*b)?),
         (BinOp::Rem, Int(a), Int(b)) if *b != 0 => Int(a.checked_rem(*b)?),
-        (BinOp::Pow, Int(a), Int(b)) if *b >= 0 => Int(a.checked_pow(u32::try_from(*b).ok()?)?),
+        (BinOp::Pow, Int(a), Int(b)) => match fidan_runtime::integer::power(*a, *b).ok()? {
+            fidan_runtime::integer::Power::Integer(value) => Int(value),
+            fidan_runtime::integer::Power::Float(value) => Float(value),
+        },
         // Float arithmetic
         (BinOp::Add, Float(a), Float(b)) => Float(a + b),
         (BinOp::Sub, Float(a), Float(b)) => Float(a - b),
@@ -245,7 +248,7 @@ mod tests {
             (BinOp::Div, 1, 0),
             (BinOp::Rem, 1, 0),
             (BinOp::Pow, 2, 63),
-            (BinOp::Pow, 2, -1),
+            (BinOp::Pow, 0, -1),
             (BinOp::Pow, 2, 4_294_967_296),
         ] {
             assert!(fold_binary(op, &MirLit::Int(a), &MirLit::Int(b)).is_none());

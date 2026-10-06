@@ -119,16 +119,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<Result<FidanValue, 
 }
 
 fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
-    match (a, b) {
-        (FidanValue::Integer(x), FidanValue::Integer(y)) => x == y,
-        (FidanValue::Float(x), FidanValue::Float(y)) => (x - y).abs() < 1e-12,
-        (FidanValue::Boolean(x), FidanValue::Boolean(y)) => x == y,
-        (FidanValue::String(x), FidanValue::String(y)) => x.as_str() == y.as_str(),
-        (FidanValue::Nothing, FidanValue::Nothing) => true,
-        (FidanValue::Integer(x), FidanValue::Float(y)) => (*x as f64 - y).abs() < 1e-12,
-        (FidanValue::Float(x), FidanValue::Integer(y)) => (x - *y as f64).abs() < 1e-12,
-        _ => crate::ffi::values_equal(a, b),
-    }
+    crate::ffi::values_equal_with(a, b, |x, y| x == y || (x - y).abs() < 1e-12)
 }
 
 fn cmp_vals(a: Option<&FidanValue>, b: Option<&FidanValue>) -> Option<std::cmp::Ordering> {
@@ -167,6 +158,26 @@ pub fn exported_names() -> &'static [&'static str] {
 mod tests {
     use super::*;
     use crate::stdlib::common::list_value;
+
+    #[test]
+    fn float_tolerance_is_recursive_and_separate_from_value_equality() {
+        let left = FidanValue::Float(1.0);
+        let right = FidanValue::Float(1.0 + 5e-13);
+        assert!(values_equal(&left, &right));
+        let left = list_value([FidanValue::Tuple(vec![left])]);
+        let right = list_value([FidanValue::Tuple(vec![right])]);
+        assert!(values_equal(&left, &right));
+        assert!(!crate::ffi::values_equal(&left, &right));
+        let mut left_dict = crate::FidanDict::new();
+        let mut right_dict = crate::FidanDict::new();
+        let key = FidanValue::String(crate::FidanString::new("nested"));
+        left_dict.insert(key.clone(), left).unwrap();
+        right_dict.insert(key, right).unwrap();
+        assert!(values_equal(
+            &FidanValue::Dict(crate::OwnedRef::new(left_dict)),
+            &FidanValue::Dict(crate::OwnedRef::new(right_dict))
+        ));
+    }
 
     #[test]
     fn assertions_compare_nested_collections_structurally() {

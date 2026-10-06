@@ -1,66 +1,62 @@
-# Engineering audit — 2026-10-05
+# Engineering audit: final 1.0.15 release preparation
 
-This pass reviewed the existing toolchain, repaired exposed behavior, refreshed compatible dependencies, and corrected presentation claims. It does not certify every language feature across every backend.
+This report describes the resulting code and validation. It is not an authority for intended language semantics. Contracts follow established architecture, pre-audit intended APIs, type-system consistency and explicit owner decisions.
 
-## Architecture and scope
+## Architecture and identity
 
-Fidan is an AI-native general-purpose programming language and compiler toolchain. Its architectural thesis is that AI development tools should use structured compiler knowledge alongside source text. Static typing and the Rust implementation describe its technical foundation; they do not replace this project identity.
+Fidan is an AI-native general-purpose programming language and compiler toolchain. AI tools can use structured diagnostics, inferred types, symbols, reads/writes, call graphs, type maps and static statement traces alongside source text through first-party workflows and MCP. Static traces are analysis/value hints, not observed execution. Provider workflows require configuration; deterministic compiler analysis does not require a model.
 
-The 25-crate workspace separates source mapping, lexing, arena AST parsing, diagnostics, type checking, typed HIR, SSA/CFG MIR, optimization passes, runtime values, and execution. The MIR interpreter selectively invokes Cranelift JIT where lowering is supported; native executables use Cranelift AOT or an optional external LLVM helper. Boxed native operations and standard-library semantics live in `fidan-runtime`; `fidan-stdlib` supplies compiler metadata and wrappers.
+The Rust pipeline is lexer/parser -> arena AST -> type analysis -> typed HIR -> SSA/CFG MIR -> optimization -> MIR interpreter/selective Cranelift JIT or Cranelift/optional LLVM AOT. Runtime values, boxed native operators and standard-library semantics are shared where practical. The driver/CLI, formatter, LSP, DAL/package/toolchain management and C/Rust embedding complete the tooling. JIT fallback is per function where lowering is unsupported or scalar/boxed ABI conversion cannot be proved safe.
 
-The driver and CLI coordinate imports, DAL/package operations, diagnostics, toolchain installation, REPL, profiling, and test execution. The formatter and LSP share the compiler frontend. The AI helper contains provider integration and compiler-grounded analysis/MCP commands. `libfidan` and `fidan-embed` expose C and Rust embedding; `fidan-secrets` handles credential storage. Native interop fixtures, crate tests, examples, replay fixtures, benchmark runners, CI, release/installation scripts, and platform branches were included in the review.
+## Final contracts and fixes
 
-Source flows through lexer/parser → AST → semantic/type analysis → HIR → MIR → passes → interpreter/JIT or AOT. Unsupported native lowering remains an explicit compilation error; selective JIT fallback is per function.
+### Arithmetic and constants
 
-## Findings and resolutions
+Integer addition, subtraction, multiplication, negation and nonnegative powers are checked i64 operations. Overflow, including MIN / -1 and MIN % -1, reports R2003. Division/modulo by zero reports R2001. These inputs do not trap the Rust compiler or native host.
 
-### Slicing
+The owner explicitly selected value-dependent negative integer powers: base zero reports R2001; bases 1/-1 retain exact integers; other integer bases produce floating reciprocals. Nonnegative powers remain checked integers. Compile-time facts prove precise result categories where possible; otherwise integer/integer power has Dynamic MIR representation. Interpreter fast paths, boxed runtime, constant evaluator and folding share power semantics. Scalar lowering requires a proven integer result.
 
-Colon slicing was absent from the parser despite runtime support for range-style slices. Existing interpreted and native implementations duplicated semantics, mishandled negative inclusive endpoints, risked integer overflow, and differed on invalid bounds.
+Constant integer ordering remains exact across the full i64 domain. Overflowing constants remain unfurled runtime expressions rather than panicking or folding invalid values. Dead-code elimination preserves discarded failing arithmetic/slices. Conservative strength-reduction proofs preserve runtime values, categories and errors.
 
-- `[start:stop:step]` now lowers to the existing slice AST/MIR, with an exclusive stop. Indexing and the existing `..`, `...`, and `step` syntax remain supported.
-- Omitted or `nothing` components use direction-aware defaults. The default step is one. Negative indices count from the end; negative steps traverse backward. Bounds clamp to the sequence. An explicit reverse stop of `-1` differs from an omitted reverse stop.
-- Strings operate on Unicode scalar values, consistently with string indexing and language-level length. These are not grapheme clusters.
-- One runtime implementation serves the interpreter and native ABI for strings, lists, and lazy ranges. Wide intermediate arithmetic handles extreme i64 steps and full-domain ranges.
-- Static non-integer components produce type diagnostics. Dynamic invalid components, zero steps, and invalid targets produce runtime errors.
-- The formatter emits its existing canonical range syntax; formatting colon syntax preserves behavior.
+### Shared and receiver contracts
 
-`test/examples/slice_regression.fdn` is the shared semantic fixture. It covers omissions, defaults, stepping, reversal, negative/clamped/empty bounds, Unicode, nested indexing, inclusive range syntax, list/range slices, and extreme integer cases. Interpreter tests use JIT thresholds zero and one; threshold one exercises selective JIT/fallback, not a claim that every operation is JIT compiled. Native tests cover valid behavior and invalid components on both AOT backends when LLVM is installed.
+Shared.update is the originally intended atomic transformation. One exclusive guard spans read, existing callable dispatch, validation and replacement, returning the new value. Failure leaves the slot unchanged. get/set are separately synchronized; get followed by set is not a compound atomic operation.
 
-### file_exists and the LOCAL file manager
+Statically known callbacks must accept one argument compatible with T and return a value assignable to T. Additional optional/default parameters may be omitted. Known wrong arities/types are rejected. Named actions, inline actions, captured closures and stdlib callables reuse existing metadata/dispatch. Flexible Fidan action callbacks receive runtime arity/parameter checking; typed Shared calls validate their results before replacement, even when discarded.
 
-Direct `file_exists` calls correctly returned true after saving, so the initial interpreter/path checks did not reproduce an always-false IO function. Stronger release validation of the original `LOCAL/test_file_manager.fdn` declarations reproduced the reported symptom on Cranelift AOT: a new object's `loadData()` took the missing-file branch despite an existing file. Both AOT backends reproduced the underlying logical-negation defect independently.
+Dynamic AOT trampolines check argument count, apply defaults/optional omission, reject nothing for certain parameters and validate declared types. Interpreter uses the same contracts. Runtime descriptors reuse existing MIR serialization; public schemas/protocols are unchanged. Receiver metadata generically substitutes T/K/V for List, Dict, Shared and other parameterized families. Mutable callable alias proofs are invalidated on assignment/shadowing.
 
-**Root cause:** native `not` used bytewise complement on an i8 boolean. `true` (1) became 254, which remained truthy when branched on or boxed. Thus `if not io.file_exists(...)` incorrectly entered the missing-file branch even when the function returned true. Cranelift now compares the operand to zero; LLVM compares to zero and extends the i1 result to the existing i8 boolean ABI. Interpreter and JIT already implemented logical negation correctly. No protocol or ABI shape changed. A shared truth-table/branch fixture and the file-manager save/reload test cover this regression.
+Shared guards track held identities per thread. Recursive same-Shared access through aliases/weak upgrades reports R0001 instead of self-deadlocking. Cross-Shared lock cycles and waiting for tasks requiring the held lock remain programmer hazards; atomicity is not weakened.
 
-Once the correct reload branch ran, it exposed another native bug: method dispatch retained an immutable dictionary-field borrow through the user callback, so `this.tasks = json.load(...)` panicked on a conflicting mutable borrow. Method lookup now clones the function and releases the borrow before invocation. The regression verifies reload, membership, subsequent task addition, and repeated object-field mutation; valid assertions remain intact.
+### Boxed operators, indexing and strings
 
-Relative paths resolve against the process working directory, not the source file directory. The regression deliberately separates these directories and checks relative and absolute paths, Windows backslash paths, aliases, missing files, object constants, negated existence checks, and JSON persistence/reload through the interpreter, Cranelift AOT, and LLVM AOT when available. Path normalization, argument conversion, and object constants were not responsible for the reproduced failure.
+String + value uses display concatenation. Unsupported arithmetic/comparison/unary operands report R0001 instead of nothing. Logical and/or/not require booleans. Native truthiness helpers do not redefine these operators. Native enum type/variant cross-comparisons and class-type identity now preserve interpreter equality behavior.
 
-A separate IO issue was found: `Path::exists` hides filesystem inspection errors. `file_exists` now uses `try_exists`: missing paths return false, existing paths return true, and inspection failures propagate IO diagnostics, including permission errors. An invalid-path regression verifies errors are not converted to false. Existing directory behavior is preserved.
+Interpreter and native bracket get/set share one runtime implementation. Negative indices count from the end; real bounds failures report R2002. Wrong target/index types and unhashable dict keys report R0001. Missing dict keys return nothing. Invalid list assignment cannot silently no-op; valid nothing elements remain valid accesses.
 
-### Other correctness and tooling fixes
+Colon [start:stop:step] is canonical for exclusive slices and legacy .. / step aliases. Inclusive ... retains compatibility spelling when colon conversion would change dynamic/negative endpoint behavior. Standalone ranges remain unchanged. Bounds clamp; omitted/nothing bounds follow step direction; invalid/zero steps fail safely. Strings use Unicode scalars, not UTF-8 bytes or graphemes.
 
-- Native string indexing now returns Unicode characters. Out-of-range native sequence indexing reports R2002; overly negative list indices no longer clamp to the first element. Invalid list assignment reports an error instead of changing the first element or silently doing nothing. Valid `nothing` list elements remain distinguishable from failed lookup.
-- Language-level string length consistently counts Unicode scalars. The embedding-facing Rust `FidanString::len` retains its byte-length semantics; `char_len` supplies the language behavior.
-- Native range `contains` no longer returns a placeholder `nothing`. Range methods share interpreter/runtime semantics, inclusive materialization handles i64::MAX, and unrepresentable range lengths report errors.
-- Standard-library assertions use the existing structural comparator for collections rather than always treating them as unequal.
-- LSP diagnostics, semantic tokens, document edits, and incoming ranges use UTF-16 columns; ranges splitting a surrogate pair are rejected.
-- LLVM target-CPU prefix inspection no longer slices a UTF-8 string at an invalid byte boundary.
-- Inkwell 0.10 reports exact memory-buffer length. Removed the old trailing-zero stripping workaround, which truncated binary bitcode and broke full LTO; added a bitcode serialization/parse regression.
-- Nested native-fixture Cargo builds now use an isolated target directory. Previously they could overwrite the workspace runtime rlib with a narrower feature set and break subsequent doctests with E0463. Relative CARGO_TARGET_DIR values also resolve consistently against the workspace root rather than each test crate directory.
-- The syntax reference had a lost-update race: two parallel tasks incremented one `Shared` counter with separate get/set calls. The initial separate-result workaround incorrectly avoided finishing the documented `Shared.update` API. The final follow-up implements atomic updates and restores same-counter examples; the reference still runs 20 times per native backend.
-- The loose `crash.fdn` reproduced a debug interpreter panic on integer subtraction overflow. The initial audit incorrectly adopted wrapping behavior from native code. External review identified the older R2003 contract; the follow-up restores checked arithmetic and catchable Fidan diagnostics. The archived workload must now report R2003 rather than a wrapped checksum. `test/examples/integer_overflow_regression.fdn` tests the documented boundary and error semantics.
-- Rust 1.99 exposed two additional LSP Clippy findings, resolved with normal Option propagation and direct closure passing. A Windows file-manager test cleanup hit an executable sharing violation; binaries now live under ignored target artifacts while temporary source/data cleanup stays checked.
-- Original root scratch files are preserved under ignored `LOCAL/scratch/release-1.0.15`. `compare.py` and `compare.cpp` use floating point and exclude the final iteration, unlike the integer Fidan workload. C++ also multiplies signed 32-bit integers before casting, causing overflow undefined behavior. They are not parity or benchmark oracles.
+Receiver substring/substr/slice clamp bounds to character positions and return empty for reversed bounds. charAt returns empty for negative/out-of-range positions. indexOf/lastIndexOf report scalar offsets. Receiver contracts intentionally differ from bracket negative indexing/stepping.
 
-## Dependencies
+### Equality and ownership
 
-The Cargo graph was reviewed and compatible stable updates applied, followed by compilation and regression testing. The initial Rust 1.95 audit used Cranelift 0.135.5. After the user upgraded to Rust 1.99 and broadened Cranelift requirements to `0`, the lockfile advanced to **0.136.2**. The reviewer follow-up narrows all six Cranelift workspace requirements to `0.136`, preserving locked **0.136.2** and preventing unrelated future 0.x API/MSRV changes. Cargo.lock needs no dependency-version changes for this constraint correction. Inkwell moved from 0.9 to 0.10 while retaining LLVM 21.1.
+std.test float tolerance applies recursively through lists, tuples and dict values; dictionary key identity remains exact. General structural value equality remains exact for floats; List.contains/find share that runtime implementation through nested values and enums. A missing List.find result is -1 on both paths. Dictionaries accept structural collection keys; a list key is not a type error.
 
-`llvm-sys = { version = "211", optional = true }` is unchanged; the user's subsequent Cargo update selected **211.1.0**, within the required 211 series. Six unused workspace declarations were removed: `phf`, `phf_codegen`, `typed-arena`, `ariadne`, `indexmap`, and `smol_str`. These were not active crate dependencies. `cargo machete --with-metadata` reports no unused crate dependencies. A fresh `cargo update --dry-run --verbose` found zero permitted updates. `generic-array` stays at 0.14.7 because Linux keyring dependencies include `crypto-common` 0.1.7 with an exact `=0.14.7` requirement. Newer LLVM bindings and unnecessary major migrations were deliberately excluded. Transitive duplicates imposed by upstream crates remain where necessary.
+Boxed ABI parameters are borrowed; returns are owned. Both AOT backends clone borrowed non-scalar identity returns before argument cleanup, including boxed unary-plus results. Fixtures cover direct/dynamic strings, lists, tuples, dicts, functions and captured closures. Callback argument/default boxes are released on success/error. Fresh list/dict construction boxes, explicitly cloned direct-call arguments and fresh fallback operator inputs/results are released locally in both backends. Remaining concrete allocation limits are recorded below; no broad ownership/object rewrite is included.
 
-The table below records direct dependencies, including unchanged entries. Multiple versions include transitive instances of the same package.
+## Earlier fixes retained and targeted audit-diff review
+
+The file_exists symptom originated in native boolean not using bitwise complement: true remained truthy after negation. Both AOT backends now implement logical negation. Original file-manager save/reload, relative/absolute/Windows paths and object mutation regressions retain their assertions. Runtime file_exists uses try_exists so missing paths return false while other inspection errors propagate. Native callback method lookup releases its field borrow before invocation.
+
+Confirmed audit regressions reviewed against main: wrapping arithmetic replaced R2003; separate-counter examples avoided the incomplete Shared.update API; AI-native identity was weakened; Roadmap was deleted; range-only formatter canonicalization was asserted without an owner decision; negative powers were restricted by an agent-selected rule; release selection was attributed to an earlier user decision. Final code/copy corrects each. Other planned features remain future work, not bugs to implement now.
+
+## Dependencies and explicit release decisions
+
+The current owner request explicitly confirms Fidan 1.0.15 and LLVM helper/toolchain 1.0.6, using upstream LLVM 21.1.8. AI helper remains 1.0.4. This is the final owner decision, not a claim of earlier selection. No tags, releases or merge are performed.
+
+Six Cranelift requirements remain 0.136, locked at 0.136.2. llvm-sys remains optional version 211, locked at 211.1.0; Inkwell remains 0.10/LLVM 21.1. Protocols remain AI analysis 1, AI helper 2, LLVM backend 5. Internal dependency edges reuse runtime power logic and existing serde_json for MIR descriptors; no external versions change in this pass.
+
+Earlier compatible dependency updates and unused declaration removal remain:
 
 | Dependency | Previous lock | Current lock |
 |---|---|---|
@@ -106,347 +102,41 @@ The table below records direct dependencies, including unchanged entries. Multip
 | urlencoding | 2.1.3 | 2.1.3 |
 | windows-native-keyring-store | 1.1.0 | 1.1.0 |
 
-## Documentation and CI
 
-README now describes the real pipeline, backend selection, optional LLVM requirements, current project status, slicing semantics, and IO working-directory behavior. Removed unsupported completeness, universal parity, and comparative performance claims, a reference to an ignored LOCAL demo, and an unaudited extension feature inventory. Editor integration is explicitly maintained in its separate repository. Benchmark timings remain workload/host-specific, without invented performance claims.
+## Documentation and tooling
 
-CI builds and tests the locked workspace, includes doctests, checks formatting, and runs Clippy with warnings denied. Optional LLVM validation now watches manifest/lock changes and the shared slicing/integer/boolean fixtures. LLVM packaging runs feature-gated backend unit tests and strict Clippy before pruning development libraries; its CI installs Clippy explicitly. Toolchain release workflows enable packaged-artifact validation before upload; their input descriptions now match helper-specific version defaults. AI packaging now reads the independent helper manifest for its tool-version default instead of mislabeling the binary with the compiler version. The workflow's actual resolver was executed locally with both an empty version and an explicit override. LLVM-only lint findings were resolved without suppressions. Both example runners require the expected diagnostic for the intentionally failing trace example; the Unix runner previously treated it as an unexpected failure. The contributor guide now names actual crates and workspace verification commands. Ignored type-checker and diagnostic documentation placeholders became runnable doctests; the blocking LSP startup example is compile-checked with `no_run`. No tests or valid assertions were removed or weakened.
+AI-native positioning remains prominent and compiler-grounded. World-first, C-performance, Rust-safety and universal parity claims remain removed; bytecode/VM tags remain absent. README restores Implemented / Partial / Planned Roadmap, distinguishing cooperative async, real parallel tasks, scoped LSP/native support and planned GPU/network/process APIs. Implemented comprehensions/actions no longer carry FUTURE comments; genuinely planned shorthand remains marked future.
 
-Rust 1.99 reports linker messages as compiler warnings. Native LLVM helper packaging exposed MSVC LNK4098: the official LLVM archive requests LIBCMT while Rust, the LLVM C wrapper, libffi, and configured `x64-windows-static-md` libxml2 request MSVCRT. Packaging explicitly selects the DLL CRT using `/NODEFAULTLIB:libcmt` in scoped/restored RUSTFLAGS, following [Microsoft's CRT selection guidance](https://learn.microsoft.com/en-us/cpp/error-messages/tool-errors/linker-tools-warning-lnk4098?view=msvc-170). This changes library selection rather than disabling the warning.
+CI retains locked workspace builds/tests/doctests, strict Clippy and formatting. LLVM packaging uses the repository script with feature tests/lints and explicit Windows CRT selection. Example sweeps distinguish intended diagnostics from failures.
 
-## Verification
+## Final validation
 
-The table below records the initial Rust 1.95 validation. The release follow-up
-after the user's compiler/dependency update is recorded separately below.
+On Windows x86_64 with Rust 1.99, locked workspace build/tests passed: 883 tests including doctests, no failures or ignored tests. Formatting and strict all-target Clippy passed. The rebuilt LLVM 1.0.6 helper passed 11 feature-enabled backend tests and release Clippy through scripts/package-toolchain.ps1. Both example sweeps passed 40/40; LLVM used full LTO. All 70 driver concurrency/backend tests passed with that helper installed.
 
-Baseline on Windows x86_64 with Rust/Cargo 1.95.0: formatting, workspace unit/integration tests, and Clippy passed. Final stable-source verification results are recorded below.
+Shared.update stress runs cover 1,000 two-task trials and 25,600 parallel-loop updates per AOT backend, plus interpreter threshold-zero/one runs and the runtime thread stress test. The original LOCAL/test_file_manager.fdn class source, with separate save/reload assertions, passed interpreter, Cranelift and LLVM in isolated data directories. One concurrent sweep attempt collided on shared executable paths; serial sweeps passed. A Windows boolean-test cleanup failure was resolved by separating executable artifacts from checked data sandboxes and using distinct backend filenames, retaining all behavior/cleanup assertions. A new presumed-invalid list dictionary key test was corrected after confirming existing structural hashing supports it.
 
-The LLVM 21.1.8 helper was built using `scripts/package-toolchain.ps1`, the configured official Windows archive and SHA-256, `llvm-toolchain-21`, `LLVM_SYS_211_PREFIX`, and vcpkg `x64-windows-static-md` libraries. The packaged helper was installed under an isolated `target/audit-fidan-home` for backend tests, avoiding reliance on a stale installed helper.
+| Changed contract | Frontend / IR evidence | Execution evidence |
+| --- | --- | --- |
+| Receiver T/K/V, Shared callback signature | Static rejection/acceptance tests; inferred action metadata | Typed result/argument validation in optimized fixture |
+| Powers, constants, arithmetic errors | Precise/Dynamic type tests; checked constant evaluation/folding; failing arithmetic retained by DCE | Optimized interpreter, selective JIT/fallback, both AOT fixtures |
+| Dynamic operators and indexing | Existing flexible lowering; shared runtime operators/index helpers | Shared release fixture, arithmetic/string/slice fixtures, both AOT sweeps |
+| Equality and owned returns | Runtime unit tests; real direct calls protected from inlining | Nested equality and repeated owned-return fixture, both AOT backends |
+| Slice canonical formatting | Parser/formatter round-trip tests; ranges/inclusive aliases preserved | Formatter-produced fixture runs on interpreter and both AOT backends; AOT error tests |
+| Shared atomicity | Existing parallel/E0401 and metadata tests retained | Repeated shared-value task/parallel-for stress on interpreter and both AOT backends |
 
-Verified on Windows x86_64, Rust/Cargo 1.95.0:
+These tests establish the covered cases, not universal backend parity. Logs and local toolchain artifacts are under ignored target/final-contract-*.
 
-| Command or scenario | Result |
-|---|---|
-| `cargo fmt --all` followed by `cargo fmt --all --check` | Pass |
-| `cargo build --workspace --locked` | Pass |
-| `cargo build --workspace --release --locked` | Pass |
-| `cargo test --workspace --locked`, with isolated rebuilt LLVM toolchain | 849 passed, 0 failed, 0 ignored; includes doctests and both native backends |
-| `cargo check --workspace --all-targets --locked` | Pass |
-| `cargo clippy --workspace --all-targets --locked -- -D warnings` | Pass |
-| `cargo check -p fidan-codegen-llvm --tests --locked --features llvm-toolchain-21,llvm-sys/no-llvm-linking` | Pass |
-| `cargo clippy -p fidan-codegen-llvm --all-targets --locked --features llvm-toolchain-21,llvm-sys/no-llvm-linking -- -D warnings` | Pass |
-| `scripts/package-toolchain.ps1` with LLVM 21.1.8, upstream SHA-256, and configured vcpkg libraries | Helper release build, 11 LLVM-enabled unit tests, strict LLVM-enabled Clippy, and packaging pass |
-| `test/scripts/test_examples_aot.ps1 -Backend cranelift` | 34 cases pass, zero skips |
-| `test/scripts/test_examples_aot.ps1 -Backend llvm -Lto full -FidanHome target/audit-fidan-home` | 34 cases pass, zero skips |
-| Shared slicing fixture via release CLI, JIT thresholds 0 and 1, and release CLI builds with Cranelift / LLVM full LTO | All pass |
-| Invalid slicing, invalid indexing assignment, and overflowing range length | Regression tests pass in interpreter and both AOT backends |
-| File-manager path/persistence regression | Interpreter, Cranelift AOT, and LLVM AOT pass |
-| Original LOCAL file-manager declarations plus save/reload/add calls in an isolated cwd | Pass; original LOCAL source unchanged |
-| Syntax reference repeated native execution | 20 runs per backend pass; interpreter also passes |
-| Native fixture tests with relative `CARGO_TARGET_DIR`, launched from each crate directory | CLI and driver cases pass |
-| README introductory, slicing, and shared-state snippets; CLI help/version and documented MIR command | Pass |
-| `cargo machete --with-metadata` | No unused crate dependencies |
-| PowerShell script parsing and `bash -n test/scripts/test_examples_aot.sh` | Pass; Unix runner execution not tested locally |
-| README local file links and `git diff --check` | No missing local file links or whitespace errors |
+## Outstanding required work
 
-Logs are retained under ignored `target/audit-*.log`, with the original LOCAL probe under `target/local-file-manager-run`. Example sweeps include the deliberately failing trace demonstration and require its expected diagnostic. No benchmark timings are presented as performance comparisons.
+Dynamic standard-library function values still need generic arity validation before dispatch. Statically known Shared.update(math.random/math.pow) callbacks are rejected, but flexible aliases can bypass those compile-time checks. This is an unfinished correctness item, not a planned feature or an intentional semantic limitation. Automatic approval review rejected shared metadata relocation and an alternative startup registry; neither change was applied. The unchanged-table relocation proposal remains pending user approval. Release preparation is not complete until this path and its cross-backend regressions pass.
 
-### Rust 1.99 release follow-up (before external review)
+## Intentional remaining limits
 
-After the user's compiler and Cargo update, workspace check/build initially
-passed. Baseline failures were two new LSP Clippy findings, a Windows temporary
-executable cleanup sharing violation, and the real debug integer-overflow crash.
-The stronger LOCAL save/reload check then reproduced native boolean negation
-and object-method borrowing bugs. These were fixed and validated before the
-release candidate was prepared.
-
-Verified on Windows x86_64 with Rust/Cargo **1.99.0**, Cranelift **0.136.2**,
-Inkwell **0.10.0**, `llvm-sys` **211.1.0**, and a freshly packaged LLVM helper
-**1.0.6** / LLVM **21.1.8**, installed under `target/final-release-home`:
-
-| Command or scenario | Result |
-|---|---|
-| `cargo fmt --all` and `cargo fmt --all --check` | Pass, all workspace Rust sources |
-| `cargo test --workspace --locked` | **854 passed**, zero failed/ignored, including doctests and native regressions |
-| `cargo clippy --workspace --all-targets --locked -- -D warnings` | Pass |
-| `cargo clippy --workspace --all-targets --all-features --locked --features llvm-sys/no-llvm-linking -- -D warnings` | Pass; optional LLVM code type-checked, native linking separately verified below |
-| `cargo check --workspace --all-targets --locked` | Pass |
-| `cargo build --workspace --locked` and `cargo build --workspace --release --locked` | Pass |
-| Required `scripts/package-toolchain.ps1` LLVM 21.1.8 configuration | Release helper build, **11 LLVM-enabled unit tests**, strict native-feature Clippy, packaging; **no compiler/linker warnings** after CRT selection |
-| `test/scripts/test_examples_aot.ps1 -Backend cranelift -Release` | **36 pass**, zero skips |
-| `test/scripts/test_examples_aot.ps1 -Backend llvm -Lto full -Release -FidanHome target/final-release-home` | **36 pass**, zero skips |
-| Release CLI slicing/integer fixtures, JIT thresholds 0 and 1 | Pass |
-| Original archived `crash.fdn` | Initial audit passed a wrapped checksum; superseded by the R2003 correction below |
-| Original LOCAL file-manager declarations plus missing/save/reload/membership/add assertions in separate fresh working directories | Interpreter, Cranelift AOT, and LLVM AOT pass; LOCAL source unchanged |
-| Boolean truth table, branching, double negation, and repeated object-field mutation | Interpreter, selective JIT, both AOT backends pass |
-| `cargo update --dry-run --verbose` | Zero permitted updates; upstream exact crypto pin and LLVM series constraint retained |
-| `cargo machete --with-metadata` | No unused crate dependencies |
-| GitHub Actions YAML, PowerShell package/example scripts, Unix runner syntax | Parse checks pass; AI helper-version resolver default/override both pass |
-
-Follow-up logs are under ignored `target/recheck-*.log`; the original LOCAL
-release probe path is recorded in `target/recheck-local-probe-path.txt`.
-Scratch originals remain under ignored `LOCAL/scratch/release-1.0.15`.
-
-## External review follow-up
-
-The diagnostic explanation and history predate the audit and describe MAX + 1
-as R2003. The previous wrapping regression was therefore a language-semantics
-mistake, not evidence of intended behavior.
-
-- Shared checked i64 arithmetic covers addition, subtraction, multiplication,
-  unary negation, integer power, and MIN / -1 or MIN % -1. R2003 is catchable;
-  integer, float, and mixed zero divisors raise R2001. Normal integer division
-  still truncates toward zero. The full i64 exponent is processed without u32
-  truncation; 0 ** 0 remains 1.
-- Negative integer powers had contradictory implementations and no established
-  regression/documentation supporting fractional integer results. The type
-  checker explicitly gives integer ** integer an integer result. Exact reciprocal
-  powers of bases 1 and -1 are preserved, including i64::MIN exponents. Other
-  negative integer powers raise R2003 with guidance to use a float operand;
-  2.0 ** -2 and math.pow(2, -2) are 0.25. This is a documented domain resolution,
-  not a claim of prior parity for fractional integer results.
-- Native arithmetic helpers store diagnostics in the existing exception slot;
-  JIT and AOT callers check it before continuing. MIR call analysis propagates
-  fallibility through direct calls. JIT callbacks preserve interpreter errors
-  instead of replacing them with nothing. Constant folding leaves invalid
-  arithmetic for runtime evaluation instead of folding wraparound or infinity.
-- Indirect flexible-value calls prevent inlining from bypassing boxed native
-  arithmetic helpers in the regression fixture. They also exposed a JIT
-  pointer/scalar mismatch: scalar intrinsics and unary/binary lowering now
-  verify logical MIR operand types, falling back to the interpreter for boxed
-  operations. A dedicated eligibility regression protects this boundary.
-- Final review also found unchecked integer absolute value. `math.abs(MIN)` and
-  `MIN.abs()` now use the same checked arithmetic and report R2003, including
-  flexible standard-library calls and the selective-JIT/AOT math intrinsics.
-  Existing public std.math dispatch signatures remain available; error-aware
-  dispatch propagates the typed diagnostic to Fidan callers.
-- Repeating the full suite exposed the syntax reference's existing lost-update
-  race in HEAD: separate shared counter get/set calls produced 1 instead of 2.
-  The initial separate-result workaround is superseded by the atomic
-  Shared.update implementation below. Existing 20-run-per-backend assertions
-  remain unchanged and now exercise the intended same-counter API.
-- Receiver substring/substr/slice use the existing std.string half-open scalar
-  range semantics: bounds clamp to [0,len], omitted end defaults to len, reversed
-  bounds return empty. charAt returns a string, empty for negative/out-of-range
-  positions. Receiver searches return scalar indices or -1. Interpreter and
-  native receivers share std.string dispatch. Bracket slicing retains its
-  separate negative-index/step semantics.
-- The LLVM setup command uses toolchain add llvm. WinGet text and tags now state
-  implemented capabilities without speed, safety, bytecode-VM, or novelty claims.
-  CONTRIBUTING, executable syntax-reference headers, and receiver module comments
-  no longer describe obsolete phase placeholders. The empty typechecker
-  parallel_check module is removed; the actual MIR parallel race checker remains.
-- Cranelift constraints are 0.136, locked at 0.136.2; llvm-sys remains exactly the
-  required manifest series 211, locked at 211.1.0. Release versions and serialized
-  protocols are unchanged. A fresh LLVM bundle is built locally at version 1.0.6.
-
-Final follow-up validation on Windows with Rust/Cargo 1.99.0:
-
-| Command or scenario | Result |
-|---|---|
-| `cargo fmt --all --check` | Pass |
-| `cargo build --workspace --locked` and CLI-only release build | Pass |
-| `cargo test --workspace --locked` with fresh LLVM helper | **862 passed**, zero failed/ignored; includes doctests |
-| `cargo clippy --workspace --all-targets --locked -- -D warnings` | Pass |
-| Strict all-target/all-feature Clippy with `llvm-sys/no-llvm-linking` | Pass; native LLVM linking separately verified by packaging |
-| Required LLVM packaging script at existing version 1.0.6 | **11 LLVM-enabled tests** pass; native-feature strict Clippy and release helper build pass |
-| Checked integer native JIT unit regression | Eleven error cases explicitly assert native compilation and diagnostic propagation, including math.abs |
-| Flexible arithmetic, constant-folding preservation, and MIR call fallibility | Targeted regressions pass |
-| Slicing, integer errors, and string receiver fixtures | Release interpreter thresholds 0/1 and both AOT backends pass |
-| Cranelift release example sweep | **37 passed**, zero skipped |
-| LLVM full-LTO release example sweep | **37 passed**, zero skipped |
-| Original LOCAL file-manager declarations plus save/reload/add assertions | Interpreter and both AOT backends pass; original source hash unchanged |
-| Archived original crash workload | Reports Fidan R2003 instead of a Rust panic or wrapped checksum |
-
-Logs are retained under ignored `target/followup-*.log`. The example-sweep build
-commands also validate the CLI-only release configuration. Existing W5003
-precompile advisory hints can appear for the integer fixture's catch CFG; these
-are separate from the clean Rust/Clippy checks and were not suppressed.
-
-## Final pre-merge optimizer and positioning follow-up
-
-The complete `main...polish/repo-audit` diff and tracked repository text were
-reviewed for public-facing identity changes, including documentation, Cargo and
-WinGet metadata, installer copy, workflow descriptions, scripts, and source
-documentation. The substantive identity regressions were the README headline,
-introduction, and AI section, plus WinGet descriptions and the removed `ai-native`
-tag. These now identify Fidan as an AI-native general-purpose programming language
-and compiler toolchain. CONTRIBUTING, CHANGELOG, and this report explicitly align
-with that identity. Technical component descriptions and honest backend/provider
-limitations remain. Unsupported novelty, comparative performance, safety,
-universal parity, bytecode, and VM claims were not restored.
-
-The wording is grounded in implemented interfaces:
-
-- `fidan-driver/src/ai_analysis.rs` defines structured diagnostics, inferred
-  types, symbols, reads/writes, call graphs, type maps, and static trace schemas.
-- `fidan-cli/src/ai_analysis.rs` parses and type-checks source and constructs
-  those analyses. Static traces walk statements with value hints and a 250-step
-  cap; they are not observed runtime executions. Types may remain unknown and
-  source-level call graphs do not establish complete runtime call coverage.
-- `fidan-ai-analysis-helper/src/fidan_client.rs` requests compiler analysis from
-  the installed CLI. The provider integration and CLI fix workflow use that
-  context for explain/fix/improve; source edits are validated before application.
-- `fidan-ai-analysis-helper/src/mcp.rs` exposes ten implemented tools, including
-  diagnostics, symbol information, call graphs, type maps, static traces, and
-  validated fix suggestions/previews. Model-assisted workflows require an
-  optional helper and configured provider; deterministic analysis does not
-  require a model.
-
-The preceding optimizer commit removes unsound strength reductions without
-changing language semantics. Every binary identity requires proven matching
-integer or boolean operands and a compatible MIR result type. Proof comes from
-literal definitions and SSA copies, not parameter annotations: flexible calls
-can currently pass values that contradict even certain parameter annotations.
-Globals, phis, dropped locals, unknown values, floats, and mixed numeric operands
-remain conservative. Checked constant arithmetic continues to leave failing
-expressions for runtime diagnostics.
-
-Three normal optimized interpreter/MIR regressions cover flexible string-plus-zero,
-all arithmetic/boolean identities, retained type errors, safe reductions, result
-types, NaN, and signed zero. The fourth regression executes the shared
-`strength_reduction_regression.fdn` fixture through Cranelift and LLVM AOT at O2.
-Native boxed string-plus-integer and invalid-operand handling retain existing
-runtime limitations; their optimizer regressions exercise interpreter/JIT rather
-than claiming unsupported native parity. No additional compiler changes were
-needed in the positioning follow-up. CONTRIBUTING already documents all six
-Cranelift `0.136` constraints and locked `0.136.2`; no obsolete broad-version
-policy remains outside the historical account above.
-
-Final validation for this follow-up on Windows with Rust/Cargo 1.99.0:
-
-| Command or scenario | Result |
-|---|---|
-| `cargo fmt --all --check` | Pass |
-| `cargo build --workspace --locked` | Pass |
-| `cargo test --workspace --locked` with installed LLVM helper 1.0.6 | **866 passed**, zero failed/ignored across 54 suites, including doctests and existing interpreter/JIT/AOT regressions |
-| `cargo clippy --workspace --all-targets --locked -- -D warnings` | Pass |
-| Targeted optimized interpreter/MIR regressions | **3 passed** |
-| Targeted shared O2 optimizer fixture | **1 passed**, executing both Cranelift and LLVM AOT |
-| Compiler analysis request for the optimizer fixture | Structured line analyses, related symbols, call graph, type map, and static trace returned successfully |
-| Local MCP `tools/list` smoke check | **10 tools** returned successfully, without a model/provider request |
-| Documentation local file links and `git diff --check` | Pass |
-
-Logs and analysis outputs are retained under ignored `target/positioning-*`.
-Earlier validation tables describe their respective historical trees. This
-follow-up changes only five documentation/metadata files; release versions,
-protocols, compiler/runtime code, dependencies, and `llvm-sys` 211 remain unchanged.
-
-### Shared.update follow-up
-
-The original README, lambda AST documentation, and E0401 guidance already intended
-`Shared.update(callback)` as the atomic transformation of one shared value. Its
-receiver metadata and interpreter/native dispatch were missing. Separate get/set
-calls were individually synchronized but could lose increments. Replacing the
-same-counter examples with separate task results concealed that incomplete API;
-this follow-up implements it and restores those examples.
-
-`update` takes one callable, holds the existing `Arc<Mutex<FidanValue>>` lock
-through invocation and replacement, and returns the new value. Interpreter
-function dispatch and native dynamic-call trampolines handle named/inline actions,
-captured closures, and standard-library function values. A callback error leaves
-the stored slot unchanged and releases the lock; other callback side effects are
-not rolled back. Metadata supplies the Shared inner return type and callback
-parameter to type checking and LSP signatures. Static non-callable arguments and
-incorrect arity are rejected; flexible invalid calls report runtime errors.
-
-All Fidan Shared accesses use a guard that tracks held Arc identities per thread.
-Recursive get/set/update through the same value or an upgraded WeakShared reports
-R0001 rather than waiting forever. JSON serialization propagates that error,
-including values nested in collections; display uses `Shared(<locked>)` instead
-of recursively locking. Access to a different Shared remains allowed. This does
-not detect cross-thread lock cycles: callbacks must use consistent ordering for
-multiple Shared values and must not join tasks that need their held value.
-
-Identity callbacks exposed a separate native ownership defect: boxed returns
-could alias a borrowed argument that dynamic-call cleanup then freed. Both AOT
-backends now use their existing owned-operand helper at the boxed return boundary.
-Repeated callbacks returning the input string cover the former heap corruption.
-No new callback ABI or wire protocol is introduced.
-
-The normal-pipeline fixture repeats two-task increments 100 times and 256-way
-parallel-for accumulation ten times per run. It also tests captured and named
-callbacks, the original 99-iteration example, returned values, callback overflow,
-invalid flexible calls, recursive aliases, serialization/display, and identity
-returns. It runs with interpreter JIT thresholds zero and one and ten complete
-runs per AOT backend. A mutation check temporarily released the lock between
-reading and writing; the same native regression failed with a counter of one
-instead of two. The atomic implementation was restored before final validation.
-A Rust contention test separately checks eight threads and 8,000 exact updates.
-E0401 regressions preserve rejection of unsafe non-Shared global mutation and
-Shared global rebinding while allowing protected receiver updates. The existing
-race analysis is not a complete analysis of arbitrary callback side effects.
-
-The complete `main...polish/repo-audit` documentation diff was reviewed for
-similarly removed, already-intended functionality. Shared.update and its
-same-counter syntax example were the confirmed case. The other removals concerned
-unsupported performance/safety/parity claims, roadmap text, an invalid standalone
-inheritance introduction, ignored LOCAL demos replaced with tracked examples, and
-an external editor extension inventory. Existing inheritance/parent, native
-interop, replay/hot-reload, and implemented editor capabilities remain documented;
-no other removal established an incomplete intended API requiring implementation.
-
-Final validation on Windows with Rust/Cargo 1.99.0 and the freshly rebuilt LLVM
-helper installed under `target/shared-update-final-home`:
-
-| Command or scenario | Result |
-|---|---|
-| `cargo fmt --all --check` | Pass |
-| `cargo build --workspace --locked` | Pass |
-| `cargo test --workspace --locked` | **872 passed**, zero failed/ignored across 54 suites, including doctests |
-| `cargo clippy --workspace --all-targets --locked -- -D warnings` | Pass |
-| Shared fixture with interpreter JIT thresholds 0 and 1 | Pass for both thresholds |
-| Shared fixture, Cranelift and LLVM AOT at O2 | Ten full runs per backend pass; 1,000 two-task trials and 25,600 accumulation updates per backend, plus callback/boundary checks |
-| Existing concurrency/backend integration suite | **69 passed**, including 20 syntax-reference runs per AOT backend |
-| Runtime Shared lock/contention and recursion tests | **2 passed**, including eight threads and 8,000 exact increments |
-| E0401 targeted tests | **5 passed**; unsafe global writes/rebinding still rejected |
-| Type-checker callback/arity and LSP typed-hover regressions | Pass |
-| `scripts/package-toolchain.ps1`, same-version LLVM 1.0.6 / LLVM 21.1.8 rebuild | Release helper build, **11 LLVM-enabled tests**, and strict LLVM-enabled Clippy pass |
-| Cranelift AOT example sweep | **39 passed**, zero skips |
-| LLVM full-LTO AOT example sweep | **39 passed**, zero skips |
-| `git diff --check` | Pass |
-
-The workspace run also passes existing slicing, checked arithmetic, Unicode
-receiver, optimizer, IO/file-manager, and native interop regressions. Logs are
-retained under ignored `target/shared-update-*`. The temporary non-atomic mutation
-failed the new concurrency regression as expected and is absent from the final
-patch. Release versions, protocols, dependencies, Cranelift 0.136 constraints,
-llvm-sys 211, and the AI-native positioning remain unchanged.
-
-## Release preparation
-
-The user selected these release-candidate versions; the follow-up does not bump
-them. No release has been tagged or published by this audit.
-
-| Component | Prepared version | Protocol |
-|---|---|---|
-| Fidan workspace / CLI | 1.0.15 | AI analysis 1 |
-| LLVM helper and toolchain bundle | 1.0.6 (upstream LLVM stays 21.1.8) | LLVM backend 5 |
-| AI helper | 1.0.4, unchanged | AI helper 2 |
-
-The LLVM helper must be republished because code generation and its LLVM binding
-dependency changed. The AI helper source did not change; it obtains compiler
-facts from the installed Fidan CLI. Its existing compatible 1.x version range
-covers Fidan 1.0.15. No serialized request, response, or MIR schema changed,
-so the protocol constants remain unchanged. The changelog describes the final
-patch, and Cargo regenerated the lockfile for the independent package versions.
-
-The audit and follow-up are prepared on polish/repo-audit. Require the
-Windows/Linux/macOS CI and toolchain validation workflows to pass before merging;
-then publish LLVM toolchain 1.0.6 before publishing
-Fidan 1.0.15 through the existing release workflows. An AI helper release is not
-required for these changes. Local validation is distinct from remote CI.
-
-## Remaining limits
-
-- Linux/macOS builds are covered by CI configuration but were not executed on this Windows host; this pass does not claim results from remote CI.
-- Optional LLVM tests skip when a compatible toolchain is unavailable. In this audit LLVM tests were run with the rebuilt helper.
-- Live AI providers, production registry operations, OS keychain interactions on other platforms, and every possible external native library were not exhaustively exercised. Their existing offline/unit/protocol tests are distinct from live-service validation.
-- Backend coverage is supported by the specific regression and existing integration tests, not universal semantic parity. Resource exhaustion from extremely large materializations remains possible, as with other collection allocations.
-- Arithmetic parity is verified for the boundary/error cases in the follow-up fixture, including dynamic values and full-width exponents. These tests do not establish universal backend parity or cover resource exhaustion.
-- The original file-manager symptom was reproduced and traced to native boolean negation, independently of cwd behavior and hidden IO errors. Other backend parity remains limited to tested scenarios.
-- LLVM's existing Windows host-CPU string disposal workaround remains: two small buffers survive until the short-lived helper exits. It was not replaced speculatively without reproducing the upstream/platform failure.
-
-## Main changed areas
-
-`fidan-parser/src/pratt.rs`, `fidan-typeck/src/check.rs`, new runtime `slice.rs` and `range.rs`, runtime `ffi.rs`/`stdlib/io.rs`, interpreter arithmetic/dispatch, LSP position conversion, Cranelift API migration and logical negation, LLVM bitcode/CPU/boolean handling, and their regression suites. Runtime ownership comments now describe actual boxed AOT ownership. Workspace/helper manifests and lock, native fixture test setup, CI/toolchain packaging and CRT selection, README/changelog, this report, and the local ignored AUDIT_PLAN record complete the reviewable changes.
+- Some temporary scalar/constant/default direct-call argument boxes and interpolation/tuple/capture allocation paths still lack matching cleanup. Broader argument cleanup was rejected by automatic approval review because ownership proof was insufficient. The narrowly proven cleanup does not claim general leak freedom.
+- Selective JIT uses interpreter fallback; threshold-one testing is not a claim that every operation is native.
+- Native objects use Dict-backed fields/methods, without complete nominal class metadata or universal interpreter/AOT object introspection parity.
+- Runtime contracts validate primitives/callables and collection contents; erased nested Shared/Pending and native nominal-object metadata are not a dependent runtime type system.
+- Cooperative spawn/await is distinct from parallel OS-thread execution. Cross-Shared callback lock cycles can still deadlock.
+- Static call graphs/traces contain unknowns and bounded analysis, not measured execution.
+- Windows validation does not replace Linux/macOS CI or external extension validation.
+- @gpu, std.net, std.process and a broad Phase 11.2 redesign remain planned.

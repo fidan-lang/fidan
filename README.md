@@ -238,8 +238,8 @@ negation, and integer powers report runtime error `R2003` when the result cannot
 be represented. Integer division truncates toward zero; `MIN / -1` and `MIN % -1`
 also report `R2003`. Division and remainder by zero report `R2001`.
 Integer `abs` also reports `R2003` for `MIN`, whose magnitude cannot fit in i64.
-Negative integer powers remain integers for bases `1` and `-1`; other bases
-report `R2003`. Use a float operand for fractional reciprocal powers. The runnable
+Negative integer powers remain integers for bases `1` and `-1`; a zero base
+reports `R2001`, and other bases produce a floating-point reciprocal power. The runnable
 [integer arithmetic regression](test/examples/integer_overflow_regression.fdn)
 checks boundaries and catchable errors through the interpreter and native backends.
 
@@ -473,9 +473,17 @@ assert_eq(text[::-1], "gnirtsemos")
 
 The default step is `1`. For negative steps, omitted bounds run from the last character to before the first; an explicit `-1` stop refers to the last character. `nothing` components use the omitted-bound defaults. A zero step or a non-integer bound reports an error. Strings count Unicode scalar values, not grapheme clusters.
 
-Existing syntax remains available: `text[1..4]`, `text[.. step 2]`, and `text[1...4]` (inclusive stop). The formatter emits this range syntax. See [the slicing regression example](test/examples/slice_regression.fdn) for executable cases shared by the backend tests.
+Existing syntax remains available: `text[1..4]`, `text[.. step 2]`, and `text[1...4]` (inclusive stop). The formatter canonicalizes exclusive slices to colon syntax, including legacy `..`/`step` aliases. Inclusive `...` slices retain their compatibility spelling because converting dynamic inclusive bounds could change behavior. Ordinary ranges keep their spelling. See [the slicing regression example](test/examples/slice_regression.fdn) for executable cases shared by the backend tests.
 
 File paths in `std.io` and `std.json` resolve relative to the process working directory, not the source file's directory. For example, running `fidan run LOCAL/test_file_manager.fdn` from the repository root reads/writes `./tasks.json` in that root. `io.cwd()` shows the working directory; `io.join(...)` builds a platform path. `io.file_exists(path)` returns `false` for missing paths and reports other filesystem inspection failures.
+
+### Integer arithmetic and powers
+
+Signed 64-bit addition, subtraction, multiplication, negation and nonnegative integer powers are checked. Overflow reports `R2003`; division or modulo by zero reports `R2001`. `i64::MIN / -1` and `i64::MIN % -1` report overflow without a host trap.
+
+Integer bases accept negative integer exponents: `2 ** -3` is the float `0.125`. Unit bases preserve exact integer results (`1 ** -999` is `1`; `(-1) ** -3` is `-1`). Zero raised to a negative exponent reports `R2001`. Constants can prove Integer/Float result types; otherwise integer/integer exponentiation uses flexible values because its result category depends on runtime operands.
+
+`std.test.assert_eq` applies its float tolerance recursively through lists, tuples and dictionaries. Collection `contains`/`find` use exact structural value equality, without test-helper tolerance.
 
 ### Error handling
 
@@ -1250,6 +1258,27 @@ cargo run -- run test/examples/test.fdn --emit mir
 The default workspace builds do not link LLVM. To use LLVM AOT, install a compatible packaged toolchain with `fidan toolchain add llvm`, then build with `fidan build --backend llvm file.fdn`. Contributors building the helper from source need LLVM 21.1 libraries and headers, `LLVM_SYS_211_PREFIX`, and `cargo build -p fidan-llvm-helper --features llvm-toolchain-21`. Use [scripts/package-toolchain.ps1](scripts/package-toolchain.ps1) for distributable toolchain builds; the [engineering audit](docs/ENGINEERING_AUDIT.md) records the tested configuration. `llvm-sys` remains on version 211.
 
 Benchmark programs and runners live under `test/`. Their timings depend on the host, backend, build profile, and workload; they are not general performance guarantees.
+
+---
+
+## Roadmap
+
+The 1.0.15 release preparation focuses on correctness and maintenance of the implemented surface. Planned capabilities are design directions, not current support guarantees.
+
+| Area | State | Current scope / direction |
+|---|---|---|
+| Compiler frontend and MIR | Implemented | Parsing, inference/type checking, typed HIR, SSA/CFG MIR and optimization |
+| Actions and collections | Implemented | Named actions, closures, list/dict comprehensions, receiver methods and Unicode scalar strings |
+| Shared state and parallel work | Implemented | Real parallel tasks/loops; atomic `Shared.update` transformations |
+| `spawn` / `await` | Partial | Cooperative same-thread deferred execution |
+| Interpreter and selective JIT | Implemented / partial | Native Cranelift compilation for eligible functions; interpreter fallback |
+| Cranelift / LLVM AOT | Implemented / partial | Native programs covered by backend fixtures; LLVM requires its helper. Native objects are Dict-backed; universal object parity is not claimed |
+| Editor tooling | Implemented / partial | Supported LSP diagnostics, completion, hover and other requests; not complete LSP coverage |
+| Compiler-grounded AI | Implemented / evolving | Structured compiler context, explain/fix/improve workflows and MCP; model workflows require provider configuration |
+| Package and embedding tooling | Implemented | DAL, toolchain management, Rust and C embedding |
+| `@gpu` | Planned | GPU execution |
+| `std.net` | Planned | Networking APIs |
+| `std.process` | Planned | Process-management APIs |
 
 ---
 

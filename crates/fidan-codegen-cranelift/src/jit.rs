@@ -877,6 +877,59 @@ impl JitCompiler {
 
         // ── Build auxiliary maps ──────────────────────────────────────────────
         let local_types = build_local_type_map(func, program, interner);
+        // The raw JIT ABI has no implicit boxing or numeric conversion. Fall
+        // back when a call/return would reinterpret a scalar as a boxed pointer.
+        for block in &func.blocks {
+            for phi in &block.phis {
+                if phi.operands.iter().any(|(_, operand)| {
+                    jit_operand_type(operand, &local_types).as_ref() != local_types.get(&phi.result)
+                }) {
+                    return None;
+                }
+            }
+            if let Terminator::Return(Some(operand)) = &block.terminator
+                && jit_operand_type(operand, &local_types).as_ref() != Some(&func.return_ty)
+            {
+                return None;
+            }
+            for instruction in &block.instructions {
+                let call = match instruction {
+                    Instr::Call {
+                        callee: Callee::Fn(id),
+                        args,
+                        ..
+                    }
+                    | Instr::Assign {
+                        rhs:
+                            Rvalue::Call {
+                                callee: Callee::Fn(id),
+                                args,
+                            },
+                        ..
+                    } => Some((id, args)),
+                    _ => None,
+                };
+                if let Some((id, args)) = call {
+                    let target = program.functions.get(id.0 as usize)?;
+                    if args.len() != target.params.len()
+                        || args.iter().zip(&target.params).any(|(arg, param)| {
+                            jit_operand_type(arg, &local_types).as_ref() != Some(&param.ty)
+                        })
+                    {
+                        return None;
+                    }
+                }
+                if let Instr::StoreGlobal { global, value } = instruction
+                    && jit_operand_type(value, &local_types).as_ref()
+                        != program
+                            .globals
+                            .get(global.0 as usize)
+                            .map(|global| &global.ty)
+                {
+                    return None;
+                }
+            }
+        }
 
         // Map GlobalId → stdlib module name, identified via use_decls
         let mut global_ns_map: HashMap<GlobalId, String> = HashMap::new();
@@ -1212,6 +1265,7 @@ impl JitCompiler {
                                 dest_ty,
                             )?;
                             builder.def_var(cl_vars[dest.0 as usize], val);
+                            emit_jit_exception_check(&mut builder, &rt)?;
                         }
                         Instr::SetIndex {
                             object,
@@ -1227,6 +1281,7 @@ impl JitCompiler {
                                 index,
                                 value,
                             )?;
+                            emit_jit_exception_check(&mut builder, &rt)?;
                         }
                         Instr::StoreGlobal { global, value } => {
                             let native_value = load_operand(&mut builder, &cl_vars, value);
@@ -1449,6 +1504,18 @@ fn emit_container_method_call(
 ) -> Option<Value> {
     let receiver_kind = operand_receiver_kind(local_types, receiver)?;
     let operation = infer_receiver_member(receiver_kind, method_name)?.operation?;
+    // These scoped collection helpers borrow boxed arguments, unlike the raw
+    // scalar JIT ABI. Unsupported boxing must use the interpreter fallback.
+    if args.iter().any(|arg| {
+        jit_operand_type(arg, local_types).is_none_or(|ty| {
+            matches!(
+                ty,
+                MirTy::Integer | MirTy::Float | MirTy::Boolean | MirTy::Handle | MirTy::Nothing
+            )
+        })
+    }) {
+        return None;
+    }
     let recv = operand_to_abi_i64(builder, vars, local_types, receiver);
     let raw = match (receiver_kind, operation) {
         (ReceiverBuiltinKind::Dict, ReceiverMethodOp::Len) => {
@@ -1565,6 +1632,14 @@ fn emit_container_get_index(
     ) {
         return None;
     }
+    if jit_operand_type(index, local_types).is_none_or(|ty| {
+        matches!(
+            ty,
+            MirTy::Integer | MirTy::Float | MirTy::Boolean | MirTy::Handle | MirTy::Nothing
+        )
+    }) {
+        return None;
+    }
     let object = operand_to_abi_i64(builder, vars, local_types, object);
     let index = operand_to_abi_i64(builder, vars, local_types, index);
     let func = dict_get_ref_for_dest(rt, dest_ty);
@@ -1587,6 +1662,16 @@ fn emit_container_set_index(
     ) {
         return None;
     }
+    if [index, value].iter().any(|operand| {
+        jit_operand_type(operand, local_types).is_none_or(|ty| {
+            matches!(
+                ty,
+                MirTy::Integer | MirTy::Float | MirTy::Boolean | MirTy::Handle | MirTy::Nothing
+            )
+        })
+    }) {
+        return None;
+    }
     let object = operand_to_abi_i64(builder, vars, local_types, object);
     let index = operand_to_abi_i64(builder, vars, local_types, index);
     let value = operand_to_abi_i64(builder, vars, local_types, value);
@@ -1607,15 +1692,38 @@ fn emit_rvalue(
         Rvalue::Use(op) => Some(load_operand(builder, ctx.vars, op)),
 
         Rvalue::Binary { op, lhs, rhs } => {
-            operand_scalar_kind(lhs, ctx.local_types)?;
-            operand_scalar_kind(rhs, ctx.local_types)?;
+            let left = operand_scalar_kind(lhs, ctx.local_types)?;
+            let right = operand_scalar_kind(rhs, ctx.local_types)?;
+            use fidan_ast::BinOp;
+            let valid = match op {
+                BinOp::And | BinOp::Or => {
+                    left == StdlibValueKind::Boolean && right == StdlibValueKind::Boolean
+                }
+                BinOp::Eq | BinOp::NotEq if left == StdlibValueKind::Boolean => {
+                    right == StdlibValueKind::Boolean
+                }
+                _ => {
+                    matches!(left, StdlibValueKind::Integer | StdlibValueKind::Float)
+                        && matches!(right, StdlibValueKind::Integer | StdlibValueKind::Float)
+                }
+            };
+            if !valid {
+                return None;
+            }
             let lv = load_operand(builder, ctx.vars, lhs);
             let rv = load_operand(builder, ctx.vars, rhs);
             emit_binop(builder, *op, lv, rv, dest_ty, ctx.rt)
         }
 
         Rvalue::Unary { op, operand } => {
-            operand_scalar_kind(operand, ctx.local_types)?;
+            let kind = operand_scalar_kind(operand, ctx.local_types)?;
+            let valid = match op {
+                fidan_ast::UnOp::Not => kind == StdlibValueKind::Boolean,
+                _ => matches!(kind, StdlibValueKind::Integer | StdlibValueKind::Float),
+            };
+            if !valid {
+                return None;
+            }
             let v = load_operand(builder, ctx.vars, operand);
             emit_unop(builder, *op, v, dest_ty, ctx.rt)
         }
@@ -2283,6 +2391,18 @@ fn jit_abi_ffi_type(_ty: &MirTy) -> Type {
     Type::i64()
 }
 
+fn jit_operand_type(operand: &Operand, local_types: &HashMap<LocalId, MirTy>) -> Option<MirTy> {
+    match operand {
+        Operand::Local(local) => local_types.get(local).cloned(),
+        Operand::Const(MirLit::Int(_)) => Some(MirTy::Integer),
+        Operand::Const(MirLit::Float(_)) => Some(MirTy::Float),
+        Operand::Const(MirLit::Bool(_)) => Some(MirTy::Boolean),
+        Operand::Const(MirLit::Nothing) => Some(MirTy::Nothing),
+        // load_operand cannot materialize these boxed constants.
+        _ => None,
+    }
+}
+
 fn operand_scalar_kind(
     operand: &Operand,
     local_types: &HashMap<LocalId, MirTy>,
@@ -2323,6 +2443,27 @@ mod tests {
     }
 
     #[test]
+    fn incompatible_boolean_and_boxed_collection_arguments_fall_back() {
+        for source in [
+            "action checked returns boolean { var x oftype flexible = 1; return not x }",
+            "action checked returns boolean { var x oftype flexible = 1; return x and true }",
+            "action checked with (certain values oftype dict oftype integer and integer) returns flexible { return values.get(1) }",
+        ] {
+            let (mir, interner) = lower(source);
+            let function = mir
+                .functions
+                .iter()
+                .find(|function| interner.resolve(function.name).as_ref() == "checked")
+                .expect("missing checked action");
+            let mut jit = JitCompiler::new();
+            assert!(
+                !jit.compile_function(function, &mir, &interner).is_native(),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
     fn checked_integer_arithmetic_compiles_and_reports_native_errors() {
         for (expression, a, b, code) in [
             ("a + b", i64::MAX, 1, "R2003"),
@@ -2330,8 +2471,7 @@ mod tests {
             ("a * b", i64::MAX, 2, "R2003"),
             ("-a", i64::MIN, 0, "R2003"),
             ("math.abs(a)", i64::MIN, 0, "R2003"),
-            ("a ** b", 2, 63, "R2003"),
-            ("a ** b", 2, -1, "R2003"),
+            ("a ** 63", 2, 63, "R2003"),
             ("a / b", i64::MIN, -1, "R2003"),
             ("a % b", i64::MIN, -1, "R2003"),
             ("a / b", 1, 0, "R2001"),
