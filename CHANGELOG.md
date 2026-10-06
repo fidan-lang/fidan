@@ -12,7 +12,7 @@ compiler releases.
 
 ---
 
-## [1.0.15] — 2026-10-05
+## [1.0.15] — 2026-10-06
 
 ### Fixed
 - Implemented colon slicing with omitted bounds, positive/negative steps,
