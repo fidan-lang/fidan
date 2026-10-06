@@ -1,23 +1,25 @@
 //! `fidan-typeck` — Symbol tables, type inference, type checking, parallel safety.
 //!
 //! # Entry point
-//! ```rust,ignore
+//! ```rust
 //! use std::sync::Arc;
-//! use fidan_lexer::SymbolInterner;
-//!
-//! let module: fidan_ast::Module = unimplemented!();
+//! use fidan_lexer::{Lexer, SymbolInterner};
+//! use fidan_source::{FileId, SourceFile};
+//! let file = SourceFile::new(FileId(0), "example.fdn", "print(1 + 2)");
 //! let interner = Arc::new(SymbolInterner::new());
+//! let (tokens, _) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+//! let (module, _) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
 //!
 //! // Lightweight: returns only diagnostics.
 //! let diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
 //!
 //! // Full: returns type map + diagnostics for HIR lowering.
 //! let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+//! assert_eq!(diags.len(), typed.diagnostics.len());
 //! ```
 
 mod check;
 mod infer;
-mod parallel_check;
 mod scope;
 mod types;
 
@@ -230,6 +232,22 @@ mod tests {
     #[test]
     fn string_var_is_clean() {
         assert!(check_errors(r#"var s = "hello""#).is_empty());
+    }
+
+    #[test]
+    fn slicing_rejects_non_integer_components() {
+        for source in [
+            r#"var result = "abc"["x":]"#,
+            r#"var result = "abc"[:true]"#,
+            r#"var result = "abc"[::1.5]"#,
+        ] {
+            assert!(
+                check_errors(source)
+                    .iter()
+                    .any(|error| error.contains("must be an integer")),
+                "{source}"
+            );
+        }
     }
 
     #[test]
@@ -846,6 +864,105 @@ var result = choose(true)
     }
 
     #[test]
+    fn shared_update_checks_callback_and_arity() {
+        for (source, expected) in [
+            (
+                "var value = Shared(0)\nvalue.update()",
+                "not enough arguments for `update`",
+            ),
+            (
+                "var value = Shared(0)\nvalue.update(1)",
+                "type `integer` is not callable",
+            ),
+            (
+                "var value = Shared(0)\nvalue.update(action with (x) { return x }, 1)",
+                "expected 1 argument, got 2",
+            ),
+        ] {
+            let errors = check_errors(source);
+            assert!(
+                errors.iter().any(|message| message.contains(expected)),
+                "{errors:?}"
+            );
+        }
+        assert!(check_errors("var value = Shared(0)\nvar updated oftype integer = value.update(action with (x) { return x + 1 })").is_empty());
+    }
+
+    #[test]
+    fn receiver_generics_and_shared_transform_signatures_are_checked() {
+        for source in [
+            "var xs oftype list oftype integer = []\nxs.append(\"wrong\")",
+            "var xs oftype list oftype integer = []\nxs.extend([\"wrong\"])",
+            "var s = Shared(1)\ns.set(\"wrong\")",
+            "var d oftype dict oftype (string, integer) = {}\nd.set(1, 2)",
+            "var d oftype dict oftype (string, integer) = {}\nd.set(\"key\", \"wrong\")",
+            "var s = Shared(1)\ns.update(action { return 1 })",
+            "var s = Shared(1)\ns.update(action with (certain x oftype integer, certain y oftype integer) { return x + y })",
+            "var s = Shared(1)\ns.update(action with (certain x oftype string) { return 1 })",
+            "var s = Shared(1)\ns.update(action with (x) { return \"wrong\" })",
+            "action wrong with (x) returns string { return \"wrong\" }\nvar s = Shared(1)\ns.update(wrong)",
+            "var wrong = action with (x) { return \"wrong\" }\nvar s = Shared(1)\ns.update(wrong)",
+        ] {
+            assert!(
+                !check_errors(source).is_empty(),
+                "accepted incompatible receiver call: {source}"
+            );
+        }
+        assert!(check_errors("var s = Shared(1)\ns.update(action with (certain x oftype integer, optional delta oftype integer = 1) { return x + delta })").is_empty());
+    }
+
+    #[test]
+    fn concrete_stdlib_calls_and_shared_callbacks_keep_static_arity_checks() {
+        for source in [
+            "use std.math\nmath.pow(1)",
+            "use std.math\nmath.pow(1, 2, 3)",
+            "use std.math\nmath.random(1)",
+            "use std.math\nvar s = Shared(1)\ns.update(math.random)",
+            "use std.math\nvar s = Shared(1)\ns.update(math.pow)",
+        ] {
+            let errors = check_errors(source);
+            assert!(
+                !errors.is_empty(),
+                "accepted incompatible stdlib call: {source}"
+            );
+        }
+        assert!(check_errors("use std.math\nvar s = Shared(1)\ns.update(math.abs)").is_empty());
+    }
+
+    #[test]
+    fn integer_power_types_reflect_value_dependent_results() {
+        for (source, expected) in [
+            ("var result = 2 ** 3", "integer"),
+            ("var result = 2 ** -3", "float"),
+            ("var result = (-1) ** -3", "integer"),
+            (
+                "const var exponent = -3\nvar result = 2 ** exponent",
+                "float",
+            ),
+            (
+                "var base = 2\nvar exponent = -3\nvar result = base ** exponent",
+                "dynamic",
+            ),
+        ] {
+            assert_eq!(top_level_var_type(source, "result"), expected);
+        }
+    }
+
+    #[test]
+    fn overflowing_const_expressions_do_not_panic_the_compiler() {
+        for expression in [
+            "9223372036854775807 + 1",
+            "(-9223372036854775807 - 1) - 1",
+            "-(-9223372036854775807 - 1)",
+            "(-9223372036854775807 - 1) / -1",
+            "(-9223372036854775807 - 1) % -1",
+            "9223372036854775807 * 2",
+        ] {
+            assert!(check_errors(&format!("const var value = {expression}")).is_empty());
+        }
+    }
+
+    #[test]
     fn integer_literal_is_not_callable() {
         let errors = check_errors("var x = 1()");
         assert!(
@@ -1379,5 +1496,79 @@ var result = choose(true)
             warnings.iter().any(|code| code == "W1006"),
             "expected W1006, got {warnings:?}"
         );
+    }
+    #[test]
+    fn strict_operator_contracts_report_e0203() {
+        for expression in [
+            "1.5 & 2.0",
+            "1 | 2.0",
+            "true ^ 1",
+            "true | 1",
+            "\"x\" << 2",
+            "1.5..3.5",
+            "true..5",
+            "1...false",
+            "true and 1",
+            "1 or false",
+            "not 42",
+            "-\"abc\"",
+            "true < false",
+            "\"x\" < 3",
+            "[] >= []",
+        ] {
+            let src = format!("var result = {expression}");
+            let interner = Arc::new(SymbolInterner::new());
+            let file = SourceFile::new(FileId(0), "<test>", src.as_str());
+            let (tokens, lexical) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, parsed) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+            assert!(
+                lexical.is_empty() && parsed.is_empty(),
+                "parse {expression}"
+            );
+            let errors: Vec<_> = typecheck(&module, interner)
+                .into_iter()
+                .filter(|d| d.severity == Severity::Error)
+                .collect();
+            assert!(
+                errors.iter().any(|d| d.code == "E0203"),
+                "expected E0203 for {expression}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_operator_and_dynamic_contracts_remain_supported() {
+        let errors = check_errors(include_str!(
+            "../../../test/examples/operator_builtin_parity_regression.fdn"
+        ));
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+    #[test]
+    fn constructor_arity_uses_single_metadata_contract() {
+        for (expression, expected) in [
+            ("Shared()", "E0301"),
+            ("Shared(1, 2)", "E0305"),
+            ("hashset([1], [2])", "E0305"),
+            ("WeakShared()", "E0301"),
+            ("WeakShared(shared, shared)", "E0305"),
+        ] {
+            let src = format!("var shared = Shared(1)\nvar result = {expression}");
+            let interner = Arc::new(SymbolInterner::new());
+            let file = SourceFile::new(FileId(0), "<test>", src.as_str());
+            let (tokens, lexical) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, parsed) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+            assert!(lexical.is_empty() && parsed.is_empty());
+            let errors: Vec<_> = typecheck(&module, interner)
+                .into_iter()
+                .filter(|d| d.severity == Severity::Error)
+                .collect();
+            assert_eq!(
+                errors.len(),
+                1,
+                "duplicate/missing diagnostics for {expression}: {errors:?}"
+            );
+            assert_eq!(errors[0].code, expected, "{expression}");
+        }
+        assert!(check_errors("var empty = hashset()\nvar one = hashset([1])\nvar shared = Shared(1)\nvar weak = WeakShared(shared)").is_empty());
     }
 }

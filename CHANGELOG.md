@@ -12,6 +12,89 @@ compiler releases.
 
 ---
 
+## [1.0.15] — 2026-10-05
+
+### Fixed
+- Implemented colon slicing with omitted bounds, positive/negative steps,
+  negative indices, Unicode string elements, and safe extreme bounds. Shared
+  runtime semantics cover interpreter and native slices; invalid components
+  and zero steps produce errors.
+- `file_exists` now propagates filesystem inspection failures instead of
+  converting them to false. Missing paths still return false; relative paths
+  resolve against the process working directory.
+- Fixed boolean `not` in both AOT backends. Negation previously complemented
+  the entire boolean byte, leaving `not true` truthy; this made the original
+  LOCAL file manager incorrectly take the missing-file branch after saving.
+- Native object method dispatch releases its field borrow before executing a
+  user method, allowing methods such as the file manager's `loadData()` to
+  replace fields without a `RefCell` panic.
+- Native Unicode indexing/length, list bounds/assignment errors, range methods,
+  and structural collection assertions now match the tested interpreter cases.
+- Integer arithmetic preserves documented R2003 overflow errors across the
+  interpreter, selective JIT, and both AOT backends, including negation, powers,
+  and MIN / -1 or MIN % -1. Division/remainder by zero reports R2001 for typed
+  and flexible values. Negative integer powers of 1 and -1 retain exact integer
+  results; other nonzero bases produce floats, and zero reports R2001.
+- Integer absolute value reports R2003 for MIN in standard-library calls,
+  receiver methods, and native intrinsics, without a host arithmetic panic.
+- Selective JIT scalar operations check MIR operand types so boxed flexible
+  values use interpreter fallback instead of treating pointers as integers.
+- String receiver searches use Unicode scalar indices; substring aliases safely
+  clamp bounds and return empty reversed ranges. charAt boundary behavior agrees
+  between interpreter and native execution.
+- Strength reduction requires proven integer or boolean operands and compatible
+  result types. Flexible operations retain runtime behavior and errors; mixed
+  numeric and float expressions retain their types, NaN, and signed-zero behavior.
+- LSP positions and document edits handle UTF-16 columns and reject ranges
+  splitting surrogate pairs.
+- LLVM bitcode serialization retains trailing bytes, fixing full LTO, and CPU
+  argument parsing handles Unicode without panicking.
+- Native fixture builds use isolated Cargo artifacts; Windows file-manager
+  tests keep executable artifacts separate from their temporary IO fixtures.
+- Implemented the documented `Shared.update(callback)` atomic read-modify-write
+  operation in interpreter and native dispatch. It returns the new value and
+  rejects same-thread recursive access. Restored same-counter parallel examples.
+- First-class standard-library calls now validate required, optional and variadic
+  argument counts before dispatch, including erased action/flexible values and
+  `Shared.update` callbacks. Interpreter and native paths report catchable R0001
+  errors from shared declarative metadata in `fidan-config`.
+- Both AOT backends return owned boxed values, preventing identity callbacks from
+  returning freed borrowed arguments and corrupting the native heap.
+
+### Changed
+- Refreshed compatible dependencies, including Cranelift 0.136.2 and Inkwell
+  pinned upstream revision `c8234a0ee4171e946f94f6b3b5da0ea8d6ef5f3b`.
+  The default LLVM toolchain is 23.1.2 with `llvm-sys` 231
+  (locked at 231.0.0). The locked graph requires Rust 1.96 or newer and was
+  validated with Rust 1.99.
+- Prepared LLVM helper/toolchain 1.0.6. AI helper stays at 1.0.4. Wire formats
+  are unchanged: LLVM backend protocol 5, AI analysis protocol 1, and AI helper
+  protocol 2 remain compatible.
+- Workspace formatting and strict Clippy cover all targets and optional
+  features. Toolchain release workflows validate their packages before upload.
+- README and contributor guidance describe actual backend coverage, build and
+  test commands, optional LLVM requirements, and current limitations, while
+  retaining Fidan's AI-native identity through structured compiler analysis,
+  first-party AI workflows, and MCP tooling. Detailed
+  verification and findings are recorded in `docs/ENGINEERING_AUDIT.md`.
+
+### Tests
+- Added final semantic fixtures for receiver generic/callback contracts, dynamic
+  operators/indexing, checked constants, negative powers, recursive equality,
+  canonical slices and owned direct/dynamic returns.
+- Added shared slicing, integer-overflow, and boolean/object-mutation fixtures, cross-backend error
+  checks, filesystem/path/persistence coverage, UTF-16 regressions, range and
+  assertion tests, LLVM bitcode round trips, and repeated syntax-reference runs.
+- Optimized-pipeline regressions cover flexible string concatenation and type
+  errors, all strength-reduction rules, safe integer/boolean reductions, float
+  edge cases, and mixed numeric result types in the interpreter/JIT. The shared
+  numeric/boolean fixture also runs through both AOT backends.
+- Added repeated Shared updates across parallel tasks and loops, captured/named
+  callbacks, callback errors, recursive access, identity returns, metadata/arity,
+  and E0401 checks. Interpreter/JIT and both AOT backends share the fixture.
+
+---
+
 ## [1.0.14] — 2026-04-24
 
 ### Added
@@ -481,7 +564,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.14...HEAD
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.15...HEAD
+[1.0.15]: https://github.com/fidan-lang/fidan/compare/v1.0.14...v1.0.15
 [1.0.14]: https://github.com/fidan-lang/fidan/compare/v1.0.13...v1.0.14
 [1.0.13]: https://github.com/fidan-lang/fidan/compare/v1.0.12...v1.0.13
 [1.0.12]: https://github.com/fidan-lang/fidan/compare/v1.0.10...v1.0.12

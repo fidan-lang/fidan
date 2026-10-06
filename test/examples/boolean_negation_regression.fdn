@@ -1,0 +1,32 @@
+# Logical negation must produce canonical booleans for calls and branches.
+@precompile
+action negate with (certain value oftype boolean) returns boolean {
+    return not value
+}
+
+for value in [true, false] {
+    var inverse = negate(value)
+    assert_eq(inverse, value == false)
+    assert_eq(negate(inverse), value)
+    if not value {
+        assert_eq(value, false)
+    } else {
+        assert_eq(value, true)
+    }
+    if inverse {
+        assert_eq(value, false)
+    }
+}
+
+object Switch {
+    var enabled = false
+    action toggle returns boolean {
+        this.enabled = not this.enabled
+        return this.enabled
+    }
+}
+var switch = Switch()
+assert_eq(switch.toggle(), true)
+assert_eq(switch.toggle(), false)
+assert_eq(switch.enabled, false)
+print("boolean negation ok")

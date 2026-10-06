@@ -32,7 +32,7 @@ pub enum FidanType {
     Shared(Box<FidanType>),
     WeakShared(Box<FidanType>),
     Pending(Box<FidanType>),
-    // First-class action type (future)
+    // First-class action values; signatures are tracked in ActionInfo.
     Function,
     // Inference placeholder — eliminated after type-checking a scope
     Unknown,

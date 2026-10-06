@@ -28,6 +28,33 @@ impl StdlibRuntimeError {
     }
 }
 
+/// Validate a callable before dispatch can ignore or synthesize arguments.
+pub fn validate_callable_arity(
+    module: &str,
+    name: &str,
+    count: usize,
+) -> Result<(), StdlibRuntimeError> {
+    let Some((minimum, maximum)) = fidan_config::stdlib::callable_arity(module, name) else {
+        return Err(StdlibRuntimeError::new(
+            fidan_diagnostics::diag_code!("R0001"),
+            format!("unknown stdlib callable `{module}.{name}`"),
+        ));
+    };
+    if count < minimum || maximum.is_some_and(|maximum| count > maximum) {
+        let expected = maximum.map_or_else(
+            || format!("at least {minimum}"),
+            |maximum| format!("{minimum}..{maximum}"),
+        );
+        return Err(StdlibRuntimeError::new(
+            fidan_diagnostics::diag_code!("R0001"),
+            format!(
+                "callback argument count for `{module}.{name}`: expected {expected}, got {count}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct ValueModuleInfo {
     name: &'static str,

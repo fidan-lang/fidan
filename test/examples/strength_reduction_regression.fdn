@@ -1,0 +1,74 @@
+# Indirect calls preserve flexible parameters through the normal optimizer.
+use std.math
+action add_zero with (certain x oftype flexible) returns flexible { return x + 0 }
+action zero_add with (certain x oftype flexible) returns flexible { return 0 + x }
+action subtract_zero with (certain x oftype flexible) returns flexible { return x - 0 }
+action multiply_one with (certain x oftype flexible) returns flexible { return x * 1 }
+action one_multiply with (certain x oftype flexible) returns flexible { return 1 * x }
+action multiply_zero with (certain x oftype flexible) returns flexible { return x * 0 }
+action zero_multiply with (certain x oftype flexible) returns flexible { return 0 * x }
+action divide_one with (certain x oftype flexible) returns flexible { return x / 1 }
+action power_zero with (certain x oftype flexible) returns flexible { return x ** 0 }
+action power_one with (certain x oftype flexible) returns flexible { return x ** 1 }
+var arithmetic oftype list oftype flexible = [add_zero, zero_add, subtract_zero, multiply_one, one_multiply, multiply_zero, zero_multiply, divide_one, power_zero, power_one]
+for i in [0, 1, 2, 3, 4, 7, 9] {
+    var result = arithmetic[i](2.5)
+    assert_eq(type(result), "float")
+    assert_eq(result, 2.5)
+}
+for i in [5, 6] {
+    var result = arithmetic[i](-2.5)
+    assert_eq(type(result), "float")
+    assert_eq(math.sign(result), -1.0)
+    assert(math.isNaN(arithmetic[i](math.nan())))
+}
+assert_eq(type(arithmetic[8](2.5)), "float")
+assert_eq(arithmetic[8](2.5), 1.0)
+
+action float_add_zero with (certain x oftype float) returns float { return x + 0.0 }
+action float_subtract_zero with (certain x oftype float) returns float { return x - 0.0 }
+action float_multiply_zero with (certain x oftype float) returns float { return x * 0 }
+action float_power_zero with (certain x oftype float) returns float { return x ** 0 }
+assert_eq(math.sign(float_add_zero(-0.0)), 1.0)
+assert_eq(math.sign(float_subtract_zero(-0.0)), -1.0)
+assert_eq(type(float_multiply_zero(2.5)), "float")
+assert_eq(type(float_power_zero(2.5)), "float")
+assert(math.isNaN(float_multiply_zero(math.nan())))
+
+action mixed_add with (certain x oftype integer) returns float { return x + 0.0 }
+action mixed_left_add with (certain x oftype integer) returns float { return 0.0 + x }
+action mixed_subtract with (certain x oftype integer) returns float { return x - 0.0 }
+action mixed_multiply with (certain x oftype integer) returns float { return x * 1.0 }
+action mixed_left_multiply with (certain x oftype integer) returns float { return 1.0 * x }
+action mixed_divide with (certain x oftype integer) returns float { return x / 1.0 }
+assert_eq(type(mixed_add(3)), "float")
+assert_eq(type(mixed_left_add(3)), "float")
+assert_eq(type(mixed_subtract(3)), "float")
+assert_eq(type(mixed_multiply(3)), "float")
+assert_eq(type(mixed_left_multiply(3)), "float")
+assert_eq(type(mixed_divide(3)), "float")
+var x = 2.5
+var y = x * 0
+assert_eq(type(y), "float")
+assert_eq(y, 0.0)
+
+action and_true with (certain x oftype flexible) returns flexible { return x and true }
+action true_and with (certain x oftype flexible) returns flexible { return true and x }
+action and_false with (certain x oftype flexible) returns flexible { return x and false }
+action false_and with (certain x oftype flexible) returns flexible { return false and x }
+action or_false with (certain x oftype flexible) returns flexible { return x or false }
+action false_or with (certain x oftype flexible) returns flexible { return false or x }
+action or_true with (certain x oftype flexible) returns flexible { return x or true }
+action true_or with (certain x oftype flexible) returns flexible { return true or x }
+var logic oftype list oftype flexible = [and_true, true_and, and_false, false_and, or_false, false_or, or_true, true_or]
+for value in [true, false] {
+    assert_eq(logic[0](value), value)
+    assert_eq(logic[1](value), value)
+    assert_eq(logic[2](value), false)
+    assert_eq(logic[3](value), false)
+    assert_eq(logic[4](value), value)
+    assert_eq(logic[5](value), value)
+    assert_eq(logic[6](value), true)
+    assert_eq(logic[7](value), true)
+}
+print("strength reduction ok")

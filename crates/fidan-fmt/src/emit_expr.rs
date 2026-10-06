@@ -341,12 +341,14 @@ fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: Layo
             if let Some(s) = start {
                 emit_expr_prec_mode(p, s, 0, mode);
             }
-            p.w(if inclusive { "..." } else { ".." });
+            // Inclusive compatibility slices retain their spelling: a dynamic
+            // inclusive bound cannot be changed to an exclusive bound safely.
+            p.w(if inclusive { "..." } else { ":" });
             if let Some(e) = end {
                 emit_expr_prec_mode(p, e, 0, mode);
             }
             if let Some(st) = step {
-                p.w(" step ");
+                p.w(if inclusive { " step " } else { ":" });
                 emit_expr_prec_mode(p, st, 0, mode);
             }
             p.w("]");

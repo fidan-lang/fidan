@@ -2,7 +2,7 @@
 //!
 //! Entry point for the `fidan lsp` CLI subcommand:
 //!
-//! ```rust,ignore
+//! ```rust,no_run
 //! fidan_lsp::run();
 //! ```
 

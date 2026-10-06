@@ -25,7 +25,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use cranelift_codegen::{
     Context,
     ir::{
-        AbiParam, BlockArg, Function, InstBuilder, MemFlags, TrapCode, UserFuncName,
+        AbiParam, BlockArg, Function, InstBuilder, MemFlagsData, TrapCode, UserFuncName,
         condcodes::{FloatCC, IntCC},
         types::{F64, I8, I32, I64},
     },
@@ -469,6 +469,15 @@ struct RuntimeDecls {
     truthy: cranelift_module::FuncId,
     null_coalesce: cranelift_module::FuncId,
     // Dynamic arithmetic
+    float_div: cranelift_module::FuncId,
+    int_add: cranelift_module::FuncId,
+    int_sub: cranelift_module::FuncId,
+    int_mul: cranelift_module::FuncId,
+    int_div: cranelift_module::FuncId,
+    int_rem: cranelift_module::FuncId,
+    int_pow: cranelift_module::FuncId,
+    int_neg: cranelift_module::FuncId,
+    int_abs: cranelift_module::FuncId,
     dyn_add: cranelift_module::FuncId,
     dyn_sub: cranelift_module::FuncId,
     dyn_mul: cranelift_module::FuncId,
@@ -495,6 +504,7 @@ struct RuntimeDecls {
     dyn_shr: cranelift_module::FuncId,
     // Range
     make_range: cranelift_module::FuncId,
+    make_range_checked: cranelift_module::FuncId,
     // Builtins
     println_fn: cranelift_module::FuncId,
     print_many_fn: cranelift_module::FuncId,
@@ -559,6 +569,10 @@ struct RuntimeDecls {
     fn_table_set: cranelift_module::FuncId,
     fn_name_register: cranelift_module::FuncId,
     call_dynamic: cranelift_module::FuncId,
+    validate_call: cranelift_module::FuncId,
+    prepare_argument: cranelift_module::FuncId,
+    check_argument: cranelift_module::FuncId,
+    shared_update_typed: cranelift_module::FuncId,
     spawn_expr: cranelift_module::FuncId,
     spawn_dynamic: cranelift_module::FuncId,
     spawn_concurrent: cranelift_module::FuncId,
@@ -596,6 +610,11 @@ impl RuntimeDecls {
                 let mut s = module.make_signature();
                 $(s.params.push(AbiParam::new($p));)*
                 s.returns.push(AbiParam::new(I64)); s
+            }};
+            (($($p:expr),*) -> f64) => {{
+                let mut s = module.make_signature();
+                $(s.params.push(AbiParam::new($p));)*
+                s.returns.push(AbiParam::new(F64)); s
             }};
             (($($p:expr),*) -> i8) => {{
                 let mut s = module.make_signature();
@@ -635,6 +654,15 @@ impl RuntimeDecls {
             drop_any: decl!("fdn_drop", sig!((p) -> void)),
             truthy: decl!("fdn_truthy", sig!((p) -> i8)),
             null_coalesce: decl!("fdn_null_coalesce", sig!((p, p) -> ptr)),
+            float_div: decl!("fdn_float_div", sig!((f64t, f64t) -> f64)),
+            int_add: decl!("fdn_int_add", sig!((i64t, i64t) -> i64)),
+            int_sub: decl!("fdn_int_sub", sig!((i64t, i64t) -> i64)),
+            int_mul: decl!("fdn_int_mul", sig!((i64t, i64t) -> i64)),
+            int_div: decl!("fdn_int_div", sig!((i64t, i64t) -> i64)),
+            int_rem: decl!("fdn_int_rem", sig!((i64t, i64t) -> i64)),
+            int_pow: decl!("fdn_int_pow", sig!((i64t, i64t) -> i64)),
+            int_abs: decl!("fdn_int_abs", sig!((i64t) -> i64)),
+            int_neg: decl!("fdn_int_neg", sig!((i64t) -> i64)),
             dyn_add: decl!("fdn_dyn_add", sig!((p, p) -> ptr)),
             dyn_sub: decl!("fdn_dyn_sub", sig!((p, p) -> ptr)),
             dyn_mul: decl!("fdn_dyn_mul", sig!((p, p) -> ptr)),
@@ -664,6 +692,7 @@ impl RuntimeDecls {
                 s.returns.push(AbiParam::new(I64));
                 s
             }),
+            make_range_checked: decl!("fdn_make_range_checked", sig!((p, p, I8) -> ptr)),
             println_fn: decl!("fdn_println", sig!((p) -> void)),
             print_many_fn: decl!("fdn_print_many", {
                 let mut s = module.make_signature();
@@ -734,6 +763,10 @@ impl RuntimeDecls {
             fn_table_set: decl!("fdn_fn_table_set", sig!((i64t, i64t) -> void)),
             fn_name_register: decl!("fdn_fn_name_register", sig!((p, i64t, i64t) -> void)),
             call_dynamic: decl!("fdn_call_dynamic", sig!((p, p, i64t) -> ptr)),
+            validate_call: decl!("fdn_validate_call", sig!((i64t, i64t, i64t) -> i8)),
+            prepare_argument: decl!("fdn_prepare_argument", sig!((p, p, i8t) -> ptr)),
+            check_argument: decl!("fdn_check_argument", sig!((p, p, i64t) -> ptr)),
+            shared_update_typed: decl!("fdn_shared_update_typed", sig!((p, p, p, i64t) -> ptr)),
             spawn_expr: decl!("fdn_spawn_expr", sig!((i64t, p, i64t) -> ptr)),
             spawn_dynamic: decl!("fdn_spawn_dynamic", sig!((p, p, i64t, p, i64t) -> ptr)),
             spawn_concurrent: decl!(
@@ -1084,7 +1117,7 @@ fn lower_extern_wrapper(
         }
     }
 
-    builder.finalize();
+    builder.finalize(module.target_config());
 
     Ok(())
 }
@@ -1260,7 +1293,7 @@ fn lower_function(
     }
 
     builder.seal_all_blocks();
-    builder.finalize();
+    builder.finalize(module.target_config());
     Ok(())
 }
 
@@ -1313,7 +1346,9 @@ fn build_boxed_value_array(
         3u8,
     ));
     for (index, value) in values.iter().enumerate() {
-        builder.ins().stack_store(*value, slot, (index as i32) * 8);
+        builder
+            .ins()
+            .stack_store(PTR_TY, *value, slot, (index as i32) * 8);
     }
     let ptr = builder.ins().stack_addr(PTR_TY, slot, 0);
     let cnt = builder.ins().iconst(I64, values.len() as i64);
@@ -1326,7 +1361,7 @@ fn coalesce_null_ptr_to_nothing(
     builder: &mut FunctionBuilder<'_>,
     value: cranelift_codegen::ir::Value,
 ) -> Result<cranelift_codegen::ir::Value> {
-    let is_null = builder.ins().icmp_imm(IntCC::Equal, value, 0);
+    let is_null = builder.ins().icmp_imm_s(IntCC::Equal, value, 0);
     let nothing = call_rt(module, builder, rt.box_nothing, &[])?.unwrap();
     Ok(builder.ins().select(is_null, nothing, value))
 }
@@ -1399,16 +1434,19 @@ fn lower_instr(
                 val
             };
             builder.def_var(cl_vars[dest.0 as usize], val);
-            if let Rvalue::Call { callee, args } = rhs
-                && call_may_throw(
+            let may_throw = match rhs {
+                rhs if rhs.arithmetic_may_fail() => true,
+                Rvalue::Call { callee, args } => call_may_throw(
                     callee,
                     args,
                     local_types,
                     namespace_locals,
                     function_throw_map,
                     interner,
-                )?
-            {
+                )?,
+                _ => false,
+            };
+            if may_throw {
                 emit_pending_exception_check(
                     module,
                     rt,
@@ -1559,6 +1597,18 @@ fn lower_instr(
             let r = call_rt(module, builder, access, &[obj, idx])?
                 .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
             builder.def_var(cl_vars[dest.0 as usize], r);
+            emit_pending_exception_check(
+                module,
+                rt,
+                builder,
+                cl_blocks,
+                cl_vars,
+                local_types,
+                mf,
+                bi,
+                current_catch_stack,
+                interner,
+            )?;
         }
 
         Instr::SetIndex {
@@ -1574,6 +1624,18 @@ fn lower_instr(
                 _ => rt.list_set,
             };
             call_rt(module, builder, access, &[obj, idx, val])?;
+            emit_pending_exception_check(
+                module,
+                rt,
+                builder,
+                cl_blocks,
+                cl_vars,
+                local_types,
+                mf,
+                bi,
+                current_catch_stack,
+                interner,
+            )?;
         }
 
         Instr::Drop { local } => {
@@ -1616,8 +1678,8 @@ fn lower_instr(
                     namespace_locals.remove(dest);
                 }
                 let gv = module.declare_data_in_func(data_id, builder.func);
-                let addr = builder.ins().global_value(PTR_TY, gv);
-                let val = builder.ins().load(PTR_TY, MemFlags::new(), addr, 0);
+                let addr = builder.ins().symbol_value(PTR_TY, gv);
+                let val = builder.ins().load(PTR_TY, MemFlagsData::new(), addr, 0);
                 store_local_from_boxed(builder, cl_vars, local_types, *dest, val, rt, module)?;
             } else {
                 namespace_locals.remove(dest);
@@ -1630,11 +1692,15 @@ fn lower_instr(
             let GlobalId(gid) = global;
             if let Some(&data_id) = global_data_ids.get(*gid as usize) {
                 let gv = module.declare_data_in_func(data_id, builder.func);
-                let addr = builder.ins().global_value(PTR_TY, gv);
+                let addr = builder.ins().symbol_value(PTR_TY, gv);
                 let val = lower_operand_boxed(builder, cl_vars, local_types, value, rt, module)?;
                 let cloned = call_rt(module, builder, rt.clone_any, &[val])?
                     .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
-                builder.ins().store(MemFlags::new(), cloned, addr, 0);
+                // The global owns its box; replacing it must release the old
+                // owner so WeakShared observes the same lifetime as the interpreter.
+                let current = builder.ins().load(PTR_TY, MemFlagsData::new(), addr, 0);
+                call_rt(module, builder, rt.drop_any, &[current])?;
+                builder.ins().store(MemFlagsData::new(), cloned, addr, 0);
             }
         }
 
@@ -1922,7 +1988,7 @@ fn lower_terminator(
                     // Non-scalar return type (Dynamic, List, Object, etc.):
                     // always return a valid *mut FidanValue.  If the operand is
                     // a native scalar (e.g. an Integer local from arithmetic), box it first.
-                    lower_operand_boxed(builder, cl_vars, local_types, op, rt, module)?
+                    lower_owned_boxed_operand(builder, cl_vars, local_types, op, rt, module)?
                 } else {
                     // Scalar return type (Integer/Float/Boolean).
                     // If the operand is a Dynamic (boxed pointer) value — e.g. the result
@@ -2094,8 +2160,7 @@ fn lower_rvalue(
                     lower_operand_boxed(builder, cl_vars, local_types, op, rt, module)
                 }
             } else {
-                let boxed = lower_operand(builder, cl_vars, op);
-                Ok(call_rt(module, builder, rt.clone_any, &[boxed])?.unwrap_or(boxed))
+                lower_owned_boxed_operand(builder, cl_vars, local_types, op, rt, module)
             }
         }
 
@@ -2211,6 +2276,13 @@ fn lower_rvalue(
             for elem in elems {
                 let ev = lower_operand_boxed(builder, cl_vars, local_types, elem, rt, module)?;
                 call_rt(module, builder, rt.list_push, &[list, ev])?;
+                // list_push clones its borrowed input. Constants and scalars
+                // were freshly boxed here; boxed locals remain borrowed.
+                if matches!(elem, Operand::Const(_))
+                    || is_scalar(&operand_mir_ty(local_types, elem))
+                {
+                    call_rt(module, builder, rt.drop_any, &[ev])?;
+                }
             }
             Ok(list)
         }
@@ -2222,6 +2294,14 @@ fn lower_rvalue(
                 let kv = lower_operand_boxed(builder, cl_vars, local_types, k, rt, module)?;
                 let vv = lower_operand_boxed(builder, cl_vars, local_types, v, rt, module)?;
                 call_rt(module, builder, rt.dict_set, &[dict, kv, vv])?;
+                // dict_set clones both borrowed inputs before returning.
+                for (operand, temporary) in [(k, kv), (v, vv)] {
+                    if matches!(operand, Operand::Const(_))
+                        || is_scalar(&operand_mir_ty(local_types, operand))
+                    {
+                        call_rt(module, builder, rt.drop_any, &[temporary])?;
+                    }
+                }
             }
             Ok(dict)
         }
@@ -2393,10 +2473,6 @@ fn lower_binary(
 ) -> Result<cranelift_codegen::ir::Value> {
     use fidan_ast::BinOp::*;
 
-    fn known_nonzero_integer(op: &Operand) -> bool {
-        matches!(op, Operand::Const(MirLit::Int(value)) if *value != 0)
-    }
-
     let lhs_mir = operand_mir_ty(local_types, lhs);
     let rhs_mir = operand_mir_ty(local_types, rhs);
     let lhs_ty = mir_ty_to_cl(&lhs_mir);
@@ -2404,61 +2480,21 @@ fn lower_binary(
 
     // Integer × Integer native path — only when both operands are DEFINITELY
     // native integers (not Dynamic/boxed pointers, which also map to I64).
-    if lhs_ty == I64 && rhs_ty == I64 && lhs_mir == MirTy::Integer && rhs_mir == MirTy::Integer {
+    if lhs_ty == I64
+        && rhs_ty == I64
+        && lhs_mir == MirTy::Integer
+        && rhs_mir == MirTy::Integer
+        && (op != Pow || result_ty == &MirTy::Integer)
+    {
         let l = lower_operand(builder, cl_vars, lhs);
         let r = lower_operand(builder, cl_vars, rhs);
         return Ok(match op {
-            Add => builder.ins().iadd(l, r),
-            Sub => builder.ins().isub(l, r),
-            Mul => builder.ins().imul(l, r),
-            Div => {
-                if !known_nonzero_integer(rhs) {
-                    // Guard against divide-by-zero only when the divisor is not a known nonzero literal.
-                    let zero = builder.ins().iconst(I64, 0);
-                    let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
-                    let ok_block = builder.create_block();
-                    let trap_block = builder.create_block();
-                    builder.ins().brif(is_zero, trap_block, &[], ok_block, &[]);
-                    builder.switch_to_block(trap_block);
-                    builder.seal_block(trap_block);
-                    let (mp, ml) = str_const(module, builder, "division by zero")?;
-                    let msg_ptr = {
-                        let r2 = module.declare_func_in_func(rt.box_str, builder.func);
-                        let inst = builder.ins().call(r2, &[mp, ml]);
-                        builder.inst_results(inst)[0]
-                    };
-                    let panic_ref = module.declare_func_in_func(rt.panic_fn, builder.func);
-                    builder.ins().call(panic_ref, &[msg_ptr]);
-                    builder.ins().trap(TrapCode::unwrap_user(1));
-                    builder.switch_to_block(ok_block);
-                    builder.seal_block(ok_block);
-                }
-                builder.ins().sdiv(l, r)
-            }
-            Rem => {
-                if !known_nonzero_integer(rhs) {
-                    // Guard against divide-by-zero only when the divisor is not a known nonzero literal.
-                    let zero = builder.ins().iconst(I64, 0);
-                    let is_zero = builder.ins().icmp(IntCC::Equal, r, zero);
-                    let ok_block = builder.create_block();
-                    let trap_block = builder.create_block();
-                    builder.ins().brif(is_zero, trap_block, &[], ok_block, &[]);
-                    builder.switch_to_block(trap_block);
-                    builder.seal_block(trap_block);
-                    let (mp, ml) = str_const(module, builder, "remainder by zero")?;
-                    let msg_ptr = {
-                        let r2 = module.declare_func_in_func(rt.box_str, builder.func);
-                        let inst = builder.ins().call(r2, &[mp, ml]);
-                        builder.inst_results(inst)[0]
-                    };
-                    let panic_ref = module.declare_func_in_func(rt.panic_fn, builder.func);
-                    builder.ins().call(panic_ref, &[msg_ptr]);
-                    builder.ins().trap(TrapCode::unwrap_user(1));
-                    builder.switch_to_block(ok_block);
-                    builder.seal_block(ok_block);
-                }
-                builder.ins().srem(l, r)
-            }
+            Add => call_rt(module, builder, rt.int_add, &[l, r])?.unwrap(),
+            Sub => call_rt(module, builder, rt.int_sub, &[l, r])?.unwrap(),
+            Mul => call_rt(module, builder, rt.int_mul, &[l, r])?.unwrap(),
+            Div => call_rt(module, builder, rt.int_div, &[l, r])?.unwrap(),
+            Rem => call_rt(module, builder, rt.int_rem, &[l, r])?.unwrap(),
+            Pow => call_rt(module, builder, rt.int_pow, &[l, r])?.unwrap(),
             Eq => builder.ins().icmp(IntCC::Equal, l, r),
             NotEq => builder.ins().icmp(IntCC::NotEqual, l, r),
             Lt => builder.ins().icmp(IntCC::SignedLessThan, l, r),
@@ -2468,8 +2504,14 @@ fn lower_binary(
             BitXor => builder.ins().bxor(l, r),
             BitAnd => builder.ins().band(l, r),
             BitOr => builder.ins().bor(l, r),
-            Shl => builder.ins().ishl(l, r),
-            Shr => builder.ins().sshr(l, r),
+            Shl => {
+                let count = builder.ins().band_imm_u(r, 63);
+                builder.ins().ishl(l, count)
+            }
+            Shr => {
+                let count = builder.ins().band_imm_u(r, 63);
+                builder.ins().sshr(l, count)
+            }
             Range | RangeInclusive => {
                 let inc = builder
                     .ins()
@@ -2477,7 +2519,7 @@ fn lower_binary(
                 return Ok(call_rt(module, builder, rt.make_range, &[l, r, inc])?
                     .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)));
             }
-            Pow | And | Or => {
+            And | Or => {
                 // Box and dispatch through C ABI.
                 let lb = call_rt(module, builder, rt.box_int, &[l])?.unwrap();
                 let rb = call_rt(module, builder, rt.box_int, &[r])?.unwrap();
@@ -2494,11 +2536,16 @@ fn lower_binary(
             Add => builder.ins().fadd(l, r),
             Sub => builder.ins().fsub(l, r),
             Mul => builder.ins().fmul(l, r),
-            Div => builder.ins().fdiv(l, r),
+            Div => call_rt(module, builder, rt.float_div, &[l, r])?.unwrap(),
             Rem => {
                 let lb = call_rt(module, builder, rt.box_float, &[l])?.unwrap();
                 let rb = call_rt(module, builder, rt.box_float, &[r])?.unwrap();
-                return dyn_binop(module, rt, builder, op, lb, rb, result_ty);
+                // fdn_box_float allocates these two boxes with Box::into_raw;
+                // the dynamic operation borrows them and owns its separate result.
+                let result = dyn_binop(module, rt, builder, op, lb, rb, result_ty)?;
+                call_rt(module, builder, rt.drop_any, &[lb])?;
+                call_rt(module, builder, rt.drop_any, &[rb])?;
+                return Ok(result);
             }
             Eq => builder.ins().fcmp(FloatCC::Equal, l, r),
             NotEq => builder.ins().fcmp(FloatCC::NotEqual, l, r),
@@ -2509,7 +2556,10 @@ fn lower_binary(
             _ => {
                 let lb = call_rt(module, builder, rt.box_float, &[l])?.unwrap();
                 let rb = call_rt(module, builder, rt.box_float, &[r])?.unwrap();
-                return dyn_binop(module, rt, builder, op, lb, rb, result_ty);
+                let result = dyn_binop(module, rt, builder, op, lb, rb, result_ty)?;
+                call_rt(module, builder, rt.drop_any, &[lb])?;
+                call_rt(module, builder, rt.drop_any, &[rb])?;
+                return Ok(result);
             }
         });
     }
@@ -2530,7 +2580,16 @@ fn lower_binary(
     // Fallback: box both and dispatch dynamically.
     let lb = lower_operand_boxed(builder, cl_vars, local_types, lhs, rt, module)?;
     let rb = lower_operand_boxed(builder, cl_vars, local_types, rhs, rt, module)?;
-    dyn_binop(module, rt, builder, op, lb, rb, result_ty)
+    let result = dyn_binop(module, rt, builder, op, lb, rb, result_ty)?;
+    // Constants and known scalar operands allocate fresh boxes here; non-scalar
+    // locals are borrowed and must remain live after this operation.
+    for (operand, boxed) in [(lhs, lb), (rhs, rb)] {
+        if matches!(operand, Operand::Const(_)) || is_scalar(&operand_mir_ty(local_types, operand))
+        {
+            call_rt(module, builder, rt.drop_any, &[boxed])?;
+        }
+    }
+    Ok(result)
 }
 
 fn dyn_binop(
@@ -2564,13 +2623,13 @@ fn dyn_binop(
         Shl => rt.dyn_shl,
         Shr => rt.dyn_shr,
         Range | RangeInclusive => {
-            let start = call_rt(module, builder, rt.unbox_int, &[l])?.unwrap();
-            let end = call_rt(module, builder, rt.unbox_int, &[r])?.unwrap();
             let inc = builder
                 .ins()
                 .iconst(I8, if op == RangeInclusive { 1 } else { 0 });
-            return Ok(call_rt(module, builder, rt.make_range, &[start, end, inc])?
-                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)));
+            return Ok(
+                call_rt(module, builder, rt.make_range_checked, &[l, r, inc])?
+                    .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)),
+            );
         }
     };
     let boxed = call_rt(module, builder, rt_fn, &[l, r])?
@@ -2592,21 +2651,7 @@ fn dyn_binop(
         }
     } else {
         // `boxed` is i64 (a *mut FidanValue heap pointer)
-        match result_ty {
-            MirTy::Integer => {
-                Ok(call_rt(module, builder, rt.unbox_int, &[boxed])?.unwrap_or(boxed))
-            }
-            MirTy::Float => {
-                Ok(call_rt(module, builder, rt.unbox_float, &[boxed])?.unwrap_or(boxed))
-            }
-            MirTy::Boolean => {
-                Ok(call_rt(module, builder, rt.unbox_bool, &[boxed])?.unwrap_or(boxed))
-            }
-            MirTy::Handle => {
-                Ok(call_rt(module, builder, rt.unbox_handle, &[boxed])?.unwrap_or(boxed))
-            }
-            _ => Ok(boxed), // Dynamic / String / Range: keep the boxed ptr
-        }
+        coerce_boxed_call_result(module, rt, builder, boxed, result_ty)
     }
 }
 
@@ -2625,9 +2670,9 @@ fn lower_unary(
     use fidan_ast::UnOp::*;
     let oty = operand_ty(cl_vars, local_types, operand);
     match (op, oty) {
-        (Neg, I64) => {
+        (Neg, I64) if operand_mir_ty(local_types, operand) == MirTy::Integer => {
             let v = lower_operand(builder, cl_vars, operand);
-            Ok(builder.ins().ineg(v))
+            call_rt(module, builder, rt.int_neg, &[v]).map(Option::unwrap)
         }
         (Neg, F64) => {
             let v = lower_operand(builder, cl_vars, operand);
@@ -2635,9 +2680,11 @@ fn lower_unary(
         }
         (Not, I8) => {
             let v = lower_operand(builder, cl_vars, operand);
-            Ok(builder.ins().bnot(v))
+            let zero = builder.ins().iconst(I8, 0);
+            Ok(builder.ins().icmp(IntCC::Equal, v, zero))
         }
-        (Pos, _) => Ok(lower_operand(builder, cl_vars, operand)),
+        (Pos, _) if is_scalar(ty) => Ok(lower_operand(builder, cl_vars, operand)),
+        (Pos, _) => lower_owned_boxed_operand(builder, cl_vars, local_types, operand, rt, module),
         _ => {
             let v = lower_operand_boxed(builder, cl_vars, local_types, operand, rt, module)?;
             let rt_fn = match op {
@@ -2647,19 +2694,13 @@ fn lower_unary(
             };
             let boxed = call_rt(module, builder, rt_fn, &[v])?
                 .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
-            // Unbox if the caller expects a native scalar
-            match ty {
-                MirTy::Integer => {
-                    Ok(call_rt(module, builder, rt.unbox_int, &[boxed])?.unwrap_or(boxed))
-                }
-                MirTy::Float => {
-                    Ok(call_rt(module, builder, rt.unbox_float, &[boxed])?.unwrap_or(boxed))
-                }
-                MirTy::Boolean => {
-                    Ok(call_rt(module, builder, rt.unbox_bool, &[boxed])?.unwrap_or(boxed))
-                }
-                _ => Ok(boxed),
+            let result = coerce_boxed_call_result(module, rt, builder, boxed, ty)?;
+            if matches!(operand, Operand::Const(_))
+                || is_scalar(&operand_mir_ty(local_types, operand))
+            {
+                call_rt(module, builder, rt.drop_any, &[v])?;
             }
+            Ok(result)
         }
     }
 }
@@ -2687,6 +2728,7 @@ fn emit_call(
             let fn_ref = module.declare_func_in_func(cl_fn_id, builder.func);
             let mir_fn = &program.functions[fn_id.0 as usize];
             let mut arg_vals = Vec::with_capacity(mir_fn.params.len());
+            let mut cloned_args = Vec::new();
             for (i, param) in mir_fn.params.iter().enumerate() {
                 let v = if let Some(arg_op) = args.get(i) {
                     lower_operand_coerced(
@@ -2699,7 +2741,18 @@ fn emit_call(
                         module,
                     )?
                 } else if let Some(default_lit) = &param.default {
-                    let raw = lower_lit(module, builder, rt, default_lit, interner)?;
+                    let raw = if is_scalar(&param.ty) {
+                        lower_lit(module, builder, rt, default_lit, interner)?
+                    } else {
+                        lower_owned_boxed_operand(
+                            builder,
+                            cl_vars,
+                            local_types,
+                            &Operand::Const(default_lit.clone()),
+                            rt,
+                            module,
+                        )?
+                    };
                     let expected_cl_ty = mir_ty_to_cl(&param.ty);
                     let actual_cl_ty = builder.func.dfg.value_type(raw);
                     if actual_cl_ty != expected_cl_ty {
@@ -2714,11 +2767,22 @@ fn emit_call(
                         interner.resolve(mir_fn.name)
                     );
                 };
+                // This is precisely lower_owned_boxed_operand's fdn_clone
+                // branch. Do not treat unknown or scalar arguments as clones.
+                if !is_scalar(&param.ty)
+                    && let Some(Operand::Local(local)) = args.get(i)
+                    && matches!(local_types.get(&local.0), Some(ty) if !matches!(ty, MirTy::Error) && !is_scalar(ty))
+                {
+                    cloned_args.push(v);
+                }
                 arg_vals.push(v);
             }
             let call = builder.ins().call(fn_ref, &arg_vals);
-            let results = builder.inst_results(call);
-            Ok(results.first().copied())
+            let result = builder.inst_results(call).first().copied();
+            for argument in cloned_args {
+                call_rt(module, builder, rt.drop_any, &[argument])?;
+            }
+            Ok(result)
         }
 
         Callee::Builtin(sym) => {
@@ -2769,6 +2833,24 @@ fn emit_call(
                 return Ok(Some(val));
             }
 
+            if method_name.as_ref() == "update"
+                && let MirTy::Shared(inner) = operand_mir_ty(local_types, receiver)
+                && args.len() == 1
+            {
+                let receiver =
+                    lower_operand_as_ptr(builder, cl_vars, local_types, receiver, rt, module)?;
+                let callback =
+                    lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?;
+                let (contract, length) = str_const(module, builder, &inner.runtime_descriptor())?;
+                let result = call_rt(
+                    module,
+                    builder,
+                    rt.shared_update_typed,
+                    &[receiver, callback, contract, length],
+                )?
+                .unwrap();
+                return coerce_boxed_call_result(module, rt, builder, result, result_ty).map(Some);
+            }
             let recv = lower_operand_as_ptr(builder, cl_vars, local_types, receiver, rt, module)?;
             let (mp, ml) = str_const(module, builder, method_name.as_ref())?;
             let (arr, cnt) =
@@ -2878,7 +2960,7 @@ fn emit_container_method_call(
         }
         (ReceiverBuiltinKind::Dict, ReceiverMethodOp::IsEmpty) => {
             let len = call_rt(module, builder, rt.dict_len, &[recv])?.unwrap_or(recv);
-            let is_empty = builder.ins().icmp_imm(IntCC::Equal, len, 0);
+            let is_empty = builder.ins().icmp_imm_s(IntCC::Equal, len, 0);
             let is_empty = builder.ins().uextend(I8, is_empty);
             return box_container_scalar_result(
                 module,
@@ -2966,7 +3048,7 @@ fn emit_container_method_call(
         }
         (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::IsEmpty) => {
             let len = call_rt(module, builder, rt.len_fn, &[recv])?.unwrap_or(recv);
-            let is_empty = builder.ins().icmp_imm(IntCC::Equal, len, 0);
+            let is_empty = builder.ins().icmp_imm_s(IntCC::Equal, len, 0);
             let is_empty = builder.ins().uextend(I8, is_empty);
             return box_container_scalar_result(
                 module,
@@ -3098,7 +3180,7 @@ fn emit_stdlib_method_call(
             if arg_ty == F64 {
                 StdlibResultValue::Float(builder.ins().fabs(arg))
             } else {
-                StdlibResultValue::Integer(builder.ins().iabs(arg))
+                StdlibResultValue::Integer(call_rt(module, builder, rt.int_abs, &[arg])?.unwrap())
             }
         }
         StdlibIntrinsic::Math(MathIntrinsic::Floor) => {
@@ -3167,15 +3249,11 @@ fn emit_builtin(
 ) -> Result<cranelift_codegen::ir::Value> {
     match name {
         "print" => {
-            if args.len() <= 1 {
-                let arg = if args.is_empty() {
-                    call_rt(module, builder, rt.box_nothing, &[])?.unwrap()
-                } else {
-                    lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?
-                };
+            if args.len() == 1 {
+                let arg = lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?;
                 call_rt(module, builder, rt.println_fn, &[arg])?;
             } else {
-                // Multi-arg print: build a pointer array and call fdn_print_many.
+                // The empty pointer array prints only a newline.
                 let (arr, cnt) =
                     build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
                 call_rt(module, builder, rt.print_many_fn, &[arr, cnt])?;
@@ -3185,7 +3263,7 @@ fn emit_builtin(
 
         "input" => {
             let prompt = if args.is_empty() {
-                call_rt(module, builder, rt.box_nothing, &[])?.unwrap()
+                builder.ins().iconst(PTR_TY, 0)
             } else {
                 lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?
             };
@@ -3216,8 +3294,10 @@ fn emit_builtin(
         }
 
         "assert" => {
-            let cond = lower_operand(builder, cl_vars, &args[0]);
-            let cond_i8 = widen_to_i8(builder, module, rt, cond, local_types, &args[0])?;
+            let cond = lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?;
+            let converted = call_rt(module, builder, rt.to_boolean, &[cond])?.unwrap();
+            let cond_i8 = call_rt(module, builder, rt.unbox_bool, &[converted])?.unwrap();
+            call_rt(module, builder, rt.drop_any, &[converted])?;
             let msg = if args.len() > 1 {
                 lower_operand_boxed(builder, cl_vars, local_types, &args[1], rt, module)?
             } else {
@@ -3230,8 +3310,13 @@ fn emit_builtin(
         }
 
         "assertEq" | "assert_eq" | "assertNe" | "assert_ne" => {
-            let (mp, ml) = str_const(module, builder, "test")?;
-            let (fp, fl) = str_const(module, builder, name)?;
+            let (mp, ml) = str_const(module, builder, "__builtin__")?;
+            let canonical = match name {
+                "assertEq" => "assert_eq",
+                "assertNe" => "assert_ne",
+                other => other,
+            };
+            let (fp, fl) = str_const(module, builder, canonical)?;
             let (arr, cnt) =
                 build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
             Ok(
@@ -3364,7 +3449,7 @@ fn lower_string_interp(
                 }
             }
         };
-        builder.ins().stack_store(boxed, slot, offset);
+        builder.ins().stack_store(PTR_TY, boxed, slot, offset);
     }
     let arr_ptr = builder.ins().stack_addr(PTR_TY, slot, 0);
     let count = builder.ins().iconst(I64, n);
@@ -3389,9 +3474,30 @@ fn emit_trampoline_default_value(
 ) -> Result<cranelift_codegen::ir::Value> {
     if let Some(lit) = default {
         let value = match lit {
-            MirLit::Int(n) => builder.ins().iconst(I64, *n),
-            MirLit::Float(f) => builder.ins().f64const(*f),
-            MirLit::Bool(b) => builder.ins().iconst(I8, i64::from(*b)),
+            MirLit::Int(n) => {
+                let value = builder.ins().iconst(I64, *n);
+                if is_scalar(ty) {
+                    value
+                } else {
+                    call_rt(module, builder, rt.box_int, &[value])?.unwrap()
+                }
+            }
+            MirLit::Float(f) => {
+                let value = builder.ins().f64const(*f);
+                if is_scalar(ty) {
+                    value
+                } else {
+                    call_rt(module, builder, rt.box_float, &[value])?.unwrap()
+                }
+            }
+            MirLit::Bool(b) => {
+                let value = builder.ins().iconst(I8, i64::from(*b));
+                if is_scalar(ty) {
+                    value
+                } else {
+                    call_rt(module, builder, rt.box_bool, &[value])?.unwrap()
+                }
+            }
             MirLit::Str(s) => {
                 let (p, l) = str_const(module, builder, s)?;
                 call_rt(module, builder, rt.box_str, &[p, l])?
@@ -3445,79 +3551,128 @@ fn emit_trampolines(
         let args_ptr = builder.block_params(entry)[0];
         let args_cnt = builder.block_params(entry)[1];
 
+        let minimum = mf
+            .params
+            .iter()
+            .rposition(|param| param.default.is_none())
+            .map_or(0, |index| index + 1);
+        let min = builder.ins().iconst(I64, minimum as i64);
+        let max = builder.ins().iconst(I64, mf.params.len() as i64);
+        let valid = call_rt(
+            module,
+            &mut builder,
+            rt.validate_call,
+            &[args_cnt, min, max],
+        )?
+        .unwrap();
+        let valid_block = builder.create_block();
+        let invalid_block = builder.create_block();
+        builder
+            .ins()
+            .brif(valid, valid_block, &[], invalid_block, &[]);
+        builder.switch_to_block(invalid_block);
+        let nothing = call_rt(module, &mut builder, rt.box_nothing, &[])?.unwrap();
+        builder.ins().return_(&[nothing]);
+        builder.switch_to_block(valid_block);
+
         let real_fn_id = fn_ids[mf.id.0 as usize];
         let real_fn_ref = module.declare_func_in_func(real_fn_id, builder.func);
 
         // Unbox each positional argument, but honor omitted optional/default params
         // instead of reading past the caller's provided argument list.
         let mut call_args: Vec<cranelift_codegen::ir::Value> = Vec::new();
+        let mut owned_args = Vec::new();
         for (j, param) in mf.params.iter().enumerate() {
             let have_arg = builder
                 .ins()
-                .icmp_imm(IntCC::UnsignedGreaterThan, args_cnt, j as i64);
+                .icmp_imm_s(IntCC::UnsignedGreaterThan, args_cnt, j as i64);
             let present_block = builder.create_block();
             let missing_block = builder.create_block();
             let cont_block = builder.create_block();
-            let param_cl_ty = mir_ty_to_cl(&param.ty);
-            builder.append_block_param(cont_block, param_cl_ty);
+            builder.append_block_param(cont_block, PTR_TY);
             builder
                 .ins()
                 .brif(have_arg, present_block, &[], missing_block, &[]);
-
             builder.switch_to_block(present_block);
-            let offset = (j as i32) * 8;
             let raw = builder
                 .ins()
-                .load(PTR_TY, MemFlags::new(), args_ptr, offset);
-            let present_val = match &param.ty {
-                MirTy::Integer => {
-                    let r = module.declare_func_in_func(rt.unbox_int, builder.func);
-                    let inst = builder.ins().call(r, &[raw]);
-                    builder.inst_results(inst)[0]
-                }
-                MirTy::Float => {
-                    let r = module.declare_func_in_func(rt.unbox_float, builder.func);
-                    let inst = builder.ins().call(r, &[raw]);
-                    builder.inst_results(inst)[0]
-                }
-                MirTy::Boolean => {
-                    let r = module.declare_func_in_func(rt.unbox_bool, builder.func);
-                    let inst = builder.ins().call(r, &[raw]);
-                    builder.inst_results(inst)[0]
-                }
-                MirTy::Handle => {
-                    let r = module.declare_func_in_func(rt.unbox_handle, builder.func);
-                    let inst = builder.ins().call(r, &[raw]);
-                    builder.inst_results(inst)[0]
-                }
-                _ => raw,
-            };
-            builder.ins().jump(
-                cont_block,
-                &[cranelift_codegen::ir::BlockArg::Value(present_val)],
-            );
-
+                .load(PTR_TY, MemFlagsData::new(), args_ptr, (j as i32) * 8);
+            builder
+                .ins()
+                .jump(cont_block, &[cranelift_codegen::ir::BlockArg::Value(raw)]);
             builder.switch_to_block(missing_block);
-            let missing_val = emit_trampoline_default_value(
+            let null = builder.ins().iconst(PTR_TY, 0);
+            builder
+                .ins()
+                .jump(cont_block, &[cranelift_codegen::ir::BlockArg::Value(null)]);
+            builder.switch_to_block(cont_block);
+            let raw = builder.block_params(cont_block)[0];
+            let default = emit_trampoline_default_value(
                 module,
                 rt,
                 &mut builder,
                 param.default.as_ref(),
-                &param.ty,
+                &MirTy::Dynamic,
             )?;
-            builder.ins().jump(
-                cont_block,
-                &[cranelift_codegen::ir::BlockArg::Value(missing_val)],
-            );
-
-            builder.switch_to_block(cont_block);
-            let val = builder.block_params(cont_block)[0];
-            call_args.push(val);
+            let certain = builder.ins().iconst(I8, i64::from(param.certain));
+            let prepared = call_rt(
+                module,
+                &mut builder,
+                rt.prepare_argument,
+                &[raw, default, certain],
+            )?
+            .unwrap();
+            call_rt(module, &mut builder, rt.drop_any, &[default])?;
+            let (contract, length) =
+                str_const(module, &mut builder, &param.ty.runtime_descriptor())?;
+            let checked = call_rt(
+                module,
+                &mut builder,
+                rt.check_argument,
+                &[prepared, contract, length],
+            )?
+            .unwrap();
+            call_rt(module, &mut builder, rt.drop_any, &[prepared])?;
+            let prepared = checked;
+            owned_args.push(prepared);
+            let value = match &param.ty {
+                MirTy::Integer => {
+                    call_rt(module, &mut builder, rt.unbox_int, &[prepared])?.unwrap()
+                }
+                MirTy::Float => {
+                    call_rt(module, &mut builder, rt.unbox_float, &[prepared])?.unwrap()
+                }
+                MirTy::Boolean => {
+                    call_rt(module, &mut builder, rt.unbox_bool, &[prepared])?.unwrap()
+                }
+                MirTy::Handle => {
+                    call_rt(module, &mut builder, rt.unbox_handle, &[prepared])?.unwrap()
+                }
+                _ => prepared,
+            };
+            call_args.push(value);
         }
+        let failed = call_rt(module, &mut builder, rt.has_exception, &[])?.unwrap();
+        let call_block = builder.create_block();
+        let error_block = builder.create_block();
+        builder
+            .ins()
+            .brif(failed, error_block, &[], call_block, &[]);
+        builder.switch_to_block(error_block);
+        for argument in &owned_args {
+            call_rt(module, &mut builder, rt.drop_any, &[*argument])?;
+        }
+        let nothing = call_rt(module, &mut builder, rt.box_nothing, &[])?.unwrap();
+        builder.ins().return_(&[nothing]);
+        builder.switch_to_block(call_block);
 
         // Call the real function.
         let call_inst = builder.ins().call(real_fn_ref, &call_args);
         let call_results: Vec<_> = builder.inst_results(call_inst).to_vec();
+
+        for argument in owned_args {
+            call_rt(module, &mut builder, rt.drop_any, &[argument])?;
+        }
 
         // Box the result if it is a scalar; return a *mut FidanValue.
         let boxed = if call_results.is_empty() {
@@ -3559,7 +3714,7 @@ fn emit_trampolines(
 
         builder.ins().return_(&[boxed]);
         builder.seal_all_blocks();
-        builder.finalize();
+        builder.finalize(module.target_config());
 
         module
             .define_function(tramp_id, ctx)
@@ -3650,7 +3805,7 @@ fn emit_c_main(
     let zero = builder.ins().iconst(I32, 0);
     builder.ins().return_(&[zero]);
     builder.seal_all_blocks();
-    builder.finalize();
+    builder.finalize(module.target_config());
 
     let mut main_sig = module.make_signature();
     main_sig.params.push(AbiParam::new(I32));
@@ -3994,48 +4149,6 @@ fn widen_to_i64(
     }
 }
 
-fn widen_to_i8(
-    builder: &mut FunctionBuilder<'_>,
-    module: &mut ObjectModule,
-    rt: &RuntimeDecls,
-    val: cranelift_codegen::ir::Value,
-    local_types: &HashMap<u32, MirTy>,
-    op: &Operand,
-) -> Result<cranelift_codegen::ir::Value> {
-    let ty = builder.func.dfg.value_type(val);
-    if ty == I8 {
-        return Ok(val);
-    }
-
-    if ty == F64 {
-        let zero = builder.ins().f64const(0.0);
-        return Ok(builder.ins().fcmp(FloatCC::NotEqual, val, zero));
-    }
-
-    match operand_mir_ty(local_types, op) {
-        MirTy::Integer | MirTy::Handle => Ok(builder.ins().icmp_imm(IntCC::NotEqual, val, 0)),
-        MirTy::Dynamic
-        | MirTy::String
-        | MirTy::List(_)
-        | MirTy::Dict(_, _)
-        | MirTy::HashSet(_)
-        | MirTy::Tuple(_)
-        | MirTy::Object(_)
-        | MirTy::Enum(_)
-        | MirTy::Shared(_)
-        | MirTy::WeakShared(_)
-        | MirTy::Pending(_)
-        | MirTy::Function
-        | MirTy::Nothing
-        | MirTy::Error => Ok(call_rt(module, builder, rt.truthy, &[val])?.unwrap_or(val)),
-        MirTy::Boolean => Ok(builder.ins().icmp_imm(IntCC::NotEqual, val, 0)),
-        MirTy::Float => {
-            let zero = builder.ins().f64const(0.0);
-            Ok(builder.ins().fcmp(FloatCC::NotEqual, val, zero))
-        }
-    }
-}
-
 fn operand_ty(
     _cl_vars: &[Variable],
     local_types: &HashMap<u32, MirTy>,
@@ -4072,7 +4185,7 @@ fn str_const(
         .define_data(data_id, &desc)
         .context("defining string constant")?;
     let gref = module.declare_data_in_func(data_id, builder.func);
-    let ptr = builder.ins().global_value(PTR_TY, gref);
+    let ptr = builder.ins().symbol_value(PTR_TY, gref);
     let len = builder.ins().iconst(I64, s.len() as i64);
     Ok((ptr, len))
 }
@@ -4100,7 +4213,7 @@ fn build_ptr_array(
     ));
     for (i, op) in args.iter().enumerate() {
         let v = lower_operand_boxed(builder, cl_vars, local_types, op, rt, module)?;
-        builder.ins().stack_store(v, slot, (i as i32) * 8);
+        builder.ins().stack_store(PTR_TY, v, slot, (i as i32) * 8);
     }
     let ptr = builder.ins().stack_addr(PTR_TY, slot, 0);
     let cnt = builder.ins().iconst(I64, n);
@@ -4796,7 +4909,9 @@ fn call_may_throw(
             Ok(
                 infer_stdlib_method(namespace.as_str(), method_name.as_str(), &arg_kinds)
                     .and_then(|info| info.intrinsic)
-                    .is_none(),
+                    .is_none_or(|intrinsic| {
+                        matches!(intrinsic, StdlibIntrinsic::Math(MathIntrinsic::Abs))
+                    }),
             )
         }
         _ => Ok(true),

@@ -843,6 +843,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn colon_slices_parse_omissions_nested_indices_and_reject_extra_components() {
+        for source in [
+            "var s = text[1:4]",
+            "var s = text[:4]",
+            "var s = text[3:]",
+            "var s = text[:]",
+            "var s = text[::2]",
+            "var s = text[1:7:2]",
+            "var s = text[1::]",
+            "var s = text[1:7:]",
+            "var s = text[::-1]",
+            "var s = text[indices[0]..4]",
+            "var s = text[text[1:3][0]:4]",
+        ] {
+            let (_, diagnostics) = parse_src(source);
+            assert!(errors(&diagnostics).is_empty(), "{source}: {diagnostics:?}");
+        }
+        for source in [
+            "var s = text[1:2:3:4]",
+            "var s = text[::2",
+            "var s = text[]",
+        ] {
+            let (_, diagnostics) = parse_src(source);
+            assert!(
+                !errors(&diagnostics).is_empty(),
+                "invalid slice accepted: {source}"
+            );
+        }
+    }
+
     // ── Test blocks ───────────────────────────────────────────────────────────
 
     #[test]

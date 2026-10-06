@@ -1,4 +1,4 @@
-//! Bootstrap dict methods — placeholder until `std.collections` (Phase 7).
+//! Dictionary receiver methods for interpreted execution.
 
 use fidan_config::{ReceiverBuiltinKind, ReceiverMethodOp, infer_receiver_member};
 use fidan_runtime::{FidanDict, FidanList, FidanValue, OwnedRef};

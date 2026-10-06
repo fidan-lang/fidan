@@ -12,6 +12,10 @@ impl FidanString {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+    /// Number of Unicode scalar values, used by language-level length/index APIs.
+    pub fn char_len(&self) -> usize {
+        self.0.chars().count()
+    }
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }

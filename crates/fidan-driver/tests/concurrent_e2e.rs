@@ -833,6 +833,283 @@ fn llvm_available() -> bool {
 }
 
 #[test]
+fn shared_update_is_atomic_across_aot_backends() {
+    let sandbox = temp_dir("fidan_shared_update");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM Shared.update regression: no installed LLVM toolchain");
+            continue;
+        }
+        let output = sandbox.join(format!(
+            "shared-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/shared_update_regression.fdn"),
+            backend,
+            &output,
+        );
+        for _ in 0..10 {
+            run_compiled_binary_clean(&output, "shared update ok");
+        }
+    }
+    fs::remove_dir_all(sandbox).expect("remove Shared update sandbox");
+}
+
+#[test]
+fn release_semantics_across_aot_backends() {
+    let sandbox = temp_dir("fidan_release_semantics");
+    // Windows image scanners can retain an exited executable's handle. Keep
+    // ignored build artifacts separate from the sandbox whose cleanup we check.
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create semantic artifact directory");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let output = artifacts.join(format!(
+            "semantics-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/release_semantics_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "release semantics ok");
+    }
+    fs::remove_dir_all(sandbox).expect("remove semantic sandbox");
+}
+
+#[test]
+fn stdlib_callable_arity_across_aot_backends() {
+    let sandbox = temp_dir("fidan_stdlib_callable_arity");
+    // Windows image scanners can retain an exited executable's handle. Keep
+    // ignored build artifacts separate from the sandbox whose cleanup we check.
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create stdlib arity artifact directory");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let output = artifacts.join(format!("arity-{backend:?}{}", std::env::consts::EXE_SUFFIX));
+        compile_program(
+            include_str!("../../../test/examples/stdlib_callable_arity_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "stdlib callable arity ok");
+    }
+    fs::remove_dir_all(sandbox).expect("remove stdlib arity sandbox");
+}
+
+#[test]
+fn strength_reduction_preserves_values_and_types_across_aot_backends() {
+    let sandbox = temp_dir("fidan_strength_reduction");
+    // Keep executable artifacts outside the data sandbox: Windows image scanners
+    // can retain handles after a successful process exit.
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create optimizer artifact directory");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM optimizer regression: no installed LLVM toolchain");
+            continue;
+        }
+        let output = artifacts.join(format!(
+            "optimizer-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/strength_reduction_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "strength reduction ok");
+    }
+    fs::remove_dir_all(sandbox).expect("remove optimizer regression sandbox");
+}
+
+#[test]
+fn integer_arithmetic_reports_consistent_errors_across_aot_backends() {
+    let sandbox = temp_dir("fidan_integer_arithmetic");
+    // Executables can remain locked by Windows image scanning after exit.
+    // Keep build artifacts under target and clean the source/data sandbox.
+    let artifact_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().unwrap());
+    fs::create_dir_all(&artifact_dir).expect("create integer artifacts");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM integer regression: no installed LLVM toolchain");
+            continue;
+        }
+        let output = artifact_dir.join(format!(
+            "integers-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/integer_overflow_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "integer arithmetic ok");
+    }
+    fs::remove_dir_all(sandbox).expect("remove integer regression sandbox");
+}
+
+#[test]
+fn string_receiver_unicode_and_bounds_across_aot_backends() {
+    let sandbox = temp_dir("fidan_string_receivers");
+    let output = sandbox.join(if cfg!(windows) {
+        "strings.exe"
+    } else {
+        "strings"
+    });
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM string regression: no installed LLVM toolchain");
+            continue;
+        }
+        compile_program(
+            include_str!("../../../test/examples/string_receiver_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "string receivers ok");
+    }
+    fs::remove_dir_all(sandbox).expect("remove string regression sandbox");
+}
+
+#[test]
+fn boolean_negation_is_logical_across_aot_backends() {
+    let sandbox = temp_dir("fidan_boolean_negation");
+    // Keep executable artifacts out of the checked data sandbox: Windows may
+    // retain an image handle after process exit.
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create boolean artifact directory");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM boolean regression: no installed LLVM toolchain");
+            continue;
+        }
+        let output = artifacts.join(format!(
+            "booleans-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/boolean_negation_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "boolean negation ok");
+    }
+    fs::remove_dir_all(sandbox).expect("remove boolean regression sandbox");
+}
+
+#[test]
+fn syntax_reference_parallel_results_are_deterministic() {
+    let sandbox = temp_dir("fidan_syntax_reference");
+    let output = sandbox.join(if cfg!(windows) {
+        "syntax.exe"
+    } else {
+        "syntax"
+    });
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM syntax reference regression: no installed LLVM toolchain");
+            continue;
+        }
+        compile_program(include_str!("../../../test/syntax.fdn"), backend, &output);
+        for _ in 0..20 {
+            run_compiled_binary_clean(&output, "All done!");
+        }
+    }
+    fs::remove_dir_all(sandbox).expect("remove syntax reference sandbox");
+}
+
+#[test]
+fn slicing_cranelift_aot_regression() {
+    let sandbox = temp_dir("fidan_slice_cranelift");
+    let output = sandbox.join(if cfg!(windows) {
+        "slicing.exe"
+    } else {
+        "slicing"
+    });
+    compile_program(
+        include_str!("../../../test/examples/slice_regression.fdn"),
+        Backend::Cranelift,
+        &output,
+    );
+    run_compiled_binary_clean(&output, "slicing ok");
+    fs::remove_dir_all(&sandbox).expect("remove slicing sandbox");
+}
+
+#[test]
+fn slicing_llvm_aot_regression() {
+    if !llvm_available() {
+        eprintln!("skipping LLVM slicing regression: no installed LLVM toolchain");
+        return;
+    }
+    let sandbox = temp_dir("fidan_slice_llvm");
+    let output = sandbox.join(if cfg!(windows) {
+        "slicing.exe"
+    } else {
+        "slicing"
+    });
+    compile_program(
+        include_str!("../../../test/examples/slice_regression.fdn"),
+        Backend::Llvm,
+        &output,
+    );
+    run_compiled_binary_clean(&output, "slicing ok");
+    fs::remove_dir_all(&sandbox).expect("remove slicing sandbox");
+}
+
+#[test]
+fn slicing_aot_rejects_invalid_components() {
+    let sandbox = temp_dir("fidan_slice_invalid");
+    let output = sandbox.join(if cfg!(windows) {
+        "slicing.exe"
+    } else {
+        "slicing"
+    });
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("skipping LLVM invalid slicing regression: no installed LLVM toolchain");
+            continue;
+        }
+        for (source, message) in [
+            (r#"var result = "abc"[::0]"#, "slice step cannot be zero"),
+            (
+                "var items = [1]\nitems[-2] = 7",
+                "list index -2 out of range",
+            ),
+            (
+                "var size = len(0...9223372036854775807)",
+                "range length cannot be represented",
+            ),
+            (
+                r#"action bad returns dynamic { return "x" }
+var result = "abc"[::bad()]"#,
+                "slice step must be an integer",
+            ),
+        ] {
+            compile_program(source, backend, &output);
+            run_compiled_binary_expect_failure(&output, message);
+        }
+    }
+    fs::remove_dir_all(&sandbox).expect("remove slicing sandbox");
+}
+
+#[test]
 fn concurrent_cranelift_aot_same_thread_ok() {
     let sandbox = temp_dir("fidan_concurrent_cranelift");
     let output = if cfg!(windows) {
@@ -1938,4 +2215,214 @@ fn llvm_aot_lto_full_smoke() {
     compile_program_with_settings(builtin_assert_source(), Backend::Llvm, &output, &settings);
     run_compiled_binary_clean(&output, "ok");
     fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn operator_builtin_parity_across_aot_backends() {
+    let sandbox = temp_dir("fidan_operator_builtin_parity");
+    // Windows image scanners can retain an exited executable's handle. Keep
+    // ignored build artifacts separate from the sandbox whose cleanup we check.
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create operator builtin parity artifact directory");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let output = artifacts.join(format!(
+            "operators-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/operator_builtin_parity_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "operator builtin parity ok");
+        for (index, source) in [
+            "var a oftype flexible = \"oops\"\nvar b oftype flexible = 3\nprint(a & b)",
+            "var a oftype flexible = 1.5\nvar b oftype flexible = 4\nprint(a..b)",
+            "var a oftype flexible = 42\nprint(not a)",
+            "print(integer(\"abc\"))",
+            "print(float(\"abc\"))",
+            "print(len(42))",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let failure = artifacts.join(format!(
+                "failure-{backend:?}-{index}{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+            compile_program(source, backend, &failure);
+            run_compiled_binary_expect_failure(&failure, "R0001");
+        }
+    }
+    fs::remove_dir_all(sandbox).expect("remove operator builtin parity sandbox");
+}
+
+#[test]
+fn core_builtin_parity_across_aot_backends() {
+    let sandbox = temp_dir("fidan_core_builtin_parity");
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create core builtin artifacts");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let output = artifacts.join(format!("core-{backend:?}{}", std::env::consts::EXE_SUFFIX));
+        // Keep intentional stderr output in this test, since example sweeps
+        // require successful examples to have an empty stderr stream.
+        let source = format!(
+            "{}\nvar errorPrinter = erase(eprint)\neprint()\nerrorPrinter()\neprint(\"matrix\", 1, true)\nerrorPrinter(\"erased\", 2, false)",
+            include_str!("../../../test/examples/core_builtin_parity_regression.fdn")
+        );
+        compile_program(&source, backend, &output);
+        let result = Command::new(&output).output().expect("run builtin matrix");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout).replace("\r\n", "\n"),
+            "\n\ncore builtin parity ok\nmatrix 1 true\n"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr).replace("\r\n", "\n"),
+            "\n\nmatrix 1 true\nerased 2 false\n"
+        );
+        for (index, source) in [
+            "var invalid oftype flexible = 42\nprint(hashset(invalid))",
+            "var invalid oftype flexible = 42\nprint(WeakShared(invalid))",
+            "var callback oftype action = hashset\nprint(callback(42))",
+            "var callback oftype flexible = WeakShared\nprint(callback(42))",
+            // Exact core assertion equality must not use std.test's tolerance.
+            "assert_eq(1.0, 1.0 + 0.0000000000005)",
+            "var callback oftype action = assert_eq\ncallback(1.0, 1.0 + 0.0000000000005)",
+            "assert(false, \"custom assertion message\")",
+            "var callback oftype action = assert\ncallback(false, \"custom assertion message\")",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let failure = artifacts.join(format!(
+                "failure-{backend:?}-{index}{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+            compile_program(source, backend, &failure);
+            run_compiled_binary_expect_failure(
+                &failure,
+                if index < 4 {
+                    "R0001"
+                } else if index < 6 {
+                    "assertEq failed"
+                } else {
+                    "custom assertion message"
+                },
+            );
+        }
+        for (index, expression) in ["input()", "reader()"].iter().enumerate() {
+            let source = format!(
+                r#"var reader oftype action = input
+var caught = false
+attempt {{
+    var value = {expression}
+    assert(false)
+}} catch error {{
+    assert(error.contains("R0001"))
+    assert(error.contains("failed to read input"))
+    caught = true
+}}
+assert_eq(caught, true)
+print("input error caught")"#
+            );
+            let binary = artifacts.join(format!(
+                "input-error-{backend:?}-{index}{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+            compile_program(&source, backend, &binary);
+            let mut child = Command::new(&binary)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn input failure");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"\xff\n")
+                .expect("send invalid UTF-8");
+            let result = child.wait_with_output().expect("wait for input failure");
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&result.stdout).trim(),
+                "input error caught"
+            );
+            assert!(result.stderr.is_empty());
+        }
+        let input_source = r#"var reader oftype action = input
+assert_eq(input(), "one")
+assert_eq(reader(), "two")
+assert_eq(input(nothing), "three")
+assert_eq(reader("prompt>"), "four\r")
+assert_eq(input(), "")
+assert_eq(reader(), "")
+print("input success ok")"#;
+        let binary = artifacts.join(format!(
+            "input-success-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(input_source, backend, &binary);
+        run_compiled_binary_with_input_clean(
+            &binary,
+            "one\r\ntwo\nthree\nfour\r",
+            &["nothingprompt>input success ok"],
+        );
+    }
+    fs::remove_dir_all(sandbox).expect("remove core builtin sandbox");
+}
+
+#[test]
+fn optional_assertion_messages_across_aot_backends() {
+    let sandbox = temp_dir("fidan_assertion_messages");
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create assertion message artifacts");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        for (index, (source, expected)) in [
+            ("assert_eq(1, 2)", "assertEq failed: 1 != 2"),
+            ("assert_ne(1, 1)", "assertNe failed: both are 1"),
+            ("assert_eq(1, 2, \"custom eq\")", "custom eq"),
+            ("assert_ne(1, 1, \"custom ne\")", "custom ne"),
+            ("var callback oftype action = erase(assert_eq); callback(1, 2, \"custom erased eq\")", "custom erased eq"),
+            ("var callback oftype action = erase(assert_ne); callback(1, 1, \"custom erased ne\")", "custom erased ne"),
+            ("assertions.assertEq(1, 2)", "expected `1` == `2`"),
+            ("assertions.assertNe(1, 1)", "expected `1` != `1`"),
+            ("assertions.assertEq(1, 2, \"custom test eq\")", "custom test eq"),
+            ("assertions.assert_eq(1, 2, \"custom test eq alias\")", "custom test eq alias"),
+            ("assertions.assertNe(1, 1, \"custom test ne\")", "custom test ne"),
+            ("assertions.assert_ne(1, 1, \"custom test ne alias\")", "custom test ne alias"),
+            ("assert_eq(1.0, 1.0 + 0.0000000000005, \"custom exact eq\")", "custom exact eq"),
+            ("assertions.assertNe(1.0, 1.0 + 0.0000000000005, \"custom tolerant ne\")", "custom tolerant ne"),
+        ].iter().enumerate() {
+            let source = format!("use std.test as assertions\naction erase with (certain value oftype flexible) returns flexible {{ if type(value) == \"nothing\" {{ return value }} return value }}\nattempt {{ {source} }} catch error {{ assert(false, \"unexpected catch\") }}");
+            let output = artifacts.join(format!("assertion-{backend:?}-{index}{}", std::env::consts::EXE_SUFFIX));
+            compile_program(&source, backend, &output);
+            run_compiled_binary_expect_failure(&output, expected);
+        }
+    }
+    fs::remove_dir_all(sandbox).expect("remove assertion message sandbox");
 }

@@ -2,14 +2,19 @@
 
 use std::sync::{OnceLock, RwLock};
 
+pub mod builtins;
 mod dict;
 pub mod ffi;
 mod hashset;
+pub mod index;
+pub mod integer;
 mod list;
 mod object;
 mod owned_ref;
 pub mod parallel;
+mod range;
 mod shared_ref;
+mod slice;
 pub mod stdlib;
 mod string;
 mod value;
@@ -20,7 +25,9 @@ pub use list::FidanList;
 pub use object::{FidanClass, FidanObject, FieldDef};
 pub use owned_ref::OwnedRef;
 pub use parallel::{FidanPending, ParallelArgs, ParallelCapture};
+pub use range::{range_length, range_method};
 pub use shared_ref::{SharedRef, WeakSharedRef};
+pub use slice::slice_value;
 pub use string::FidanString;
 pub use value::{FidanValue, FunctionId, display, display_into, write_display_io};
 
@@ -59,3 +66,5 @@ pub fn current_program_args() -> Vec<String> {
         .expect("program argv override lock poisoned");
     slot.clone().unwrap_or_else(|| std::env::args().collect())
 }
+
+pub mod contracts;

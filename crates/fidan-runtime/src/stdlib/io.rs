@@ -229,9 +229,21 @@ pub fn dispatch_result(
         }
         "fileExists" | "file_exists" | "exists" => {
             let path = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
-            Some(Ok(FidanValue::Boolean(
-                std::path::Path::new(&path).exists(),
-            )))
+            Some(
+                std::path::Path::new(&path)
+                    .try_exists()
+                    .map(FidanValue::Boolean)
+                    .map_err(|err| {
+                        StdlibRuntimeError::new(
+                            if err.kind() == std::io::ErrorKind::PermissionDenied {
+                                diag_code!("R3004")
+                            } else {
+                                diag_code!("R3002")
+                            },
+                            format!("failed to check whether file `{path}` exists: {err}"),
+                        )
+                    }),
+            )
         }
         "isFile" | "is_file" => {
             let path = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
@@ -443,6 +455,17 @@ mod tests {
 
     fn string_arg(value: &str) -> FidanValue {
         FidanValue::String(crate::FidanString::new(value))
+    }
+
+    #[test]
+    fn file_exists_reports_invalid_paths_instead_of_false() {
+        for alias in ["fileExists", "file_exists", "exists"] {
+            let error = dispatch_result(alias, vec![string_arg("invalid\0path")])
+                .expect("known io function")
+                .expect_err("invalid path must report failure");
+            assert_eq!(error.code, diag_code!("R3002"));
+            assert!(error.message.contains("failed to check whether file"));
+        }
     }
 
     #[test]

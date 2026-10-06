@@ -29,7 +29,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.14"
+version = "1.0.15"
 edition = "2024"
 authors = ["Fidan Contributors", "Kaan Gönüldinc <contact@appsolves.dev>"]
 license-file = "LICENSE"
@@ -58,19 +58,13 @@ fidan-fmt = { path = "crates/fidan-fmt" }
 fidan-lsp = { path = "crates/fidan-lsp" }
 
 # External
-phf = { version = "0.13.1", features = ["macros"] }
-phf_codegen = "0.13.1"
 dashmap = "6"
-typed-arena = "2"
-ariadne = "0.6.0"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 anyhow = "1"
 rustc-hash = "2"
 parking_lot = "0.12"
 regex = "1"
-indexmap = "2"
-smol_str = "0.3.6"
 strsim = "0.11"
 rustyline = "18"
 unicode-width = "0.2"
@@ -97,15 +91,15 @@ indicatif = "0.18"
 notify = { version = "8", features = ["macos_fsevent"] }
 sha2 = "0.11"
 globset = "0.4"
-cranelift-jit = "0"
-cranelift-codegen = { version = "0", features = ["x86"] }
-cranelift-frontend = "0"
-cranelift-native = "0"
-cranelift-module = "0"
-cranelift-object = "0"
+cranelift-jit = "0.136"
+cranelift-codegen = { version = "0.136", features = ["x86"] }
+cranelift-frontend = "0.136"
+cranelift-native = "0.136"
+cranelift-module = "0.136"
+cranelift-object = "0.136"
 target-lexicon = "0.13"
 libffi = "5.1.0"
-inkwell = { version = "0.9.0", default-features = false }
+inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "c8234a0ee4171e946f94f6b3b5da0ea8d6ef5f3b", default-features = false }
 
 [profile.dev]
 opt-level = 1 # faster builds in dev without being fully unoptimised

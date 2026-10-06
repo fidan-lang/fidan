@@ -173,6 +173,30 @@ try {
 
         Write-Host "=== $rel ==="
 
+        if ($baseName -eq "release_mega_1_0.fdn") {
+            if (-not $IsWindows) {
+                Write-Host "[SKIP] $rel - Windows-local FFI mega fixture"
+                $skip += 1
+                continue
+            }
+            $missingFixtures = @(
+                foreach ($fixture in @("LOCAL/extern-cpp/ffi_demo.dll", "target/debug/fidan_extern_fixture.dll")) {
+                    $fixturePath = Join-Path $repoRoot $fixture
+                    if (-not (Test-Path -LiteralPath $fixturePath -PathType Leaf)) {
+                        $fixture
+                    } elseif (-not ((Test-Path -LiteralPath ($fixturePath + ".lib") -PathType Leaf) -or
+                                    (Test-Path -LiteralPath ([IO.Path]::ChangeExtension($fixturePath, ".lib")) -PathType Leaf))) {
+                        "$fixture import library (.dll.lib or .lib)"
+                    }
+                }
+            )
+            if ($missingFixtures.Count -gt 0) {
+                Write-Host "[SKIP] $rel - missing local extern fixtures: $($missingFixtures -join ', ')"
+                $skip += 1
+                continue
+            }
+        }
+
         $compileExit = Invoke-ProgramWithTimeout `
             -ExePath $fidan `
             -Arguments @("build", "--backend", $Backend, "--lto", $Lto, $file.FullName, "-o", $bin) `
@@ -218,6 +242,7 @@ try {
         $stdinLines = $null
         $allowTimeout = $false
         $expectFailure = $false
+        $expectedFailureMessage = ""
 
         switch ($baseName) {
             "parallel_benchmark.fdn" {
@@ -232,6 +257,7 @@ try {
             }
             "trace_demo.fdn" {
                 $expectFailure = $true
+                $expectedFailureMessage = "something went wrong: iteration 42"
             }
         }
 
@@ -259,7 +285,7 @@ try {
 
         if ($exitCode -ne 0) {
             $stderrText = Read-TextFile $stderr
-            if ($expectFailure) {
+            if ($expectFailure -and $stderrText.Contains($expectedFailureMessage)) {
                 Write-Host "[PASS] $rel - failed as expected"
                 if ($stderrText) {
                     Write-Host $stderrText

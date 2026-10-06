@@ -13,6 +13,7 @@ fidan-lexer = { workspace = true }
 fidan-ast = { workspace = true }
 fidan-diagnostics = { workspace = true }
 fidan-stdlib = { workspace = true }
+fidan-runtime = { workspace = true }
 rustc-hash = { workspace = true }
 
 [dev-dependencies]

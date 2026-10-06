@@ -1,19 +1,9 @@
-//! Bootstrap list methods — placeholder until `std.collections` (Phase 7).
+//! List receiver methods for interpreted execution.
 
 use fidan_config::{ReceiverBuiltinKind, infer_receiver_member};
 use fidan_runtime::{FidanList, FidanString, FidanValue, OwnedRef};
 
-/// Value equality used internally for `contains` and `find`.
-fn values_equal(a: &FidanValue, b: &FidanValue) -> bool {
-    match (a, b) {
-        (FidanValue::Integer(x), FidanValue::Integer(y)) => x == y,
-        (FidanValue::Float(x), FidanValue::Float(y)) => x == y,
-        (FidanValue::Boolean(x), FidanValue::Boolean(y)) => x == y,
-        (FidanValue::String(x), FidanValue::String(y)) => x.as_str() == y.as_str(),
-        (FidanValue::Nothing, FidanValue::Nothing) => true,
-        _ => false,
-    }
-}
+use fidan_runtime::ffi::values_equal;
 
 pub fn dispatch(r: OwnedRef<FidanList>, method: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
     let method = infer_receiver_member(ReceiverBuiltinKind::List, method)?.canonical_name;

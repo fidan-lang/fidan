@@ -12,7 +12,7 @@ on:
           - llvm
           - ai-analysis
       toolchain_version:
-        description: "Fidan toolchain package version (defaults to workspace version)"
+        description: "Fidan toolchain package version (defaults to the selected helper version)"
         required: false
         type: string
       publish:
@@ -23,10 +23,10 @@ on:
       llvm_tool_version:
         description: "Upstream LLVM version for the LLVM toolchain package"
         required: false
-        default: "21.1.8"
+        default: "23.1.2"
         type: string
       ai_analysis_tool_version:
-        description: "AI analysis helper tool version (defaults to workspace version)"
+        description: "AI analysis helper tool version (defaults to the AI helper version)"
         required: false
         default: ""
         type: string
@@ -39,7 +39,7 @@ jobs:
     with:
       toolchain_version: ${{ inputs.toolchain_version }}
       llvm_tool_version: ${{ inputs.llvm_tool_version }}
-      validate: false
+      validate: true
 
   release-llvm:
     name: Release LLVM toolchain
@@ -59,7 +59,7 @@ jobs:
     with:
       toolchain_version: ${{ inputs.toolchain_version }}
       tool_version: ${{ inputs.ai_analysis_tool_version }}
-      validate: false
+      validate: true
 
   release-ai-analysis:
     name: Release AI analysis toolchain

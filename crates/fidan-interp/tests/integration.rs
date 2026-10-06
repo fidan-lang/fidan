@@ -180,6 +180,241 @@ fn run_src(src: &str) -> Result<(), RunError> {
     run_src_with_threshold(src, 500)
 }
 
+#[test]
+fn strength_reduction_preserves_values_and_runtime_types() {
+    let source = format!(
+        "{}\n assert_eq(arithmetic[0](\"text\"), \"text0\")\n\
+         assert_eq(arithmetic[1](\"text\"), \"0text\")",
+        include_str!("../../../test/examples/strength_reduction_regression.fdn")
+    );
+    for threshold in [0, 1] {
+        run_src_with_threshold(&source, threshold).unwrap_or_else(|error| {
+            panic!("optimized strength reduction: {}", error.message);
+        });
+    }
+}
+
+#[test]
+fn strength_reduction_requires_proven_integer_or_boolean_operands() {
+    let mut cases = Vec::new();
+    for (ty, expressions) in [
+        (
+            "integer",
+            &[
+                "x + 0", "0 + x", "x - 0", "x * 1", "1 * x", "x * 0", "0 * x", "x / 1", "x ** 0",
+                "x ** 1",
+            ][..],
+        ),
+        (
+            "boolean",
+            &[
+                "x and true",
+                "true and x",
+                "x and false",
+                "false and x",
+                "x or false",
+                "false or x",
+                "x or true",
+                "true or x",
+            ][..],
+        ),
+    ] {
+        for expression in expressions {
+            let literal = if ty == "integer" { "3" } else { "true" };
+            cases.push((
+                format!(
+                    "action calculate returns flexible {{ var x = {literal}; return {expression} }}"
+                ),
+                true,
+            ));
+            for parameter in [
+                format!("certain x oftype {ty}"),
+                format!("x oftype {ty}"),
+                "certain x oftype flexible".to_owned(),
+                "certain x oftype float".to_owned(),
+            ] {
+                let source = format!(
+                    "action calculate with ({parameter}) returns flexible {{ return {expression} }}"
+                );
+                cases.push((source, false));
+            }
+        }
+    }
+
+    for (source, should_reduce) in [
+        (
+            "action calculate returns flexible { var x = 3; var copy = x; return copy * 0 }",
+            true,
+        ),
+        (
+            "action calculate returns flexible { var x = 3; return x * 0 }",
+            true,
+        ),
+        (
+            "action calculate with (certain x oftype integer) returns flexible { var copy oftype float = x; return copy * 0 }",
+            false,
+        ),
+        (
+            "var x = 3\n action calculate returns flexible { return x * 0 }",
+            false,
+        ),
+        (
+            "action calculate with (certain flag oftype boolean) returns flexible { var x oftype flexible = 1; if flag { x = \"text\" }; return x + 0 }",
+            false,
+        ),
+    ] {
+        cases.push((source.to_owned(), should_reduce));
+    }
+    for (source, should_reduce) in cases {
+        let (mut mir, interner) = build_mir(&source);
+        fidan_passes::run_all(&mut mir);
+        let function = mir
+            .functions
+            .iter()
+            .find(|function| interner.resolve(function.name).as_ref() == "calculate")
+            .unwrap();
+        let has_binary = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .any(|instr| {
+                matches!(
+                    instr,
+                    fidan_mir::Instr::Assign {
+                        rhs: fidan_mir::Rvalue::Binary { .. },
+                        ..
+                    }
+                )
+            });
+        assert_eq!(has_binary, !should_reduce, "{source}");
+    }
+}
+
+#[test]
+fn strength_reduction_preserves_dynamic_type_errors() {
+    for (expression, argument) in [
+        ("x + 0", "true"),
+        ("0 + x", "true"),
+        ("x - 0", "\"invalid\""),
+        ("x * 1", "\"invalid\""),
+        ("1 * x", "\"invalid\""),
+        ("x * 0", "\"invalid\""),
+        ("0 * x", "\"invalid\""),
+        ("x / 1", "\"invalid\""),
+        ("x ** 0", "\"invalid\""),
+        ("x ** 1", "\"invalid\""),
+        ("x and true", "\"invalid\""),
+        ("true and x", "\"invalid\""),
+        ("x and false", "\"invalid\""),
+        ("false and x", "\"invalid\""),
+        ("x or false", "\"invalid\""),
+        ("false or x", "\"invalid\""),
+        ("x or true", "\"invalid\""),
+        ("true or x", "\"invalid\""),
+    ] {
+        let source = format!(
+            "action calculate with (certain x oftype flexible) returns flexible {{ return {expression} }}\n\
+             var functions oftype list oftype flexible = [calculate]\n print(functions[0]({argument}))"
+        );
+        for threshold in [0, 1] {
+            let error = run_src_with_threshold(&source, threshold)
+                .expect_err("invalid dynamic operand must retain its runtime error");
+            assert!(
+                error.message.contains("type error"),
+                "{expression}: {}",
+                error.message
+            );
+        }
+    }
+    for (ty, expression) in [
+        ("integer", "x * 0"),
+        ("integer", "x ** 0"),
+        ("boolean", "x and false"),
+        ("boolean", "x or true"),
+    ] {
+        let source = format!(
+            "action calculate with (certain x oftype {ty}) returns flexible {{ return {expression} }}\n\
+             var functions oftype list oftype flexible = [calculate]\n print(functions[0](\"invalid\"))"
+        );
+        // Parameter annotations are not runtime type checks for flexible calls.
+        let error = run_src_with_threshold(&source, 0)
+            .expect_err("annotated parameter must not erase a dynamic runtime type error");
+        assert!(
+            error.message.contains("type error"),
+            "{expression}: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
+fn integer_arithmetic_reports_runtime_errors_without_host_panics() {
+    let source = include_str!("../../../test/examples/integer_overflow_regression.fdn");
+    for threshold in [0, 1] {
+        if let Err(error) = run_src_with_threshold(source, threshold) {
+            panic!("integer arithmetic semantics: {}", error.message);
+        }
+    }
+}
+
+#[test]
+fn string_receiver_unicode_and_bounds_with_and_without_jit() {
+    let source = include_str!("../../../test/examples/string_receiver_regression.fdn");
+    for threshold in [0, 1] {
+        if let Err(error) = run_src_with_threshold(source, threshold) {
+            panic!("string receiver semantics: {}", error.message);
+        }
+    }
+}
+
+#[test]
+fn boolean_negation_is_logical_with_and_without_jit() {
+    let source = include_str!("../../../test/examples/boolean_negation_regression.fdn");
+    for threshold in [0, 1] {
+        if let Err(error) = run_src_with_threshold(source, threshold) {
+            panic!("boolean negation semantics: {}", error.message);
+        }
+    }
+}
+
+#[test]
+fn slicing_regression_interpreter_and_jit_fallback() {
+    let source = include_str!("../../../test/examples/slice_regression.fdn");
+    for threshold in [0, 1] {
+        if let Err(error) = run_src_with_threshold(source, threshold) {
+            panic!("slicing semantics: {}", error.message);
+        }
+    }
+}
+
+#[test]
+fn slicing_invalid_dynamic_components_report_errors() {
+    for (component, source) in [
+        ("step cannot be zero", r#"var result = "abc"[::0]"#),
+        (
+            "step must be an integer",
+            r#"action bad returns dynamic { return "x" }
+var result = "abc"[::bad()]"#,
+        ),
+        (
+            "index must be an integer",
+            r#"action bad returns dynamic { return "x" }
+var result = "abc"[bad():]"#,
+        ),
+        (
+            "list index -2 out of range",
+            "var items = [1]\nitems[-2] = 7",
+        ),
+        (
+            "range length cannot be represented",
+            "var size = len(0...9223372036854775807)",
+        ),
+    ] {
+        let error = run_src(source).expect_err("invalid slice should fail");
+        assert!(error.message.contains(component), "{}", error.message);
+    }
+}
+
 fn run_src_preserving_call_frames(src: &str) -> Result<(), RunError> {
     let source_map = Arc::new(SourceMap::new());
     let interner = make_interner();
@@ -1212,6 +1447,49 @@ fn parallel_for_accepts_ranges_with_jit_enabled() {
 }
 
 #[test]
+fn shared_update_is_atomic_with_and_without_jit() {
+    for threshold in [0, 1] {
+        run_src_with_threshold(
+            include_str!("../../../test/examples/shared_update_regression.fdn"),
+            threshold,
+        )
+        .unwrap_or_else(|error| panic!("atomic Shared update: {}", error.message));
+    }
+}
+
+#[test]
+fn release_semantics_with_and_without_jit() {
+    for threshold in [0, 1] {
+        run_src_with_threshold(
+            include_str!("../../../test/examples/release_semantics_regression.fdn"),
+            threshold,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "release semantics at JIT threshold {threshold}: {}\n{:?}",
+                error.message, error.trace
+            )
+        });
+    }
+}
+
+#[test]
+fn stdlib_callable_arity_with_and_without_jit() {
+    for threshold in [0, 1] {
+        run_src_with_threshold(
+            include_str!("../../../test/examples/stdlib_callable_arity_regression.fdn"),
+            threshold,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "stdlib callable arity at threshold {threshold}: {}",
+                error.message
+            )
+        });
+    }
+}
+
+#[test]
 fn weak_shared_supports_upgrade_and_collection() {
     assert!(
         run_src(
@@ -2198,6 +2476,24 @@ fn e0401_no_race_with_shared() {
 }
 
 #[test]
+fn e0401_shared_update_is_safe_but_global_rebinding_is_not() {
+    for source in [
+        "var counter = Shared(0)\nparallel { task A { counter.update(action with (x) { return x + 1 }) } task B { counter.update(action with (x) { return x + 1 }) } }",
+        "var counter = Shared(0)\nparallel for i in 0..100 { counter.update(action with (x) { return x + 1 }) }",
+    ] {
+        let (mir, interner) = build_mir(source);
+        assert!(fidan_passes::check_parallel_races(&mir, &interner).is_empty());
+    }
+    for source in [
+        "var counter = Shared(0)\nparallel { task A { counter = Shared(1) } task B { counter = Shared(2) } }",
+        "var counter = 0\nparallel for i in 0..100 { counter = counter + 1 }",
+    ] {
+        let (mir, interner) = build_mir(source);
+        assert!(!fidan_passes::check_parallel_races(&mir, &interner).is_empty());
+    }
+}
+
+#[test]
 fn e0401_no_race_when_no_parallel() {
     // Sequential code should never trigger a data-race diagnostic
     let (mir, interner) = build_mir(
@@ -2755,4 +3051,120 @@ assert_eq(collect(["a"]).len(), 1)
         )
         .is_ok()
     );
+}
+
+#[test]
+fn operator_builtin_parity_with_and_without_jit() {
+    for threshold in [0, 1] {
+        run_src_with_threshold(
+            include_str!("../../../test/examples/operator_builtin_parity_regression.fdn"),
+            threshold,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "operator/builtin parity at threshold {threshold}: {}",
+                error.message
+            )
+        });
+    }
+}
+
+#[test]
+fn core_builtin_parity_with_and_without_jit() {
+    for threshold in [0, 1] {
+        run_src_with_threshold(
+            include_str!("../../../test/examples/core_builtin_parity_regression.fdn"),
+            threshold,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "core builtin parity at threshold {threshold}: {}",
+                error.message
+            )
+        });
+        for source in [
+            r#"assert(false, "custom assertion message")"#,
+            r#"var callback oftype action = assert; callback(false, "custom assertion message")"#,
+        ] {
+            let error = run_src_with_threshold(source, threshold).expect_err("assertion failure");
+            assert!(error.message.contains("custom assertion message"));
+        }
+        let source = r#"var reader oftype action = input
+assert_eq(input(), "one")
+assert_eq(reader(), "two")
+assert_eq(input(), "three")"#;
+        let (mut mir, interner) = build_mir(source);
+        fidan_passes::run_all(&mut mir);
+        let source_map = Arc::new(SourceMap::new());
+        source_map.add_file("<test>", source);
+        run_mir_with_replay(
+            mir,
+            interner,
+            source_map,
+            threshold,
+            vec!["one".into(), "two".into(), "three".into()],
+            None,
+        )
+        .0
+        .unwrap_or_else(|error| panic!("erased input replay: {}", error.message));
+    }
+}
+
+#[test]
+fn optional_assertion_messages_with_and_without_jit() {
+    for threshold in [0, 1] {
+        for (source, expected) in [
+            ("assert_eq(1, 2)", "assertion failed: expected 1 == 2"),
+            ("assert_ne(1, 1)", "assertion failed: expected 1 != 1"),
+            ("assert_eq(1, 2, \"custom eq\")", "custom eq"),
+            ("assert_ne(1, 1, \"custom ne\")", "custom ne"),
+            (
+                "var callback oftype action = erase(assert_eq); callback(1, 2, \"custom erased eq\")",
+                "custom erased eq",
+            ),
+            (
+                "var callback oftype action = erase(assert_ne); callback(1, 1, \"custom erased ne\")",
+                "custom erased ne",
+            ),
+            ("assertions.assertEq(1, 2)", "expected `1` == `2`"),
+            ("assertions.assertNe(1, 1)", "expected `1` != `1`"),
+            (
+                "assertions.assertEq(1, 2, \"custom test eq\")",
+                "custom test eq",
+            ),
+            (
+                "assertions.assert_eq(1, 2, \"custom test eq alias\")",
+                "custom test eq alias",
+            ),
+            (
+                "assertions.assertNe(1, 1, \"custom test ne\")",
+                "custom test ne",
+            ),
+            (
+                "assertions.assert_ne(1, 1, \"custom test ne alias\")",
+                "custom test ne alias",
+            ),
+            (
+                "assert_eq(1.0, 1.0 + 0.0000000000005, \"custom exact eq\")",
+                "custom exact eq",
+            ),
+            (
+                "assertions.assertNe(1.0, 1.0 + 0.0000000000005, \"custom tolerant ne\")",
+                "custom tolerant ne",
+            ),
+        ] {
+            // The interpreter keeps its existing std.test diagnostic prefix.
+            let expected = if source.starts_with("assertions.") {
+                format!("assertion failed: {expected}")
+            } else {
+                expected.to_owned()
+            };
+            let source = format!(
+                "use std.test as assertions\naction erase with (certain value oftype flexible) returns flexible {{ if type(value) == \"nothing\" {{ return value }} return value }}\nattempt {{ {source} }} catch error {{ assert(false, \"unexpected catch\") }}"
+            );
+            let error = run_src_with_threshold(&source, threshold).expect_err("assertion failure");
+            assert_eq!(error.message, expected, "threshold {threshold}: {source}");
+            assert_eq!(error.code, fidan_diagnostics::diag_code!("R0001"));
+        }
+    }
 }

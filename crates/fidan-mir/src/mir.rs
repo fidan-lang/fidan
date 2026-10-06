@@ -62,6 +62,11 @@ pub enum MirTy {
 }
 
 impl MirTy {
+    /// Internal runtime contract; uses the existing MIR type representation.
+    pub fn runtime_descriptor(&self) -> String {
+        serde_json::to_string(self).expect("MIR types are serializable")
+    }
+
     pub fn is_nothing(&self) -> bool {
         matches!(self, MirTy::Nothing)
     }
@@ -198,6 +203,20 @@ pub enum Rvalue {
         value: Operand,
         index: usize,
     },
+}
+
+impl Rvalue {
+    /// Operators can raise type errors as well as R2001/R2003.
+    pub fn arithmetic_may_fail(&self) -> bool {
+        matches!(
+            self,
+            Self::Binary { .. }
+                | Self::Unary {
+                    op: UnOp::Neg | UnOp::Not,
+                    ..
+                }
+        )
+    }
 }
 
 // ── Instructions ──────────────────────────────────────────────────────────────
@@ -385,7 +404,8 @@ pub struct MirParam {
     /// If `true` the caller must not pass `nothing` for this parameter.
     pub certain: bool,
     /// Default value to use when the caller passes `nothing` (or omits the arg).
-    /// Only populated for `optional` params whose default is a compile-time literal.
+    /// Optional parameters without a literal default carry Nothing; non-literal
+    /// defaults are evaluated in the function prologue.
     pub default: Option<MirLit>,
 }
 

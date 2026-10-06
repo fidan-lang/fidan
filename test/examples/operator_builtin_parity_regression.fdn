@@ -1,0 +1,137 @@
+# Strict operator types and catchable core builtin failures on every execution path.
+action bitAnd with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a & b }
+action bitOr with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a | b }
+action bitXor with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a ^ b }
+action shiftLeft with (certain a oftype integer, certain b oftype integer) returns integer { return a << b }
+action shiftRight with (certain a oftype integer, certain b oftype integer) returns integer { return a >> b }
+action dynamicLeft with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a << b }
+action dynamicRight with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a >> b }
+action makeRange with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a..b }
+action makeInclusive with (certain a oftype flexible, certain b oftype flexible) returns flexible { return a...b }
+action both with (certain a oftype flexible, certain b oftype flexible) { return a and b }
+action either with (certain a oftype flexible, certain b oftype flexible) { return a or b }
+action invert with (certain a oftype flexible) { return not a }
+action negate with (certain a oftype flexible) returns flexible { return -a }
+action less with (certain a oftype flexible, certain b oftype flexible) { return a < b }
+# Indirect dispatch preserves dynamic operands through optimization/inlining.
+var operators oftype list oftype flexible = [bitAnd, bitOr, bitXor, dynamicLeft, dynamicRight, makeRange, makeInclusive, both, either, invert, negate, less]
+action expectError with (certain callback oftype action, certain code oftype string) {
+    var caught = false
+    attempt { callback() } catch error {
+        assert(error.contains(code))
+        caught = true
+    }
+    assert_eq(caught, true)
+}
+assert_eq(6 & 3, 2)
+assert_eq(6 | 3, 7)
+assert_eq(6 ^ 3, 5)
+assert_eq(operators[0](6, 3), 2)
+assert_eq(operators[1](6, 3), 7)
+assert_eq(operators[2](6, 3), 5)
+assert_eq(1 << 0, 1)
+assert_eq(1 << 63, -9223372036854775807 - 1)
+assert_eq(1 << 64, 1)
+assert_eq(1 << 65, 2)
+assert_eq(8 >> 65, 4)
+assert_eq(1 << -1, -9223372036854775807 - 1)
+assert_eq(-8 >> 65, -4)
+var counts = [0, 63, 64, 65, -1]
+var expectedLeft = [1, -9223372036854775807 - 1, 1, 2, -9223372036854775807 - 1]
+var expectedRight = [8, 0, 8, 4, 0]
+for index in 0..len(counts) {
+    assert_eq(shiftLeft(1, counts[index]), expectedLeft[index])
+    assert_eq(operators[3](1, counts[index]), expectedLeft[index])
+    assert_eq(shiftRight(8, counts[index]), expectedRight[index])
+    assert_eq(operators[4](8, counts[index]), expectedRight[index])
+}
+assert_eq(shiftRight(-8, 65), -4)
+assert_eq(operators[4](-8, 65), -4)
+assert_eq(len(operators[5](1, 4)), 3)
+assert_eq(len(operators[6](1, 4)), 4)
+assert_eq(len(1..4), 3)
+assert_eq(len(1...4), 4)
+assert_eq(operators[7](true, false), false)
+assert_eq(operators[8](false, true), true)
+assert_eq(operators[9](true), false)
+assert_eq(operators[10](2.5), -2.5)
+assert_eq(operators[11](1, 1.5), true)
+assert_eq(operators[11](1.5, 2), true)
+assert_eq(operators[11]("a", "b"), true)
+assert_eq(true and false, false)
+assert_eq(false or true, true)
+assert_eq(not false, true)
+assert_eq(1 < 1.5, true)
+assert_eq(1.5 <= 2, true)
+assert_eq("b" > "a", true)
+assert_eq("b" >= "b", true)
+assert_eq(1 == 1.0, true)
+assert_eq(nothing == nothing, true)
+assert_eq(+"identity", "identity")
+expectError(action { return operators[0]("oops", 3) }, "R0001")
+expectError(action { return operators[0](3, 2.5) }, "R0001")
+expectError(action { return operators[1]("oops", 3) }, "R0001")
+expectError(action { return operators[1](3, 2.5) }, "R0001")
+expectError(action { return operators[2]("oops", 3) }, "R0001")
+expectError(action { return operators[2](3, 2.5) }, "R0001")
+expectError(action { return operators[3]("oops", 3) }, "R0001")
+expectError(action { return operators[3](3, 2.5) }, "R0001")
+expectError(action { return operators[4]("oops", 3) }, "R0001")
+expectError(action { return operators[4](3, 2.5) }, "R0001")
+expectError(action { return operators[5](1.5, 4) }, "R0001")
+expectError(action { return operators[5](true, 4) }, "R0001")
+expectError(action { return operators[5]("1", 4) }, "R0001")
+expectError(action { return operators[5](1, 2.5) }, "R0001")
+expectError(action { return operators[6](1.5, 4) }, "R0001")
+expectError(action { return operators[6](true, 4) }, "R0001")
+expectError(action { return operators[6]("1", 4) }, "R0001")
+expectError(action { return operators[6](1, 2.5) }, "R0001")
+expectError(action { return operators[7](true, 1) }, "R0001")
+expectError(action { return operators[7](1, true) }, "R0001")
+expectError(action { return operators[8](false, "bad") }, "R0001")
+expectError(action { return operators[8]("bad", false) }, "R0001")
+expectError(action { return operators[9](42) }, "R0001")
+expectError(action { return operators[10]("bad") }, "R0001")
+expectError(action { return operators[11](true, false) }, "R0001")
+expectError(action { return operators[11]("x", 3) }, "R0001")
+expectError(action { return integer("abc") }, "R0001")
+expectError(action { return integer([1, 2]) }, "R0001")
+expectError(action { return float("abc") }, "R0001")
+expectError(action { return float(true) }, "R0001")
+expectError(action { return len(42) }, "R0001")
+assert_eq(integer("123"), 123)
+assert_eq(integer(true), 1)
+assert_eq(integer(2.5), 2)
+assert_eq(float("1.5"), 1.5)
+assert_eq(float(2), 2.0)
+assert_eq(len("λ中"), 2)
+assert_eq(len([1, 2]), 2)
+assert_eq(len((1, 2)), 2)
+assert_eq(len({ "key": 1 }), 1)
+assert_eq(len(hashset([1, 2])), 2)
+var erasedInteger oftype action = integer
+var erasedFloat oftype flexible = float
+var erasedLen oftype action = len
+assert_eq(erasedInteger("123"), 123)
+assert_eq(erasedFloat("1.5"), 1.5)
+assert_eq(erasedLen([1, 2]), 2)
+expectError(action { return erasedInteger("abc") }, "R0001")
+expectError(action { return erasedFloat(true) }, "R0001")
+expectError(action { return erasedLen(42) }, "R0001")
+var wide oftype flexible = (-9223372036854775807 - 1)...9223372036854775807
+expectError(action { return len(wide) }, "R0001")
+expectError(action { return erasedLen(wide) }, "R0001")
+# Receiver errors retain the interpreter's existing R2002 contract.
+expectError(action { return wide.len() }, "R2002")
+expectError(action { return wide.toList() }, "R2002")
+var typedWide = (-9223372036854775807 - 1)...9223372036854775807
+expectError(action { return typedWide.len() }, "R2002")
+var reachedAfterFailure = false
+action checkedLength with (certain value oftype flexible) returns integer {
+    var result = len(value)
+    reachedAfterFailure = true
+    return result
+}
+expectError(action { return checkedLength(42) }, "R0001")
+assert_eq(reachedAfterFailure, false)
+print("operator builtin parity ok")

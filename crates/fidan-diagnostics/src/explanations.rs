@@ -985,8 +985,9 @@ Fix: check the index before accessing:
         "R2003" => Some(
             r#"An arithmetic operation produced a result that cannot be represented
 in the target integer type (64-bit signed integer).  Fidan's integer
-arithmetic wraps on overflow in debug mode and raises this error when
-wrapping is detected.
+arithmetic reports R2003 on overflow in every build profile. Integer
+negative powers remain exact integers for bases 1 and -1. Other nonzero
+integer bases produce floating-point results; a zero base reports R2001.
 
 Example:
 

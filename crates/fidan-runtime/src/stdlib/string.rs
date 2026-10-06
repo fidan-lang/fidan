@@ -172,7 +172,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
             let to = coerce_string(args.get(2).unwrap_or(&FidanValue::Nothing));
             Some(string_value(&s.replacen(from.as_str(), to.as_str(), 1)))
         }
-        "slice" | "substr" => {
+        "substring" | "slice" | "substr" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
             let chars: Vec<char> = s.chars().collect();
             let len = chars.len();
@@ -184,6 +184,16 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
                 chars[start..end].iter().collect()
             };
             Some(string_value(&sub))
+        }
+        "charAt" | "char_at" => {
+            let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
+            let ch = match args.get(1) {
+                Some(FidanValue::Integer(n)) => {
+                    usize::try_from(*n).ok().and_then(|n| s.chars().nth(n))
+                }
+                _ => None,
+            };
+            Some(string_value(&ch.map(|c| c.to_string()).unwrap_or_default()))
         }
         "padStart" | "pad_start" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));

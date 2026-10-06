@@ -299,11 +299,13 @@ fn infer_rvalue_type(
             match op {
                 Eq | NotEq | Lt | LtEq | Gt | GtEq => MirTy::Boolean,
                 Add | Sub | Mul | Div | Rem | Pow
-                    if matches!(lhs_ty, MirTy::Float) || matches!(rhs_ty, MirTy::Float) =>
+                    if matches!(lhs_ty, MirTy::Integer | MirTy::Float)
+                        && matches!(rhs_ty, MirTy::Integer | MirTy::Float)
+                        && (matches!(lhs_ty, MirTy::Float) || matches!(rhs_ty, MirTy::Float)) =>
                 {
                     MirTy::Float
                 }
-                Add | Sub | Mul | Div | Rem | Pow
+                Add | Sub | Mul | Div | Rem
                     if matches!(lhs_ty, MirTy::Integer) && matches!(rhs_ty, MirTy::Integer) =>
                 {
                     MirTy::Integer
@@ -331,10 +333,7 @@ fn infer_rvalue_type(
                 fidan_ast::UnOp::Neg | fidan_ast::UnOp::Pos => operand_ty,
             }
         }
-        Rvalue::Literal(MirLit::Int(_)) => MirTy::Integer,
-        Rvalue::Literal(MirLit::Float(_)) => MirTy::Float,
-        Rvalue::Literal(MirLit::Bool(_)) => MirTy::Boolean,
-        Rvalue::Literal(MirLit::Str(_)) => MirTy::String,
+        Rvalue::Literal(literal) => infer_operand_type(&Operand::Const(literal.clone()), map),
         Rvalue::Use(operand) => infer_operand_type(operand, map),
         Rvalue::Call { callee, args } => {
             infer_call_result_ty(callee, program, args, map, namespace_locals, resolve_symbol)
@@ -352,7 +351,8 @@ fn infer_operand_type(operand: &Operand, local_types: &HashMap<u32, MirTy>) -> M
         Operand::Const(MirLit::Bool(_)) => MirTy::Boolean,
         Operand::Const(MirLit::Str(_)) => MirTy::String,
         Operand::Const(MirLit::Nothing) => MirTy::Nothing,
-        _ => MirTy::Error,
+        Operand::Const(MirLit::FunctionRef(_) | MirLit::StdlibFn { .. }) => MirTy::Function,
+        Operand::Const(_) => MirTy::Dynamic,
     }
 }
 
@@ -434,6 +434,7 @@ fn function_may_throw(function: &MirFunction, throw_map: &HashMap<FunctionId, bo
                 {
                     return true;
                 }
+                Instr::Assign { rhs, .. } if rhs.arithmetic_may_fail() => return true,
                 Instr::GetField { .. }
                 | Instr::SetField { .. }
                 | Instr::GetIndex { .. }

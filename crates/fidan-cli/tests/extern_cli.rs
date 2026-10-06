@@ -16,8 +16,11 @@ fn workspace_root() -> PathBuf {
 
 fn debug_target_dir() -> PathBuf {
     std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
+        .map(|path| workspace_root().join(path))
         .unwrap_or_else(|| workspace_root().join("target"))
+        // Nested Cargo builds must not overwrite the workspace runtime rlib
+        // with a different feature set before its doctests run.
+        .join("extern-fixture")
         .join("debug")
 }
 
@@ -40,6 +43,8 @@ fn build_fixture() -> PathBuf {
     let workspace = workspace_root();
     let output = Command::new(cargo_exe())
         .args(["build", "-p", "fidan-extern-fixture"])
+        .arg("--target-dir")
+        .arg(debug_target_dir().parent().expect("fixture target root"))
         .current_dir(&workspace)
         .output()
         .expect("failed to build extern fixture");

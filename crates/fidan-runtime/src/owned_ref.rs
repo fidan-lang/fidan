@@ -1,9 +1,9 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-/// Interpreter-internal owned reference. Single-threaded only.
-/// In AOT mode this is lowered to Box<T> or alloca.
-/// Never exposed to user code.
+/// Shared owner for boxed runtime collections and objects in interpreter and AOT execution.
+/// Single-threaded: cross-thread shared values use `SharedRef` instead.
+/// This ownership wrapper is not exposed to Fidan code.
 #[derive(Debug, Clone)]
 pub struct OwnedRef<T>(pub Rc<RefCell<T>>);
 

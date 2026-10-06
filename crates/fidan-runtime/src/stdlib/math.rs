@@ -28,6 +28,18 @@ fn to_f64(v: &FidanValue) -> f64 {
     }
 }
 
+pub fn dispatch_result(
+    name: &str,
+    args: Vec<FidanValue>,
+) -> Option<Result<FidanValue, super::StdlibRuntimeError>> {
+    if name == "abs"
+        && let Some(FidanValue::Integer(n)) = args.first()
+    {
+        return Some(crate::integer::abs(*n).map(FidanValue::Integer));
+    }
+    dispatch(name, args).map(Ok)
+}
+
 pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
     match name {
         "sin" => Some(float_val(arg0(&args).sin())),
@@ -55,7 +67,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "trunc" => Some(float_val(arg0(&args).trunc())),
         "fract" => Some(float_val(arg0(&args).fract())),
         "abs" => match args.first() {
-            Some(FidanValue::Integer(n)) => Some(FidanValue::Integer(n.abs())),
+            Some(FidanValue::Integer(n)) => n.checked_abs().map(FidanValue::Integer),
             Some(FidanValue::Float(f)) => Some(float_val(f.abs())),
             _ => Some(FidanValue::Nothing),
         },

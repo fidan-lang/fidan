@@ -2,6 +2,8 @@
 
 Thank you for your interest in contributing to **Fidan**. Contributions help improve the language, tooling, and ecosystem. We welcome improvements such as bug fixes, performance optimizations, documentation updates, tooling, editor support, and ecosystem integrations.
 
+Fidan is an AI-native general-purpose programming language and compiler toolchain. Its design connects human-readable code and native backends with AI tools that use structured compiler information. The [AI-native tooling documentation](README.md#ai-native-tooling) describes the implemented analysis interfaces, first-party workflows, and their limitations. Keep public descriptions grounded in those capabilities and distinguish design goals from verified results.
+
 Please read this document before submitting a contribution.
 
 ---
@@ -18,16 +20,26 @@ cd fidan
 ### 2. Build the workspace
 
 ```bash
-cargo build
+cargo build --workspace --locked
 ```
 
 ### 3. Run tests
 
 ```bash
-cargo test
+cargo test --workspace --locked
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
 ```
 
 Before submitting a pull request, make sure the project builds successfully and all relevant tests pass.
+
+On Windows, `test\scripts\test.bat` also runs every `.fdn` file under `test/` and its `test {}` blocks. It supplies the replay fixture and treats the trace demo's deliberate failure as expected. `test\scripts\test-runner-coverage.ps1` verifies that a failing test block makes this runner fail; run it separately from example sweeps because it temporarily adds a failing fixture.
+
+Run `test/scripts/test_examples_aot.ps1` (PowerShell) or `test/scripts/test_examples_aot.sh` (Bash) with `--backend cranelift` / `--backend llvm` (PowerShell: `-Backend`). LLVM tests execute the installed helper, so compiler contributors must rebuild/install the matching helper after backend changes; rebuilding the workspace alone does not replace it. Check `fidan toolchain list`, and use the runner's `-FidanHome` / `--fidan-home` option for an isolated toolchain installation. Golden-file checks live in `test/scripts/test_aot.bat` and `test/scripts/test_aot.sh`.
+
+The benchmark helpers use their full default workloads. Unix `performance_bm.sh` additionally requires Valgrind and KCachegrind for Callgrind profiling; it reports missing tools rather than pretending to profile successfully.
+
+Use Rust 1.96 or newer and a host C/C++ toolchain. The current lockfile was tested with Rust 1.99. Linux builds also need `pkg-config` and `libdbus-1-dev` (Debian/Ubuntu names). Default workspace builds do not require LLVM; optional backend setup is documented in the [README](README.md#build-from-source). All six Cranelift crates are constrained to the compatible `0.136` series, currently locked at `0.136.2`. Commit the lockfile with dependency updates and repeat workspace/backend validation before changing the supported series.
 
 ---
 
@@ -37,11 +49,11 @@ The repository is organized as a Cargo workspace.
 
 ```text
 crates/
-    lexer
-    parser
-    ast
-    compiler
-    runtime
+    fidan-lexer / fidan-parser / fidan-ast / fidan-typeck
+    fidan-hir / fidan-mir / fidan-passes
+    fidan-interp / fidan-codegen-cranelift / fidan-codegen-llvm
+    fidan-runtime / fidan-stdlib
+    fidan-driver / fidan-cli / fidan-lsp / fidan-fmt
 
 test/
     ...
@@ -49,6 +61,8 @@ test/
 
 Core language components live inside `crates/`.  
 Tests and examples live inside `test/`.
+
+See the [workspace architecture](README.md#architecture) for all 25 crates, including embedding and optional analysis/toolchain helpers. Crate-local tests also live under `crates/*/tests`.
 
 As the project evolves, additional crates and tooling may be added. Please try to keep contributions aligned with the existing project structure.
 
@@ -145,7 +159,7 @@ Please write commit messages that clearly explain the purpose of the change.
 Good examples:
 
 - `parser: fix precedence handling for null-coalescing operator`
-- `runtime: reduce allocation overhead in bytecode VM`
+- `runtime: reduce allocation overhead in the runtime`
 - `docs: add syntax examples for extension actions`
 
 Avoid vague commit messages like:

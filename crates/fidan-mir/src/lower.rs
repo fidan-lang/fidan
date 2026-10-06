@@ -1612,7 +1612,7 @@ impl<'p> FnCtx<'p> {
                             args.iter().map(|a| self.lower_expr(&a.value)).collect();
                         self.emit(Instr::Call {
                             dest: None,
-                            result_ty: None,
+                            result_ty: Some(fidan_ty_to_mir(&expr.ty)),
                             callee: callee_op,
                             args: arg_ops,
                             span: expr.span,
@@ -3273,7 +3273,11 @@ pub fn lower_program(
         for param in &func.params {
             let local = ctx.alloc_local();
             ctx.define_var(param.name, local);
-            let default = param.default.as_ref().and_then(hir_lit_to_mir_lit);
+            let default = param
+                .default
+                .as_ref()
+                .and_then(hir_lit_to_mir_lit)
+                .or_else(|| param.optional.then_some(MirLit::Nothing));
             ctx.func_mut().params.push(MirParam {
                 local,
                 name: param.name,

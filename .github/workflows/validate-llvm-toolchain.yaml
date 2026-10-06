@@ -4,16 +4,21 @@ on:
   workflow_dispatch:
     inputs:
       toolchain_version:
-        description: "Fidan toolchain package version (defaults to workspace version)"
+        description: "Fidan toolchain package version (defaults to the LLVM helper version)"
         required: false
         type: string
       llvm_tool_version:
         description: "Upstream LLVM version for the toolchain package"
         required: true
-        default: "21.1.8"
+        default: "23.1.2"
         type: string
   pull_request:
     paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "test/examples/slice_regression.fdn"
+      - "test/examples/integer_overflow_regression.fdn"
+      - "test/examples/boolean_negation_regression.fdn"
       - ".github/workflows/llvm-toolchain-build.yaml"
       - ".github/workflows/validate-llvm-toolchain.yaml"
       - ".github/workflows/release-toolchain.yaml"
@@ -35,5 +40,5 @@ jobs:
     uses: ./.github/workflows/llvm-toolchain-build.yaml
     with:
       toolchain_version: ${{ github.event.inputs.toolchain_version || '' }}
-      llvm_tool_version: ${{ github.event.inputs.llvm_tool_version || '21.1.8' }}
+      llvm_tool_version: ${{ github.event.inputs.llvm_tool_version || '23.1.2' }}
       validate: true

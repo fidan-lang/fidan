@@ -29,8 +29,13 @@ echo.
 powershell -NoProfile -Command ^
     "$sw = [System.Diagnostics.Stopwatch]::StartNew();" ^
     "& '.\target\release\fidan.exe' run 'test\examples\parallel_benchmark.fdn';" ^
+    "$benchmarkExit = $LASTEXITCODE;" ^
     "$sw.Stop();" ^
     "Write-Host '';" ^
-    "Write-Host ('Total wall-clock time: ' + $sw.Elapsed.TotalSeconds.ToString('F2') + ' s')"
+    "Write-Host ('Total wall-clock time: ' + $sw.Elapsed.TotalSeconds.ToString('F2') + ' s');" ^
+    "exit $benchmarkExit"
+
+if errorlevel 1 exit /b 1
 
 endlocal
+exit /b 0

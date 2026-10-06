@@ -259,6 +259,55 @@ impl<'t> Parser<'t> {
                 }
                 // ── Postfix: index / slice ────────────────────────────────────
                 TokenKind::LBracket => {
+                    // Colon slices use the same AST as range slices. The lexer
+                    // emits `::` as one token, including in `text[1::2]`.
+                    let previous_slice_start = self.in_slice_start;
+                    let first = if matches!(
+                        self.peek(),
+                        TokenKind::Colon
+                            | TokenKind::DoubleColon
+                            | TokenKind::DotDot
+                            | TokenKind::DotDotDot
+                    ) {
+                        None
+                    } else {
+                        self.in_slice_start = true;
+                        let first = self.parse_expr_bp(0);
+                        self.in_slice_start = previous_slice_start;
+                        Some(first)
+                    };
+                    if matches!(self.peek(), TokenKind::Colon | TokenKind::DoubleColon) {
+                        let double_colon = matches!(self.peek(), TokenKind::DoubleColon);
+                        self.advance();
+                        let slice_end = if double_colon
+                            || matches!(
+                                self.peek(),
+                                TokenKind::Colon | TokenKind::RBracket | TokenKind::Eof
+                            ) {
+                            None
+                        } else {
+                            Some(self.parse_expr_bp(0))
+                        };
+                        let has_step = double_colon || self.eat(&TokenKind::Colon);
+                        let step = if has_step
+                            && !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof)
+                        {
+                            Some(self.parse_expr_bp(0))
+                        } else {
+                            None
+                        };
+                        let end_pos = self.current_span().end;
+                        self.expect_tok(&TokenKind::RBracket);
+                        lhs = self.module.arena.alloc_expr(Expr::Slice {
+                            target: lhs,
+                            start: first,
+                            end: slice_end,
+                            inclusive: false,
+                            step,
+                            span: Span::new(self.module.file, start, end_pos),
+                        });
+                        continue;
+                    }
                     // ── Open-start slice: obj[..end], obj[...end], obj[..], obj[.. step N] ──
                     if matches!(self.peek(), TokenKind::DotDot | TokenKind::DotDotDot) {
                         let inclusive = matches!(self.peek(), TokenKind::DotDotDot);
@@ -281,7 +330,7 @@ impl<'t> Parser<'t> {
                         self.expect_tok(&TokenKind::RBracket);
                         lhs = self.module.arena.alloc_expr(Expr::Slice {
                             target: lhs,
-                            start: None,
+                            start: first,
                             end: slice_end,
                             inclusive,
                             step,
@@ -289,48 +338,14 @@ impl<'t> Parser<'t> {
                         });
                         continue;
                     }
-                    // ── Parse start expression (suppress `..`/`...` as infix) ──
-                    self.in_slice_start = true;
-                    let first = self.parse_expr_bp(0);
-                    self.in_slice_start = false;
-                    // ── Closed-start slice: obj[s..e], obj[s..], obj[s...e] ───
-                    if matches!(self.peek(), TokenKind::DotDot | TokenKind::DotDotDot) {
-                        let inclusive = matches!(self.peek(), TokenKind::DotDotDot);
-                        self.advance(); // consume `..` or `...`
-                        let slice_end =
-                            if matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof)
-                                || self.at_ident(self.sym_step)
-                            {
-                                None
-                            } else {
-                                Some(self.parse_expr_bp(0))
-                            };
-                        let step = if self.at_ident(self.sym_step) {
-                            self.advance(); // consume `step`
-                            Some(self.parse_expr_bp(0))
-                        } else {
-                            None
-                        };
-                        let end_pos = self.current_span().end;
-                        self.expect_tok(&TokenKind::RBracket);
-                        lhs = self.module.arena.alloc_expr(Expr::Slice {
-                            target: lhs,
-                            start: Some(first),
-                            end: slice_end,
-                            inclusive,
-                            step,
-                            span: Span::new(self.module.file, start, end_pos),
-                        });
-                    } else {
-                        // ── Plain index: obj[expr] ───────────────────────────
-                        let end_pos = self.current_span().end;
-                        self.expect_tok(&TokenKind::RBracket);
-                        lhs = self.module.arena.alloc_expr(Expr::Index {
-                            object: lhs,
-                            index: first,
-                            span: Span::new(self.module.file, start, end_pos),
-                        });
-                    }
+                    let first = first.expect("index expression parsed above");
+                    let end_pos = self.current_span().end;
+                    self.expect_tok(&TokenKind::RBracket);
+                    lhs = self.module.arena.alloc_expr(Expr::Index {
+                        object: lhs,
+                        index: first,
+                        span: Span::new(self.module.file, start, end_pos),
+                    });
                     continue;
                 }
                 // ── NullCoalesce ──────────────────────────────────────────────

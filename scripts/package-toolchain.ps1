@@ -532,6 +532,8 @@ function Invoke-HelperBuild {
   $previousMacOsLinker = if ($hadMacOsLinker) { (Get-Item "Env:$linkerEnvName").Value } else { "" }
   $previousRustFlags = $env:RUSTFLAGS
   $hadRustFlags = [bool](Test-Path Env:RUSTFLAGS)
+  $previousReleaseLto = $env:CARGO_PROFILE_RELEASE_LTO
+  $hadReleaseLto = [bool](Test-Path Env:CARGO_PROFILE_RELEASE_LTO)
   $helperLibShimDir = $null
   $hadLlvmSysPrefix = $false
   $previousLlvmSysPrefix = ""
@@ -551,6 +553,22 @@ function Invoke-HelperBuild {
     if ($Kind -eq "llvm") {
       if (-not $LlvmRoot) {
         throw "LLVM helper build requires -LlvmRoot"
+      }
+
+      # Rust's patched LLVM cannot safely consume upstream LLVM's embedded
+      # bitcode during helper linking. This does not disable Fidan's --lto full.
+      $env:CARGO_PROFILE_RELEASE_LTO = "false"
+
+      if ($IsWindows) {
+        # Select the DLL CRT used by Rust and x64-windows-static-md dependencies.
+        # Upstream LLVM archives also request LIBCMT; linking both CRTs conflicts.
+        $dynamicCrtFlag = "-C link-arg=/NODEFAULTLIB:libcmt"
+        $env:RUSTFLAGS = if ($hadRustFlags -and $previousRustFlags) {
+          "$previousRustFlags $dynamicCrtFlag"
+        }
+        else {
+          $dynamicCrtFlag
+        }
       }
 
       $llvmBinDir = Join-Path $LlvmRoot "bin"
@@ -649,8 +667,26 @@ function Invoke-HelperBuild {
     if ($LASTEXITCODE -ne 0) {
       throw "Failed to build $HelperPackage"
     }
+    if ($Kind -eq "llvm" -and $HelperCargoFeatures) {
+      # Run the feature-gated backend tests while the full LLVM development
+      # libraries are still available, before the distribution is pruned.
+      cargo test -p fidan-codegen-llvm --lib --release --locked --features $HelperCargoFeatures
+      if ($LASTEXITCODE -ne 0) {
+        throw "LLVM backend tests failed"
+      }
+      cargo clippy -p fidan-codegen-llvm --all-targets --release --locked --features $HelperCargoFeatures -- -D warnings
+      if ($LASTEXITCODE -ne 0) {
+        throw "LLVM backend lint checks failed"
+      }
+    }
   }
   finally {
+    if ($hadReleaseLto) {
+      $env:CARGO_PROFILE_RELEASE_LTO = $previousReleaseLto
+    }
+    else {
+      Remove-Item Env:CARGO_PROFILE_RELEASE_LTO -ErrorAction SilentlyContinue
+    }
     $env:PATH = $previousPath
 
     if ($hadLib) {
@@ -832,6 +868,14 @@ try {
     throw "Expected helper binary at '$helperPath'"
   }
   Copy-Item -LiteralPath $helperPath -Destination (Join-Path $helperDir $helperBinary)
+
+  if ($Kind -eq "llvm" -and $IsWindows) {
+    # Windows loads imported DLLs before main; placing the official C API DLL
+    # beside the helper also supports invoking it without a modified PATH.
+    $llvmDll = Join-Path $payloadRoot "bin/LLVM-C.dll"
+    if (-not (Test-Path -LiteralPath $llvmDll)) { throw "Missing official LLVM C API DLL: $llvmDll" }
+    Copy-Item -LiteralPath $llvmDll -Destination (Join-Path $helperDir "LLVM-C.dll")
+  }
 
   if (($Kind -eq "llvm") -and $payloadRoot) {
     Remove-LlvmPayload -LlvmRoot $payloadRoot

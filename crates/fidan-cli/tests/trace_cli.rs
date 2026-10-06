@@ -90,6 +90,110 @@ fn make_temp_dir(name: &str) -> PathBuf {
     path
 }
 
+#[test]
+fn file_manager_checks_existing_missing_and_relative_paths() {
+    let sandbox = make_temp_dir("file_manager_paths");
+    let nested = sandbox.join("nested");
+    std::fs::create_dir(&nested).expect("create nested script directory");
+    // LOCAL is not part of a clone. Keep this equivalent object/persistence
+    // scenario self-contained and verify cwd differs from the source directory.
+    let source = r#"use std.io
+use std.json
+object StorageManager {
+    var tasks oftype hashset oftype string = hashset()
+    const var FILE_PATH = "./tasks.json"
+    action save returns boolean { return json.dump(this.tasks, this.FILE_PATH) }
+    action exists returns boolean { return io.file_exists(this.FILE_PATH) }
+    action load returns boolean {
+        if not io.file_exists(this.FILE_PATH) { return true }
+        this.tasks = json.load(this.FILE_PATH)
+        return not this.tasks.isEmpty()
+    }
+    action add with (certain name oftype string) { this.tasks.add(name) }
+}
+var storage = StorageManager()
+assert_eq(storage.FILE_PATH, "./tasks.json")
+assert_eq(storage.exists(), false)
+assert_eq(storage.load(), true)
+assert_eq(not storage.exists(), true)
+storage.add("audit")
+assert_eq(storage.save(), true)
+assert_eq(storage.exists(), true)
+assert_eq(not storage.exists(), false)
+var reloaded = StorageManager()
+assert_eq(reloaded.load(), true)
+assert_eq(reloaded.tasks.contains("audit"), true)
+reloaded.add("reload")
+assert_eq(reloaded.tasks.contains("reload"), true)
+assert_eq(io.fileExists(io.join(io.cwd(), "tasks.json")), true)
+assert_eq(io.exists("./tasks.json"), true)
+assert_eq(io.file_exists("missing.json"), false)
+assert_eq(json.load(storage.FILE_PATH)[0], "audit")
+assert_eq(io.file_exists("nested/tasks.json"), false)
+print("file paths ok")
+"#;
+    let program = nested.join("file_manager.fdn");
+    let source = if cfg!(windows) {
+        format!("{source}\nassert_eq(io.file_exists(\"nested\\\\..\\\\tasks.json\"), true)\n")
+    } else {
+        source.to_owned()
+    };
+    std::fs::write(&program, source).expect("write file manager fixture");
+    let llvm_available = fidan_driver::install::resolve_fidan_home()
+        .ok()
+        .and_then(|home| fidan_driver::install::installed_llvm_toolchains(&home).ok())
+        .is_some_and(|toolchains| !toolchains.is_empty());
+    for backend in [None, Some("cranelift"), Some("llvm")] {
+        if backend == Some("llvm") && !llvm_available {
+            eprintln!("skipping LLVM file manager regression: no installed LLVM toolchain");
+            continue;
+        }
+        let mut command;
+        if let Some(backend) = backend {
+            // Windows scanners can retain a finished executable's image handle.
+            // Keep build artifacts in target so sandbox cleanup only removes IO fixtures.
+            let artifact_dir = workspace_root()
+                .join("target/file-manager-tests")
+                .join(sandbox.file_name().expect("sandbox name"));
+            std::fs::create_dir_all(&artifact_dir).expect("create fixture artifact directory");
+            let binary = artifact_dir.join(format!(
+                "file_manager_{backend}{}",
+                if cfg!(windows) { ".exe" } else { "" }
+            ));
+            let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+                .args(["build", "--backend", backend])
+                .arg(&program)
+                .arg("-o")
+                .arg(&binary)
+                .current_dir(&sandbox)
+                .output()
+                .expect("build file manager fixture");
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            command = Command::new(&binary);
+        } else {
+            command = Command::new(env!("CARGO_BIN_EXE_fidan"));
+            command.arg("run").arg(&program);
+        }
+        let output = command
+            .current_dir(&sandbox)
+            .output()
+            .expect("run file manager fixture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("file paths ok"));
+        assert!(sandbox.join("tasks.json").is_file());
+        std::fs::remove_file(sandbox.join("tasks.json")).expect("remove generated task file");
+    }
+    std::fs::remove_dir_all(&sandbox).expect("remove file manager sandbox");
+}
+
 fn host_triple() -> String {
     if cfg!(target_os = "windows") {
         if cfg!(target_arch = "x86_64") {

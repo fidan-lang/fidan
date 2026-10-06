@@ -12,14 +12,14 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FunctionId(pub u32);
 
-/// The universal Fidan value type used in the interpreter.
+/// The universal boxed value type used by the interpreter and native runtime.
 ///
-/// In AOT mode, this is replaced by typed native LLVM values.
+/// AOT uses native scalars where possible and boxed values at runtime boundaries.
 ///
 /// ## Memory model
 /// - Primitives (`Integer`, `Float`, `Boolean`, `Nothing`) are always **copied**.
 /// - `String`, `List`, `Dict` are Copy-on-Write: cheap to clone, copy on mutation.
-/// - `Object` is owned by an `OwnedRef<T>` (interpreter-internal Rc<RefCell<T>>).
+/// - `Object` is owned by an `OwnedRef<T>` (runtime Rc<RefCell<T>>).
 /// - `Shared` is the only variant backed by `Arc<Mutex<T>>` — explicit opt-in.
 #[derive(Debug, Clone)]
 pub enum FidanValue {
@@ -321,14 +321,18 @@ pub fn write_display_io<W: io::Write>(out: &mut W, val: &FidanValue) -> io::Resu
             out.write_all(b">")
         }
         FidanValue::Shared(s) => {
-            let inner = s.0.lock().unwrap();
+            let Ok(inner) = s.lock() else {
+                return out.write_all(b"Shared(<locked>)");
+            };
             out.write_all(b"Shared(")?;
             write_display_io(out, &inner)?;
             out.write_all(b")")
         }
         FidanValue::WeakShared(ws) => {
             if let Some(shared) = ws.upgrade() {
-                let inner = shared.0.lock().unwrap();
+                let Ok(inner) = shared.lock() else {
+                    return out.write_all(b"WeakShared(<locked>)");
+                };
                 out.write_all(b"WeakShared(")?;
                 write_display_io(out, &inner)?;
                 out.write_all(b")")
@@ -453,14 +457,20 @@ pub fn display_into(out: &mut String, val: &FidanValue) {
             out.push('>');
         }
         FidanValue::Shared(s) => {
-            let inner = s.0.lock().unwrap();
+            let Ok(inner) = s.lock() else {
+                out.push_str("Shared(<locked>)");
+                return;
+            };
             out.push_str("Shared(");
             display_into(out, &inner);
             out.push(')');
         }
         FidanValue::WeakShared(ws) => {
             if let Some(shared) = ws.upgrade() {
-                let inner = shared.0.lock().unwrap();
+                let Ok(inner) = shared.lock() else {
+                    out.push_str("WeakShared(<locked>)");
+                    return;
+                };
                 out.push_str("WeakShared(");
                 display_into(out, &inner);
                 out.push(')');
