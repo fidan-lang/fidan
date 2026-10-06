@@ -54,6 +54,10 @@ compiler releases.
 - Implemented the documented `Shared.update(callback)` atomic read-modify-write
   operation in interpreter and native dispatch. It returns the new value and
   rejects same-thread recursive access. Restored same-counter parallel examples.
+- First-class standard-library calls now validate required, optional and variadic
+  argument counts before dispatch, including erased action/flexible values and
+  `Shared.update` callbacks. Interpreter and native paths report catchable R0001
+  errors from shared declarative metadata in `fidan-config`.
 - Both AOT backends return owned boxed values, preventing identity callbacks from
   returning freed borrowed arguments and corrupting the native heap.
 

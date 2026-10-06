@@ -2606,6 +2606,8 @@ impl MirMachine {
         name: &str,
         args: Vec<FidanValue>,
     ) -> Result<FidanValue, MirSignal> {
+        fidan_runtime::stdlib::validate_callable_arity(module, name, args.len())
+            .map_err(|error| MirSignal::RuntimeError(error.code, error.message))?;
         if module == "__builtin__" {
             if let Some(value) = builtins::call_builtin_constructor(name, args.clone())
                 .map_err(|err| MirSignal::Panic(err.message))?

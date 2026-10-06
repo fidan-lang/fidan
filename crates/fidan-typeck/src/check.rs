@@ -5,8 +5,8 @@ use fidan_ast::{
     AstArena, BinOp, Decorator, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp,
 };
 use fidan_config::{
-    BUILTIN_BINDINGS, BUILTIN_DECORATORS, BuiltinReturnKind, BuiltinSemantic, builtin_info,
-    builtin_return_kind, builtin_semantic, receiver_method_arity_bounds,
+    BUILTIN_BINDINGS, BUILTIN_DECORATORS, BuiltinReturnKind, BuiltinSemantic, builtin_return_kind,
+    builtin_semantic, receiver_method_arity_bounds,
 };
 use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
@@ -3224,10 +3224,9 @@ impl TypeChecker {
     }
 
     fn check_builtin_arguments(&mut self, name: &str, args: &[CallArgInfo], span: Span) {
-        let Some(info) = builtin_info(name) else {
-            return;
-        };
-        let Some((min_args, max_args)) = Self::parse_signature_arity(info.signature) else {
+        let Some((min_args, max_args)) =
+            fidan_config::stdlib::callable_arity(fidan_config::BUILTIN_VALUE_MODULE, name)
+        else {
             return;
         };
 
@@ -3257,40 +3256,6 @@ impl TypeChecker {
                 span,
             );
         }
-    }
-
-    fn parse_signature_arity(signature: &str) -> Option<(usize, Option<usize>)> {
-        let open = signature.find('(')?;
-        let close = signature.rfind(')')?;
-        if close <= open {
-            return None;
-        }
-
-        let params = signature[open + 1..close].trim();
-        if params.is_empty() {
-            return Some((0, Some(0)));
-        }
-
-        let mut min_args = 0usize;
-        let mut max_args = 0usize;
-        let mut variadic = false;
-
-        for raw_param in params.split(',') {
-            let param = raw_param.trim();
-            if param.is_empty() {
-                continue;
-            }
-            if param.ends_with("...") {
-                variadic = true;
-                continue;
-            }
-            max_args += 1;
-            if !param.ends_with('?') {
-                min_args += 1;
-            }
-        }
-
-        Some((min_args, if variadic { None } else { Some(max_args) }))
     }
 
     fn fidan_type_to_stdlib_spec(&self, ty: &FidanType) -> StdlibTypeSpec {

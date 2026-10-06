@@ -2785,6 +2785,14 @@ fn dispatch_stdlib_inline(
     func: &str,
     args: Vec<FidanValue>,
 ) -> Option<*mut FidanValue> {
+    // Preserve None for non-stdlib namespaces; all known callable dispatches
+    // share the same contract, including direct calls and Shared callbacks.
+    if (module == fidan_config::BUILTIN_VALUE_MODULE
+        || !fidan_config::stdlib::module_members(module).is_empty())
+        && let Err(error) = stdlib::validate_callable_arity(module, func, args.len())
+    {
+        return Some(unsafe { runtime_call_error(error.message) });
+    }
     match module {
         "__builtin__" => dispatch_builtin_inline(func, args),
         "math" => Some(dispatch_math(func, args)),

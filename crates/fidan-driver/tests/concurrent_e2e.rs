@@ -884,6 +884,30 @@ fn release_semantics_across_aot_backends() {
 }
 
 #[test]
+fn stdlib_callable_arity_across_aot_backends() {
+    let sandbox = temp_dir("fidan_stdlib_callable_arity");
+    // Windows image scanners can retain an exited executable's handle. Keep
+    // ignored build artifacts separate from the sandbox whose cleanup we check.
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create stdlib arity artifact directory");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let output = artifacts.join(format!("arity-{backend:?}{}", std::env::consts::EXE_SUFFIX));
+        compile_program(
+            include_str!("../../../test/examples/stdlib_callable_arity_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "stdlib callable arity ok");
+    }
+    fs::remove_dir_all(sandbox).expect("remove stdlib arity sandbox");
+}
+
+#[test]
 fn strength_reduction_preserves_values_and_types_across_aot_backends() {
     let sandbox = temp_dir("fidan_strength_reduction");
     for backend in [Backend::Cranelift, Backend::Llvm] {

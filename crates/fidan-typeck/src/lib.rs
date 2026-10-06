@@ -912,6 +912,24 @@ var result = choose(true)
     }
 
     #[test]
+    fn concrete_stdlib_calls_and_shared_callbacks_keep_static_arity_checks() {
+        for source in [
+            "use std.math\nmath.pow(1)",
+            "use std.math\nmath.pow(1, 2, 3)",
+            "use std.math\nmath.random(1)",
+            "use std.math\nvar s = Shared(1)\ns.update(math.random)",
+            "use std.math\nvar s = Shared(1)\ns.update(math.pow)",
+        ] {
+            let errors = check_errors(source);
+            assert!(
+                !errors.is_empty(),
+                "accepted incompatible stdlib call: {source}"
+            );
+        }
+        assert!(check_errors("use std.math\nvar s = Shared(1)\ns.update(math.abs)").is_empty());
+    }
+
+    #[test]
     fn integer_power_types_reflect_value_dependent_results() {
         for (source, expected) in [
             ("var result = 2 ** 3", "integer"),

@@ -1474,6 +1474,22 @@ fn release_semantics_with_and_without_jit() {
 }
 
 #[test]
+fn stdlib_callable_arity_with_and_without_jit() {
+    for threshold in [0, 1] {
+        run_src_with_threshold(
+            include_str!("../../../test/examples/stdlib_callable_arity_regression.fdn"),
+            threshold,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "stdlib callable arity at threshold {threshold}: {}",
+                error.message
+            )
+        });
+    }
+}
+
+#[test]
 fn weak_shared_supports_upgrade_and_collection() {
     assert!(
         run_src(

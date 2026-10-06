@@ -1,0 +1,101 @@
+# Generic StdlibFn invocation after its concrete signature is erased.
+use std.math
+use std.string
+use std.collections
+use std.time
+use std.io
+
+# Multiple blocks retain a real call boundary through the optimizer.
+action erase with (certain value oftype flexible) returns flexible {
+    if type(value) == "nothing" { return value }
+    return value
+}
+action expectArityError with (certain callback oftype action) {
+    var caught = false
+    attempt { callback() } catch error {
+        assert(error.contains("R0001"))
+        assert(error.contains("callback argument count"))
+        caught = true
+    }
+    assert_eq(caught, true)
+}
+
+# Ordinary direct calls retain their existing behavior.
+assert_eq(math.pow(2, 3), 8.0)
+assert_eq(math.abs(-7), 7)
+assert_eq(string.slice("abcdef", 2), "cdef")
+assert_eq(string.parse_int("42"), 42)
+assert_eq(collections.concat([1], [2]), [1, 2])
+
+var fixed oftype action = erase(math.pow)
+assert_eq(fixed(2, 3), 8.0)
+expectArityError(action { fixed(1) })
+expectArityError(action { fixed(1, 2, 3) })
+var flexibleFn oftype flexible = erase(math.pow)
+assert_eq(flexibleFn(2, 3), 8.0)
+expectArityError(action { flexibleFn() })
+expectArityError(action { flexibleFn(1) })
+expectArityError(action { flexibleFn(1, 2, 3) })
+var callableAlias oftype callable = erase(math.abs)
+var fnAlias oftype fn = erase(math.abs)
+assert_eq(callableAlias(-7), 7)
+assert_eq(fnAlias(-7), 7)
+expectArityError(action { callableAlias() })
+expectArityError(action { fnAlias(1, 2) })
+
+var zeroArgs = erase(math.random)
+var randomValue = zeroArgs()
+assert_eq(type(randomValue), "float")
+expectArityError(action { zeroArgs(1) })
+var oneArg = erase(math.abs)
+assert_eq(oneArg(-7), 7)
+expectArityError(action { oneArg() })
+expectArityError(action { oneArg(1, 2) })
+
+var optionalSlice = erase(string.slice)
+assert_eq(optionalSlice("abcdef", 2), "cdef")
+assert_eq(optionalSlice("abcdef", 2, 4), "cd")
+expectArityError(action { optionalSlice("abcdef") })
+expectArityError(action { optionalSlice("abcdef", 1, 2, 3) })
+var allOptional = erase(time.format_date)
+assert_eq(type(allOptional()), "string")
+assert_eq(allOptional(0), "1970-01-01 00:00:00")
+assert_eq(allOptional(0, "YYYY"), "1970")
+expectArityError(action { allOptional(0, "YYYY", 1) })
+
+var variadic = erase(collections.concat)
+assert_eq(variadic(), [])
+assert_eq(variadic([1]), [1])
+assert_eq(variadic([1], [2], [3], [4], [5], [6], [7], [8], [9], [10], [11], [12]), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+var requiredVariadic = erase(string.format)
+assert_eq(requiredVariadic("plain"), "plain")
+assert_eq(requiredVariadic("\{\} \{\} \{\}", 1, "two", true), "1 two true")
+expectArityError(action { requiredVariadic() })
+var printer = erase(io.print)
+printer()
+
+var alias = erase(string.parse_int)
+assert_eq(alias("42"), 42)
+expectArityError(action { alias() })
+expectArityError(action { alias("42", 1) })
+
+# Top-level callable values are also represented as StdlibFn internally.
+var length = erase(len)
+assert_eq(length([1, 2]), 2)
+expectArityError(action { length() })
+expectArityError(action { length([1], 2) })
+
+var counter = Shared(-7)
+assert_eq(counter.update(math.abs), 7)
+var validCallback = erase(math.abs)
+assert_eq(counter.update(validCallback), 7)
+for callback in [erase(math.random), erase(math.pow)] {
+    expectArityError(action { counter.update(callback) })
+    assert_eq(counter.get(), 7)
+    # An erased receiver must retain the same callback contract and atomicity.
+    var dynamicCounter oftype flexible = Shared(-7)
+    expectArityError(action { dynamicCounter.update(callback) })
+    assert_eq(dynamicCounter.get(), -7)
+    assert_eq(dynamicCounter.update(validCallback), 7)
+}
+print("stdlib callable arity ok")

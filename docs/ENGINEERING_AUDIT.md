@@ -111,7 +111,7 @@ CI retains locked workspace builds/tests/doctests, strict Clippy and formatting.
 
 ## Final validation
 
-On Windows x86_64 with Rust 1.99, locked workspace build/tests passed: 883 tests including doctests, no failures or ignored tests. Formatting and strict all-target Clippy passed. The rebuilt LLVM 1.0.6 helper passed 11 feature-enabled backend tests and release Clippy through scripts/package-toolchain.ps1. Both example sweeps passed 40/40; LLVM used full LTO. All 70 driver concurrency/backend tests passed with that helper installed.
+On Windows x86_64 with Rust 1.99, locked workspace build/tests passed: 890 tests across 54 suites including doctests, no failures or ignored tests. Formatting and strict all-target Clippy passed. The rebuilt LLVM 1.0.6 helper passed 11 feature-enabled backend tests and release Clippy through scripts/package-toolchain.ps1. Both example sweeps passed 41/41 with no skips; LLVM used full LTO. All 71 driver concurrency/backend tests passed with that helper installed. Seven new metadata/frontend/interpreter/backend test functions cover the final callable-arity fix. The pre-fix release CLI fails the same arity fixture; the rebuilt CLI passes it.
 
 Shared.update stress runs cover 1,000 two-task trials and 25,600 parallel-loop updates per AOT backend, plus interpreter threshold-zero/one runs and the runtime thread stress test. The original LOCAL/test_file_manager.fdn class source, with separate save/reload assertions, passed interpreter, Cranelift and LLVM in isolated data directories. One concurrent sweep attempt collided on shared executable paths; serial sweeps passed. A Windows boolean-test cleanup failure was resolved by separating executable artifacts from checked data sandboxes and using distinct backend filenames, retaining all behavior/cleanup assertions. A new presumed-invalid list dictionary key test was corrected after confirming existing structural hashing supports it.
 
@@ -123,12 +123,23 @@ Shared.update stress runs cover 1,000 two-task trials and 25,600 parallel-loop u
 | Equality and owned returns | Runtime unit tests; real direct calls protected from inlining | Nested equality and repeated owned-return fixture, both AOT backends |
 | Slice canonical formatting | Parser/formatter round-trip tests; ranges/inclusive aliases preserved | Formatter-produced fixture runs on interpreter and both AOT backends; AOT error tests |
 | Shared atomicity | Existing parallel/E0401 and metadata tests retained | Repeated shared-value task/parallel-for stress on interpreter and both AOT backends |
+| Stdlib callable arity | Single pure config source; every alias/public signature checked; static wrong-call rejection retained | Optimized erased-callable/Shared fixture on interpreter, JIT interaction and both AOT backends |
 
-These tests establish the covered cases, not universal backend parity. Logs and local toolchain artifacts are under ignored target/final-contract-*.
+These tests establish the covered cases, not universal backend parity. Logs and local toolchain artifacts are under ignored target/final-contract-* and target/final-stdlib-*.
 
-## Outstanding required work
+## Standard-library callable arity
 
-Dynamic standard-library function values still need generic arity validation before dispatch. Statically known Shared.update(math.random/math.pow) callbacks are rejected, but flexible aliases can bypass those compile-time checks. This is an unfinished correctness item, not a planned feature or an intentional semantic limitation. Automatic approval review rejected shared metadata relocation and an alternative startup registry; neither change was applied. The unchanged-table relocation proposal remains pending user approval. Release preparation is not complete until this path and its cross-backend regressions pass.
+The final callback-arity blocker is resolved through the owner-approved low-level metadata placement. `fidan-config::stdlib` holds the eleven existing member tables, names/aliases, raw signatures/docs and pure parameter-shape lookup. The tables are unchanged, with no copied table left in `fidan-stdlib`. That crate re-exports `StdlibMemberInfo`, `member_info` and `module_members`; compiler type inference, signature rendering and runtime implementation/dispatch remain in their existing crates.
+
+Required positional bounds, optional parameters and unbounded variadic tails derive from those descriptors. The existing optional pattern default for `time.format` is preserved. Top-level callable builtins reuse their existing config signatures; the compiler no longer has a separate builtin arity parser. Alias lookup resolves the same canonical member descriptor.
+
+Interpreter stdlib entry and native inline stdlib dispatch call the same runtime validator before implementations can ignore surplus or synthesize missing arguments. Wrong arity reports catchable R0001 with the same message. Native `fdn_call_dynamic` and Shared callbacks reuse this dispatcher. Shared guards remain held across callback invocation; errors leave the slot unchanged. Statically known calls retain frontend diagnostics; erased action/callable/fn/flexible values use runtime validation without a richer function type system.
+
+Cargo confirms the graph is acyclic: config has no dependencies; runtime depends on config and never on stdlib; stdlib retains its existing config/runtime dependencies. No manifest, lockfile, version, protocol or extension change is required. Public metadata/rendering and all aliases are regression-tested; the optimized callable fixture covers zero/one/multiple required arguments, optional/default/variadic calls, aliases, erased callables and Shared failure preservation on interpreter/JIT and both AOT backends.
+
+## Local release readiness
+
+No required correctness item identified in the previous final-polish report remains unfinished. The branch is locally release-ready for Fidan 1.0.15 with LLVM helper 1.0.6, pending independent review and remote Windows/Linux/macOS CI. No merge, tag or publication is performed. Planned features and the concrete limitations below are not being presented as implemented or silently treated as fixed.
 
 ## Intentional remaining limits
 

@@ -1,5 +1,7 @@
 //! `fidan-config` — shared language/runtime configuration constants.
 
+pub mod stdlib;
+
 /// Pseudo-module used by MIR/lowerings for top-level builtins like `print`
 /// or `assert_eq`.
 pub const BUILTIN_VALUE_MODULE: &str = "__builtin__";
