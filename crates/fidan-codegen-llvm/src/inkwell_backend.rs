@@ -1568,16 +1568,26 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 .fn_type(&[self.i64_type.into(), self.ptr_type.into()], false),
         );
         self.declare_runtime_fn(
-            "fdn_assert_eq",
-            self.context
-                .void_type()
-                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+            "fdn_assert_eq_with_message",
+            self.context.void_type().fn_type(
+                &[
+                    self.ptr_type.into(),
+                    self.ptr_type.into(),
+                    self.ptr_type.into(),
+                ],
+                false,
+            ),
         );
         self.declare_runtime_fn(
-            "fdn_assert_ne",
-            self.context
-                .void_type()
-                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+            "fdn_assert_ne_with_message",
+            self.context.void_type().fn_type(
+                &[
+                    self.ptr_type.into(),
+                    self.ptr_type.into(),
+                    self.ptr_type.into(),
+                ],
+                false,
+            ),
         );
         self.declare_runtime_fn(
             "fdn_panic",
@@ -3331,13 +3341,29 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             "assertEq" | "assert_eq" => {
                 let lhs = self.lower_operand(&args[0])?;
                 let rhs = self.lower_operand(&args[1])?;
-                self.call_void("fdn_assert_eq", &[lhs.into(), rhs.into()])?;
+                let message = if let Some(message) = args.get(2) {
+                    self.lower_operand(message)?
+                } else {
+                    self.module.ptr_type.const_null()
+                };
+                self.call_void(
+                    "fdn_assert_eq_with_message",
+                    &[lhs.into(), rhs.into(), message.into()],
+                )?;
                 self.call_ptr("fdn_box_nothing", &[])
             }
             "assertNe" | "assert_ne" => {
                 let lhs = self.lower_operand(&args[0])?;
                 let rhs = self.lower_operand(&args[1])?;
-                self.call_void("fdn_assert_ne", &[lhs.into(), rhs.into()])?;
+                let message = if let Some(message) = args.get(2) {
+                    self.lower_operand(message)?
+                } else {
+                    self.module.ptr_type.const_null()
+                };
+                self.call_void(
+                    "fdn_assert_ne_with_message",
+                    &[lhs.into(), rhs.into(), message.into()],
+                )?;
                 self.call_ptr("fdn_box_nothing", &[])
             }
             "panic" => {

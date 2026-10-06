@@ -910,10 +910,24 @@ pub unsafe extern "C" fn fdn_assert(cond: i64, msg: *mut FidanValue) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_assert_eq(lhs: *mut FidanValue, rhs: *mut FidanValue) {
+    fdn_assert_eq_with_message(lhs, rhs, std::ptr::null_mut());
+}
+
+/// Borrows all arguments. A null message preserves the generated default.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_assert_eq_with_message(
+    lhs: *mut FidanValue,
+    rhs: *mut FidanValue,
+    message: *mut FidanValue,
+) {
     let left = borrow(lhs).clone();
     let right = borrow(rhs).clone();
     if !values_equal(&left, &right) {
-        let msg = format!("assertEq failed: {} != {}", display(&left), display(&right));
+        let msg = if message.is_null() {
+            format!("assertEq failed: {} != {}", display(&left), display(&right))
+        } else {
+            display(borrow(message))
+        };
         let msg_val = into_raw(FidanValue::String(FidanString::new(&msg)));
         fdn_throw_unhandled(msg_val);
     }
@@ -921,10 +935,24 @@ pub unsafe extern "C" fn fdn_assert_eq(lhs: *mut FidanValue, rhs: *mut FidanValu
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_assert_ne(lhs: *mut FidanValue, rhs: *mut FidanValue) {
+    fdn_assert_ne_with_message(lhs, rhs, std::ptr::null_mut());
+}
+
+/// Borrows all arguments. A null message preserves the generated default.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_assert_ne_with_message(
+    lhs: *mut FidanValue,
+    rhs: *mut FidanValue,
+    message: *mut FidanValue,
+) {
     let left = borrow(lhs).clone();
     let right = borrow(rhs).clone();
     if values_equal(&left, &right) {
-        let msg = format!("assertNe failed: both are {}", display(&left));
+        let msg = if message.is_null() {
+            format!("assertNe failed: both are {}", display(&left))
+        } else {
+            display(borrow(message))
+        };
         let msg_val = into_raw(FidanValue::String(FidanString::new(&msg)));
         fdn_throw_unhandled(msg_val);
     }
@@ -2661,11 +2689,14 @@ fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut Fid
             BuiltinSemantic::AssertEq | BuiltinSemantic::AssertNe => {
                 let lhs = std::ptr::from_ref(&args[0]).cast_mut();
                 let rhs = std::ptr::from_ref(&args[1]).cast_mut();
+                let message = args.get(2).map_or(std::ptr::null_mut(), |value| {
+                    std::ptr::from_ref(value).cast_mut()
+                });
                 unsafe {
                     if semantic == BuiltinSemantic::AssertEq {
-                        fdn_assert_eq(lhs, rhs);
+                        fdn_assert_eq_with_message(lhs, rhs, message);
                     } else {
-                        fdn_assert_ne(lhs, rhs);
+                        fdn_assert_ne_with_message(lhs, rhs, message);
                     }
                 }
                 Some(into_raw(FidanValue::Nothing))

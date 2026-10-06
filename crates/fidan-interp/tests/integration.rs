@@ -3109,3 +3109,62 @@ assert_eq(input(), "three")"#;
         .unwrap_or_else(|error| panic!("erased input replay: {}", error.message));
     }
 }
+
+#[test]
+fn optional_assertion_messages_with_and_without_jit() {
+    for threshold in [0, 1] {
+        for (source, expected) in [
+            ("assert_eq(1, 2)", "assertion failed: expected 1 == 2"),
+            ("assert_ne(1, 1)", "assertion failed: expected 1 != 1"),
+            ("assert_eq(1, 2, \"custom eq\")", "custom eq"),
+            ("assert_ne(1, 1, \"custom ne\")", "custom ne"),
+            (
+                "var callback oftype action = erase(assert_eq); callback(1, 2, \"custom erased eq\")",
+                "custom erased eq",
+            ),
+            (
+                "var callback oftype action = erase(assert_ne); callback(1, 1, \"custom erased ne\")",
+                "custom erased ne",
+            ),
+            ("assertions.assertEq(1, 2)", "expected `1` == `2`"),
+            ("assertions.assertNe(1, 1)", "expected `1` != `1`"),
+            (
+                "assertions.assertEq(1, 2, \"custom test eq\")",
+                "custom test eq",
+            ),
+            (
+                "assertions.assert_eq(1, 2, \"custom test eq alias\")",
+                "custom test eq alias",
+            ),
+            (
+                "assertions.assertNe(1, 1, \"custom test ne\")",
+                "custom test ne",
+            ),
+            (
+                "assertions.assert_ne(1, 1, \"custom test ne alias\")",
+                "custom test ne alias",
+            ),
+            (
+                "assert_eq(1.0, 1.0 + 0.0000000000005, \"custom exact eq\")",
+                "custom exact eq",
+            ),
+            (
+                "assertions.assertNe(1.0, 1.0 + 0.0000000000005, \"custom tolerant ne\")",
+                "custom tolerant ne",
+            ),
+        ] {
+            // The interpreter keeps its existing std.test diagnostic prefix.
+            let expected = if source.starts_with("assertions.") {
+                format!("assertion failed: {expected}")
+            } else {
+                expected.to_owned()
+            };
+            let source = format!(
+                "use std.test as assertions\naction erase with (certain value oftype flexible) returns flexible {{ if type(value) == \"nothing\" {{ return value }} return value }}\nattempt {{ {source} }} catch error {{ assert(false, \"unexpected catch\") }}"
+            );
+            let error = run_src_with_threshold(&source, threshold).expect_err("assertion failure");
+            assert_eq!(error.message, expected, "threshold {threshold}: {source}");
+            assert_eq!(error.code, fidan_diagnostics::diag_code!("R0001"));
+        }
+    }
+}

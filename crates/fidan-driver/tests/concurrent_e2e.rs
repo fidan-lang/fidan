@@ -2390,3 +2390,39 @@ print("input success ok")"#;
     }
     fs::remove_dir_all(sandbox).expect("remove core builtin sandbox");
 }
+
+#[test]
+fn optional_assertion_messages_across_aot_backends() {
+    let sandbox = temp_dir("fidan_assertion_messages");
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create assertion message artifacts");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        for (index, (source, expected)) in [
+            ("assert_eq(1, 2)", "assertEq failed: 1 != 2"),
+            ("assert_ne(1, 1)", "assertNe failed: both are 1"),
+            ("assert_eq(1, 2, \"custom eq\")", "custom eq"),
+            ("assert_ne(1, 1, \"custom ne\")", "custom ne"),
+            ("var callback oftype action = erase(assert_eq); callback(1, 2, \"custom erased eq\")", "custom erased eq"),
+            ("var callback oftype action = erase(assert_ne); callback(1, 1, \"custom erased ne\")", "custom erased ne"),
+            ("assertions.assertEq(1, 2)", "expected `1` == `2`"),
+            ("assertions.assertNe(1, 1)", "expected `1` != `1`"),
+            ("assertions.assertEq(1, 2, \"custom test eq\")", "custom test eq"),
+            ("assertions.assert_eq(1, 2, \"custom test eq alias\")", "custom test eq alias"),
+            ("assertions.assertNe(1, 1, \"custom test ne\")", "custom test ne"),
+            ("assertions.assert_ne(1, 1, \"custom test ne alias\")", "custom test ne alias"),
+            ("assert_eq(1.0, 1.0 + 0.0000000000005, \"custom exact eq\")", "custom exact eq"),
+            ("assertions.assertNe(1.0, 1.0 + 0.0000000000005, \"custom tolerant ne\")", "custom tolerant ne"),
+        ].iter().enumerate() {
+            let source = format!("use std.test as assertions\naction erase with (certain value oftype flexible) returns flexible {{ if type(value) == \"nothing\" {{ return value }} return value }}\nattempt {{ {source} }} catch error {{ assert(false, \"unexpected catch\") }}");
+            let output = artifacts.join(format!("assertion-{backend:?}-{index}{}", std::env::consts::EXE_SUFFIX));
+            compile_program(&source, backend, &output);
+            run_compiled_binary_expect_failure(&output, expected);
+        }
+    }
+    fs::remove_dir_all(sandbox).expect("remove assertion message sandbox");
+}

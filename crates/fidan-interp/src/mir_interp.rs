@@ -2553,11 +2553,15 @@ impl MirMachine {
                 return if equal {
                     Ok(FidanValue::Nothing)
                 } else {
-                    let da = builtins::display(&a);
-                    let db = builtins::display(&b);
-                    Err(MirSignal::Panic(format!(
-                        "assertion failed: expected {da} == {db}"
-                    )))
+                    Err(MirSignal::Panic(
+                        it.next()
+                            .map(|value| builtins::display(&value))
+                            .unwrap_or_else(|| {
+                                let da = builtins::display(&a);
+                                let db = builtins::display(&b);
+                                format!("assertion failed: expected {da} == {db}")
+                            }),
+                    ))
                 };
             }
             "assert_ne" => {
@@ -2568,11 +2572,15 @@ impl MirMachine {
                 return if !equal {
                     Ok(FidanValue::Nothing)
                 } else {
-                    let da = builtins::display(&a);
-                    let db = builtins::display(&b);
-                    Err(MirSignal::Panic(format!(
-                        "assertion failed: expected {da} != {db}"
-                    )))
+                    Err(MirSignal::Panic(
+                        it.next()
+                            .map(|value| builtins::display(&value))
+                            .unwrap_or_else(|| {
+                                let da = builtins::display(&a);
+                                let db = builtins::display(&b);
+                                format!("assertion failed: expected {da} != {db}")
+                            }),
+                    ))
                 };
             }
             "input" => {

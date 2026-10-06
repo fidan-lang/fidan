@@ -20,11 +20,9 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<Result<FidanValue, 
             if values_equal(&a, &b) {
                 Some(Ok(FidanValue::Nothing))
             } else {
-                Some(Err(format!(
-                    "expected `{}` == `{}`",
-                    format_val(&a),
-                    format_val(&b)
-                )))
+                Some(Err(args.get(2).map(format_val).unwrap_or_else(|| {
+                    format!("expected `{}` == `{}`", format_val(&a), format_val(&b))
+                })))
             }
         }
         "assertNe" | "assert_ne" => {
@@ -33,11 +31,9 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<Result<FidanValue, 
             if !values_equal(&a, &b) {
                 Some(Ok(FidanValue::Nothing))
             } else {
-                Some(Err(format!(
-                    "expected `{}` != `{}`",
-                    format_val(&a),
-                    format_val(&b)
-                )))
+                Some(Err(args.get(2).map(format_val).unwrap_or_else(|| {
+                    format!("expected `{}` != `{}`", format_val(&a), format_val(&b))
+                })))
             }
         }
         "assertGt" | "assert_gt" => {
@@ -158,6 +154,48 @@ pub fn exported_names() -> &'static [&'static str] {
 mod tests {
     use super::*;
     use crate::stdlib::common::list_value;
+
+    #[test]
+    fn equality_assertions_honor_optional_messages() {
+        for name in ["assertEq", "assert_eq", "assertNe", "assert_ne"] {
+            let eq = matches!(name, "assertEq" | "assert_eq");
+            let arguments = vec![
+                FidanValue::Integer(1),
+                FidanValue::Integer(if eq { 2 } else { 1 }),
+            ];
+            assert_eq!(
+                dispatch(name, arguments.clone()).unwrap().unwrap_err(),
+                if eq {
+                    "expected `1` == `2`"
+                } else {
+                    "expected `1` != `1`"
+                }
+            );
+            for (message, expected) in [
+                (
+                    FidanValue::String(crate::FidanString::new("custom")),
+                    "custom",
+                ),
+                (FidanValue::String(crate::FidanString::new("")), ""),
+                (FidanValue::Nothing, "nothing"),
+            ] {
+                let mut arguments = arguments.clone();
+                arguments.push(message);
+                assert_eq!(dispatch(name, arguments).unwrap().unwrap_err(), expected);
+            }
+            let close_floats = vec![
+                FidanValue::Float(1.0),
+                FidanValue::Float(1.0 + 5e-13),
+                FidanValue::String(crate::FidanString::new("custom")),
+            ];
+            let result = dispatch(name, close_floats).unwrap();
+            if eq {
+                assert!(matches!(result, Ok(FidanValue::Nothing)));
+            } else {
+                assert_eq!(result.unwrap_err(), "custom");
+            }
+        }
+    }
 
     #[test]
     fn float_tolerance_is_recursive_and_separate_from_value_equality() {
