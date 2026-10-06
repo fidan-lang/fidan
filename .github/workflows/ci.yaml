@@ -48,6 +48,11 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked
 
+      - name: Toolchain packaging environment regression
+        shell: pwsh
+        run: |
+          ./test/scripts/test-toolchain-build-env.ps1
+
       - name: Formatting
         run: cargo fmt --all --check
 

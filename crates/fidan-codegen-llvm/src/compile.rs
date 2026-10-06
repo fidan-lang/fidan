@@ -6,16 +6,16 @@ use std::path::{Path, PathBuf};
 
 pub fn compile_request(helper_path: &Path, request: &CompileRequest) -> Result<PathBuf> {
     trace("compile_request:start");
-    #[cfg(feature = "llvm-toolchain-21")]
+    #[cfg(feature = "llvm-toolchain-23")]
     let layout = validate_toolchain_layout(helper_path)?;
-    #[cfg(not(feature = "llvm-toolchain-21"))]
+    #[cfg(not(feature = "llvm-toolchain-23"))]
     let _layout = validate_toolchain_layout(helper_path)?;
     trace("compile_request:validated_toolchain");
     validate_backend_payload(&request.payload)?;
     trace("compile_request:validated_payload");
-    #[cfg(feature = "llvm-toolchain-21")]
+    #[cfg(feature = "llvm-toolchain-23")]
     let backend = BackendContext::new(&request.payload);
-    #[cfg(not(feature = "llvm-toolchain-21"))]
+    #[cfg(not(feature = "llvm-toolchain-23"))]
     let _backend = BackendContext::new(&request.payload);
     trace("compile_request:backend_context_ready");
 
@@ -45,18 +45,18 @@ pub fn compile_request(helper_path: &Path, request: &CompileRequest) -> Result<P
         }
     }
 
-    #[cfg(feature = "llvm-toolchain-21")]
+    #[cfg(feature = "llvm-toolchain-23")]
     let init_symbol = backend
         .init_function()
         .map(|function| backend.mangled_function_name(function))
         .transpose()?;
-    #[cfg(feature = "llvm-toolchain-21")]
+    #[cfg(feature = "llvm-toolchain-23")]
     let main_symbol = backend
         .main_function()
         .map(|function| backend.mangled_function_name(function))
         .transpose()?;
 
-    #[cfg(feature = "llvm-toolchain-21")]
+    #[cfg(feature = "llvm-toolchain-23")]
     {
         trace("compile_request:inkwell_backend");
         crate::inkwell_backend::compile_and_link_module(&layout, &backend, request)
@@ -77,10 +77,10 @@ pub fn compile_request(helper_path: &Path, request: &CompileRequest) -> Result<P
             })
     }
 
-    #[cfg(not(feature = "llvm-toolchain-21"))]
+    #[cfg(not(feature = "llvm-toolchain-23"))]
     {
         bail!(
-            "this build of fidan-llvm-helper was compiled without the required LLVM backend feature `llvm-toolchain-21`"
+            "this build of fidan-llvm-helper was compiled without the required LLVM backend feature `llvm-toolchain-23`"
         );
     }
 }
@@ -102,7 +102,7 @@ pub(crate) fn trace(message: &str) {
     let _ = std::io::stderr().flush();
 }
 
-#[cfg(feature = "llvm-toolchain-21")]
+#[cfg(feature = "llvm-toolchain-23")]
 pub(crate) fn dump_ir(module_ir: &str) {
     if !env_flag_enabled("FIDAN_LLVM_DUMP_IR") {
         return;
@@ -115,7 +115,7 @@ pub(crate) fn dump_ir(module_ir: &str) {
     let _ = std::io::stderr().flush();
 }
 
-#[cfg(feature = "llvm-toolchain-21")]
+#[cfg(feature = "llvm-toolchain-23")]
 pub(crate) fn env_flag_enabled(name: &str) -> bool {
     std::env::var(name)
         .ok()

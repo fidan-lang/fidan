@@ -99,7 +99,7 @@ cranelift-module = "0.136"
 cranelift-object = "0.136"
 target-lexicon = "0.13"
 libffi = "5.1.0"
-inkwell = { version = "0.10.0", default-features = false }
+inkwell = { git = "https://github.com/TheDan64/inkwell", rev = "c8234a0ee4171e946f94f6b3b5da0ea8d6ef5f3b", default-features = false }
 
 [profile.dev]
 opt-level = 1 # faster builds in dev without being fully unoptimised

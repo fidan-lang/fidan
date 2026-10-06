@@ -10,7 +10,7 @@ on:
       llvm_tool_version:
         description: "Upstream LLVM version for the toolchain package"
         required: true
-        default: "21.1.8"
+        default: "23.1.2"
         type: string
   pull_request:
     paths:
@@ -40,5 +40,5 @@ jobs:
     uses: ./.github/workflows/llvm-toolchain-build.yaml
     with:
       toolchain_version: ${{ github.event.inputs.toolchain_version || '' }}
-      llvm_tool_version: ${{ github.event.inputs.llvm_tool_version || '21.1.8' }}
+      llvm_tool_version: ${{ github.event.inputs.llvm_tool_version || '23.1.2' }}
       validate: true

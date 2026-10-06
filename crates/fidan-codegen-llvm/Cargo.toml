@@ -8,12 +8,12 @@ repository.workspace = true
 
 [features]
 default = []
-llvm-toolchain-21 = [
+llvm-toolchain-23 = [
   "dep:fidan-ast",
   "dep:fidan-stdlib",
   "dep:inkwell",
   "dep:llvm-sys",
-  "inkwell/llvm21-1",
+  "inkwell/llvm23-1",
 ]
 
 [dependencies]
@@ -23,9 +23,14 @@ fidan-mir = { workspace = true }
 fidan-ast = { workspace = true, optional = true }
 fidan-stdlib = { workspace = true, optional = true }
 inkwell = { workspace = true, optional = true }
-llvm-sys = { version = "211", optional = true }
+llvm-sys = { version = "231", optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+# The official Windows static libraries interpose rpmalloc on the host CRT.
+# Link the supplied LLVM-C DLL instead, using its import library in build.rs.
+[target.'cfg(windows)'.dependencies]
+llvm-sys = { version = "231", optional = true, features = ["no-llvm-linking"] }
 
 [dev-dependencies]
 fidan-ast = { workspace = true }

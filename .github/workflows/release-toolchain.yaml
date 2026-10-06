@@ -23,7 +23,7 @@ on:
       llvm_tool_version:
         description: "Upstream LLVM version for the LLVM toolchain package"
         required: false
-        default: "21.1.8"
+        default: "23.1.2"
         type: string
       ai_analysis_tool_version:
         description: "AI analysis helper tool version (defaults to the AI helper version)"

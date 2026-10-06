@@ -63,8 +63,9 @@ compiler releases.
 
 ### Changed
 - Refreshed compatible dependencies, including Cranelift 0.136.2 and Inkwell
-  0.10.0. LLVM remains 21.1 with `llvm-sys` restricted to the 211 series
-  (locked at 211.1.0). The locked graph requires Rust 1.96 or newer and was
+  pinned upstream revision `c8234a0ee4171e946f94f6b3b5da0ea8d6ef5f3b`.
+  The default LLVM toolchain is 23.1.2 with `llvm-sys` 231
+  (locked at 231.0.0). The locked graph requires Rust 1.96 or newer and was
   validated with Rust 1.99.
 - Prepared LLVM helper/toolchain 1.0.6. AI helper stays at 1.0.4. Wire formats
   are unchanged: LLVM backend protocol 5, AI analysis protocol 1, and AI helper

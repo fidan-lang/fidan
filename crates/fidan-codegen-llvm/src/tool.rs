@@ -337,7 +337,7 @@ fn configure_unix_link_environment(_command: &mut Command, _layout: &ToolchainLa
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn prepend_env_path(command: &mut Command, key: &str, value: &Path) {
     let existing = std::env::var_os(key).unwrap_or_default();
     let mut paths = vec![value.to_path_buf()];

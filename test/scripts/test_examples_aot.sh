@@ -175,6 +175,31 @@ while IFS= read -r file; do
 
     echo "=== $rel ==="
 
+    if [ "$base_name" = "release_mega_1_0.fdn" ]; then
+        case "$(uname -s)" in
+            MINGW*|MSYS*|CYGWIN*)
+                missing_fixtures=()
+                for fixture in LOCAL/extern-cpp/ffi_demo.dll target/debug/fidan_extern_fixture.dll; do
+                    if [ ! -f "$fixture" ]; then
+                        missing_fixtures+=("$fixture")
+                    elif [ ! -f "$fixture.lib" ] && [ ! -f "${fixture%.dll}.lib" ]; then
+                        missing_fixtures+=("$fixture import library (.dll.lib or .lib)")
+                    fi
+                done
+                if [ "${#missing_fixtures[@]}" -gt 0 ]; then
+                    echo "[SKIP] $rel - missing local extern fixtures: ${missing_fixtures[*]}"
+                    SKIP=$((SKIP + 1))
+                    continue
+                fi
+                ;;
+            *)
+                echo "[SKIP] $rel - Windows-local FFI mega fixture"
+                SKIP=$((SKIP + 1))
+                continue
+                ;;
+        esac
+    fi
+
     set +e
     run_with_timeout 600 "$compile_out" "$compile_err" \
         "$FIDAN" build --backend "$BACKEND" --lto "$LTO" "$file" -o "$bin"

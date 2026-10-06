@@ -52,13 +52,23 @@ Confirmed audit regressions reviewed against main: wrapping arithmetic replaced 
 
 ## Dependencies and explicit release decisions
 
-The current owner request explicitly confirms Fidan 1.0.15 and LLVM helper/toolchain 1.0.6, using upstream LLVM 21.1.8. AI helper remains 1.0.4. This is the final owner decision, not a claim of earlier selection. No tags, releases or merge are performed.
+The current owner decision keeps Fidan 1.0.15 and LLVM helper/toolchain 1.0.6 and changes the default upstream toolchain to LLVM 23.1.2. AI helper remains 1.0.4. LLVM 21.1.8 was the earlier audit baseline and is no longer the release target. No tags, releases or merge are performed.
 
-Six Cranelift requirements remain 0.136, locked at 0.136.2. llvm-sys remains optional version 211, locked at 211.1.0; Inkwell remains 0.10/LLVM 21.1. Protocols remain AI analysis 1, AI helper 2, LLVM backend 5. Internal dependency edges reuse runtime power logic and existing serde_json for MIR descriptors; no external versions change in this pass.
+Six Cranelift requirements remain 0.136, locked at 0.136.2. Optional llvm-sys is now 231, locked at 231.0.0. Released Inkwell 0.10.0 lacks LLVM 23 support; its upstream git revision `c8234a0ee4171e946f94f6b3b5da0ea8d6ef5f3b` (package version 0.10.0) provides `llvm23-1` and is pinned exactly in the manifest and lockfile. The active LLVM graph contains one Inkwell and one llvm-sys, with no LLVM 21/22 binding. Upstream Inkwell still declares older optional features; those are not linked. Protocols remain AI analysis 1, AI helper 2, LLVM backend 5.
+
+The owner explicitly confirmed the existing GitHub/R2 binary/toolchain release workflow; crates.io publication is not required for 1.0.15. Registry dry runs for the unchanged backend/helper/CLI already failed because internal path dependencies lack version requirements. An isolated pinned-Inkwell dry run fails for its missing registry version requirement as well. These crates are not currently crates.io-publishable, and adding a registry version would not provide the unreleased LLVM 23 feature. No vendored/forked Inkwell or speculative registry-publishing workaround was introduced.
+
+Official assets from `llvm/llvm-project` release `llvmorg-23.1.2` were downloaded in full and SHA256-checked against GitHub's release digests before updating the source configuration:
+
+| Platform / official asset | Verified SHA256 |
+|---|---|
+| Windows x86_64: `clang+llvm-23.1.2-x86_64-pc-windows-msvc.tar.xz` | `8fb91cdc44fcbbdcf6b3ffd0a1f9859abd14a3c3aae4423c2b6d4a4f90bf0095` |
+| Linux x86_64: `LLVM-23.1.2-Linux-X64.tar.xz` | `b5ed9675149cc837c282e9b6962c276c9fa62863d5b2f91537b60848552995b7` |
+| macOS ARM64: `LLVM-23.1.2-macOS-ARM64.tar.xz` | `d7c26fc6177e42842e2d1ffaad31aec057c56a924392b1a23d830abe2c5d53b1` |
 
 Earlier compatible dependency updates and unused declaration removal remain:
 
-| Dependency | Previous lock | Current lock |
+| Dependency | Pre-audit lock (historical) | Current lock |
 |---|---|---|
 | anyhow | 1.0.102 | 1.0.104 |
 | apple-native-keyring-store | 1.0.0 | 1.0.2 |
@@ -75,11 +85,11 @@ Earlier compatible dependency updates and unused declaration removal remain:
 | flate2 | 1.1.9 | 1.1.10 |
 | globset | 0.4.18 | 0.4.20 |
 | indicatif | 0.18.4 | 0.18.6 |
-| inkwell | 0.9.0 | 0.10.0 |
+| inkwell | 0.9.0 | 0.10.0, git revision c8234a0ee4171e946f94f6b3b5da0ea8d6ef5f3b |
 | itoa | 1.0.18 | 1.0.18 |
 | keyring-core | 1.0.0 | 1.0.0 |
 | libffi | 5.1.0 | 5.2.0 |
-| llvm-sys | 211.0.1 | 211.1.0 |
+| llvm-sys | 211.0.1 (LLVM 21 baseline) | 231.0.0 |
 | mimalloc | 0.1.52 | 0.1.52 |
 | notify | 8.2.0 | 8.2.0 |
 | parking_lot | 0.12.5 | 0.12.5 |
@@ -107,11 +117,19 @@ Earlier compatible dependency updates and unused declaration removal remain:
 
 AI-native positioning remains prominent and compiler-grounded. World-first, C-performance, Rust-safety and universal parity claims remain removed; bytecode/VM tags remain absent. README restores Implemented / Partial / Planned Roadmap, distinguishing cooperative async, real parallel tasks, scoped LSP/native support and planned GPU/network/process APIs. Implemented comprehensions/actions no longer carry FUTURE comments; genuinely planned shorthand remains marked future.
 
-CI retains locked workspace builds/tests/doctests, strict Clippy and formatting. LLVM packaging uses the repository script with feature tests/lints and explicit Windows CRT selection. Example sweeps distinguish intended diagnostics from failures.
+CI retains locked workspace builds/tests/doctests, strict Clippy and formatting. LLVM packaging uses the repository script with feature tests/lints and explicit Windows CRT selection. Rust release LTO is disabled only inside the LLVM helper build/test/Clippy phase, with the previous environment restored on success or failure; the workspace release profile keeps LTO. Fidan LLVM full LTO remains a separate validation path.
+
+LLVM 23's official Windows static libraries interpose rpmalloc on the host CRT, producing duplicate malloc/calloc/free symbols when embedded in the Rust helper. They also report a nonportable absolute zstd library path in llvm-config. Windows therefore uses the official LLVM-C DLL/import library with llvm-sys's supported no-llvm-linking feature; its target-initialization wrappers are still built. A small build script links that C API library, and packaging places the unmodified DLL beside the helper so it loads without an external PATH dependency. LLVM's allocator remains private to its DLL. Linux/macOS retain their existing LLVM library linking. No Inkwell/LLVM fork, allocator override, added zstd dependency or config-output adapter remains.
+
+macOS's unused `prepend_env_path` function is now Linux-only; its deliberate DYLD environment cleanup is retained. Both AOT sweeps skip only the Windows-local release mega fixture on other platforms, or on Windows when its DLL/import libraries are missing, and state the reason. Present fixtures still run; unrelated compilation failures still fail.
 
 ## Final validation
 
-On Windows x86_64 with Rust 1.99, locked workspace build/tests passed: 908 tests across 54 suites including doctests, no failures or ignored tests. Formatting and strict all-target Clippy passed. The rebuilt LLVM 1.0.6 helper passed 11 feature-enabled backend tests and release Clippy through scripts/package-toolchain.ps1. Both example sweeps passed 43/43 with no skips; LLVM used full LTO. All 74 driver concurrency/backend tests passed with that helper installed. The preceding callable-arity fix added seven metadata/frontend/interpreter/backend test functions. Nine additional functions cover the operator/builtin follow-up; six cover the subsequent top-level builtin follow-up, and three verify optional equality-assertion messages. The pre-fix release CLI fails the same arity fixture; the rebuilt CLI passes it.
+Following the LLVM 23.1.2 migration, Windows x86_64 / Rust 1.99 locked workspace build/tests passed: 908 tests across 54 suites including doctests, no failures or ignored tests. Formatting, strict all-target Clippy and git diff --check passed. The LLVM helper 1.0.6 was rebuilt, packaged through scripts/package-toolchain.ps1 and installed into an isolated workspace-local FIDAN_HOME; its tool version is 23.1.2 and protocol is 5. It starts without adding LLVM to PATH. Packaging passed all 11 LLVM-feature backend tests and release Clippy. Target initialization, target-machine creation, passes, module verification, object emission, IR parsing and full LTO required no LLVM API source changes.
+
+Cranelift and LLVM example/regression sweeps each passed 43/43 with no skips under both PowerShell and MSYS Bash on Windows. LLVM used --lto full. The Windows-local FFI artifacts were present; removing one import library temporarily produced the intended explicit skip in both runners, after which the library was restored. Each backend also passed all five golden-output cases. The test.bat runner passed all workspace suites, all 43 interpreter scripts and their test blocks. All 74 driver concurrency/backend tests passed with the new helper installed, including operator/builtin parity, Shared.update, slicing, overflow, negative powers, callable arity and assertion messages. Four new packaging-environment regression cases verify that build/test/Clippy disable Rust LTO and restore absent or pre-existing environment values on success and failure; they run in CI on all three hosts.
+
+The preceding callable-arity fix added seven metadata/frontend/interpreter/backend test functions. Nine additional functions cover the operator/builtin follow-up; six cover the subsequent top-level builtin follow-up, and three verify optional equality-assertion messages. Earlier investigation established that the pre-fix release CLI fails the same arity fixture and the rebuilt CLI passes it.
 
 Shared.update stress runs cover 1,000 two-task trials and 25,600 parallel-loop updates per AOT backend, plus interpreter threshold-zero/one runs and the runtime thread stress test. The original LOCAL/test_file_manager.fdn class source, with separate save/reload assertions, passed interpreter, Cranelift and LLVM in isolated data directories. One concurrent sweep attempt collided on shared executable paths; serial sweeps passed. A Windows boolean-test cleanup failure was resolved by separating executable artifacts from checked data sandboxes and using distinct backend filenames, retaining all behavior/cleanup assertions. A new presumed-invalid list dictionary key test was corrected after confirming existing structural hashing supports it.
 
@@ -125,7 +143,7 @@ Shared.update stress runs cover 1,000 two-task trials and 25,600 parallel-loop u
 | Shared atomicity | Existing parallel/E0401 and metadata tests retained | Repeated shared-value task/parallel-for stress on interpreter and both AOT backends |
 | Stdlib callable arity | Single pure config source; every alias/public signature checked; static wrong-call rejection retained | Optimized erased-callable/Shared fixture on interpreter, JIT interaction and both AOT backends |
 
-These tests establish the covered cases, not universal backend parity. Logs and local toolchain artifacts are under ignored target/final-contract-*, target/final-stdlib-*, target/operator-* and target/core-builtin-*.
+These tests establish the covered cases, not universal backend parity. Migration logs, downloaded/hash-verified upstream archives and the isolated packaged toolchain are under ignored target/llvm23-*. Earlier validation logs remain under target/final-contract-*, target/final-stdlib-*, target/operator-* and target/core-builtin-*. Native Linux/macOS LLVM 23 builds were not run locally; PR #3's three-OS CI must validate those hosts after the migration commit. MSYS Bash results are Windows results, not Linux validation.
 
 ## Standard-library callable arity
 
