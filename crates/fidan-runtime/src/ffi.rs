@@ -59,7 +59,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{
     cell::RefCell,
-    io::{BufRead, BufWriter, IsTerminal, LineWriter, Write},
+    io::{BufWriter, IsTerminal, LineWriter, Write},
 };
 
 // ── Internal helpers ───────────────────────────────────────────────────────────
@@ -130,12 +130,6 @@ fn panic_missing_method(receiver: &FidanValue, method_name: &str) -> ! {
         receiver.type_name()
     );
     let msg_val = into_raw(FidanValue::String(FidanString::new(&msg)));
-    unsafe { fdn_panic(msg_val) }
-}
-
-fn panic_runtime_message(message: impl Into<String>) -> ! {
-    let message = message.into();
-    let msg_val = into_raw(FidanValue::String(FidanString::new(&message)));
     unsafe { fdn_panic(msg_val) }
 }
 
@@ -879,23 +873,17 @@ pub unsafe extern "C" fn fdn_print(ptr: *mut FidanValue) {
 /// Returns a new owned `String` value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_input(prompt: *mut FidanValue) -> *mut FidanValue {
-    let pv = borrow(prompt);
     flush_stdout_buffer();
-    if !matches!(pv, FidanValue::Nothing) {
+    // Null means no prompt; an explicitly supplied Nothing is still displayed.
+    if !prompt.is_null() {
         with_stdout_buffer(|stdout| {
-            let _ = crate::value::write_display_io(stdout, pv);
+            let _ = crate::value::write_display_io(stdout, borrow(prompt));
             let _ = stdout.flush();
         });
     }
-    let mut line = String::new();
-    let _ = std::io::stdin().read_line(&mut line);
-    if line.ends_with('\n') {
-        line.pop();
-    }
-    if line.ends_with('\r') {
-        line.pop();
-    }
-    into_raw(FidanValue::String(FidanString::new(&line)))
+    builtin_value_result(crate::builtins::read_input_line(
+        &mut std::io::stdin().lock(),
+    ))
 }
 
 /// Return the length of a string / list / dict / range.  Borrows `ptr`.
@@ -968,15 +956,7 @@ pub unsafe extern "C" fn fdn_to_float(ptr: *mut FidanValue) -> *mut FidanValue {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_to_boolean(ptr: *mut FidanValue) -> *mut FidanValue {
-    let result = match borrow(ptr) {
-        FidanValue::Boolean(b) => FidanValue::Boolean(*b),
-        FidanValue::Integer(n) => FidanValue::Boolean(*n != 0),
-        FidanValue::Float(f) => FidanValue::Boolean(*f != 0.0),
-        FidanValue::String(s) => FidanValue::Boolean(!s.as_str().is_empty()),
-        FidanValue::Nothing => FidanValue::Boolean(false),
-        _ => FidanValue::Boolean(true),
-    };
-    into_raw(result)
+    into_raw(FidanValue::Boolean(borrow(ptr).truthy()))
 }
 
 /// Check `certain` parameter invariant — `val` must not be `nothing`.  Borrows `val`.
@@ -2599,32 +2579,31 @@ fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut Fid
     if let Some(semantic) = builtin_semantic(func) {
         return match semantic {
             BuiltinSemantic::Print => {
-                let parts: Vec<String> = args.iter().map(display).collect();
-                println!("{}", parts.join(" "));
+                let pointers: Vec<_> = args
+                    .iter()
+                    .map(|value| std::ptr::from_ref(value).cast_mut())
+                    .collect();
+                unsafe {
+                    fdn_print_many(pointers.as_ptr(), pointers.len() as i64);
+                }
                 Some(into_raw(FidanValue::Nothing))
             }
             BuiltinSemantic::Eprint => {
-                let parts: Vec<String> = args.iter().map(display).collect();
-                eprintln!("{}", parts.join(" "));
+                let mut stderr = std::io::stderr().lock();
+                for (index, value) in args.iter().enumerate() {
+                    if index > 0 {
+                        let _ = stderr.write_all(b" ");
+                    }
+                    let _ = crate::value::write_display_io(&mut stderr, value);
+                }
+                let _ = stderr.write_all(b"\n");
                 Some(into_raw(FidanValue::Nothing))
             }
             BuiltinSemantic::Input => {
-                let prompt = args.first().map(display).unwrap_or_default();
-                if !prompt.is_empty() {
-                    use std::io::Write;
-                    print!("{}", prompt);
-                    let _ = std::io::stdout().flush();
-                }
-                let stdin = std::io::stdin();
-                let mut line = String::new();
-                stdin.lock().read_line(&mut line).ok()?;
-                if line.ends_with('\n') {
-                    line.pop();
-                    if line.ends_with('\r') {
-                        line.pop();
-                    }
-                }
-                Some(into_raw(FidanValue::String(FidanString::new(&line))))
+                let prompt = args.first().map_or(std::ptr::null_mut(), |value| {
+                    std::ptr::from_ref(value).cast_mut()
+                });
+                Some(unsafe { fdn_input(prompt) })
             }
             BuiltinSemantic::String => {
                 let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
@@ -2657,37 +2636,39 @@ fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut Fid
                 ))))
             }
             BuiltinSemantic::HashSetConstructor => {
-                let source = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-                let set = match source {
-                    FidanValue::Nothing => FidanHashSet::new(),
-                    FidanValue::List(list) => {
-                        FidanHashSet::from_values(list.borrow().iter().cloned())
-                            .unwrap_or_else(|err| panic_runtime_message(err.to_string()))
-                    }
-                    FidanValue::HashSet(existing) => existing.borrow().clone(),
-                    other => panic_runtime_message(format!(
-                        "hashset(items) expects a list or hashset, got {}",
-                        other.type_name()
-                    )),
-                };
-                Some(into_raw(FidanValue::HashSet(OwnedRef::new(set))))
+                let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                Some(builtin_value_result(crate::builtins::hashset(value)))
             }
             BuiltinSemantic::SharedConstructor => {
                 let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
                 Some(into_raw(FidanValue::Shared(SharedRef::new(inner))))
             }
             BuiltinSemantic::WeakSharedConstructor => {
-                let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-                match inner {
-                    FidanValue::Shared(shared) => {
-                        Some(into_raw(FidanValue::WeakShared(shared.downgrade())))
-                    }
-                    FidanValue::WeakShared(weak) => Some(into_raw(FidanValue::WeakShared(weak))),
-                    _ => Some(into_raw(FidanValue::Nothing)),
-                }
+                let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                Some(builtin_value_result(crate::builtins::weak_shared(value)))
             }
-            BuiltinSemantic::Assert | BuiltinSemantic::AssertEq | BuiltinSemantic::AssertNe => {
-                Some(dispatch_test(func, args))
+            BuiltinSemantic::Assert => {
+                let condition = args[0].truthy();
+                let mut message = args
+                    .get(1)
+                    .cloned()
+                    .unwrap_or_else(|| FidanValue::String(FidanString::new("assertion failed")));
+                unsafe {
+                    fdn_assert(i64::from(condition), &mut message);
+                }
+                Some(into_raw(FidanValue::Nothing))
+            }
+            BuiltinSemantic::AssertEq | BuiltinSemantic::AssertNe => {
+                let lhs = std::ptr::from_ref(&args[0]).cast_mut();
+                let rhs = std::ptr::from_ref(&args[1]).cast_mut();
+                unsafe {
+                    if semantic == BuiltinSemantic::AssertEq {
+                        fdn_assert_eq(lhs, rhs);
+                    } else {
+                        fdn_assert_ne(lhs, rhs);
+                    }
+                }
+                Some(into_raw(FidanValue::Nothing))
             }
         };
     }
@@ -3826,6 +3807,20 @@ mod tests {
             assert!(display(&drain_exception().expect("range receiver error")).contains("R2002"));
             for ptr in [text, integer, float, range, result] {
                 drop(Box::from_raw(ptr));
+            }
+        }
+    }
+    #[test]
+    fn constructor_dispatch_stores_catchable_errors() {
+        for name in ["hashset", "WeakShared"] {
+            let result =
+                dispatch_stdlib_inline("__builtin__", name, vec![FidanValue::Integer(42)]).unwrap();
+            assert!(matches!(unsafe { borrow(result) }, FidanValue::Nothing));
+            assert!(
+                display(&drain_exception().expect("R0001 constructor error")).contains("R0001")
+            );
+            unsafe {
+                drop(Box::from_raw(result));
             }
         }
     }

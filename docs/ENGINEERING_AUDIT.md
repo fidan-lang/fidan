@@ -111,7 +111,7 @@ CI retains locked workspace builds/tests/doctests, strict Clippy and formatting.
 
 ## Final validation
 
-On Windows x86_64 with Rust 1.99, locked workspace build/tests passed: 899 tests across 54 suites including doctests, no failures or ignored tests. Formatting and strict all-target Clippy passed. The rebuilt LLVM 1.0.6 helper passed 11 feature-enabled backend tests and release Clippy through scripts/package-toolchain.ps1. Both example sweeps passed 42/42 with no skips; LLVM used full LTO. All 72 driver concurrency/backend tests passed with that helper installed. The preceding callable-arity fix added seven metadata/frontend/interpreter/backend test functions. Nine additional functions cover this final operator/builtin follow-up. The pre-fix release CLI fails the same arity fixture; the rebuilt CLI passes it.
+On Windows x86_64 with Rust 1.99, locked workspace build/tests passed: 905 tests across 54 suites including doctests, no failures or ignored tests. Formatting and strict all-target Clippy passed. The rebuilt LLVM 1.0.6 helper passed 11 feature-enabled backend tests and release Clippy through scripts/package-toolchain.ps1. Both example sweeps passed 43/43 with no skips; LLVM used full LTO. All 73 driver concurrency/backend tests passed with that helper installed. The preceding callable-arity fix added seven metadata/frontend/interpreter/backend test functions. Nine additional functions cover the operator/builtin follow-up; six cover the subsequent top-level builtin follow-up. The pre-fix release CLI fails the same arity fixture; the rebuilt CLI passes it.
 
 Shared.update stress runs cover 1,000 two-task trials and 25,600 parallel-loop updates per AOT backend, plus interpreter threshold-zero/one runs and the runtime thread stress test. The original LOCAL/test_file_manager.fdn class source, with separate save/reload assertions, passed interpreter, Cranelift and LLVM in isolated data directories. One concurrent sweep attempt collided on shared executable paths; serial sweeps passed. A Windows boolean-test cleanup failure was resolved by separating executable artifacts from checked data sandboxes and using distinct backend filenames, retaining all behavior/cleanup assertions. A new presumed-invalid list dictionary key test was corrected after confirming existing structural hashing supports it.
 
@@ -125,7 +125,7 @@ Shared.update stress runs cover 1,000 two-task trials and 25,600 parallel-loop u
 | Shared atomicity | Existing parallel/E0401 and metadata tests retained | Repeated shared-value task/parallel-for stress on interpreter and both AOT backends |
 | Stdlib callable arity | Single pure config source; every alias/public signature checked; static wrong-call rejection retained | Optimized erased-callable/Shared fixture on interpreter, JIT interaction and both AOT backends |
 
-These tests establish the covered cases, not universal backend parity. Logs and local toolchain artifacts are under ignored target/final-contract-*, target/final-stdlib-* and target/operator-*.
+These tests establish the covered cases, not universal backend parity. Logs and local toolchain artifacts are under ignored target/final-contract-*, target/final-stdlib-*, target/operator-* and target/core-builtin-*.
 
 ## Standard-library callable arity
 
@@ -148,6 +148,18 @@ Both AOT backends use a strict boxed range constructor when bounds are dynamic; 
 Native range errors no longer exit the process. Core len range-length failures retain interpreter R0001; receiver range-method failures retain interpreter R2002. Existing may-throw classification and generated pending-exception checks propagate scalar placeholders before subsequent statements execute. Explicit panic/assert behavior is outside this change.
 
 Nine new test functions cover frontend rejection, optimized interpreter/JIT interaction, both AOT backends, helper exception channels, constant shift masking and callable-alias editor metadata/hover. The shared adversarial fixture includes indirect dynamic operators, all requested shift counts, direct/erased conversions, unsupported lengths and caught full-i64-range failures. Six additional uncaught-error programs per AOT backend verify unsuccessful exit and R0001 output. Callable type aliases action/callable/fn now have central editor metadata without duplicate builtin-function entries. A Windows optimizer-test executable cleanup failure was corrected using the existing separation of ignored binary artifacts from checked data sandboxes; semantic and cleanup assertions remain intact.
+
+## Top-level builtin follow-up
+
+Hashset and WeakShared construction now use shared runtime contracts from both interpreter and native dispatch. Empty/Nothing hashsets, list construction and set copies retain their existing behavior; Shared and WeakShared inputs produce weak handles. Invalid sources and constructor failures use catchable R0001 through the existing exception channel. Hash-key construction currently supports every FidanValue variant, including structural collections; there is no currently reachable unhashable-value category to fabricate a failure test for. Any future from_values error is propagated, not made fatal.
+
+Direct Shared/hashset/WeakShared calls validate the existing central arity metadata before constructor-specific inference: exactly one, zero or one, and exactly one argument respectively. WeakShared no longer duplicates that arity check. Erased calls retain the generic R0001 arity validator.
+
+The shared input line reader propagates host read failures as R0001, preserves successful EOF as an empty string, trims LF/CRLF, and preserves a lone trailing CR. Native direct and first-class input share fdn_input; absent prompts remain absent while an explicitly supplied Nothing is displayed. Interpreter direct and first-class builtins share dispatch, including input capture/replay and assertion handling.
+
+The exact top-level builtin matrix review also corrected empty print output, Boolean conversion for empty sets/ranges and dead weak handles, assertion truth conversion and optional messages, and exact structural assertion equality. Core assert_eq/assert_ne use exact recursive value equality; std.test continues to use its separate recursive float tolerance. Native explicit assertion failures retain their designed termination behavior. Cranelift now drops the old owned global box before replacement, matching existing LLVM behavior and allowing a weak handle to expire after its last Shared owner is cleared. This is a local ownership fix, not a general temporary-allocation rewrite.
+
+Six added test functions cover shared constructor/input contracts, native pending exceptions, single frontend arity diagnostics, optimized interpreter/JIT interaction and both AOT backends. The native test verifies direct/erased print and eprint streams, eight uncaught failures per backend, caught invalid-UTF8 reads, and successful input/EOF/prompt behavior. The same stdin pipe cases pass the interpreter CLI at JIT thresholds zero and one. Existing native Dict-backed object introspection/display limitations and explicit assertion termination remain as documented; these tests do not claim universal object parity.
 
 ## Local release readiness
 

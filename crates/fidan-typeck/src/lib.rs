@@ -1543,4 +1543,32 @@ var result = choose(true)
         ));
         assert!(errors.is_empty(), "{errors:?}");
     }
+    #[test]
+    fn constructor_arity_uses_single_metadata_contract() {
+        for (expression, expected) in [
+            ("Shared()", "E0301"),
+            ("Shared(1, 2)", "E0305"),
+            ("hashset([1], [2])", "E0305"),
+            ("WeakShared()", "E0301"),
+            ("WeakShared(shared, shared)", "E0305"),
+        ] {
+            let src = format!("var shared = Shared(1)\nvar result = {expression}");
+            let interner = Arc::new(SymbolInterner::new());
+            let file = SourceFile::new(FileId(0), "<test>", src.as_str());
+            let (tokens, lexical) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, parsed) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+            assert!(lexical.is_empty() && parsed.is_empty());
+            let errors: Vec<_> = typecheck(&module, interner)
+                .into_iter()
+                .filter(|d| d.severity == Severity::Error)
+                .collect();
+            assert_eq!(
+                errors.len(),
+                1,
+                "duplicate/missing diagnostics for {expression}: {errors:?}"
+            );
+            assert_eq!(errors[0].code, expected, "{expression}");
+        }
+        assert!(check_errors("var empty = hashset()\nvar one = hashset([1])\nvar shared = Shared(1)\nvar weak = WeakShared(shared)").is_empty());
+    }
 }

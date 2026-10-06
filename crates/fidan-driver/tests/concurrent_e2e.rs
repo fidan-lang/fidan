@@ -2261,3 +2261,132 @@ fn operator_builtin_parity_across_aot_backends() {
     }
     fs::remove_dir_all(sandbox).expect("remove operator builtin parity sandbox");
 }
+
+#[test]
+fn core_builtin_parity_across_aot_backends() {
+    let sandbox = temp_dir("fidan_core_builtin_parity");
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create core builtin artifacts");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let output = artifacts.join(format!("core-{backend:?}{}", std::env::consts::EXE_SUFFIX));
+        // Keep intentional stderr output in this test, since example sweeps
+        // require successful examples to have an empty stderr stream.
+        let source = format!(
+            "{}\nvar errorPrinter = erase(eprint)\neprint()\nerrorPrinter()\neprint(\"matrix\", 1, true)\nerrorPrinter(\"erased\", 2, false)",
+            include_str!("../../../test/examples/core_builtin_parity_regression.fdn")
+        );
+        compile_program(&source, backend, &output);
+        let result = Command::new(&output).output().expect("run builtin matrix");
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout).replace("\r\n", "\n"),
+            "\n\ncore builtin parity ok\nmatrix 1 true\n"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr).replace("\r\n", "\n"),
+            "\n\nmatrix 1 true\nerased 2 false\n"
+        );
+        for (index, source) in [
+            "var invalid oftype flexible = 42\nprint(hashset(invalid))",
+            "var invalid oftype flexible = 42\nprint(WeakShared(invalid))",
+            "var callback oftype action = hashset\nprint(callback(42))",
+            "var callback oftype flexible = WeakShared\nprint(callback(42))",
+            // Exact core assertion equality must not use std.test's tolerance.
+            "assert_eq(1.0, 1.0 + 0.0000000000005)",
+            "var callback oftype action = assert_eq\ncallback(1.0, 1.0 + 0.0000000000005)",
+            "assert(false, \"custom assertion message\")",
+            "var callback oftype action = assert\ncallback(false, \"custom assertion message\")",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let failure = artifacts.join(format!(
+                "failure-{backend:?}-{index}{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+            compile_program(source, backend, &failure);
+            run_compiled_binary_expect_failure(
+                &failure,
+                if index < 4 {
+                    "R0001"
+                } else if index < 6 {
+                    "assertEq failed"
+                } else {
+                    "custom assertion message"
+                },
+            );
+        }
+        for (index, expression) in ["input()", "reader()"].iter().enumerate() {
+            let source = format!(
+                r#"var reader oftype action = input
+var caught = false
+attempt {{
+    var value = {expression}
+    assert(false)
+}} catch error {{
+    assert(error.contains("R0001"))
+    assert(error.contains("failed to read input"))
+    caught = true
+}}
+assert_eq(caught, true)
+print("input error caught")"#
+            );
+            let binary = artifacts.join(format!(
+                "input-error-{backend:?}-{index}{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+            compile_program(&source, backend, &binary);
+            let mut child = Command::new(&binary)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn input failure");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"\xff\n")
+                .expect("send invalid UTF-8");
+            let result = child.wait_with_output().expect("wait for input failure");
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&result.stdout).trim(),
+                "input error caught"
+            );
+            assert!(result.stderr.is_empty());
+        }
+        let input_source = r#"var reader oftype action = input
+assert_eq(input(), "one")
+assert_eq(reader(), "two")
+assert_eq(input(nothing), "three")
+assert_eq(reader("prompt>"), "four\r")
+assert_eq(input(), "")
+assert_eq(reader(), "")
+print("input success ok")"#;
+        let binary = artifacts.join(format!(
+            "input-success-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(input_source, backend, &binary);
+        run_compiled_binary_with_input_clean(
+            &binary,
+            "one\r\ntwo\nthree\nfour\r",
+            &["nothingprompt>input success ok"],
+        );
+    }
+    fs::remove_dir_all(sandbox).expect("remove core builtin sandbox");
+}

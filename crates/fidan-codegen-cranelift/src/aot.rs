@@ -1696,6 +1696,10 @@ fn lower_instr(
                 let val = lower_operand_boxed(builder, cl_vars, local_types, value, rt, module)?;
                 let cloned = call_rt(module, builder, rt.clone_any, &[val])?
                     .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
+                // The global owns its box; replacing it must release the old
+                // owner so WeakShared observes the same lifetime as the interpreter.
+                let current = builder.ins().load(PTR_TY, MemFlagsData::new(), addr, 0);
+                call_rt(module, builder, rt.drop_any, &[current])?;
                 builder.ins().store(MemFlagsData::new(), cloned, addr, 0);
             }
         }
@@ -3245,15 +3249,11 @@ fn emit_builtin(
 ) -> Result<cranelift_codegen::ir::Value> {
     match name {
         "print" => {
-            if args.len() <= 1 {
-                let arg = if args.is_empty() {
-                    call_rt(module, builder, rt.box_nothing, &[])?.unwrap()
-                } else {
-                    lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?
-                };
+            if args.len() == 1 {
+                let arg = lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?;
                 call_rt(module, builder, rt.println_fn, &[arg])?;
             } else {
-                // Multi-arg print: build a pointer array and call fdn_print_many.
+                // The empty pointer array prints only a newline.
                 let (arr, cnt) =
                     build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
                 call_rt(module, builder, rt.print_many_fn, &[arr, cnt])?;
@@ -3263,7 +3263,7 @@ fn emit_builtin(
 
         "input" => {
             let prompt = if args.is_empty() {
-                call_rt(module, builder, rt.box_nothing, &[])?.unwrap()
+                builder.ins().iconst(PTR_TY, 0)
             } else {
                 lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?
             };
@@ -3294,8 +3294,10 @@ fn emit_builtin(
         }
 
         "assert" => {
-            let cond = lower_operand(builder, cl_vars, &args[0]);
-            let cond_i8 = widen_to_i8(builder, module, rt, cond, local_types, &args[0])?;
+            let cond = lower_operand_boxed(builder, cl_vars, local_types, &args[0], rt, module)?;
+            let converted = call_rt(module, builder, rt.to_boolean, &[cond])?.unwrap();
+            let cond_i8 = call_rt(module, builder, rt.unbox_bool, &[converted])?.unwrap();
+            call_rt(module, builder, rt.drop_any, &[converted])?;
             let msg = if args.len() > 1 {
                 lower_operand_boxed(builder, cl_vars, local_types, &args[1], rt, module)?
             } else {
@@ -3308,8 +3310,13 @@ fn emit_builtin(
         }
 
         "assertEq" | "assert_eq" | "assertNe" | "assert_ne" => {
-            let (mp, ml) = str_const(module, builder, "test")?;
-            let (fp, fl) = str_const(module, builder, name)?;
+            let (mp, ml) = str_const(module, builder, "__builtin__")?;
+            let canonical = match name {
+                "assertEq" => "assert_eq",
+                "assertNe" => "assert_ne",
+                other => other,
+            };
+            let (fp, fl) = str_const(module, builder, canonical)?;
             let (arr, cnt) =
                 build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
             Ok(
@@ -4139,48 +4146,6 @@ fn widen_to_i64(
         builder.ins().uextend(I64, flag)
     } else {
         val
-    }
-}
-
-fn widen_to_i8(
-    builder: &mut FunctionBuilder<'_>,
-    module: &mut ObjectModule,
-    rt: &RuntimeDecls,
-    val: cranelift_codegen::ir::Value,
-    local_types: &HashMap<u32, MirTy>,
-    op: &Operand,
-) -> Result<cranelift_codegen::ir::Value> {
-    let ty = builder.func.dfg.value_type(val);
-    if ty == I8 {
-        return Ok(val);
-    }
-
-    if ty == F64 {
-        let zero = builder.ins().f64const(0.0);
-        return Ok(builder.ins().fcmp(FloatCC::NotEqual, val, zero));
-    }
-
-    match operand_mir_ty(local_types, op) {
-        MirTy::Integer | MirTy::Handle => Ok(builder.ins().icmp_imm_s(IntCC::NotEqual, val, 0)),
-        MirTy::Dynamic
-        | MirTy::String
-        | MirTy::List(_)
-        | MirTy::Dict(_, _)
-        | MirTy::HashSet(_)
-        | MirTy::Tuple(_)
-        | MirTy::Object(_)
-        | MirTy::Enum(_)
-        | MirTy::Shared(_)
-        | MirTy::WeakShared(_)
-        | MirTy::Pending(_)
-        | MirTy::Function
-        | MirTy::Nothing
-        | MirTy::Error => Ok(call_rt(module, builder, rt.truthy, &[val])?.unwrap_or(val)),
-        MirTy::Boolean => Ok(builder.ins().icmp_imm_s(IntCC::NotEqual, val, 0)),
-        MirTy::Float => {
-            let zero = builder.ins().f64const(0.0);
-            Ok(builder.ins().fcmp(FloatCC::NotEqual, val, zero))
-        }
     }
 }
 

@@ -2246,92 +2246,7 @@ impl MirMachine {
     ) -> Result<FidanValue, MirSignal> {
         match callee {
             Callee::Fn(fn_id) => self.call_function(*fn_id, args),
-            Callee::Builtin(sym) => {
-                if let Some(&extern_fn) = self.extern_builtin_fns.get(sym) {
-                    return self.call_function(extern_fn, args);
-                }
-                let name: Arc<str> = self.sym_str(*sym);
-                // Check if this is a free-imported stdlib function (e.g. `use std.io.{readFile}`).
-                if let Some(module) = self.stdlib_free_fns.get(&name).cloned() {
-                    return self.dispatch_stdlib_call(&module, &name, args);
-                }
-                // ── Test assertion builtins ───────────────────────────────
-                // These must be dispatched before `call_builtin` because they
-                // need to return `Err(MirSignal::Panic)` on failure, which
-                // the `Option`-returning `call_builtin` cannot express.
-                match name.as_ref() {
-                    "assert" => {
-                        let cond = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-                        return if cond.truthy() {
-                            Ok(FidanValue::Nothing)
-                        } else {
-                            Err(MirSignal::Panic("assertion failed".to_string()))
-                        };
-                    }
-                    "assert_eq" => {
-                        let mut it = args.into_iter();
-                        let a = it.next().unwrap_or(FidanValue::Nothing);
-                        let b = it.next().unwrap_or(FidanValue::Nothing);
-                        let equal = fidan_values_equal(&a, &b);
-                        return if equal {
-                            Ok(FidanValue::Nothing)
-                        } else {
-                            let da = builtins::display(&a);
-                            let db = builtins::display(&b);
-                            Err(MirSignal::Panic(format!(
-                                "assertion failed: expected {da} == {db}"
-                            )))
-                        };
-                    }
-                    "assert_ne" => {
-                        let mut it = args.into_iter();
-                        let a = it.next().unwrap_or(FidanValue::Nothing);
-                        let b = it.next().unwrap_or(FidanValue::Nothing);
-                        let equal = fidan_values_equal(&a, &b);
-                        return if !equal {
-                            Ok(FidanValue::Nothing)
-                        } else {
-                            let da = builtins::display(&a);
-                            let db = builtins::display(&b);
-                            Err(MirSignal::Panic(format!(
-                                "assertion failed: expected {da} != {db}"
-                            )))
-                        };
-                    }
-                    "input" => {
-                        // Replay mode: return the next pre-recorded line.
-                        if self.replay_pos < self.replay_inputs.len() {
-                            let line = self.replay_inputs[self.replay_pos].clone();
-                            self.replay_pos += 1;
-                            return Ok(FidanValue::String(FidanString::new(&line)));
-                        }
-                        // Normal mode: delegate to the builtin (reads stdin) and capture.
-                        let v = builtins::call_builtin("input", args)
-                            .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
-                            .unwrap_or(FidanValue::Nothing);
-                        if let FidanValue::String(ref s) = v {
-                            self.stdin_capture.push(s.as_str().to_string());
-                        }
-                        return Ok(v);
-                    }
-                    _ => {}
-                }
-                // Constructor builtins (e.g. `Shared(val)`) take priority; then
-                // true language builtins (print, input, len, type conversions, math).
-                // String/list/dict receiver methods are NOT free functions and must
-                // be invoked via `receiver.method()` — they live in call_bootstrap_method.
-                if let Some(value) = builtins::call_builtin_constructor(&name, args.clone())
-                    .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
-                {
-                    return Ok(value);
-                }
-                if let Some(value) = builtins::call_builtin(&name, args)
-                    .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
-                {
-                    return Ok(value);
-                }
-                Err(MirSignal::Panic(format!("unknown builtin `{}`", name)))
-            }
+            Callee::Builtin(sym) => self.dispatch_core_builtin(*sym, args),
             Callee::Method { receiver, method } => {
                 if let Operand::Const(MirLit::Namespace(module)) = receiver {
                     let method_name = self.sym_str(*method);
@@ -2598,6 +2513,103 @@ impl MirMachine {
         }
     }
 
+    // Direct and first-class core builtins share assertions and input replay/capture.
+    fn dispatch_core_builtin(
+        &mut self,
+        sym: Symbol,
+        args: Vec<FidanValue>,
+    ) -> Result<FidanValue, MirSignal> {
+        if let Some(&extern_fn) = self.extern_builtin_fns.get(&sym) {
+            return self.call_function(extern_fn, args);
+        }
+        let name: Arc<str> = self.sym_str(sym);
+        // Check if this is a free-imported stdlib function (e.g. `use std.io.{readFile}`).
+        if let Some(module) = self.stdlib_free_fns.get(&name).cloned() {
+            return self.dispatch_stdlib_call(&module, &name, args);
+        }
+        // ── Test assertion builtins ───────────────────────────────
+        // These must be dispatched before `call_builtin` because they
+        // need to return `Err(MirSignal::Panic)` on failure, which
+        // the `Option`-returning `call_builtin` cannot express.
+        match name.as_ref() {
+            "assert" => {
+                let mut args = args.into_iter();
+                let cond = args.next().unwrap_or(FidanValue::Nothing);
+                let message = args
+                    .next()
+                    .map(|value| builtins::display(&value))
+                    .unwrap_or_else(|| "assertion failed".to_owned());
+                return if cond.truthy() {
+                    Ok(FidanValue::Nothing)
+                } else {
+                    Err(MirSignal::Panic(message))
+                };
+            }
+            "assert_eq" => {
+                let mut it = args.into_iter();
+                let a = it.next().unwrap_or(FidanValue::Nothing);
+                let b = it.next().unwrap_or(FidanValue::Nothing);
+                let equal = fidan_runtime::ffi::values_equal(&a, &b);
+                return if equal {
+                    Ok(FidanValue::Nothing)
+                } else {
+                    let da = builtins::display(&a);
+                    let db = builtins::display(&b);
+                    Err(MirSignal::Panic(format!(
+                        "assertion failed: expected {da} == {db}"
+                    )))
+                };
+            }
+            "assert_ne" => {
+                let mut it = args.into_iter();
+                let a = it.next().unwrap_or(FidanValue::Nothing);
+                let b = it.next().unwrap_or(FidanValue::Nothing);
+                let equal = fidan_runtime::ffi::values_equal(&a, &b);
+                return if !equal {
+                    Ok(FidanValue::Nothing)
+                } else {
+                    let da = builtins::display(&a);
+                    let db = builtins::display(&b);
+                    Err(MirSignal::Panic(format!(
+                        "assertion failed: expected {da} != {db}"
+                    )))
+                };
+            }
+            "input" => {
+                // Replay mode: return the next pre-recorded line.
+                if self.replay_pos < self.replay_inputs.len() {
+                    let line = self.replay_inputs[self.replay_pos].clone();
+                    self.replay_pos += 1;
+                    return Ok(FidanValue::String(FidanString::new(&line)));
+                }
+                // Normal mode: delegate to the builtin (reads stdin) and capture.
+                let v = builtins::call_builtin("input", args)
+                    .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
+                    .unwrap_or(FidanValue::Nothing);
+                if let FidanValue::String(ref s) = v {
+                    self.stdin_capture.push(s.as_str().to_string());
+                }
+                return Ok(v);
+            }
+            _ => {}
+        }
+        // Constructor builtins (e.g. `Shared(val)`) take priority; then
+        // true language builtins (print, input, len, type conversions, math).
+        // String/list/dict receiver methods are NOT free functions and must
+        // be invoked via `receiver.method()` — they live in call_bootstrap_method.
+        if let Some(value) = builtins::call_builtin_constructor(&name, args.clone())
+            .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
+        {
+            return Ok(value);
+        }
+        if let Some(value) = builtins::call_builtin(&name, args)
+            .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
+        {
+            return Ok(value);
+        }
+        Err(MirSignal::Panic(format!("unknown builtin `{}`", name)))
+    }
+
     // ── Stdlib dispatch ───────────────────────────────────────────────────────
 
     fn dispatch_stdlib_call(
@@ -2609,17 +2621,7 @@ impl MirMachine {
         fidan_runtime::stdlib::validate_callable_arity(module, name, args.len())
             .map_err(|error| MirSignal::RuntimeError(error.code, error.message))?;
         if module == "__builtin__" {
-            if let Some(value) = builtins::call_builtin_constructor(name, args.clone())
-                .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
-            {
-                return Ok(value);
-            }
-            if let Some(value) = builtins::call_builtin(name, args)
-                .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
-            {
-                return Ok(value);
-            }
-            return Err(MirSignal::Panic(format!("unknown builtin `{name}`")));
+            return self.dispatch_core_builtin(self.interner.intern(name), args);
         }
         // Sandbox check: guard all `io` module calls before execution.
         // Check sandbox first (Option branch) so non-sandbox runs skip the

@@ -1,21 +1,11 @@
 use fidan_config::{BuiltinSemantic, builtin_semantic};
-use fidan_diagnostics::{DiagCode, diag_code};
+use fidan_diagnostics::DiagCode;
 use fidan_runtime::display as runtime_display;
-use fidan_runtime::{FidanHashSet, FidanString, FidanValue, OwnedRef, SharedRef};
-use std::io::BufRead;
+use fidan_runtime::{FidanString, FidanValue, SharedRef};
 
 pub struct BuiltinError {
     pub code: DiagCode,
     pub message: String,
-}
-
-impl BuiltinError {
-    fn runtime(message: String) -> Self {
-        Self {
-            code: diag_code!("R0001"),
-            message,
-        }
-    }
 }
 
 impl From<fidan_runtime::stdlib::StdlibRuntimeError> for BuiltinError {
@@ -78,20 +68,9 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanVal
                 let _ = fidan_runtime::write_display_io(&mut stdout, prompt);
                 let _ = stdout.flush();
             }
-            let stdin = std::io::stdin();
-            let mut line = String::new();
-            stdin
-                .lock()
-                .read_line(&mut line)
-                .map_err(|err| BuiltinError::runtime(format!("failed to read input: {err}")))?;
-            // Strip trailing newline
-            if line.ends_with('\n') {
-                line.pop();
-                if line.ends_with('\r') {
-                    line.pop();
-                }
-            }
-            Ok(Some(FidanValue::String(FidanString::new(&line))))
+            Ok(Some(fidan_runtime::builtins::read_input_line(
+                &mut std::io::stdin().lock(),
+            )?))
         }
 
         // ── Type conversion ───────────────────────────────────────────────────
@@ -137,35 +116,16 @@ pub fn call_builtin_constructor(
 ) -> Result<Option<FidanValue>, BuiltinError> {
     match builtin_semantic(name) {
         Some(BuiltinSemantic::HashSetConstructor) => {
-            let source = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            let set = match source {
-                FidanValue::Nothing => FidanHashSet::new(),
-                FidanValue::List(list) => FidanHashSet::from_values(list.borrow().iter().cloned())
-                    .map_err(|err| BuiltinError::runtime(err.to_string()))?,
-                FidanValue::HashSet(existing) => existing.borrow().clone(),
-                other => {
-                    return Err(BuiltinError::runtime(format!(
-                        "hashset(items) expects a list or hashset, got {}",
-                        other.type_name()
-                    )));
-                }
-            };
-            Ok(Some(FidanValue::HashSet(OwnedRef::new(set))))
+            let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            Ok(Some(fidan_runtime::builtins::hashset(value)?))
         }
         Some(BuiltinSemantic::SharedConstructor) => {
             let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
             Ok(Some(FidanValue::Shared(SharedRef::new(inner))))
         }
         Some(BuiltinSemantic::WeakSharedConstructor) => {
-            let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            match inner {
-                FidanValue::Shared(shared) => Ok(Some(FidanValue::WeakShared(shared.downgrade()))),
-                FidanValue::WeakShared(weak) => Ok(Some(FidanValue::WeakShared(weak))),
-                other => Err(BuiltinError::runtime(format!(
-                    "WeakShared(shared) expects a Shared value, got {}",
-                    other.type_name()
-                ))),
-            }
+            let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+            Ok(Some(fidan_runtime::builtins::weak_shared(value)?))
         }
         _ => Ok(None),
     }

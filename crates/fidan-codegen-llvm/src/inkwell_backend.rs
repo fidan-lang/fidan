@@ -3280,12 +3280,8 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
         trace(&format!("inkwell:lower_builtin:{name}"));
         match name.as_str() {
             "print" => {
-                if args.len() <= 1 {
-                    let arg = if let Some(arg) = args.first() {
-                        self.lower_operand(arg)?
-                    } else {
-                        self.call_ptr("fdn_box_nothing", &[])?
-                    };
+                if args.len() == 1 {
+                    let arg = self.lower_operand(&args[0])?;
                     self.call_void("fdn_println", &[arg.into()])?;
                 } else {
                     let values = args
@@ -3301,7 +3297,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 let prompt = if let Some(arg) = args.first() {
                     self.lower_operand(arg)?
                 } else {
-                    self.call_ptr("fdn_box_nothing", &[])?
+                    self.module.ptr_type.const_null()
                 };
                 self.call_ptr("fdn_input", &[prompt.into()])
             }
@@ -3316,7 +3312,9 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             }
             "assert" => {
                 let cond = self.lower_operand(&args[0])?;
-                let truthy = self.call_i8("fdn_truthy", &[cond.into()])?;
+                let converted = self.call_ptr("fdn_to_boolean", &[cond.into()])?;
+                let truthy = self.call_i8("fdn_unbox_bool", &[converted.into()])?;
+                self.call_void("fdn_drop", &[converted.into()])?;
                 let truthy_i64 = self.module.builder.build_int_z_extend(
                     truthy,
                     self.module.i64_type,

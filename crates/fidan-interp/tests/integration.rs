@@ -3068,3 +3068,44 @@ fn operator_builtin_parity_with_and_without_jit() {
         });
     }
 }
+
+#[test]
+fn core_builtin_parity_with_and_without_jit() {
+    for threshold in [0, 1] {
+        run_src_with_threshold(
+            include_str!("../../../test/examples/core_builtin_parity_regression.fdn"),
+            threshold,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "core builtin parity at threshold {threshold}: {}",
+                error.message
+            )
+        });
+        for source in [
+            r#"assert(false, "custom assertion message")"#,
+            r#"var callback oftype action = assert; callback(false, "custom assertion message")"#,
+        ] {
+            let error = run_src_with_threshold(source, threshold).expect_err("assertion failure");
+            assert!(error.message.contains("custom assertion message"));
+        }
+        let source = r#"var reader oftype action = input
+assert_eq(input(), "one")
+assert_eq(reader(), "two")
+assert_eq(input(), "three")"#;
+        let (mut mir, interner) = build_mir(source);
+        fidan_passes::run_all(&mut mir);
+        let source_map = Arc::new(SourceMap::new());
+        source_map.add_file("<test>", source);
+        run_mir_with_replay(
+            mir,
+            interner,
+            source_map,
+            threshold,
+            vec!["one".into(), "two".into(), "three".into()],
+            None,
+        )
+        .0
+        .unwrap_or_else(|error| panic!("erased input replay: {}", error.message));
+    }
+}

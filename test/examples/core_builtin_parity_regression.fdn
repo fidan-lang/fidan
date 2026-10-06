@@ -1,0 +1,97 @@
+# Direct and erased top-level builtin contracts (ordinary input has separate pipe tests).
+action erase with (certain value oftype flexible) returns flexible {
+    if type(value) == "nothing" { return value }
+    return value
+}
+action expectRuntimeError with (certain callback oftype action) {
+    var caught = false
+    attempt { callback() } catch error {
+        assert(error.contains("R0001"))
+        caught = true
+    }
+    assert_eq(caught, true)
+}
+var makeSet oftype action = erase(hashset)
+var makeWeak oftype flexible = erase(WeakShared)
+var makeShared oftype action = erase(Shared)
+assert_eq(len(hashset()), 0)
+assert_eq(len(hashset(nothing)), 0)
+assert_eq(len(makeSet()), 0)
+assert_eq(len(makeSet(nothing)), 0)
+var values = [1, 2, 1]
+var original = hashset(values)
+var copied = hashset(original)
+copied.add(3)
+assert_eq(len(original), 2)
+assert_eq(len(copied), 3)
+assert_eq(len(makeSet(values)), 2)
+assert_eq(len(makeSet(original)), 2)
+# Structural values are hashable under the established implementation.
+assert_eq(len(hashset([[1], (2, "x"), { "key": 3 }])), 3)
+var invalid oftype flexible = 42
+expectRuntimeError(action { return hashset(invalid) })
+expectRuntimeError(action { return makeSet(invalid) })
+expectRuntimeError(action { return WeakShared(invalid) })
+expectRuntimeError(action { return makeWeak(invalid) })
+expectRuntimeError(action { return makeShared() })
+expectRuntimeError(action { return makeShared(1, 2) })
+expectRuntimeError(action { return makeSet([1], [2]) })
+expectRuntimeError(action { return makeWeak() })
+var owner = Shared(7)
+var weak = WeakShared(owner)
+var equivalent = WeakShared(weak)
+var indirect = makeWeak(owner)
+var indirectCopy = makeWeak(weak)
+assert_eq(weak.isAlive(), true)
+assert_eq(equivalent.isAlive(), true)
+assert_eq(indirect.upgrade().get(), 7)
+assert_eq(indirectCopy.upgrade().get(), 7)
+expectRuntimeError(action { return makeWeak(owner, owner) })
+assert_eq(makeShared(8).get(), 8)
+var assertion oftype action = erase(assert)
+var same oftype flexible = erase(assert_eq)
+var different oftype action = erase(assert_ne)
+assertion(256)
+assertion(0.5)
+assertion([])
+assert([])
+same({ "key": [1] }, { "key": [1] })
+assert_eq({ "key": [1] }, { "key": [1] })
+# Core assertions use exact equality; std.test retains separate tolerant equality.
+different(1.0, 1.0 + 0.0000000000005)
+assert_ne(1.0, 1.0 + 0.0000000000005)
+expectRuntimeError(action { return assertion() })
+expectRuntimeError(action { return same(1) })
+expectRuntimeError(action { return different(1, 2, "message", 4) })
+var toBool = erase(boolean)
+for value in [nothing, 0, 0.0, "", hashset(), 3..3] {
+    assert_eq(boolean(value), false)
+    assert_eq(toBool(value), false)
+}
+for value in [[], {}, 256, 0.5, "text", hashset([1]), 1..2] {
+    assert_eq(boolean(value), true)
+    assert_eq(toBool(value), true)
+}
+var alive = Shared(1)
+var mortal = WeakShared(alive)
+alive = nothing
+assert_eq(boolean(mortal), false)
+assert_eq(toBool(mortal), false)
+var stringify = erase(string)
+var classify = erase(type)
+var convertInt = erase(integer)
+var convertFloat = erase(float)
+var size = erase(len)
+assert_eq(stringify(42), string(42))
+assert_eq(classify(42), type(42))
+assert_eq(convertInt("123"), integer("123"))
+assert_eq(convertFloat("1.5"), float("1.5"))
+assert_eq(size(values), len(values))
+expectRuntimeError(action { return convertInt("bad") })
+expectRuntimeError(action { return convertFloat(true) })
+expectRuntimeError(action { return size(42) })
+var printer = erase(print)
+print()
+printer()
+print("core builtin parity ok")
+printer("matrix", 1, true)

@@ -3533,6 +3533,7 @@ impl TypeChecker {
                 }
                 let name_str = self.interner.resolve(name).to_string();
                 if let Some(semantic) = builtin_semantic(name_str.as_str()) {
+                    self.check_builtin_arguments(&name_str, args, span);
                     match semantic {
                         BuiltinSemantic::SharedConstructor => {
                             let inner = args
@@ -3572,21 +3573,6 @@ impl TypeChecker {
                                 .iter()
                                 .map(|arg| self.infer_expr(arg.value, module))
                                 .collect();
-                            if inferred_args.is_empty() {
-                                self.emit_error(
-                                    fidan_diagnostics::diag_code!("E0301"),
-                                    "WeakShared(shared) requires a Shared argument",
-                                    span,
-                                );
-                                return FidanType::WeakShared(Box::new(FidanType::Dynamic));
-                            }
-                            if inferred_args.len() > 1 {
-                                self.emit_error(
-                                    fidan_diagnostics::diag_code!("E0302"),
-                                    "WeakShared(shared) accepts exactly one argument",
-                                    span,
-                                );
-                            }
                             return match inferred_args.first() {
                                 Some(FidanType::Shared(inner)) => {
                                     FidanType::WeakShared(Box::new((**inner).clone()))
@@ -3615,7 +3601,6 @@ impl TypeChecker {
                     }
                 }
                 if let Some(return_kind) = builtin_return_kind(&name_str) {
-                    self.check_builtin_arguments(&name_str, args, span);
                     return self.builtin_return_kind_to_type(return_kind);
                 }
                 if let Some(import) = self.stdlib_imports.get(&name).copied() {
