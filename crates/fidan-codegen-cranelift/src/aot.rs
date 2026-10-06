@@ -504,6 +504,7 @@ struct RuntimeDecls {
     dyn_shr: cranelift_module::FuncId,
     // Range
     make_range: cranelift_module::FuncId,
+    make_range_checked: cranelift_module::FuncId,
     // Builtins
     println_fn: cranelift_module::FuncId,
     print_many_fn: cranelift_module::FuncId,
@@ -691,6 +692,7 @@ impl RuntimeDecls {
                 s.returns.push(AbiParam::new(I64));
                 s
             }),
+            make_range_checked: decl!("fdn_make_range_checked", sig!((p, p, I8) -> ptr)),
             println_fn: decl!("fdn_println", sig!((p) -> void)),
             print_many_fn: decl!("fdn_print_many", {
                 let mut s = module.make_signature();
@@ -2498,8 +2500,14 @@ fn lower_binary(
             BitXor => builder.ins().bxor(l, r),
             BitAnd => builder.ins().band(l, r),
             BitOr => builder.ins().bor(l, r),
-            Shl => builder.ins().ishl(l, r),
-            Shr => builder.ins().sshr(l, r),
+            Shl => {
+                let count = builder.ins().band_imm_u(r, 63);
+                builder.ins().ishl(l, count)
+            }
+            Shr => {
+                let count = builder.ins().band_imm_u(r, 63);
+                builder.ins().sshr(l, count)
+            }
             Range | RangeInclusive => {
                 let inc = builder
                     .ins()
@@ -2611,13 +2619,13 @@ fn dyn_binop(
         Shl => rt.dyn_shl,
         Shr => rt.dyn_shr,
         Range | RangeInclusive => {
-            let start = call_rt(module, builder, rt.unbox_int, &[l])?.unwrap();
-            let end = call_rt(module, builder, rt.unbox_int, &[r])?.unwrap();
             let inc = builder
                 .ins()
                 .iconst(I8, if op == RangeInclusive { 1 } else { 0 });
-            return Ok(call_rt(module, builder, rt.make_range, &[start, end, inc])?
-                .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)));
+            return Ok(
+                call_rt(module, builder, rt.make_range_checked, &[l, r, inc])?
+                    .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)),
+            );
         }
     };
     let boxed = call_rt(module, builder, rt_fn, &[l, r])?

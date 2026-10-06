@@ -1497,4 +1497,50 @@ var result = choose(true)
             "expected W1006, got {warnings:?}"
         );
     }
+    #[test]
+    fn strict_operator_contracts_report_e0203() {
+        for expression in [
+            "1.5 & 2.0",
+            "1 | 2.0",
+            "true ^ 1",
+            "true | 1",
+            "\"x\" << 2",
+            "1.5..3.5",
+            "true..5",
+            "1...false",
+            "true and 1",
+            "1 or false",
+            "not 42",
+            "-\"abc\"",
+            "true < false",
+            "\"x\" < 3",
+            "[] >= []",
+        ] {
+            let src = format!("var result = {expression}");
+            let interner = Arc::new(SymbolInterner::new());
+            let file = SourceFile::new(FileId(0), "<test>", src.as_str());
+            let (tokens, lexical) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, parsed) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+            assert!(
+                lexical.is_empty() && parsed.is_empty(),
+                "parse {expression}"
+            );
+            let errors: Vec<_> = typecheck(&module, interner)
+                .into_iter()
+                .filter(|d| d.severity == Severity::Error)
+                .collect();
+            assert!(
+                errors.iter().any(|d| d.code == "E0203"),
+                "expected E0203 for {expression}: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn valid_operator_and_dynamic_contracts_remain_supported() {
+        let errors = check_errors(include_str!(
+            "../../../test/examples/operator_builtin_parity_regression.fdn"
+        ));
+        assert!(errors.is_empty(), "{errors:?}");
+    }
 }

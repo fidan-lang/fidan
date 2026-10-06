@@ -111,7 +111,7 @@ CI retains locked workspace builds/tests/doctests, strict Clippy and formatting.
 
 ## Final validation
 
-On Windows x86_64 with Rust 1.99, locked workspace build/tests passed: 890 tests across 54 suites including doctests, no failures or ignored tests. Formatting and strict all-target Clippy passed. The rebuilt LLVM 1.0.6 helper passed 11 feature-enabled backend tests and release Clippy through scripts/package-toolchain.ps1. Both example sweeps passed 41/41 with no skips; LLVM used full LTO. All 71 driver concurrency/backend tests passed with that helper installed. Seven new metadata/frontend/interpreter/backend test functions cover the final callable-arity fix. The pre-fix release CLI fails the same arity fixture; the rebuilt CLI passes it.
+On Windows x86_64 with Rust 1.99, locked workspace build/tests passed: 899 tests across 54 suites including doctests, no failures or ignored tests. Formatting and strict all-target Clippy passed. The rebuilt LLVM 1.0.6 helper passed 11 feature-enabled backend tests and release Clippy through scripts/package-toolchain.ps1. Both example sweeps passed 42/42 with no skips; LLVM used full LTO. All 72 driver concurrency/backend tests passed with that helper installed. The preceding callable-arity fix added seven metadata/frontend/interpreter/backend test functions. Nine additional functions cover this final operator/builtin follow-up. The pre-fix release CLI fails the same arity fixture; the rebuilt CLI passes it.
 
 Shared.update stress runs cover 1,000 two-task trials and 25,600 parallel-loop updates per AOT backend, plus interpreter threshold-zero/one runs and the runtime thread stress test. The original LOCAL/test_file_manager.fdn class source, with separate save/reload assertions, passed interpreter, Cranelift and LLVM in isolated data directories. One concurrent sweep attempt collided on shared executable paths; serial sweeps passed. A Windows boolean-test cleanup failure was resolved by separating executable artifacts from checked data sandboxes and using distinct backend filenames, retaining all behavior/cleanup assertions. A new presumed-invalid list dictionary key test was corrected after confirming existing structural hashing supports it.
 
@@ -125,7 +125,7 @@ Shared.update stress runs cover 1,000 two-task trials and 25,600 parallel-loop u
 | Shared atomicity | Existing parallel/E0401 and metadata tests retained | Repeated shared-value task/parallel-for stress on interpreter and both AOT backends |
 | Stdlib callable arity | Single pure config source; every alias/public signature checked; static wrong-call rejection retained | Optimized erased-callable/Shared fixture on interpreter, JIT interaction and both AOT backends |
 
-These tests establish the covered cases, not universal backend parity. Logs and local toolchain artifacts are under ignored target/final-contract-* and target/final-stdlib-*.
+These tests establish the covered cases, not universal backend parity. Logs and local toolchain artifacts are under ignored target/final-contract-*, target/final-stdlib-* and target/operator-*.
 
 ## Standard-library callable arity
 
@@ -136,6 +136,18 @@ Required positional bounds, optional parameters and unbounded variadic tails der
 Interpreter stdlib entry and native inline stdlib dispatch call the same runtime validator before implementations can ignore surplus or synthesize missing arguments. Wrong arity reports catchable R0001 with the same message. Native `fdn_call_dynamic` and Shared callbacks reuse this dispatcher. Shared guards remain held across callback invocation; errors leave the slot unchanged. Statically known calls retain frontend diagnostics; erased action/callable/fn/flexible values use runtime validation without a richer function type system.
 
 Cargo confirms the graph is acyclic: config has no dependencies; runtime depends on config and never on stdlib; stdlib retains its existing config/runtime dependencies. No manifest, lockfile, version, protocol or extension change is required. Public metadata/rendering and all aliases are regression-tested; the optimized callable fixture covers zero/one/multiple required arguments, optional/default/variadic calls, aliases, erased callables and Shared failure preservation on interpreter/JIT and both AOT backends.
+
+## Final operator and core-builtin parity follow-up
+
+Frontend E0203 now rejects known non-integer bitwise/range operands, non-Boolean logical operands, non-numeric unary negation, and unsupported ordering pairs. Dynamic/Unknown operands defer validation; equality/inequality and unary-plus identity retain their existing contracts. Ordering accepts numeric pairs (including mixed Integer/Float) and String/String.
+
+All integer shift counts use `rhs & 63`, including negative counts. Cranelift scalar shifts explicitly mask before `ishl`/`sshr`; LLVM uses the masked boxed helpers. Interpreter and constant folding already masked counts. Native dynamic bitwise failures now use the existing R0001 exception slot rather than silent Nothing.
+
+Both AOT backends use a strict boxed range constructor when bounds are dynamic; permissive scalar ABI unboxers remain unchanged. Core integer/float/len contracts are shared in runtime helpers: integer accepts Integer/Float/Boolean/parseable String, float accepts Float/Integer/parseable String, and len accepts String/List/Dict/HashSet/Tuple/Range. Invalid calls report R0001. First-class interpreter builtin invocation now preserves runtime diagnostic codes rather than converting them to panic signals.
+
+Native range errors no longer exit the process. Core len range-length failures retain interpreter R0001; receiver range-method failures retain interpreter R2002. Existing may-throw classification and generated pending-exception checks propagate scalar placeholders before subsequent statements execute. Explicit panic/assert behavior is outside this change.
+
+Nine new test functions cover frontend rejection, optimized interpreter/JIT interaction, both AOT backends, helper exception channels, constant shift masking and callable-alias editor metadata/hover. The shared adversarial fixture includes indirect dynamic operators, all requested shift counts, direct/erased conversions, unsupported lengths and caught full-i64-range failures. Six additional uncaught-error programs per AOT backend verify unsuccessful exit and R0001 output. Callable type aliases action/callable/fn now have central editor metadata without duplicate builtin-function entries. A Windows optimizer-test executable cleanup failure was corrected using the existing separation of ignored binary artifacts from checked data sandboxes; semantic and cleanup assertions remain intact.
 
 ## Local release readiness
 

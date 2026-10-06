@@ -910,12 +910,18 @@ fn stdlib_callable_arity_across_aot_backends() {
 #[test]
 fn strength_reduction_preserves_values_and_types_across_aot_backends() {
     let sandbox = temp_dir("fidan_strength_reduction");
+    // Keep executable artifacts outside the data sandbox: Windows image scanners
+    // can retain handles after a successful process exit.
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create optimizer artifact directory");
     for backend in [Backend::Cranelift, Backend::Llvm] {
         if backend == Backend::Llvm && !llvm_available() {
             eprintln!("skipping LLVM optimizer regression: no installed LLVM toolchain");
             continue;
         }
-        let output = sandbox.join(format!(
+        let output = artifacts.join(format!(
             "optimizer-{backend:?}{}",
             std::env::consts::EXE_SUFFIX
         ));
@@ -2209,4 +2215,49 @@ fn llvm_aot_lto_full_smoke() {
     compile_program_with_settings(builtin_assert_source(), Backend::Llvm, &output, &settings);
     run_compiled_binary_clean(&output, "ok");
     fs::remove_dir_all(&sandbox).ok();
+}
+
+#[test]
+fn operator_builtin_parity_across_aot_backends() {
+    let sandbox = temp_dir("fidan_operator_builtin_parity");
+    // Windows image scanners can retain an exited executable's handle. Keep
+    // ignored build artifacts separate from the sandbox whose cleanup we check.
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().expect("sandbox name"));
+    fs::create_dir_all(&artifacts).expect("create operator builtin parity artifact directory");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let output = artifacts.join(format!(
+            "operators-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/operator_builtin_parity_regression.fdn"),
+            backend,
+            &output,
+        );
+        run_compiled_binary_clean(&output, "operator builtin parity ok");
+        for (index, source) in [
+            "var a oftype flexible = \"oops\"\nvar b oftype flexible = 3\nprint(a & b)",
+            "var a oftype flexible = 1.5\nvar b oftype flexible = 4\nprint(a..b)",
+            "var a oftype flexible = 42\nprint(not a)",
+            "print(integer(\"abc\"))",
+            "print(float(\"abc\"))",
+            "print(len(42))",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let failure = artifacts.join(format!(
+                "failure-{backend:?}-{index}{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+            compile_program(source, backend, &failure);
+            run_compiled_binary_expect_failure(&failure, "R0001");
+        }
+    }
+    fs::remove_dir_all(sandbox).expect("remove operator builtin parity sandbox");
 }

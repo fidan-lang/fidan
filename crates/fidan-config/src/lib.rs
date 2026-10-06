@@ -956,6 +956,27 @@ pub const LANGUAGE_BUILTINS: &[BuiltinInfo] = &[
 
 pub const LANGUAGE_TYPE_NAMES: &[BuiltinInfo] = &[
     BuiltinInfo {
+        name: "action",
+        signature: "action",
+        doc: "First-class callable value type (action, callable and fn are aliases). Concrete callable arity is validated at runtime when its signature is erased.",
+        semantic: None,
+        return_kind: None,
+    },
+    BuiltinInfo {
+        name: "callable",
+        signature: "callable",
+        doc: "First-class callable value type (action, callable and fn are aliases). Concrete callable arity is validated at runtime when its signature is erased.",
+        semantic: None,
+        return_kind: None,
+    },
+    BuiltinInfo {
+        name: "fn",
+        signature: "fn",
+        doc: "First-class callable value type (action, callable and fn are aliases). Concrete callable arity is validated at runtime when its signature is erased.",
+        semantic: None,
+        return_kind: None,
+    },
+    BuiltinInfo {
         name: "handle",
         signature: "handle",
         doc: "Opaque native handle type used for extern interop and low-level OS or library handles.",
@@ -1743,6 +1764,23 @@ mod tests {
                 "duplicate language decorator `{}`",
                 info.name
             );
+        }
+    }
+    #[test]
+    fn callable_type_aliases_have_unique_editor_metadata() {
+        for name in ["action", "callable", "fn"] {
+            assert_eq!(
+                LANGUAGE_TYPE_NAMES
+                    .iter()
+                    .filter(|info| info.name == name)
+                    .count(),
+                1
+            );
+            assert!(
+                builtin_info(name).is_none(),
+                "type alias must not be a builtin function"
+            );
+            assert!(type_name_info(name).unwrap().doc.contains("callable"));
         }
     }
 }

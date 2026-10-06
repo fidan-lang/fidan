@@ -7070,4 +7070,12 @@ Holder.compass.
         assert_eq!(edits[0].range.start.line, 1);
         assert_eq!(edits[0].range.end.line, 1);
     }
+    #[test]
+    fn callable_alias_type_hover_uses_canonical_metadata() {
+        for name in ["action", "callable", "fn"] {
+            let hover = type_name_hover_markdown(name).expect("callable alias hover");
+            assert!(hover.contains(&format!("```fidan\n{name}\n```")));
+            assert!(hover.contains("First-class callable"));
+        }
+    }
 }

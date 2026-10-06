@@ -3052,3 +3052,19 @@ assert_eq(collect(["a"]).len(), 1)
         .is_ok()
     );
 }
+
+#[test]
+fn operator_builtin_parity_with_and_without_jit() {
+    for threshold in [0, 1] {
+        run_src_with_threshold(
+            include_str!("../../../test/examples/operator_builtin_parity_regression.fdn"),
+            threshold,
+        )
+        .unwrap_or_else(|error| {
+            panic!(
+                "operator/builtin parity at threshold {threshold}: {}",
+                error.message
+            )
+        });
+    }
+}

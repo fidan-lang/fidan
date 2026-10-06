@@ -2610,12 +2610,12 @@ impl MirMachine {
             .map_err(|error| MirSignal::RuntimeError(error.code, error.message))?;
         if module == "__builtin__" {
             if let Some(value) = builtins::call_builtin_constructor(name, args.clone())
-                .map_err(|err| MirSignal::Panic(err.message))?
+                .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
             {
                 return Ok(value);
             }
-            if let Some(value) =
-                builtins::call_builtin(name, args).map_err(|err| MirSignal::Panic(err.message))?
+            if let Some(value) = builtins::call_builtin(name, args)
+                .map_err(|err| MirSignal::RuntimeError(err.code, err.message))?
             {
                 return Ok(value);
             }

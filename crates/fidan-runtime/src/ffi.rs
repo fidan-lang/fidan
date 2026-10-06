@@ -497,7 +497,13 @@ macro_rules! int_only_binop {
                 (FidanValue::Integer(x), FidanValue::Integer(y)) => {
                     FidanValue::Integer($op(*x, *y))
                 }
-                _ => FidanValue::Nothing,
+                _ => {
+                    return runtime_call_error(format!(
+                        "type error: bitwise operands must be integers, got {} and {}",
+                        av.type_name(),
+                        bv.type_name()
+                    ))
+                }
             };
             into_raw(result)
         }
@@ -800,17 +806,12 @@ pub unsafe extern "C" fn fdn_dyn_neg(ptr: *mut FidanValue) -> *mut FidanValue {
 int_only_binop!(fdn_dyn_bit_xor, |a: i64, b: i64| a ^ b);
 int_only_binop!(fdn_dyn_bit_and, |a: i64, b: i64| a & b);
 int_only_binop!(fdn_dyn_bit_or, |a: i64, b: i64| a | b);
-int_only_binop!(fdn_dyn_shl, |a: i64, b: i64| a.wrapping_shl(b as u32));
-int_only_binop!(fdn_dyn_shr, |a: i64, b: i64| a.wrapping_shr(b as u32));
+int_only_binop!(fdn_dyn_shl, |a: i64, b: i64| a
+    .wrapping_shl((b & 63) as u32));
+int_only_binop!(fdn_dyn_shr, |a: i64, b: i64| a
+    .wrapping_shr((b & 63) as u32));
 
 // ── Range construction ─────────────────────────────────────────────────────────
-
-fn range_length_or_exit(start: i64, end: i64, inclusive: bool) -> i64 {
-    crate::range_length(start, end, inclusive).unwrap_or_else(|message| {
-        eprintln!("panic: {message}");
-        std::process::exit(1);
-    })
-}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fdn_make_range(start: i64, end: i64, inclusive: i8) -> *mut FidanValue {
@@ -819,6 +820,25 @@ pub extern "C" fn fdn_make_range(start: i64, end: i64, inclusive: i8) -> *mut Fi
         end,
         inclusive: inclusive != 0,
     })
+}
+
+/// Boxed range bounds require actual integers; scalar ABI coercions do not apply.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_make_range_checked(
+    start: *mut FidanValue,
+    end: *mut FidanValue,
+    inclusive: i8,
+) -> *mut FidanValue {
+    match (borrow(start), borrow(end)) {
+        (FidanValue::Integer(start), FidanValue::Integer(end)) => {
+            fdn_make_range(*start, *end, inclusive)
+        }
+        (start, end) => runtime_call_error(format!(
+            "type error: range bounds must be integers, got {} and {}",
+            start.type_name(),
+            end.type_name()
+        )),
+    }
 }
 
 // ── Built-in functions ─────────────────────────────────────────────────────────
@@ -881,19 +901,7 @@ pub unsafe extern "C" fn fdn_input(prompt: *mut FidanValue) -> *mut FidanValue {
 /// Return the length of a string / list / dict / range.  Borrows `ptr`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_len(ptr: *mut FidanValue) -> i64 {
-    match borrow(ptr) {
-        FidanValue::String(s) => s.char_len() as i64,
-        FidanValue::List(l) => l.borrow().len() as i64,
-        FidanValue::Dict(d) => d.borrow().len() as i64,
-        FidanValue::HashSet(s) => s.borrow().len() as i64,
-        FidanValue::Tuple(items) => items.len() as i64,
-        FidanValue::Range {
-            start,
-            end,
-            inclusive,
-        } => range_length_or_exit(*start, *end, *inclusive),
-        _ => 0,
-    }
+    checked_integer_result(crate::builtins::len(borrow(ptr)))
 }
 
 /// Panic with a message.  Borrows `ptr`.  Does not return.
@@ -950,34 +958,12 @@ pub unsafe extern "C" fn fdn_to_string(ptr: *mut FidanValue) -> *mut FidanValue 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_to_integer(ptr: *mut FidanValue) -> *mut FidanValue {
-    let result = match borrow(ptr) {
-        FidanValue::Integer(n) => FidanValue::Integer(*n),
-        FidanValue::Float(f) => FidanValue::Integer(*f as i64),
-        FidanValue::Boolean(b) => FidanValue::Integer(if *b { 1 } else { 0 }),
-        FidanValue::String(s) => s
-            .as_str()
-            .parse::<i64>()
-            .map(FidanValue::Integer)
-            .unwrap_or(FidanValue::Nothing),
-        _ => FidanValue::Nothing,
-    };
-    into_raw(result)
+    builtin_value_result(crate::builtins::integer(borrow(ptr)))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_to_float(ptr: *mut FidanValue) -> *mut FidanValue {
-    let result = match borrow(ptr) {
-        FidanValue::Float(f) => FidanValue::Float(*f),
-        FidanValue::Integer(n) => FidanValue::Float(*n as f64),
-        FidanValue::Boolean(b) => FidanValue::Float(if *b { 1.0 } else { 0.0 }),
-        FidanValue::String(s) => s
-            .as_str()
-            .parse::<f64>()
-            .map(FidanValue::Float)
-            .unwrap_or(FidanValue::Nothing),
-        _ => FidanValue::Nothing,
-    };
-    into_raw(result)
+    builtin_value_result(crate::builtins::float(borrow(ptr)))
 }
 
 #[unsafe(no_mangle)]
@@ -1105,15 +1091,7 @@ pub unsafe extern "C" fn fdn_list_set(
 /// Return the number of elements.  Borrows `list`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_list_len(list: *mut FidanValue) -> i64 {
-    match borrow(list) {
-        FidanValue::List(l) => l.borrow().len() as i64,
-        FidanValue::Range {
-            start,
-            end,
-            inclusive,
-        } => range_length_or_exit(*start, *end, *inclusive),
-        _ => 0,
-    }
+    fdn_len(list)
 }
 
 /// Concatenate two lists into a new owned list.  Borrows both.
@@ -2403,14 +2381,11 @@ fn dispatch_range_method(
 ) -> *mut FidanValue {
     match crate::range_method(start, end, inclusive, method, _args) {
         Ok(Some(value)) => into_raw(value),
-        result => {
-            let message = match result {
-                Err(message) => message,
-                _ => format!("range method not found: .{method}()"),
-            };
-            eprintln!("panic: {message}");
-            std::process::exit(1);
-        }
+        Err(message) => builtin_value_result(Err(stdlib::StdlibRuntimeError::new(
+            fidan_diagnostics::diag_code!("R2002"),
+            message,
+        ))),
+        Ok(None) => unsafe { runtime_call_error(format!("range method not found: .{method}()")) },
     }
 }
 // ── Value comparison helpers ───────────────────────────────────────────────────
@@ -2659,32 +2634,11 @@ fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut Fid
             }
             BuiltinSemantic::Integer => {
                 let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-                let converted = match &value {
-                    FidanValue::Integer(n) => FidanValue::Integer(*n),
-                    FidanValue::Float(f) => FidanValue::Integer(*f as i64),
-                    FidanValue::Boolean(b) => FidanValue::Integer(if *b { 1 } else { 0 }),
-                    FidanValue::String(s) => s
-                        .as_str()
-                        .parse::<i64>()
-                        .map(FidanValue::Integer)
-                        .unwrap_or(FidanValue::Nothing),
-                    _ => FidanValue::Nothing,
-                };
-                Some(into_raw(converted))
+                Some(builtin_value_result(crate::builtins::integer(&value)))
             }
             BuiltinSemantic::Float => {
                 let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-                let converted = match &value {
-                    FidanValue::Float(f) => FidanValue::Float(*f),
-                    FidanValue::Integer(n) => FidanValue::Float(*n as f64),
-                    FidanValue::String(s) => s
-                        .as_str()
-                        .parse::<f64>()
-                        .map(FidanValue::Float)
-                        .unwrap_or(FidanValue::Nothing),
-                    _ => FidanValue::Nothing,
-                };
-                Some(into_raw(converted))
+                Some(builtin_value_result(crate::builtins::float(&value)))
             }
             BuiltinSemantic::Boolean => {
                 let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
@@ -2692,20 +2646,9 @@ fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut Fid
             }
             BuiltinSemantic::Len => {
                 let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-                let length = match &value {
-                    FidanValue::String(s) => s.char_len() as i64,
-                    FidanValue::List(list) => list.borrow().len() as i64,
-                    FidanValue::Dict(dict) => dict.borrow().len() as i64,
-                    FidanValue::HashSet(set) => set.borrow().len() as i64,
-                    FidanValue::Tuple(tuple) => tuple.len() as i64,
-                    FidanValue::Range {
-                        start,
-                        end,
-                        inclusive,
-                    } => range_length_or_exit(*start, *end, *inclusive),
-                    _ => return Some(into_raw(FidanValue::Nothing)),
-                };
-                Some(into_raw(FidanValue::Integer(length)))
+                Some(builtin_value_result(
+                    crate::builtins::len(&value).map(FidanValue::Integer),
+                ))
             }
             BuiltinSemantic::Type => {
                 let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
@@ -2839,6 +2782,16 @@ fn runtime_error_to_exception_ptr(
     into_raw(FidanValue::String(FidanString::new(&format!(
         "{prefix} [{code}]: {message}"
     ))))
+}
+
+fn builtin_value_result(result: Result<FidanValue, stdlib::StdlibRuntimeError>) -> *mut FidanValue {
+    match result {
+        Ok(value) => into_raw(value),
+        Err(error) => {
+            checked_integer_result(Err(error));
+            into_raw(FidanValue::Nothing)
+        }
+    }
 }
 
 unsafe fn runtime_call_error(message: impl Into<String>) -> *mut FidanValue {
@@ -3836,6 +3789,44 @@ mod tests {
         let _ = std::fs::remove_file(path);
         unsafe {
             drop(Box::from_raw(result));
+        }
+    }
+    #[test]
+    fn strict_operator_and_builtin_errors_use_exception_slot() {
+        unsafe {
+            let text = into_raw(FidanValue::String(FidanString::new("abc")));
+            let integer = into_raw(FidanValue::Integer(42));
+            let float = into_raw(FidanValue::Float(1.5));
+            for operation in 0..4 {
+                let result = match operation {
+                    0 => fdn_dyn_bit_and(text, integer),
+                    1 => fdn_to_integer(text),
+                    2 => fdn_to_float(text),
+                    _ => fdn_make_range_checked(float, integer, 0),
+                };
+                assert!(matches!(borrow(result), FidanValue::Nothing));
+                let error = drain_exception().expect("stored R0001");
+                assert!(display(&error).contains("R0001"));
+                drop(Box::from_raw(result));
+            }
+            // Check each operation separately: the slot holds one pending error.
+            for helper in [fdn_dyn_bit_or, fdn_dyn_bit_xor, fdn_dyn_shl, fdn_dyn_shr] {
+                let result = helper(text, integer);
+                assert!(
+                    display(&drain_exception().expect("stored bitwise error")).contains("R0001")
+                );
+                drop(Box::from_raw(result));
+            }
+            assert_eq!(fdn_len(integer), 0);
+            assert!(display(&drain_exception().expect("stored length error")).contains("R0001"));
+            let range = fdn_make_range(i64::MIN, i64::MAX, 1);
+            assert_eq!(fdn_len(range), 0);
+            assert!(display(&drain_exception().expect("range length error")).contains("R0001"));
+            let result = dispatch_range_method(i64::MIN, i64::MAX, true, "len", vec![]);
+            assert!(display(&drain_exception().expect("range receiver error")).contains("R2002"));
+            for ptr in [text, integer, float, range, result] {
+                drop(Box::from_raw(ptr));
+            }
         }
     }
 }

@@ -1414,6 +1414,17 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             ),
         );
         self.declare_runtime_fn(
+            "fdn_make_range_checked",
+            self.ptr_type.fn_type(
+                &[
+                    self.ptr_type.into(),
+                    self.ptr_type.into(),
+                    self.i8_type.into(),
+                ],
+                false,
+            ),
+        );
+        self.declare_runtime_fn(
             "fdn_slice",
             self.ptr_type.fn_type(
                 &[
@@ -3418,8 +3429,6 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             BinOp::Shl => self.call_ptr("fdn_dyn_shl", &[lhs.into(), rhs.into()]),
             BinOp::Shr => self.call_ptr("fdn_dyn_shr", &[lhs.into(), rhs.into()]),
             BinOp::Range | BinOp::RangeInclusive => {
-                let lhs_raw = self.call_i64("fdn_unbox_int", &[lhs.into()])?;
-                let rhs_raw = self.call_i64("fdn_unbox_int", &[rhs.into()])?;
                 let inclusive = self.module.i8_type.const_int(
                     if matches!(op, BinOp::RangeInclusive) {
                         1
@@ -3429,8 +3438,8 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                     false,
                 );
                 self.call_ptr(
-                    "fdn_make_range",
-                    &[lhs_raw.into(), rhs_raw.into(), inclusive.into()],
+                    "fdn_make_range_checked",
+                    &[lhs.into(), rhs.into(), inclusive.into()],
                 )
             }
         }?;

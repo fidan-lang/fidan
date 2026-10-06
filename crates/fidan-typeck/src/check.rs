@@ -2492,15 +2492,35 @@ impl TypeChecker {
                 }
             }
 
-            Expr::Unary { op, operand, .. } => {
-                // E0205: unary +/- require a concrete number.
+            Expr::Unary { op, operand, span } => {
+                // Preserve unary + as identity; negation and not validate operands.
                 if matches!(op, UnOp::Pos | UnOp::Neg) {
                     self.require_non_nullable(operand, "arithmetic operand", module);
                 }
                 let inner = self.infer_expr(operand, module);
+                let valid = match op {
+                    UnOp::Pos => true,
+                    UnOp::Neg => matches!(inner, FidanType::Integer | FidanType::Float),
+                    UnOp::Not => matches!(inner, FidanType::Boolean),
+                } || matches!(
+                    inner,
+                    FidanType::Dynamic | FidanType::Unknown | FidanType::Error
+                );
+                if !valid {
+                    let name = self.ty_name(&inner);
+                    let symbol = match op {
+                        UnOp::Pos => "+",
+                        UnOp::Neg => "-",
+                        UnOp::Not => "not",
+                    };
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0203"),
+                        format!("operator `{symbol}` cannot be applied to `{name}`"),
+                        span,
+                    );
+                }
                 match op {
-                    UnOp::Pos => inner,
-                    UnOp::Neg => inner,
+                    UnOp::Pos | UnOp::Neg => inner,
                     UnOp::Not => FidanType::Boolean,
                 }
             }
@@ -4598,7 +4618,16 @@ impl TypeChecker {
             BinOp::BitXor => "^",
             BinOp::Shl => "<<",
             BinOp::Shr => ">>",
-            _ => "",
+            BinOp::Eq => "==",
+            BinOp::NotEq => "!=",
+            BinOp::Lt => "<",
+            BinOp::LtEq => "<=",
+            BinOp::Gt => ">",
+            BinOp::GtEq => ">=",
+            BinOp::And => "and",
+            BinOp::Or => "or",
+            BinOp::Range => "..",
+            BinOp::RangeInclusive => "...",
         };
 
         match op {
@@ -4618,16 +4647,7 @@ impl TypeChecker {
                     FidanType::Dynamic
                 }
             },
-            BinOp::Sub
-            | BinOp::Mul
-            | BinOp::Div
-            | BinOp::Rem
-            | BinOp::Pow
-            | BinOp::BitXor
-            | BinOp::BitAnd
-            | BinOp::BitOr
-            | BinOp::Shl
-            | BinOp::Shr => match (lhs, rhs) {
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem | BinOp::Pow => match (lhs, rhs) {
                 (FidanType::Float, FidanType::Float | FidanType::Integer)
                 | (FidanType::Integer, FidanType::Float) => FidanType::Float,
                 (FidanType::Integer, FidanType::Integer) => FidanType::Integer,
@@ -4642,15 +4662,50 @@ impl TypeChecker {
                     FidanType::Dynamic
                 }
             },
-            BinOp::Eq
-            | BinOp::NotEq
-            | BinOp::Lt
-            | BinOp::LtEq
-            | BinOp::Gt
-            | BinOp::GtEq
-            | BinOp::And
-            | BinOp::Or => FidanType::Boolean,
-            BinOp::Range | BinOp::RangeInclusive => FidanType::List(Box::new(FidanType::Integer)),
+            BinOp::Eq | BinOp::NotEq => FidanType::Boolean,
+            _ => {
+                let unchecked = |ty: &FidanType| {
+                    matches!(
+                        ty,
+                        FidanType::Dynamic | FidanType::Unknown | FidanType::Error
+                    )
+                };
+                let integer = |ty: &FidanType| matches!(ty, FidanType::Integer) || unchecked(ty);
+                let boolean = |ty: &FidanType| matches!(ty, FidanType::Boolean) || unchecked(ty);
+                let numeric = |ty: &FidanType| {
+                    matches!(ty, FidanType::Integer | FidanType::Float) || unchecked(ty)
+                };
+                let (valid, result) = match op {
+                    BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor | BinOp::Shl | BinOp::Shr => (
+                        integer(lhs) && integer(rhs),
+                        if either_dynamic {
+                            FidanType::Dynamic
+                        } else {
+                            FidanType::Integer
+                        },
+                    ),
+                    BinOp::Range | BinOp::RangeInclusive => (
+                        integer(lhs) && integer(rhs),
+                        FidanType::List(Box::new(FidanType::Integer)),
+                    ),
+                    BinOp::And | BinOp::Or => (boolean(lhs) && boolean(rhs), FidanType::Boolean),
+                    _ => (
+                        (numeric(lhs) && numeric(rhs))
+                            || ((matches!(lhs, FidanType::String) || unchecked(lhs))
+                                && (matches!(rhs, FidanType::String) || unchecked(rhs))),
+                        FidanType::Boolean,
+                    ),
+                };
+                if !valid {
+                    let (l, r) = (self.ty_name(lhs), self.ty_name(rhs));
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0203"),
+                        format!("operator `{op_sym}` cannot be applied to `{l}` and `{r}`"),
+                        span,
+                    );
+                }
+                result
+            }
         }
     }
 

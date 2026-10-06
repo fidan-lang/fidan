@@ -259,4 +259,23 @@ mod tests {
             Some(MirLit::Int(i64::MIN))
         ));
     }
+    #[test]
+    fn constant_shifts_mask_signed_counts_to_six_bits() {
+        for (a, b, left, right) in [
+            (1, 0, 1, 1),
+            (1, 63, i64::MIN, 0),
+            (1, 64, 1, 1),
+            (1, 65, 2, 0),
+            (8, 65, 16, 4),
+            (1, -1, i64::MIN, 0),
+            (-8, 65, -16, -4),
+        ] {
+            assert!(
+                matches!(fold_binary(BinOp::Shl, &MirLit::Int(a), &MirLit::Int(b)), Some(MirLit::Int(value)) if value == left)
+            );
+            assert!(
+                matches!(fold_binary(BinOp::Shr, &MirLit::Int(a), &MirLit::Int(b)), Some(MirLit::Int(value)) if value == right)
+            );
+        }
+    }
 }

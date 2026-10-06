@@ -18,15 +18,13 @@ impl BuiltinError {
     }
 }
 
-fn invalid_conversion(target: &str, value: &FidanValue) -> BuiltinError {
-    let rendered = match value {
-        FidanValue::String(s) => format!("{:?}", s.as_str()),
-        other => display(other),
-    };
-    BuiltinError::runtime(format!(
-        "cannot convert {rendered} ({}) to {target}",
-        value.type_name()
-    ))
+impl From<fidan_runtime::stdlib::StdlibRuntimeError> for BuiltinError {
+    fn from(error: fidan_runtime::stdlib::StdlibRuntimeError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+        }
+    }
 }
 
 /// Try to handle a call to a core language built-in function.
@@ -103,30 +101,11 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanVal
         }
         BuiltinSemantic::Integer => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            Ok(Some(match &v {
-                FidanValue::Integer(n) => FidanValue::Integer(*n),
-                FidanValue::Float(f) => FidanValue::Integer(*f as i64),
-                FidanValue::Boolean(b) => FidanValue::Integer(if *b { 1 } else { 0 }),
-                FidanValue::String(s) => s
-                    .as_str()
-                    .parse::<i64>()
-                    .map(FidanValue::Integer)
-                    .map_err(|_| invalid_conversion("integer", &v))?,
-                _ => return Err(invalid_conversion("integer", &v)),
-            }))
+            Ok(Some(fidan_runtime::builtins::integer(&v)?))
         }
         BuiltinSemantic::Float => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            Ok(Some(match &v {
-                FidanValue::Float(f) => FidanValue::Float(*f),
-                FidanValue::Integer(n) => FidanValue::Float(*n as f64),
-                FidanValue::String(s) => s
-                    .as_str()
-                    .parse::<f64>()
-                    .map(FidanValue::Float)
-                    .map_err(|_| invalid_conversion("float", &v))?,
-                _ => return Err(invalid_conversion("float", &v)),
-            }))
+            Ok(Some(fidan_runtime::builtins::float(&v)?))
         }
         BuiltinSemantic::Boolean => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
@@ -136,26 +115,7 @@ pub fn call_builtin(name: &str, args: Vec<FidanValue>) -> Result<Option<FidanVal
         // ── Collections ───────────────────────────────────────────────────────
         BuiltinSemantic::Len => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            let n = match &v {
-                FidanValue::String(s) => s.char_len() as i64,
-                FidanValue::List(l) => l.borrow().len() as i64,
-                FidanValue::Dict(d) => d.borrow().len() as i64,
-                FidanValue::HashSet(s) => s.borrow().len() as i64,
-                FidanValue::Tuple(t) => t.len() as i64,
-                FidanValue::Range {
-                    start,
-                    end,
-                    inclusive,
-                } => fidan_runtime::range_length(*start, *end, *inclusive)
-                    .map_err(BuiltinError::runtime)?,
-                _ => {
-                    return Err(BuiltinError::runtime(format!(
-                        "len() is not supported for {}",
-                        v.type_name()
-                    )));
-                }
-            };
-            Ok(Some(FidanValue::Integer(n)))
+            Ok(Some(FidanValue::Integer(fidan_runtime::builtins::len(&v)?)))
         }
         BuiltinSemantic::Type => {
             let v = args.into_iter().next().unwrap_or(FidanValue::Nothing);
