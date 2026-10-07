@@ -306,7 +306,7 @@ function Copy-PublishedWingetRelease {
   $repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "fidan-lang/fidan" }
   $tag = "v$ResolvedVersion"
   $installerName = "fidan_windows_bootstrap_v$ResolvedVersion.exe"
-  $releaseJson = & gh release view $tag --repo $repo --json tagName, isDraft, assets
+  $releaseJson = & gh release view $tag --repo $repo --json "tagName,isDraft,assets"
   if ($LASTEXITCODE -ne 0) { throw "Failed to read published GitHub release '$tag'." }
   $release = $releaseJson | ConvertFrom-Json
   if ($release.isDraft -or $release.tagName -ne $tag) { throw "Release '$tag' is not published." }
