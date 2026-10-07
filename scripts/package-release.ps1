@@ -80,8 +80,7 @@ function Invoke-WindowsReleaseHelper {
     [string]$ResolvedOutputRoot,
     [string]$ResolvedHostTriple = "",
     [string]$ResolvedBootstrapScriptUrl = "",
-    [string]$ResolvedWingetManifestRoot = "",
-    [string]$ResolvedBinaryPath = ""
+    [string]$ResolvedWingetManifestRoot = ""
   )
 
   if (-not $script:IsWindowsHost) {
@@ -102,7 +101,6 @@ function Invoke-WindowsReleaseHelper {
   if ($Mode -eq "build-installer") {
     $scriptArgs["HostTriple"] = $ResolvedHostTriple
     $scriptArgs["BootstrapScriptUrl"] = $ResolvedBootstrapScriptUrl
-    $scriptArgs["BinaryPath"] = $ResolvedBinaryPath
   }
 
   if ($Mode -eq "submit-winget" -or $Mode -eq "prepare-winget") {
@@ -208,7 +206,13 @@ if (-not (Test-Path -LiteralPath $binaryPath)) {
 }
 
 if ($shouldBuildWindowsInstaller) {
-  Invoke-WindowsReleaseHelper -Mode "build-installer" -ResolvedVersion $Version -ResolvedOutputRoot $OutputRoot -ResolvedHostTriple $hostTriple -ResolvedBootstrapScriptUrl $BootstrapScriptUrl -ResolvedBinaryPath $binaryPath
+  # The bootstrap installer downloads Fidan; it must not alter the compiler
+  # subsequently staged into the distribution archive.
+  $binaryHash = (Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash
+  Invoke-WindowsReleaseHelper -Mode "build-installer" -ResolvedVersion $Version -ResolvedOutputRoot $OutputRoot -ResolvedHostTriple $hostTriple -ResolvedBootstrapScriptUrl $BootstrapScriptUrl
+  if ((Get-FileHash -LiteralPath $binaryPath -Algorithm SHA256).Hash -ne $binaryHash) {
+    throw "Windows installer packaging modified '$binaryPath'; refusing to package the altered binary."
+  }
 }
 
 $runtimeArtifacts = @()
