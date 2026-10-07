@@ -1,0 +1,64 @@
+name: Submit WinGet release
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Already published Fidan version (optional v prefix)"
+        required: true
+        type: string
+    secrets:
+      WINGET_GITHUB_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Already published Fidan version (without v); no rebuild or asset upload"
+        required: true
+        default: "1.0.15"
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  submit:
+    runs-on: windows-latest
+    environment: releases
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Resolve release version
+        id: version
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          $version = $env:RELEASE_VERSION -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Expected a published stable version such as 1.0.15" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+
+      - name: Bootstrap and verify WinGet
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/prepare-winget-client.ps1
+
+      - name: Stage existing release artifacts
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          ./scripts/package-release-windows.ps1 -Mode stage-winget-release -Version $env:RELEASE_VERSION -OutputRoot dist/winget
+
+      - name: Validate and submit WinGet manifest
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          WINGET_GITHUB_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
+        run: |
+          ./scripts/package-release-windows.ps1 -Mode submit-winget -Version $env:RELEASE_VERSION -OutputRoot dist/winget -WingetManifestRoot dist/winget/winget/manifests

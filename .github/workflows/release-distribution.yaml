@@ -230,67 +230,12 @@ jobs:
 
   winget:
     name: Submit winget manifest
-    runs-on: windows-latest
     needs: publish
-    environment: releases
     if: ${{ github.event_name == 'push' && needs.publish.result == 'success' }}
-
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Download merged distribution bundle
-        uses: actions/download-artifact@v8
-        with:
-          name: distribution-bundle
-          path: dist/release
-
-      - name: Update WinGet (App Installer)
-        shell: pwsh
-        run: |
-          $progressPreference = 'SilentlyContinue'
-          $bundlePath = Join-Path $env:RUNNER_TEMP "Microsoft.DesktopAppInstaller.msixbundle"
-
-          Invoke-WebRequest -Uri "https://aka.ms/getwinget" -OutFile $bundlePath
-          Add-AppxPackage -Path $bundlePath -ForceUpdateFromAnyVersion
-
-          Write-Host "App Installer version: $((Get-AppxPackage Microsoft.DesktopAppInstaller).Version)"
-          winget --info
-
-      - name: Submit winget manifest
-        id: submit_winget
-        continue-on-error: true
-        shell: pwsh
-        env:
-          WINGET_GITHUB_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}
-        run: |
-          $version = "${{ github.ref_name }}" -replace '^v', ''
-          $manifestRoot = "config/winget/manifest"
-          if (-not (Test-Path -LiteralPath $manifestRoot)) {
-            throw "Expected winget manifest root at '$manifestRoot'"
-          }
-
-          $installerManifestMatches = Get-ChildItem -Path $manifestRoot -Recurse -File -Filter "Fidan.Fidan.installer.yaml"
-          if (-not $installerManifestMatches) {
-            throw "No Fidan.Fidan.installer.yaml found under '$manifestRoot'"
-          }
-
-          $manifestDirs = @($installerManifestMatches | Select-Object -ExpandProperty DirectoryName -Unique)
-          if ($manifestDirs.Count -eq 1) {
-            $manifestRoot = $manifestDirs | Select-Object -First 1
-          } else {
-            $versionMatch = @($manifestDirs | Where-Object { (Split-Path -Leaf $_) -eq $version })
-            if ($versionMatch.Count -eq 1) {
-              $manifestRoot = $versionMatch | Select-Object -First 1
-            } else {
-              $candidates = $manifestDirs -join ", "
-              throw "Multiple winget manifest directories found and none uniquely matched version '$version': $candidates"
-            }
-          }
-
-          ./scripts/package-release.ps1 -Version $version -OutputRoot "dist/release" -SkipBuild -SubmitWinget -WingetManifestRoot $manifestRoot
-
-      - name: Warn on winget submission failure
-        if: steps.submit_winget.outcome == 'failure'
-        shell: pwsh
-        run: |
-          Write-Warning "WinGet manifest submission failed, but the workflow is configured to continue."
+    permissions:
+      contents: read
+    uses: ./.github/workflows/submit-winget.yaml
+    with:
+      version: ${{ github.ref_name }}
+    secrets:
+      WINGET_GITHUB_TOKEN: ${{ secrets.WINGET_GITHUB_TOKEN }}

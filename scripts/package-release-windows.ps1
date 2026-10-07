@@ -1,6 +1,6 @@
 param(
   [Parameter(Mandatory = $true)]
-  [ValidateSet("build-installer", "prepare-winget", "submit-winget")]
+  [ValidateSet("build-installer", "stage-winget-release", "prepare-winget", "submit-winget")]
   [string]$Mode,
 
   [Parameter(Mandatory = $true)]
@@ -9,8 +9,7 @@ param(
   [string]$OutputRoot = "dist/release",
   [string]$HostTriple = "x86_64-pc-windows-msvc",
   [string]$BootstrapScriptUrl = "https://fidan.dev/install.ps1",
-  [string]$WingetManifestRoot = "config/winget/manifest",
-  [string]$BinaryPath = "target/release/fidan.exe"
+  [string]$WingetManifestRoot = "config/winget/manifest"
 )
 
 $ErrorActionPreference = "Stop"
@@ -91,24 +90,12 @@ function Assert-SignToolAvailable {
 
 function Install-WindowsInstallerDependencies {
   Add-DirectoryToPath -Path "C:\Program Files (x86)\Inno Setup 6"
-  Add-DirectoryToPath -Path "C:\ProgramData\chocolatey\bin"
-  Add-DirectoryToPath -Path "C:\ProgramData\chocolatey\lib\upx\tools"
 
   Install-CommandIfMissing -Name "iscc.exe" -InstallAction {
     $installer = Join-Path $env:TEMP "innosetup-installer.exe"
     Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe" -OutFile $installer
     Start-Process -FilePath $installer -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" -Wait
     Add-DirectoryToPath -Path "C:\Program Files (x86)\Inno Setup 6"
-  }
-
-  Install-CommandIfMissing -Name "upx.exe" -InstallAction {
-    if (-not (Get-Command choco.exe -ErrorAction SilentlyContinue)) {
-      throw "UPX is mandatory but Chocolatey is not available to install it automatically."
-    }
-
-    choco install upx --no-progress --yes
-    Add-DirectoryToPath -Path "C:\ProgramData\chocolatey\bin"
-    Add-DirectoryToPath -Path "C:\ProgramData\chocolatey\lib\upx\tools"
   }
 
   Assert-SignToolAvailable
@@ -227,30 +214,32 @@ function Resolve-BootstrapScriptMetadata {
   }
 }
 
-function Compress-BinaryWithUpx {
-  param([string]$ResolvedBinaryPath)
+function Write-WindowsInstallerWingetMetadata {
+  param(
+    [string]$ResolvedVersion,
+    [string]$ResolvedOutputRoot,
+    [string]$InstallerPath,
+    [object]$vcppRedistManifest
+  )
 
-  if (-not (Test-Path -LiteralPath $ResolvedBinaryPath)) {
-    throw "Expected binary for UPX compression at '$ResolvedBinaryPath'"
-  }
-
-  $upxOutput = & upx --best --lzma $ResolvedBinaryPath 2>&1
-  $upxExitCode = $LASTEXITCODE
-  $upxText = ($upxOutput | Out-String).Trim()
-
-  if ($upxExitCode -eq 0) {
-    if (-not [string]::IsNullOrWhiteSpace($upxText)) {
-      Write-Host $upxText
+  $wingetDir = Join-Path $ResolvedOutputRoot "winget"
+  New-Item -ItemType Directory -Force -Path $wingetDir | Out-Null
+  $repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "fidan-lang/fidan" }
+  $installerName = Split-Path -Leaf $InstallerPath
+  $wingetInfo = [ordered]@{
+    version       = $ResolvedVersion
+    release_tag   = "v$ResolvedVersion"
+    installer     = $installerName
+    installer_url = "https://github.com/$repo/releases/download/v$ResolvedVersion/$installerName"
+    sha256        = (Get-FileHash -LiteralPath $InstallerPath -Algorithm SHA256).Hash
+    vc_redist     = [ordered]@{
+      package_identifier = $vcppRedistManifest.PackageIdentifier
+      minimum_version    = $vcppRedistManifest.MinimumVersion
     }
-    return
   }
-
-  if ($upxText -match "AlreadyPackedException|already packed by UPX") {
-    Write-Host "UPX skipped: '$ResolvedBinaryPath' is already packed."
-    return
-  }
-
-  throw "UPX compression failed for '$ResolvedBinaryPath'`n$upxText"
+  $wingetInfoPath = Join-Path $wingetDir "windows-installer.json"
+  $wingetInfo | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $wingetInfoPath -Encoding UTF8
+  Write-Host "Winget metadata: $wingetInfoPath"
 }
 
 function Build-WindowsInstaller {
@@ -258,12 +247,10 @@ function Build-WindowsInstaller {
     [string]$ResolvedVersion,
     [string]$ResolvedOutputRoot,
     [string]$ResolvedHostTriple,
-    [string]$ResolvedBootstrapScriptUrl,
-    [string]$ResolvedBinaryPath
+    [string]$ResolvedBootstrapScriptUrl
   )
 
   Install-WindowsInstallerDependencies
-  Compress-BinaryWithUpx -ResolvedBinaryPath $ResolvedBinaryPath
 
   $metadata = Resolve-BootstrapScriptMetadata -Url $ResolvedBootstrapScriptUrl
 
@@ -302,32 +289,60 @@ function Build-WindowsInstaller {
   $payloadInstallerPath = Join-Path $payloadInstallerDir $installerName
   Copy-Item -LiteralPath $builtInstallerPath -Destination $payloadInstallerPath -Force
 
-  $wingetDir = Join-Path $ResolvedOutputRoot "winget"
-  New-Item -ItemType Directory -Force -Path $wingetDir | Out-Null
-
-  $repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "fidan-lang/fidan" }
-  $releaseTag = if ($env:GITHUB_REF_NAME -and $env:GITHUB_REF_NAME.StartsWith("v")) { $env:GITHUB_REF_NAME } else { "v$ResolvedVersion" }
-  $installerSha256 = (Get-FileHash -LiteralPath $payloadInstallerPath -Algorithm SHA256).Hash
-  $installerUrl = "https://github.com/$repo/releases/download/$releaseTag/$installerName"
   $vcRedistMetadata = Get-WindowsVcRedistReleaseMetadata -HostTriple $ResolvedHostTriple
-
-  $wingetInfo = [ordered]@{
-    version       = $ResolvedVersion
-    release_tag   = $releaseTag
-    installer     = $installerName
-    installer_url = $installerUrl
-    sha256        = $installerSha256
-    vc_redist     = [ordered]@{
-      package_identifier = $vcRedistMetadata.PackageIdentifier
-      minimum_version    = $vcRedistMetadata.MinimumVersion
-    }
-  }
-
-  $wingetInfoPath = Join-Path $wingetDir "windows-installer.json"
-  $wingetInfo | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $wingetInfoPath -Encoding UTF8
+  Write-WindowsInstallerWingetMetadata -ResolvedVersion $ResolvedVersion -ResolvedOutputRoot $ResolvedOutputRoot -InstallerPath $payloadInstallerPath -vcppRedistManifest $vcRedistMetadata
 
   Write-Host "Built Windows bootstrap installer: $payloadInstallerPath"
-  Write-Host "Winget metadata: $wingetInfoPath"
+}
+
+function Copy-PublishedWingetRelease {
+  param(
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [string]$ResolvedVersion,
+    [string]$ResolvedOutputRoot,
+    [string]$ResolvedWingetManifestRoot
+  )
+
+  $repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "fidan-lang/fidan" }
+  $tag = "v$ResolvedVersion"
+  $installerName = "fidan_windows_bootstrap_v$ResolvedVersion.exe"
+  $releaseJson = & gh release view $tag --repo $repo --json tagName, isDraft, assets
+  if ($LASTEXITCODE -ne 0) { throw "Failed to read published GitHub release '$tag'." }
+  $release = $releaseJson | ConvertFrom-Json
+  if ($release.isDraft -or $release.tagName -ne $tag) { throw "Release '$tag' is not published." }
+  $assets = @($release.assets | Where-Object { $_.name -eq $installerName })
+  if ($assets.Count -ne 1) { throw "Published release '$tag' must contain '$installerName'." }
+
+  # Use the original release's VC++ requirement, not the retry runner's runtime.
+  $manifest = Invoke-RestMethod -Uri "https://releases.fidan.dev/manifest.json" -TimeoutSec 60
+  $entries = @($manifest.fidan_versions | Where-Object {
+      $_.version -eq $ResolvedVersion -and $_.host_triple -eq "x86_64-pc-windows-msvc"
+    })
+  $minimumVersion = $null
+  if ($entries.Count -ne 1 -or -not [version]::TryParse([string]$entries[0].vc_redist_min_version, [ref]$minimumVersion)) {
+    throw "Published manifest lacks a valid Windows VC++ requirement for '$ResolvedVersion'."
+  }
+
+  $installerDir = Join-Path $ResolvedOutputRoot "payload/fidan/$ResolvedVersion/x86_64-pc-windows-msvc"
+  New-Item -ItemType Directory -Force -Path $installerDir | Out-Null
+  & gh release download $tag --repo $repo --pattern $installerName --dir $installerDir --clobber
+  if ($LASTEXITCODE -ne 0) { throw "Failed to download published installer '$installerName'." }
+  $installerPath = Join-Path $installerDir $installerName
+  $hash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  if ($assets[0].digest -and $assets[0].digest -ne "sha256:$hash") {
+    throw "Published installer SHA256 does not match the GitHub release digest."
+  }
+  $vcRedistMetadata = [pscustomobject]@{
+    PackageIdentifier = Get-WindowsVcRedistPackageIdentifier -Architecture x64
+    MinimumVersion    = [string]$entries[0].vc_redist_min_version
+  }
+  Write-WindowsInstallerWingetMetadata -ResolvedVersion $ResolvedVersion -ResolvedOutputRoot $ResolvedOutputRoot -InstallerPath $installerPath -vcppRedistManifest $vcRedistMetadata
+
+  $sourceDir = Resolve-WingetManifestDirectory -ResolvedWingetManifestRoot $ResolvedWingetManifestRoot -ResolvedVersion $ResolvedVersion -PackageIdentifier "Fidan.Fidan"
+  $manifestDir = Join-Path $ResolvedOutputRoot "winget/manifests"
+  New-Item -ItemType Directory -Force -Path $manifestDir | Out-Null
+  Copy-Item -LiteralPath (Get-ChildItem -LiteralPath $sourceDir -Filter "Fidan.Fidan*.yaml" -File).FullName -Destination $manifestDir -Force
+  Write-Host "Staged published release '$tag' for WinGet without rebuilding or uploading release assets."
 }
 
 function Resolve-WingetManifestDirectory {
@@ -408,7 +423,7 @@ function Submit-WingetManifest {
 
   $installerSha256 = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash
   $repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { "fidan-lang/fidan" }
-  $releaseTag = if ($env:GITHUB_REF_NAME -and $env:GITHUB_REF_NAME.StartsWith("v")) { $env:GITHUB_REF_NAME } else { "v$ResolvedVersion" }
+  $releaseTag = "v$ResolvedVersion"
   $installerUrl = "https://github.com/$repo/releases/download/$releaseTag/$($installer.Name)"
   $wingetInfoPath = Join-Path $ResolvedOutputRoot "winget/windows-installer.json"
   if (-not (Test-Path -LiteralPath $wingetInfoPath)) {
@@ -463,7 +478,10 @@ function Submit-WingetManifest {
 
 switch ($Mode) {
   "build-installer" {
-    Build-WindowsInstaller -ResolvedVersion $Version -ResolvedOutputRoot $OutputRoot -ResolvedHostTriple $HostTriple -ResolvedBootstrapScriptUrl $BootstrapScriptUrl -ResolvedBinaryPath $BinaryPath
+    Build-WindowsInstaller -ResolvedVersion $Version -ResolvedOutputRoot $OutputRoot -ResolvedHostTriple $HostTriple -ResolvedBootstrapScriptUrl $BootstrapScriptUrl
+  }
+  "stage-winget-release" {
+    Copy-PublishedWingetRelease -ResolvedVersion $Version -ResolvedOutputRoot $OutputRoot -ResolvedWingetManifestRoot $WingetManifestRoot
   }
   "prepare-winget" {
     Submit-WingetManifest -ResolvedVersion $Version -ResolvedOutputRoot $OutputRoot -ResolvedWingetManifestRoot $WingetManifestRoot -SkipSubmit

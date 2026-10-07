@@ -45,6 +45,11 @@ jobs:
         shell: pwsh
         run: ./test/scripts/test-bootstrap-windows.ps1
 
+      - name: Windows release pipeline regressions
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./test/scripts/test-release-windows.ps1
+
       - name: Build
         run: cargo build --workspace --locked
 
