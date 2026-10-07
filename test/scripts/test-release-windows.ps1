@@ -9,6 +9,7 @@ foreach ($name in @("PATH", "VERSION", "ROOT_DIR", "BOOTSTRAP_SCRIPT_SIZE", "BOO
   $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
 }
 $previousExit = $global:LASTEXITCODE
+$previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
 $checks = 0
 function Assert-ReleaseCheck {
   param([bool]$Condition, [string]$Message)
@@ -120,7 +121,10 @@ if ($env:FIDAN_RELEASE_PROBE_MUTATE -eq "1") { Set-Content target/release/fidan.
 
   # The real bootstrap script must fail closed at install, repair and CLI checks.
   $bootstrapState = @{ Failure = "" }
-  function Install-PackageProvider {}
+  function Install-PackageProvider {
+    Assert-ReleaseCheck ([bool]([Net.ServicePointManager]::SecurityProtocol -band [Net.SecurityProtocolType]::Tls12)) "TLS 1.2 was not enabled before provider bootstrap"
+    if ($bootstrapState.Failure -eq "provider") { throw "provider probe failure" }
+  }
   function Install-Module { if ($bootstrapState.Failure -eq "module") { throw "module probe failure" } }
   function Import-Module {}
   function Repair-WinGetPackageManager {
@@ -133,16 +137,62 @@ if ($env:FIDAN_RELEASE_PROBE_MUTATE -eq "1") { Set-Content target/release/fidan.
   function Get-Command { [pscustomobject]@{ Source = "Invoke-WinGetProbe" } }
   function Invoke-WinGetProbe { $global:LASTEXITCODE = if ($bootstrapState.Failure -eq "cli") { 17 } else { 0 } }
   $bootstrapState.Failure = ""
+  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls
   & (Join-Path $repoRoot "scripts/prepare-winget-client.ps1")
   Assert-ReleaseCheck ($LASTEXITCODE -eq 0) "WinGet bootstrap success path failed"
-  foreach ($phase in @("module", "repair", "repair-code", "cli")) {
+  foreach ($phase in @("provider", "module", "repair", "repair-code", "cli")) {
     $bootstrapState.Failure = $phase
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls
     Assert-ReleaseFailure { & (Join-Path $repoRoot "scripts/prepare-winget-client.ps1") } '*WinGet bootstrap/repair failed*'
   }
+
+  # Exercise the actual CI host: 5.1 has no $IsWindows automatic variable.
+  $desktopProbe = Join-Path $scratch "winget-powershell51-probe.ps1"
+  Set-Content -LiteralPath $desktopProbe -Value @'
+param([string]$BootstrapScript)
+$ErrorActionPreference = "Stop"
+if ($PSVersionTable.PSEdition -ne "Desktop" -or $PSVersionTable.PSVersion -lt [version]"5.1") { throw "Expected Windows PowerShell 5.1" }
+if (Get-Variable IsWindows -ErrorAction SilentlyContinue) { throw "Expected no IsWindows variable" }
+$calls = [Collections.Generic.List[string]]::new()
+$failProvider = $false
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls
+function Install-PackageProvider {
+  if (-not ([Net.ServicePointManager]::SecurityProtocol -band [Net.SecurityProtocolType]::Tls12)) { throw "TLS 1.2 missing before provider bootstrap" }
+  $calls.Add("provider")
+  if ($failProvider) { throw "provider probe failure" }
+}
+function Install-Module { $calls.Add("module") }
+function Import-Module { $calls.Add("import") }
+function Repair-WinGetPackageManager {
+  param([switch]$AllUsers, [switch]$Latest, [switch]$Force, $ErrorAction)
+  if (-not ($AllUsers -and $Latest -and $Force)) { throw "Required repair switches missing" }
+  $calls.Add("repair")
+  return 0
+}
+function Get-Command { [pscustomobject]@{ Source = "Invoke-WinGetProbe" } }
+function Invoke-WinGetProbe {
+  if ($args[0] -ne "--info") { throw "Expected winget --info" }
+  $calls.Add("info")
+  $global:LASTEXITCODE = 0
+}
+& $BootstrapScript
+if (($calls -join ',') -ne "provider,module,import,repair,info") { throw "Unexpected bootstrap sequence: $calls" }
+$calls.Clear()
+$failProvider = $true
+$failure = ""
+try { & $BootstrapScript } catch { $failure = $_.Exception.Message }
+if ($failure -notlike "WinGet bootstrap/repair failed;*provider probe failure*" -or ($calls -join ',') -ne "provider") {
+  throw "Provider failure did not stop the bootstrap under Windows PowerShell 5.1"
+}
+'@
+  $desktopPowerShell = Join-Path $env:SystemRoot "System32/WindowsPowerShell/v1.0/powershell.exe"
+  & $desktopPowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $desktopProbe -BootstrapScript (Join-Path $repoRoot "scripts/prepare-winget-client.ps1")
+  Assert-ReleaseCheck ($LASTEXITCODE -eq 0) "WinGet bootstrap failed under Windows PowerShell 5.1"
 } finally {
   Pop-Location
   foreach ($name in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name]) }
   $global:LASTEXITCODE = $previousExit
+  [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
   # scratch is a resolved child of the repository's target directory.
   if (-not $scratch.StartsWith((Join-Path $repoRoot "target/") , [StringComparison]::OrdinalIgnoreCase)) { throw "Unexpected cleanup path: $scratch" }
   Remove-Item -LiteralPath $scratch -Recurse -Force

@@ -42,7 +42,7 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Bootstrap and verify WinGet
-        shell: pwsh
+        shell: powershell
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: ./scripts/prepare-winget-client.ps1
