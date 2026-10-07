@@ -12,6 +12,22 @@ compiler releases.
 
 ---
 
+## [1.0.16] — 2026-10-07
+
+### Fixed
+- Fixed severe Windows CLI startup latency caused by release-time UPX packing.
+  Published Windows binaries are no longer modified during bootstrap-installer packaging.
+- Fixed WinGet publication on GitHub-hosted Windows runners by replacing direct
+  App Installer MSIX installation with Microsoft.WinGet.Client repair/bootstrap.
+
+### Changed
+- Windows release packaging now verifies that installer creation leaves the
+  compiled Fidan executable byte-for-byte unchanged.
+- Added a reusable WinGet submission workflow for retrying already published
+  releases without rebuilding, retagging, or replacing release assets.
+
+---
+
 ## [1.0.15] — 2026-10-06
 
 ### Fixed
