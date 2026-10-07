@@ -446,31 +446,30 @@ function Submit-WingetManifest {
     Set-Content -LiteralPath $manifest.FullName -Value $content -Encoding UTF8
   }
 
-  $winget = (Get-Command winget.exe -ErrorAction SilentlyContinue).Source
-  if (-not $winget) {
-    throw "winget.exe not found on PATH"
-  }
-
-  & $winget validate --manifest $manifestDir --verbose-logs
-  if ($LASTEXITCODE -ne 0) {
-    throw "winget validate failed"
-  }
-
   if ($SkipSubmit) {
+    # Local preparation can validate with WinGet; CI submission needs only WingetCreate.
+    $winget = (Get-Command winget.exe -ErrorAction SilentlyContinue).Source
+    if (-not $winget) {
+      throw "winget.exe not found on PATH (required only for local prepare-winget validation)"
+    }
+    & $winget validate --manifest $manifestDir --verbose-logs
+    if ($LASTEXITCODE -ne 0) {
+      throw "winget validate failed"
+    }
     Write-Host "Prepared and validated winget manifests at '$manifestDir' (submission skipped)."
     return
   }
 
-  if (-not $env:WINGET_GITHUB_TOKEN) {
-    throw "WINGET_GITHUB_TOKEN is required for winget submission."
+  if ([string]::IsNullOrWhiteSpace($env:WINGET_CREATE_GITHUB_TOKEN)) {
+    throw "WINGET_CREATE_GITHUB_TOKEN is required for winget submission."
   }
 
   $wingetCreateExe = Join-Path (Resolve-Path ".") "wingetcreate.exe"
-  Invoke-WebRequest -Uri "https://github.com/microsoft/winget-create/releases/latest/download/wingetcreate.exe" -OutFile $wingetCreateExe
+  Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest" -OutFile $wingetCreateExe -TimeoutSec 60 -ErrorAction Stop
 
-  & $wingetCreateExe submit $manifestDir --token $env:WINGET_GITHUB_TOKEN
+  & $wingetCreateExe submit $manifestDir --no-open
   if ($LASTEXITCODE -ne 0) {
-    throw "wingetcreate submit failed"
+    throw "wingetcreate submit failed with exit code $LASTEXITCODE"
   }
 
   Write-Host "Submitted winget manifests from '$manifestDir'"

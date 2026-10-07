@@ -5,11 +5,10 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
 $scratch = Join-Path $repoRoot ("target/release-pipeline-test-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $scratch | Out-Null
 $savedEnvironment = @{}
-foreach ($name in @("PATH", "VERSION", "ROOT_DIR", "BOOTSTRAP_SCRIPT_SIZE", "BOOTSTRAP_SCRIPT_SHA256", "FIDAN_BUILD_INSTALLER", "FIDAN_RELEASE_PROBE_MUTATE", "GITHUB_REF_NAME")) {
+foreach ($name in @("PATH", "VERSION", "ROOT_DIR", "BOOTSTRAP_SCRIPT_SIZE", "BOOTSTRAP_SCRIPT_SHA256", "FIDAN_BUILD_INSTALLER", "FIDAN_RELEASE_PROBE_MUTATE", "GITHUB_REF_NAME", "WINGET_CREATE_GITHUB_TOKEN")) {
   $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
 }
 $previousExit = $global:LASTEXITCODE
-$previousSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
 $checks = 0
 function Assert-ReleaseCheck {
   param([bool]$Condition, [string]$Message)
@@ -119,84 +118,83 @@ if ($env:FIDAN_RELEASE_PROBE_MUTATE -eq "1") { Set-Content target/release/fidan.
   $script:vcMinimum = "invalid"
   Assert-ReleaseFailure { Copy-PublishedWingetRelease @stageArgs } '*lacks a valid Windows VC++ requirement*'
 
-  # The real bootstrap script must fail closed at install, repair and CLI checks.
-  $bootstrapState = @{ Failure = "" }
-  function Install-PackageProvider {
-    Assert-ReleaseCheck ([bool]([Net.ServicePointManager]::SecurityProtocol -band [Net.SecurityProtocolType]::Tls12)) "TLS 1.2 was not enabled before provider bootstrap"
-    if ($bootstrapState.Failure -eq "provider") { throw "provider probe failure" }
+  # Submit the actual staged manifests without provisioning or invoking winget.exe.
+  $submissionState = @{ DownloadFailure = $false; ExitCode = 0; Downloads = 0; Calls = 0; Arguments = @() }
+  function Get-Command { throw "CI submission must not look up winget.exe" }
+  function Invoke-WebRequest {
+    param($Uri, $OutFile, $TimeoutSec, $ErrorAction)
+    $submissionState.Downloads++
+    if ($Uri -ne 'https://aka.ms/wingetcreate/latest' -or $TimeoutSec -le 0 -or $ErrorAction -ne 'Stop') {
+      throw "Expected fail-closed download from Microsoft's standalone endpoint"
+    }
+    if ($submissionState.DownloadFailure) { throw "WingetCreate download probe failure" }
+    Set-Content -LiteralPath $OutFile 'standalone executable probe'
   }
-  function Install-Module { if ($bootstrapState.Failure -eq "module") { throw "module probe failure" } }
-  function Import-Module {}
-  function Repair-WinGetPackageManager {
-    param([switch]$AllUsers, [switch]$Latest, [switch]$Force, $ErrorAction)
-    if (-not ($AllUsers -and $Latest -and $Force)) { throw "Required repair switches missing" }
-    if ($bootstrapState.Failure -eq "repair") { throw "repair probe failure" }
-    if ($bootstrapState.Failure -eq "repair-code") { return 17 }
-    return 0
+  function Invoke-WingetCreateProbe {
+    $submissionState.Calls++
+    $submissionState.Arguments = $args
+    if ($env:WINGET_CREATE_GITHUB_TOKEN -ne 'test-token-not-a-credential') { throw "Environment token missing" }
+    $global:LASTEXITCODE = $submissionState.ExitCode
   }
-  function Get-Command { [pscustomobject]@{ Source = "Invoke-WinGetProbe" } }
-  function Invoke-WinGetProbe { $global:LASTEXITCODE = if ($bootstrapState.Failure -eq "cli") { 17 } else { 0 } }
-  $bootstrapState.Failure = ""
-  [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls
-  & (Join-Path $repoRoot "scripts/prepare-winget-client.ps1")
-  Assert-ReleaseCheck ($LASTEXITCODE -eq 0) "WinGet bootstrap success path failed"
-  foreach ($phase in @("provider", "module", "repair", "repair-code", "cli")) {
-    $bootstrapState.Failure = $phase
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls
-    Assert-ReleaseFailure { & (Join-Path $repoRoot "scripts/prepare-winget-client.ps1") } '*WinGet bootstrap/repair failed*'
+  $wingetCreateProbePath = Join-Path $scratch 'wingetcreate.exe'
+  # Resolve the real executable call to a probe, without launching any submission.
+  Set-Alias -Name $wingetCreateProbePath -Value Invoke-WingetCreateProbe
+  $submitArgs = @{ ResolvedVersion = '1.0.15'; ResolvedOutputRoot = 'dist/published'; ResolvedWingetManifestRoot = 'dist/published/winget/manifests' }
+  $expectedManifestDir = (Resolve-Path $submitArgs.ResolvedWingetManifestRoot).Path
+  foreach ($token in @('', '   ')) {
+    $env:WINGET_CREATE_GITHUB_TOKEN = $token
+    Assert-ReleaseFailure { Submit-WingetManifest @submitArgs } '*WINGET_CREATE_GITHUB_TOKEN is required*'
   }
+  Assert-ReleaseCheck ($submissionState.Downloads -eq 0 -and $submissionState.Calls -eq 0) "Missing token did not stop download/submission"
+  $env:WINGET_CREATE_GITHUB_TOKEN = 'test-token-not-a-credential'
+  $submissionState.DownloadFailure = $true
+  Assert-ReleaseFailure { Submit-WingetManifest @submitArgs } '*WingetCreate download probe failure*'
+  Assert-ReleaseCheck ($submissionState.Calls -eq 0) "Failed download still submitted manifests"
+  $submissionState.DownloadFailure = $false
+  $submissionState.ExitCode = 17
+  Assert-ReleaseFailure { Submit-WingetManifest @submitArgs } '*wingetcreate submit failed with exit code 17*'
+  $submissionState.ExitCode = 0
+  Submit-WingetManifest @submitArgs
+  Assert-ReleaseCheck ($submissionState.Calls -eq 2 -and ($submissionState.Arguments -join '|') -eq "submit|$expectedManifestDir|--no-open") "Manifest directory or token-free submission arguments changed"
 
-  # Exercise the actual CI host: 5.1 has no $IsWindows automatic variable.
-  $desktopProbe = Join-Path $scratch "winget-powershell51-probe.ps1"
-  Set-Content -LiteralPath $desktopProbe -Value @'
-param([string]$BootstrapScript)
-$ErrorActionPreference = "Stop"
-if ($PSVersionTable.PSEdition -ne "Desktop" -or $PSVersionTable.PSVersion -lt [version]"5.1") { throw "Expected Windows PowerShell 5.1" }
-if (Get-Variable IsWindows -ErrorAction SilentlyContinue) { throw "Expected no IsWindows variable" }
-$calls = [Collections.Generic.List[string]]::new()
-$failProvider = $false
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls
-function Install-PackageProvider {
-  if (-not ([Net.ServicePointManager]::SecurityProtocol -band [Net.SecurityProtocolType]::Tls12)) { throw "TLS 1.2 missing before provider bootstrap" }
-  $calls.Add("provider")
-  if ($failProvider) { throw "provider probe failure" }
-}
-function Install-Module { $calls.Add("module") }
-function Import-Module { $calls.Add("import") }
-function Repair-WinGetPackageManager {
-  param([switch]$AllUsers, [switch]$Latest, [switch]$Force, $ErrorAction)
-  if (-not ($AllUsers -and $Latest -and $Force)) { throw "Required repair switches missing" }
-  $calls.Add("repair")
-  return 0
-}
-function Get-Command { [pscustomobject]@{ Source = "Invoke-WinGetProbe" } }
-function Invoke-WinGetProbe {
-  if ($args[0] -ne "--info") { throw "Expected winget --info" }
-  $calls.Add("info")
-  $global:LASTEXITCODE = 0
-}
-& $BootstrapScript
-if (($calls -join ',') -ne "provider,module,import,repair,info") { throw "Unexpected bootstrap sequence: $calls" }
-$calls.Clear()
-$failProvider = $true
-$failure = ""
-try { & $BootstrapScript } catch { $failure = $_.Exception.Message }
-if ($failure -notlike "WinGet bootstrap/repair failed;*provider probe failure*" -or ($calls -join ',') -ne "provider") {
-  throw "Provider failure did not stop the bootstrap under Windows PowerShell 5.1"
-}
-'@
-  $desktopPowerShell = Join-Path $env:SystemRoot "System32/WindowsPowerShell/v1.0/powershell.exe"
-  & $desktopPowerShell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $desktopProbe -BootstrapScript (Join-Path $repoRoot "scripts/prepare-winget-client.ps1")
-  Assert-ReleaseCheck ($LASTEXITCODE -eq 0) "WinGet bootstrap failed under Windows PowerShell 5.1"
+  $manifests = Get-ChildItem dist/published/winget/manifests -Filter *.yaml -File
+  foreach ($manifest in $manifests) {
+    $content = Get-Content -LiteralPath $manifest.FullName -Raw
+    Assert-ReleaseCheck ($content -match '(?m)^PackageVersion: 1\.0\.15\s*$') "Manifest version was not rewritten"
+  }
+  $installerManifest = Get-Content dist/published/winget/manifests/Fidan.Fidan.installer.yaml -Raw
+  $repo = if ($env:GITHUB_REPOSITORY) { $env:GITHUB_REPOSITORY } else { 'fidan-lang/fidan' }
+  $expectedUrl = "https://github.com/$repo/releases/download/v1.0.15/fidan_windows_bootstrap_v1.0.15.exe"
+  Assert-ReleaseCheck ($installerManifest.Contains("InstallerUrl: $expectedUrl") -and $installerManifest.Contains("InstallerSha256: $originalHash")) "Published installer URL/digest was not preserved in manifests"
+  Assert-ReleaseCheck ($installerManifest.Contains('PackageIdentifier: Microsoft.VCRedist.2015+.x64') -and $installerManifest.Contains('MinimumVersion: 14.51.36247.00')) "Original VC++ manifest dependency was not preserved"
+  $stagedInstaller = Get-ChildItem dist/published/payload -Recurse -Filter *.exe | Select-Object -First 1
+  Assert-ReleaseCheck ((Get-FileHash $stagedInstaller.FullName).Hash -eq $originalHash) "Submission modified the staged release installer"
+
+  # Optional local preparation validates without downloading/submitting WingetCreate.
+  function Get-Command { [pscustomobject]@{ Source = 'Invoke-WinGetValidationProbe' } }
+  function Invoke-WinGetValidationProbe {
+    if (($args -join '|') -ne "validate|--manifest|$expectedManifestDir|--verbose-logs") { throw "Unexpected local validation arguments" }
+    $global:LASTEXITCODE = $script:validationExit
+  }
+  $downloadsBefore = $submissionState.Downloads
+  $callsBefore = $submissionState.Calls
+  $env:WINGET_CREATE_GITHUB_TOKEN = ''
+  $script:validationExit = 0
+  Submit-WingetManifest @submitArgs -SkipSubmit
+  Assert-ReleaseCheck ($submissionState.Downloads -eq $downloadsBefore -and $submissionState.Calls -eq $callsBefore) "Local validation attempted a submission"
+  $script:validationExit = 17
+  Assert-ReleaseFailure { Submit-WingetManifest @submitArgs -SkipSubmit } '*winget validate failed*'
+  function Get-Command { $null }
+  Assert-ReleaseFailure { Submit-WingetManifest @submitArgs -SkipSubmit } '*winget.exe not found on PATH*'
+
 } finally {
   Pop-Location
   foreach ($name in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name]) }
   $global:LASTEXITCODE = $previousExit
-  [Net.ServicePointManager]::SecurityProtocol = $previousSecurityProtocol
+  if ($wingetCreateProbePath) { Remove-Item -LiteralPath ("Alias:" + $wingetCreateProbePath) -ErrorAction SilentlyContinue }
   # scratch is a resolved child of the repository's target directory.
   if (-not $scratch.StartsWith((Join-Path $repoRoot "target/") , [StringComparison]::OrdinalIgnoreCase)) { throw "Unexpected cleanup path: $scratch" }
   Remove-Item -LiteralPath $scratch -Recurse -Force
 }
 Write-Host "Windows release pipeline: $checks checks passed."
 exit 0
-

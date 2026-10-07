@@ -45,17 +45,17 @@ Use Rust 1.96 or newer and a host C/C++ toolchain. The current lockfile was test
 
 ## Release infrastructure
 
-Windows installer packaging must leave the compiled `target/release/fidan.exe` unchanged. The Inno bootstrap downloads Fidan rather than embedding the compiler; its signing and LZMA2 compression are independent of the distribution binary. Packaging checks the compiler's SHA256 before and after building the installer. Run `./test/scripts/test-release-windows.ps1` on Windows to verify binary/archive preservation, signing cleanup, published-release staging and WinGet bootstrap failures.
+Windows installer packaging must leave the compiled `target/release/fidan.exe` unchanged. The Inno bootstrap downloads Fidan rather than embedding the compiler; its signing and LZMA2 compression are independent of the distribution binary. Packaging checks the compiler's SHA256 before and after building the installer. Run `./test/scripts/test-release-windows.ps1` on Windows to verify binary/archive preservation, signing cleanup, published-release staging, manifest rewriting and submission failure propagation.
 
-WinGet preparation uses Microsoft's `Microsoft.WinGet.Client` module and `Repair-WinGetPackageManager -AllUsers -Latest -Force`, followed by `winget --info`. Preparation, validation or submission failures fail the WinGet job explicitly; an already published Fidan release is left intact.
+CI downloads Microsoft's [standalone WingetCreate executable](https://github.com/microsoft/winget-create#using-the-standalone-exe) from `https://aka.ms/wingetcreate/latest` and submits the manifest directory directly. It does not provision App Installer or require `winget.exe`. Download failures, a missing token or a nonzero submission exit code fail the job. The official `winget-pkgs` PR pipeline validates submitted manifests.
 
-To retry WinGet for an existing release, run **Submit WinGet release** (`.github/workflows/submit-winget.yaml`) from `main` using `workflow_dispatch`, with version `1.0.15` or another published stable version. It downloads the existing GitHub bootstrap installer, verifies its release digest when available and uses the original Windows VC++ minimum from the published distribution manifest. It then runs the existing `winget validate` and `wingetcreate submit` path. It does not compile, retag, upload or replace release assets. The `releases` environment/repository must provide `WINGET_GITHUB_TOKEN`; that secret is exposed only to the submission step.
+To retry WinGet for an existing release, run **Submit WinGet release** (`.github/workflows/submit-winget.yaml`) from `main` using `workflow_dispatch`, with version `1.0.16` or another published stable version. It downloads the existing GitHub bootstrap installer, verifies its release digest when available and uses the original Windows VC++ minimum from the published distribution manifest. It then runs `wingetcreate submit`. It does not compile, retag, upload or replace release assets. The `releases` environment/repository must provide `WINGET_GITHUB_TOKEN`; that secret is mapped only into the submission step's `WINGET_CREATE_GITHUB_TOKEN` environment variable, never a command-line argument.
 
-For local validation without submitting, run on Windows from the repository root:
+For optional local `winget validate` checks without submitting, run on Windows with `winget.exe` available, from the repository root:
 
 ```powershell
-./scripts/package-release-windows.ps1 -Mode stage-winget-release -Version 1.0.15 -OutputRoot target/winget-retry
-./scripts/package-release-windows.ps1 -Mode prepare-winget -Version 1.0.15 -OutputRoot target/winget-retry -WingetManifestRoot target/winget-retry/winget/manifests
+./scripts/package-release-windows.ps1 -Mode stage-winget-release -Version 1.0.16 -OutputRoot target/winget-retry
+./scripts/package-release-windows.ps1 -Mode prepare-winget -Version 1.0.16 -OutputRoot target/winget-retry -WingetManifestRoot target/winget-retry/winget/manifests
 ```
 
 ---
