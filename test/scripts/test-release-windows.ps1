@@ -101,22 +101,22 @@ if ($env:FIDAN_RELEASE_PROBE_MUTATE -eq "1") { Set-Content target/release/fidan.
   function Invoke-RestMethod { @{ fidan_versions = @(@{ version = "1.0.15"; host_triple = "x86_64-pc-windows-msvc"; vc_redist_min_version = $script:vcMinimum }) } }
   $env:GITHUB_REF_NAME = "v9.9.9"
   $stageArgs = @{ ResolvedVersion = "1.0.15"; ResolvedOutputRoot = "dist/published"; ResolvedWingetManifestRoot = (Join-Path $repoRoot "config/winget/manifest") }
-  Stage-PublishedWingetRelease @stageArgs
+  Copy-PublishedWingetRelease @stageArgs
   $metadata = Get-Content dist/published/winget/windows-installer.json -Raw | ConvertFrom-Json
   Assert-ReleaseCheck ($metadata.release_tag -eq "v1.0.15" -and $metadata.vc_redist.minimum_version -eq $script:vcMinimum -and $metadata.sha256 -eq $originalHash -and (Test-Path dist/published/winget/manifests/Fidan.Fidan.installer.yaml)) "Published asset/VC metadata was replaced by retry host metadata"
   $script:publishedDraft = $true
-  Assert-ReleaseFailure { Stage-PublishedWingetRelease @stageArgs } '*is not published*'
+  Assert-ReleaseFailure { Copy-PublishedWingetRelease @stageArgs } '*is not published*'
   $script:publishedDraft = $false
   $script:publishedDigest = 'sha256:' + ('0' * 64)
-  Assert-ReleaseFailure { Stage-PublishedWingetRelease @stageArgs } '*SHA256 does not match*'
+  Assert-ReleaseFailure { Copy-PublishedWingetRelease @stageArgs } '*SHA256 does not match*'
   $script:publishedDigest = "sha256:$originalHash".ToLowerInvariant()
   foreach ($phase in @("view", "download")) {
     $script:ghFailure = $phase
-    Assert-ReleaseFailure { Stage-PublishedWingetRelease @stageArgs } '*Failed to*'
+    Assert-ReleaseFailure { Copy-PublishedWingetRelease @stageArgs } '*Failed to*'
   }
   $script:ghFailure = ""
   $script:vcMinimum = "invalid"
-  Assert-ReleaseFailure { Stage-PublishedWingetRelease @stageArgs } '*lacks a valid Windows VC++ requirement*'
+  Assert-ReleaseFailure { Copy-PublishedWingetRelease @stageArgs } '*lacks a valid Windows VC++ requirement*'
 
   # The real bootstrap script must fail closed at install, repair and CLI checks.
   $bootstrapState = @{ Failure = "" }
