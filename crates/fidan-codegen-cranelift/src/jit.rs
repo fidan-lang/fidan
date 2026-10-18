@@ -129,6 +129,7 @@ pub fn encode_jit_abi_value(value: &FidanValue, ty: &MirTy) -> i64 {
         (FidanValue::Integer(n), MirTy::Integer) => *n,
         (FidanValue::Float(f), MirTy::Float) => f.to_bits() as i64,
         (FidanValue::Boolean(b), MirTy::Boolean) => i64::from(*b),
+        (FidanValue::Handle(handle), MirTy::Handle) => *handle as i64,
         _ => register_jit_abi_ptr(Box::into_raw(Box::new(value.clone()))),
     }
 }
@@ -138,6 +139,7 @@ pub fn decode_jit_abi_value(raw: i64, ty: &MirTy) -> FidanValue {
         MirTy::Integer => FidanValue::Integer(raw),
         MirTy::Float => FidanValue::Float(f64::from_bits(raw as u64)),
         MirTy::Boolean => FidanValue::Boolean(raw != 0),
+        MirTy::Handle => FidanValue::Handle(raw as usize),
         _ if raw == 0 => FidanValue::Nothing,
         _ => unsafe { (*(raw as *mut FidanValue)).clone() },
     }
@@ -2578,9 +2580,14 @@ mod tests {
             (FidanValue::WeakShared(live.downgrade()), 1),
             (FidanValue::WeakShared(expired), 0),
         ];
-        for control in ["if", "while"] {
+        for (control, type_name) in ["if", "while"].into_iter().flat_map(|control| {
+            [
+                "flexible", "string", "integer", "float", "boolean", "handle",
+            ]
+            .map(|type_name| (control, type_name))
+        }) {
             let (mir, interner) = lower(&format!(
-                "action choose with (condition oftype flexible) returns integer {{ {control} condition {{ return 1 }}; return 0 }}",
+                "action choose with (condition oftype {type_name}) returns integer {{ {control} condition {{ return 1 }}; return 0 }}",
             ));
             let function = mir
                 .functions
@@ -2595,6 +2602,9 @@ mod tests {
             );
             for _ in 0..100 {
                 for (condition, expected) in &cases {
+                    if type_name != "flexible" && type_name != condition.type_name() {
+                        continue;
+                    }
                     let result = with_jit_runtime_context(std::ptr::null_mut(), || {
                         call_jit_fn(&entry, std::slice::from_ref(condition))
                     });
@@ -2604,6 +2614,13 @@ mod tests {
                     );
                 }
             }
+        }
+        for handle in [0, 1, usize::MAX] {
+            let raw = encode_jit_abi_value(&FidanValue::Handle(handle), &MirTy::Handle);
+            assert_eq!(raw as usize, handle);
+            assert!(
+                matches!(decode_jit_abi_value(raw, &MirTy::Handle), FidanValue::Handle(value) if value == handle)
+            );
         }
     }
 
