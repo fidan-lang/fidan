@@ -3168,3 +3168,31 @@ fn optional_assertion_messages_with_and_without_jit() {
         }
     }
 }
+
+#[test]
+fn sandbox_checks_env_module_and_erased_callable_aliases() {
+    for expression in [
+        "env.get(\"FIDAN_SANDBOX_FIXTURE\")",
+        "env.getVar(\"FIDAN_SANDBOX_FIXTURE\")",
+        "env.get_var(\"FIDAN_SANDBOX_FIXTURE\")",
+        "env.set(\"FIDAN_SANDBOX_FIXTURE\",\"forbidden\")",
+        "env.args()",
+    ] {
+        let source = format!(
+            "use std.env\nvar denied = false\nattempt {{ var result = {expression} }} catch error {{ denied = true; assert_eq(error.contains(\"R4003\"),true) }}\nassert_eq(denied,true)"
+        );
+        assert!(
+            run_src_with_sandbox(&source, fidan_stdlib::SandboxPolicy::default()).is_ok(),
+            "{expression}"
+        );
+    }
+    let source = "use std.env\nvar callback oftype flexible = env.get\nvar denied = false\nattempt { callback(\"FIDAN_SANDBOX_FIXTURE\") } catch error { denied=true; assert_eq(error.contains(\"R4003\"),true) }\nassert_eq(denied,true)";
+    assert!(run_src_with_sandbox(source, fidan_stdlib::SandboxPolicy::default()).is_ok());
+    assert!(
+        run_src_with_sandbox(
+            "use std.env\nassert_eq(type(env.args()),\"list\")",
+            fidan_stdlib::SandboxPolicy::default().with_allow_env()
+        )
+        .is_ok()
+    );
+}

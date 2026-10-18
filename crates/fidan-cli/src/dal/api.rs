@@ -5,6 +5,10 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use std::fmt::Display;
+use std::io::Read;
+use std::time::Duration;
+
+pub const MAX_ARCHIVE_BYTES: u64 = 50 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct DalClient {
@@ -15,8 +19,27 @@ pub struct DalClient {
 
 impl DalClient {
     pub fn new(base: String, token: Option<String>) -> Result<Self> {
+        let url = reqwest::Url::parse(&base).context("invalid Dal registry URL")?;
+        let loopback = matches!(
+            url.host_str(),
+            Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+        );
+        if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            bail!(
+                "Dal registry requires HTTPS (HTTP only on literal loopback), without credentials, query or fragment"
+            );
+        }
+        let base = base.trim_end_matches('/').to_owned();
         let http = Client::builder()
+            .https_only(url.scheme() == "https")
             .user_agent(concat!("fidan/", env!("CARGO_PKG_VERSION"), " dal-cli"))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(120))
             .build()
             .context("failed to build Dal HTTP client")?;
 
@@ -55,10 +78,22 @@ impl DalClient {
             .get(&url)
             .send()
             .with_context(|| format!("failed to fetch sparse index for `{name}`"))?;
+        // A missing dependency is a resolver conflict; other failures stay fatal.
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(vec![]);
+        }
         let response = ensure_success_bytes(response, "fetch sparse index")?;
-        let body = response
-            .text()
+        const MAX_INDEX_BYTES: u64 = 8 * 1024 * 1024;
+        let mut bytes = Vec::new();
+        response
+            .take(MAX_INDEX_BYTES + 1)
+            .read_to_end(&mut bytes)
             .context("failed to read sparse index body")?;
+        if bytes.len() as u64 > MAX_INDEX_BYTES {
+            bail!("sparse index exceeds 8 MiB limit");
+        }
+        let body = String::from_utf8(bytes).context("sparse index is not UTF-8")?;
+        let mut versions = std::collections::BTreeSet::new();
         let mut entries = Vec::new();
         for (line_no, line) in body.lines().enumerate() {
             let trimmed = line.trim();
@@ -67,12 +102,25 @@ impl DalClient {
             }
             let entry: IndexEntry = serde_json::from_str(trimmed)
                 .with_context(|| format!("invalid NDJSON line {} in sparse index", line_no + 1))?;
+            if entry.name != name {
+                bail!("sparse index package identity does not match `{name}`");
+            }
+            validate_checksum(&entry.cksum)?;
+            fidan_driver::dal::compiler_compatible(
+                entry.fidan.as_deref(),
+                env!("CARGO_PKG_VERSION"),
+            )?;
+            semver::Version::parse(&entry.vers).context("invalid version in sparse index")?;
+            if !versions.insert(entry.vers.clone()) || versions.len() > 10_000 {
+                bail!("sparse index contains duplicate versions or exceeds the version limit");
+            }
             entries.push(entry);
         }
         Ok(entries)
     }
 
-    pub fn download_archive(&self, name: &str, version: &str) -> Result<Vec<u8>> {
+    pub fn download_archive(&self, name: &str, version: &str, checksum: &str) -> Result<Vec<u8>> {
+        validate_checksum(checksum)?;
         let url = format!("{}/packages/{name}/versions/{version}/download", self.base);
         let response = self
             .http
@@ -80,10 +128,19 @@ impl DalClient {
             .send()
             .with_context(|| format!("failed to download `{name}@{version}`"))?;
         let response = ensure_success_bytes(response, "download package archive")?;
-        let bytes = response
-            .bytes()
+        if response
+            .content_length()
+            .is_some_and(|size| size > MAX_ARCHIVE_BYTES)
+        {
+            bail!("downloaded archive exceeds the 50 MiB limit");
+        }
+        let mut bytes = Vec::new();
+        response
+            .take(MAX_ARCHIVE_BYTES + 1)
+            .read_to_end(&mut bytes)
             .context("failed to read downloaded archive")?;
-        Ok(bytes.to_vec())
+        verify_archive_checksum(&bytes, checksum)?;
+        Ok(bytes)
     }
 
     pub fn publish(
@@ -109,7 +166,7 @@ impl DalClient {
             .send()
             .with_context(|| format!("failed to publish `{package}`"))?;
         let response = ensure_success_bytes(response, "publish package")?;
-        response.json().context("invalid publish response")
+        read_json(response)
     }
 
     pub fn yank(&self, package: &str, version: &str, reason: Option<&str>) -> Result<MessageOnly> {
@@ -185,7 +242,20 @@ fn ensure_success<T: DeserializeOwned>(
     action: impl Display,
 ) -> Result<T> {
     let response = ensure_success_bytes(response, action)?;
-    response.json().context("invalid JSON response")
+    read_json(response)
+}
+
+fn read_json<T: DeserializeOwned>(response: reqwest::blocking::Response) -> Result<T> {
+    const MAX_JSON_BYTES: u64 = 8 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    response
+        .take(MAX_JSON_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("failed to read registry JSON")?;
+    if bytes.len() as u64 > MAX_JSON_BYTES {
+        bail!("registry JSON exceeds the 8 MiB limit");
+    }
+    serde_json::from_slice(&bytes).context("invalid registry JSON response")
 }
 
 fn ensure_success_bytes(
@@ -197,10 +267,14 @@ fn ensure_success_bytes(
     }
 
     let status = response.status();
-    let body = response
-        .text()
-        .unwrap_or_else(|_| "<unreadable response body>".to_string());
-    bail!("{action} failed: HTTP {status} — {body}");
+    let mut body = String::new();
+    response
+        .take(16 * 1024)
+        .read_to_string(&mut body)
+        .context("failed to read registry error response")?;
+    // Terminal control characters from an untrusted registry must not execute.
+    body.retain(|character| !character.is_control() || character == '\n' || character == '\t');
+    bail!("{action} failed: HTTP {status} - {body}");
 }
 
 #[derive(Debug, Deserialize)]
@@ -257,6 +331,74 @@ pub struct MessageOnly {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct IndexEntry {
+    pub name: String,
+    pub cksum: String,
+    #[serde(default)]
+    pub fidan: Option<String>,
     pub vers: String,
     pub yanked: bool,
+}
+
+fn validate_checksum(checksum: &str) -> Result<()> {
+    if checksum.len() != 64 || !checksum.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("registry archive checksum must be exactly 64 hexadecimal SHA-256 characters");
+    }
+    Ok(())
+}
+
+pub fn verify_archive_checksum(bytes: &[u8], checksum: &str) -> Result<()> {
+    validate_checksum(checksum)?;
+    if bytes.len() as u64 > MAX_ARCHIVE_BYTES {
+        bail!("downloaded archive exceeds the 50 MiB limit");
+    }
+    if crate::distribution::verify_sha256(bytes, checksum).is_err() {
+        bail!("downloaded archive SHA-256 checksum does not match the registry index");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod integrity_tests {
+    use super::*;
+
+    #[test]
+    fn archive_checksum_is_strict_and_detects_tampering() {
+        let bytes = b"abc";
+        let checksum =
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad".to_string();
+        verify_archive_checksum(bytes, &checksum).unwrap();
+        verify_archive_checksum(bytes, &checksum.to_uppercase()).unwrap();
+        assert!(verify_archive_checksum(b"modified artifact", &checksum).is_err());
+        for invalid in [
+            "".to_string(),
+            "0".repeat(63),
+            "g".repeat(64),
+            "0".repeat(65),
+        ] {
+            assert!(verify_archive_checksum(bytes, &invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn index_requires_identity_and_checksum() {
+        assert!(serde_json::from_str::<IndexEntry>(r#"{"vers":"1.0.0","yanked":false}"#).is_err());
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    #[test]
+    fn registry_urls_cannot_send_credentials_over_remote_plaintext_http() {
+        for url in [
+            "http://example.test",
+            "https://user:password@example.test",
+            "file:///tmp/index",
+            "https://example.test?key=value",
+        ] {
+            assert!(DalClient::new(url.into(), None).is_err());
+        }
+        assert!(DalClient::new("https://dal.example.test".into(), None).is_ok());
+        assert!(DalClient::new("http://127.0.0.1:8080".into(), None).is_ok());
+    }
 }

@@ -1,4 +1,7 @@
-use crate::imports::{collect_file_import_paths, filter_hir_module, pre_register_hir_into_tc};
+use crate::imports::{
+    bind_hir_file_imports, collect_file_import_paths, collect_file_import_paths_with_root,
+    pre_register_hir_into_tc,
+};
 use crate::last_error;
 use crate::replay::save_replay_bundle;
 use crate::terminal::paint;
@@ -834,8 +837,12 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                         .parent()
                         .map(|p| p.to_path_buf())
                         .unwrap_or_else(|| std::path::PathBuf::from("."));
-                    let (sub_paths, sub_unresolved) =
-                        collect_file_import_paths(&imp_module, &interner, &imp_base);
+                    let (sub_paths, sub_unresolved) = collect_file_import_paths_with_root(
+                        &imp_module,
+                        &interner,
+                        &imp_base,
+                        &base_dir,
+                    );
                     for (name, span) in sub_unresolved {
                         let diag = fidan_diagnostics::Diagnostic::error(
                             fidan_diagnostics::diag_code!("E0106"),
@@ -867,7 +874,16 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                             .any(|d| d.severity == fidan_diagnostics::Severity::Error);
                         error_count = budget.error_count();
                         if !imp_tc_err && !budget.would_block_further_errors() {
-                            let imp_hir = fidan_hir::lower_module(&imp_module, &imp_tm, &interner);
+                            let mut imp_hir =
+                                fidan_hir::lower_module(&imp_module, &imp_tm, &interner);
+                            bind_hir_file_imports(
+                                &mut imp_hir,
+                                &imp_module,
+                                &interner,
+                                &source_map,
+                                &imp_base,
+                                &base_dir,
+                            );
                             // Always push so private transitive deps are compiled into MIR
                             // (their functions may be called by the importing module).
                             // `expose` only controls whether names appear in the outer typeck.
@@ -932,19 +948,20 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     // Compute once; all --emit and run blocks share the merged result without
     // re-calling lower_module.
     let merged_hir: Option<fidan_hir::HirModule> = typed_module.as_ref().map(|tm| {
-        let base = fidan_hir::lower_module(&module, tm, &interner);
+        let mut base = fidan_hir::lower_module(&module, tm, &interner);
+        bind_hir_file_imports(
+            &mut base,
+            &module,
+            &interner,
+            &source_map,
+            &base_dir,
+            &base_dir,
+        );
         imported_hirs
             .into_iter()
-            .fold(base, |acc, (imp, filter, _expose_tc)| {
-                // None (namespace) or Some(empty) (wildcard): merge the full HIR so that
-                // all functions exist in MIR (namespace dispatch / flat exposure).
-                // Some(non-empty names): flat import — strip everything except those names.
-                let filtered = if let Some(names) = filter.as_ref().filter(|f| !f.is_empty()) {
-                    filter_hir_module(imp, names, &interner)
-                } else {
-                    imp
-                };
-                fidan_hir::merge_module(acc, filtered)
+            .fold(base, |acc, (imp, _filter, _expose_tc)| {
+                // Keep helpers; filters apply to name visibility, not code retention.
+                fidan_hir::merge_module(acc, imp)
             })
     });
 

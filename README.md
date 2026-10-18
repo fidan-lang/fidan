@@ -929,7 +929,7 @@ fidan dal add my-package[json,cli] --version "^1.2"
 fidan dal add my-tool --global
 ```
 
-Dal resolves dependencies into `dal.lock`, supports optional dependencies through feature wiring, and can install package-provided CLI entries declared in `[cli]` metadata.
+Dal resolves dependencies into `dal.lock`, supports optional dependencies through feature wiring, and can install package-provided CLI entries declared in `[cli]` metadata. The local relaunch branch adds verified archive integrity, explicit compiler constraints and bounded backtracking; see the [source-branch package contract](docs/DAL_PACKAGE_CONTRACT.md) for compatibility and release-order gates.
 
 Dal token lookup order:
 

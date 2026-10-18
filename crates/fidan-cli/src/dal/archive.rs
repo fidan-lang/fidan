@@ -5,9 +5,9 @@ use fidan_driver::dal::{
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Cursor;
+use std::io::{self, Cursor, Read};
 use std::path::{Component, Path, PathBuf};
 use tar::{Archive, Builder, EntryType};
 
@@ -33,6 +33,7 @@ pub struct BuiltPackage {
 #[derive(Debug, Clone)]
 struct DalIgnore {
     set: GlobSet,
+    include: Option<GlobSet>,
 }
 
 pub fn build_package_archive(project_dir: &Path) -> Result<BuiltPackage> {
@@ -40,8 +41,9 @@ pub fn build_package_archive(project_dir: &Path) -> Result<BuiltPackage> {
         .canonicalize()
         .with_context(|| format!("cannot access {}", project_dir.display()))?;
     let manifest = read_manifest(&project_dir)?;
-    let ignore = load_dalignore(&project_dir)?;
+    let ignore = load_dalignore(&project_dir, &manifest)?;
     validate_package_dir(&project_dir, &manifest, ignore.as_ref())?;
+    validate_pack_budget(&project_dir, &project_dir, ignore.as_ref(), &mut (0, 0))?;
 
     let root_name = package_root_name(&manifest);
     let archive_name = format!("{root_name}.tar.gz");
@@ -58,11 +60,271 @@ pub fn build_package_archive(project_dir: &Path) -> Result<BuiltPackage> {
         .finish()
         .context("failed to finalize gzip archive")?;
 
+    visit_archive(&archive_bytes, |_, _, _| Ok(()))?;
     Ok(BuiltPackage {
         manifest,
         archive_name,
         archive_bytes,
     })
+}
+
+const MAX_UNCOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 10_000;
+
+// All archive consumers share validation before accepting manifest data or files.
+fn visit_archive(
+    bytes: &[u8],
+    mut visit: impl FnMut(&str, EntryType, &mut dyn Read) -> Result<()>,
+) -> Result<String> {
+    if bytes.len() as u64 > super::api::MAX_ARCHIVE_BYTES {
+        bail!("archive exceeds the compressed size limit");
+    }
+    let decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
+    let mut archive = Archive::new(decoder.take(MAX_UNCOMPRESSED_BYTES + 1));
+    let mut root = None;
+    let mut seen = HashSet::new();
+    let mut destinations = HashMap::new();
+    let mut destination_parents = HashMap::new();
+    let mut spellings = HashMap::new();
+    let mut total = 0_u64;
+    let mut has_manifest = false;
+    let mut has_init = false;
+    for (count, entry) in archive
+        .entries()
+        .context("cannot read archive entries")?
+        .enumerate()
+    {
+        if count >= MAX_ARCHIVE_ENTRIES {
+            bail!("archive contains too many entries");
+        }
+        let mut entry = entry.context("invalid archive entry")?;
+        let kind = entry.header().entry_type();
+        if kind != EntryType::Regular && kind != EntryType::Directory {
+            bail!("archive contains unsupported entry type");
+        }
+        let path_bytes = entry.path_bytes();
+        let path = std::str::from_utf8(&path_bytes)
+            .context("archive path is not valid UTF-8")?
+            .trim_end_matches('/')
+            .to_string();
+        if path.len() > 4096 || path.contains(['\\', ':']) {
+            bail!("archive contains an unsafe portable path");
+        }
+        let parts: Vec<_> = path.split('/').collect();
+        if parts.len() > 64 {
+            bail!("archive nesting exceeds the portable depth limit");
+        }
+        let mut prefix = String::new();
+        for part in &parts {
+            prefix.push_str(part);
+            prefix.push('/');
+            if let Some(previous) = spellings.insert(prefix.to_ascii_lowercase(), prefix.clone())
+                && previous != prefix
+            {
+                bail!("archive contains case-aliased paths");
+            }
+        }
+        if parts.iter().any(|part| {
+            part.is_empty()
+                || matches!(*part, "." | "..")
+                || part.ends_with(['.', ' '])
+                || part
+                    .chars()
+                    .any(|ch| ch.is_control() || matches!(ch, '<' | '>' | '"' | '|' | '?' | '*'))
+        }) {
+            bail!("archive contains an unsafe path");
+        }
+        for part in &parts {
+            let stem = part
+                .split('.')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_uppercase();
+            if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+                || (stem.len() == 4
+                    && (stem.starts_with("COM") || stem.starts_with("LPT"))
+                    && matches!(stem.as_bytes()[3], b'1'..=b'9'))
+            {
+                bail!("archive contains a Windows device path");
+            }
+        }
+        if root.as_deref().is_some_and(|expected| expected != parts[0]) {
+            bail!("archive contains multiple package roots");
+        }
+        root.get_or_insert_with(|| parts[0].to_string());
+        if !seen.insert(path.to_ascii_lowercase()) {
+            bail!("archive contains duplicate paths");
+        }
+        let size = entry.size();
+        total = total.checked_add(size).context("archive size overflow")?;
+        if total > MAX_UNCOMPRESSED_BYTES || total > (bytes.len() as u64).saturating_mul(100) {
+            bail!("archive exceeds expansion limits");
+        }
+        if parts.len() == 1 {
+            if kind != EntryType::Directory {
+                bail!("archive root must be a directory");
+            }
+            continue;
+        }
+        let relative = parts[1..].join("/");
+        if !ALLOWED_TOP_DIRS.contains(&parts[1])
+            && !(parts.len() == 2
+                && (ALLOWED_TOP_FILES.contains(&parts[1]) || is_license_file(parts[1])))
+        {
+            bail!("archive contains unsupported top-level entry");
+        }
+        if relative == "src" && kind == EntryType::Directory {
+            continue;
+        }
+        let destination = remap_source_relative_path(Path::new(&relative));
+        // src/ is flattened by the existing install ABI. Reject aliases before writing.
+        let destination_name = destination.to_string_lossy().into_owned();
+        let segments: Vec<_> = destination_name.split('/').collect();
+        for depth in 1..segments.len() {
+            let prefix = segments[..depth].join("/");
+            if let Some((_, previous_kind)) = destinations.get(&prefix.to_ascii_lowercase())
+                && *previous_kind != EntryType::Directory
+            {
+                bail!("archive file used as parent directory");
+            }
+            if let Some(previous) =
+                destination_parents.insert(prefix.to_ascii_lowercase(), prefix.clone())
+                && previous != prefix
+            {
+                bail!("archive contains remapped case-aliased parent directories");
+            }
+        }
+        if kind == EntryType::Regular
+            && destination_parents.contains_key(&destination_name.to_ascii_lowercase())
+        {
+            bail!("archive file collides with an implicit directory");
+        }
+        if let Some((previous_name, previous_kind)) = destinations.insert(
+            destination_name.to_ascii_lowercase(),
+            (destination_name.clone(), kind),
+        ) && (previous_name != destination_name
+            || previous_kind != EntryType::Directory
+            || kind != EntryType::Directory)
+        {
+            bail!("archive entries collide after source-path remapping");
+        }
+        if relative == "dal.toml" && kind == EntryType::Regular {
+            if size > MAX_MANIFEST_BYTES {
+                bail!("archive manifest exceeds size limit");
+            }
+            has_manifest = true;
+        }
+        has_init |= relative == "src/init.fdn" && kind == EntryType::Regular;
+        visit(&relative, kind, &mut entry)?;
+    }
+    // TAR iteration can stop before gzip's trailer; drain bounded input to check CRC.
+    let mut reader = archive.into_inner();
+    io::copy(&mut reader, &mut io::sink()).context("invalid gzip stream")?;
+    if reader.limit() == 0 {
+        bail!("archive exceeds uncompressed size limit");
+    }
+    if !has_manifest || !has_init {
+        bail!("archive must contain dal.toml and src/init.fdn");
+    }
+    root.context("archive is empty")
+}
+
+struct StagedDirectory(PathBuf);
+
+impl StagedDirectory {
+    fn new(parent: &Path) -> Result<Self> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+        let path = parent.join(format!(".dal-stage-{}-{nonce}", std::process::id()));
+        let builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        let builder = {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = builder;
+            builder.mode(0o700);
+            builder
+        };
+        builder
+            .create(&path)
+            .context("cannot create private install staging directory")?;
+        Ok(Self(path))
+    }
+}
+
+impl Drop for StagedDirectory {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.0)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            eprintln!("warning: cannot clean Dal staging directory: {error}");
+        }
+    }
+}
+
+fn reject_symlink_ancestors(path: &Path) -> Result<()> {
+    let absolute = std::path::absolute(path)?;
+    let mut current = PathBuf::new();
+    for component in absolute.components() {
+        current.push(component);
+        if !matches!(component, Component::Normal(_)) {
+            continue;
+        }
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                bail!("installation path contains a symbolic link")
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn identical_tree(left: &Path, right: &Path) -> Result<bool> {
+    let left_meta = fs::symlink_metadata(left)?;
+    let right_meta = fs::symlink_metadata(right)?;
+    if left_meta.file_type().is_symlink() || right_meta.file_type().is_symlink() {
+        return Ok(false);
+    }
+    if left_meta.is_file() && right_meta.is_file() {
+        if left_meta.len() != right_meta.len() {
+            return Ok(false);
+        }
+        let limit = left_meta
+            .len()
+            .checked_add(1)
+            .context("cached file length overflow")?;
+        let mut expected = Vec::new();
+        let mut cached = Vec::new();
+        fs::File::open(left)?
+            .take(limit)
+            .read_to_end(&mut expected)?;
+        fs::File::open(right)?
+            .take(limit)
+            .read_to_end(&mut cached)?;
+        return Ok(expected == cached && expected.len() as u64 == left_meta.len());
+    }
+    if !left_meta.is_dir() || !right_meta.is_dir() {
+        return Ok(false);
+    }
+    let names = |dir: &Path| -> Result<std::collections::BTreeSet<_>> {
+        fs::read_dir(dir)?
+            .take(MAX_ARCHIVE_ENTRIES + 1)
+            .map(|entry| Ok(entry?.file_name()))
+            .collect()
+    };
+    let entries = names(left)?;
+    if entries != names(right)? {
+        return Ok(false);
+    }
+    for name in entries {
+        if !identical_tree(&left.join(&name), &right.join(&name))? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub fn install_downloaded_package(
@@ -72,99 +334,82 @@ pub fn install_downloaded_package(
     into_dir: &Path,
     force: bool,
 ) -> Result<PathBuf> {
-    let target_dir = package_install_dir(into_dir, package, version);
-    if target_dir.exists() {
-        if !force {
-            return Ok(target_dir);
+    fidan_driver::dal::validate_package_name(package)?;
+    semver::Version::parse(version).context("invalid package version")?;
+    let target = package_install_dir(into_dir, package, version);
+    reject_symlink_ancestors(&target)?;
+    let parent = target
+        .parent()
+        .context("missing package parent directory")?;
+    fs::create_dir_all(parent)?;
+    let staging = StagedDirectory::new(parent)?;
+    let root = visit_archive(archive_bytes, |relative, kind, reader| {
+        let output = remap_install_path(&staging.0, Path::new(relative));
+        if kind == EntryType::Directory {
+            fs::create_dir_all(&output)?;
+        } else {
+            fs::create_dir_all(output.parent().context("missing archive entry parent")?)?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&output)?;
+            io::copy(reader, &mut file)?;
         }
-        fs::remove_dir_all(&target_dir)
-            .with_context(|| format!("cannot remove {}", target_dir.display()))?;
+        Ok(())
+    })?;
+    let manifest = read_manifest(&staging.0)?;
+    fidan_driver::dal::ensure_compiler_compatible(&manifest)?;
+    if root != format!("{package}-{version}")
+        || manifest.package.name != package
+        || manifest.package.version != version
+    {
+        bail!("archive identity does not match requested package/version");
     }
-    fs::create_dir_all(&target_dir)
-        .with_context(|| format!("cannot create {}", target_dir.display()))?;
-
-    let root_name = format!("{package}-{version}");
-    let decoder = flate2::read::GzDecoder::new(Cursor::new(archive_bytes));
-    let mut archive = Archive::new(decoder);
-    let mut saw_init = false;
-
-    for entry in archive.entries().context("cannot read archive entries")? {
-        let mut entry = entry.context("invalid archive entry")?;
-        let path = entry
-            .path()
-            .context("cannot read archive path")?
-            .to_path_buf();
-        let mut components = path.components();
-        let root = components.next();
-        let Some(Component::Normal(root_component)) = root else {
-            bail!("archive entry has invalid root path");
-        };
-        if root_component.to_string_lossy() != root_name {
-            bail!("archive root directory does not match expected package root");
+    if target.exists() && !force {
+        if !identical_tree(&staging.0, &target)? {
+            bail!("existing package differs from verified archive; use --force to replace it");
         }
-
-        let remainder: PathBuf = components.collect();
-        if remainder.as_os_str().is_empty() {
-            continue;
-        }
-
-        if !is_safe_relative_path(&remainder) {
-            bail!("archive contains unsafe path `{}`", remainder.display());
-        }
-
-        let out_path = remap_install_path(&target_dir, &remainder);
-        match entry.header().entry_type() {
-            EntryType::Directory => {
-                fs::create_dir_all(&out_path)
-                    .with_context(|| format!("cannot create {}", out_path.display()))?;
+        return Ok(target);
+    }
+    if target.exists() {
+        let backup = StagedDirectory::new(parent)?;
+        let previous = backup.0.join("previous");
+        fs::rename(&target, &previous)?;
+        if let Err(error) = fs::rename(&staging.0, &target) {
+            if let Err(restore_error) = fs::rename(&previous, &target) {
+                let saved = previous.display().to_string();
+                // Preserve the original installation if rollback itself fails.
+                std::mem::forget(backup);
+                bail!(
+                    "install failed ({error}); rollback failed ({restore_error}); original preserved at {saved}"
+                );
             }
-            EntryType::Regular => {
-                if let Some(parent) = out_path.parent() {
-                    fs::create_dir_all(parent)
-                        .with_context(|| format!("cannot create {}", parent.display()))?;
-                }
-                entry
-                    .unpack(&out_path)
-                    .with_context(|| format!("cannot write {}", out_path.display()))?;
-                if out_path == target_dir.join("init.fdn") {
-                    saw_init = true;
-                }
-            }
-            _ => bail!("archive contains unsupported entry type"),
+            return Err(error.into());
         }
+    } else {
+        fs::rename(&staging.0, &target)?;
     }
-
-    if !saw_init {
-        bail!("downloaded package did not contain src/init.fdn");
-    }
-
-    Ok(target_dir)
+    Ok(target)
 }
 
 pub fn read_manifest_from_archive(archive_bytes: &[u8]) -> Result<DalManifest> {
-    let decoder = flate2::read::GzDecoder::new(Cursor::new(archive_bytes));
-    let mut archive = Archive::new(decoder);
-    for entry in archive.entries().context("cannot read archive entries")? {
-        let mut entry = entry.context("invalid archive entry")?;
-        let path = entry
-            .path()
-            .context("cannot read archive path")?
-            .to_path_buf();
-        let file_name = path.file_name().and_then(|name| name.to_str());
-        if file_name != Some("dal.toml") {
-            continue;
+    let mut manifest = None;
+    let root = visit_archive(archive_bytes, |relative, kind, reader| {
+        if relative == "dal.toml" && kind == EntryType::Regular {
+            let mut bytes = Vec::new();
+            reader.read_to_end(&mut bytes)?;
+            let parsed: DalManifest =
+                toml::from_slice(&bytes).context("invalid dal.toml inside archive")?;
+            fidan_driver::dal::validate_manifest(&parsed)?;
+            manifest = Some(parsed);
         }
-        let mut manifest_bytes = Vec::new();
-        use std::io::Read;
-        entry
-            .read_to_end(&mut manifest_bytes)
-            .context("cannot read `dal.toml` from archive")?;
-        let manifest: DalManifest =
-            toml::from_slice(&manifest_bytes).context("invalid `dal.toml` inside archive")?;
-        fidan_driver::dal::validate_manifest(&manifest)?;
-        return Ok(manifest);
+        Ok(())
+    })?;
+    let manifest = manifest.context("missing archive manifest")?;
+    if root != package_root_name(&manifest) {
+        bail!("archive root does not match manifest identity");
     }
-    bail!("downloaded archive did not contain `dal.toml`");
+    Ok(manifest)
 }
 
 fn validate_package_dir(
@@ -227,7 +472,19 @@ fn validate_package_dir(
         let entry = entry?;
         let path = entry.path();
         let file_name = entry.file_name().to_string_lossy().to_string();
+        if is_ignored_path(ignore, project_dir, &path) {
+            continue;
+        }
         if !allowed.contains(&file_name) && !is_license_file(&file_name) {
+            // A package include list selects archive files, not every development
+            // directory in the source checkout. Still reject selected forbidden files.
+            if ignore.is_some_and(|rules| rules.include.is_some())
+                && path.is_dir()
+                && !fs::symlink_metadata(&path)?.file_type().is_symlink()
+                && !validate_tree(&path, project_dir, ignore)?
+            {
+                continue;
+            }
             bail!("top-level entry `{file_name}` is not allowed in a Dal package archive");
         }
 
@@ -272,6 +529,48 @@ fn validate_package_dir(
     Ok(())
 }
 
+fn sorted_entries(path: &Path) -> Result<Vec<fs::DirEntry>> {
+    let mut entries = fs::read_dir(path)?
+        .take(MAX_ARCHIVE_ENTRIES + 1)
+        .collect::<io::Result<Vec<_>>>()?;
+    if entries.len() > MAX_ARCHIVE_ENTRIES {
+        bail!("package contains too many entries");
+    }
+    entries.sort_by_key(|entry| entry.file_name());
+    Ok(entries)
+}
+fn validate_pack_budget(
+    path: &Path,
+    root: &Path,
+    ignore: Option<&DalIgnore>,
+    budget: &mut (usize, u64),
+) -> Result<()> {
+    if path.strip_prefix(root)?.components().count() > 64 {
+        bail!("package nesting exceeds limit");
+    }
+    for entry in sorted_entries(path)? {
+        if is_ignored_path(ignore, root, &entry.path()) {
+            continue;
+        }
+        let metadata = entry.path().symlink_metadata()?;
+        if metadata.file_type().is_symlink() {
+            bail!("symlinks are not allowed in Dal packages");
+        }
+        budget.0 += 1;
+        budget.1 = budget
+            .1
+            .checked_add(metadata.len())
+            .context("package size overflow")?;
+        if budget.0 > MAX_ARCHIVE_ENTRIES || budget.1 > MAX_UNCOMPRESSED_BYTES {
+            bail!("package exceeds archive limits");
+        }
+        if metadata.is_dir() {
+            validate_pack_budget(&entry.path(), root, ignore, budget)?;
+        }
+    }
+    Ok(())
+}
+
 fn append_allowed_entries(
     builder: &mut Builder<GzEncoder<Vec<u8>>>,
     project_dir: &Path,
@@ -284,8 +583,7 @@ fn append_allowed_entries(
         Path::new(root_name).join("dal.toml"),
     )?;
 
-    for entry in fs::read_dir(project_dir)? {
-        let entry = entry?;
+    for entry in sorted_entries(project_dir)? {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = entry.path();
         if is_ignored_path(ignore, project_dir, &path) {
@@ -323,8 +621,7 @@ fn append_tree(
     project_dir: &Path,
     ignore: Option<&DalIgnore>,
 ) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
-        let entry = entry?;
+    for entry in sorted_entries(dir)? {
         let path = entry.path();
         if is_ignored_path(ignore, project_dir, &path) {
             continue;
@@ -339,7 +636,13 @@ fn append_tree(
             .unwrap_or(&path);
         let archive_path = root.join(rel);
         if meta.is_dir() {
-            builder.append_dir(&archive_path, &path)?;
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(EntryType::Directory);
+            header.set_size(0);
+            header.set_mode(0o755);
+            header.set_mtime(0);
+            header.set_cksum();
+            builder.append_data(&mut header, &archive_path, io::empty())?;
             append_tree(builder, &path, anchor, root, project_dir, ignore)?;
         } else if meta.is_file() {
             append_file(builder, &path, archive_path)?;
@@ -358,13 +661,32 @@ fn append_file(
     if meta.file_type().is_symlink() {
         bail!("symlinks are not allowed in Dal packages");
     }
+    if !meta.is_file() {
+        bail!("package entries must be regular files");
+    }
+    if meta.len() > MAX_UNCOMPRESSED_BYTES {
+        bail!("package file exceeds archive limit");
+    }
+    let mut header = tar::Header::new_gnu();
+    header.set_size(meta.len());
+    header.set_mode(0o644);
+    header.set_mtime(0);
+    header.set_cksum();
     builder
-        .append_path_with_name(source, archive_path)
+        .append_data(
+            &mut header,
+            archive_path,
+            fs::File::open(source)?.take(meta.len()),
+        )
         .with_context(|| format!("cannot archive {}", source.display()))?;
     Ok(())
 }
 
-fn validate_tree(path: &Path, project_dir: &Path, ignore: Option<&DalIgnore>) -> Result<()> {
+fn validate_tree(path: &Path, project_dir: &Path, ignore: Option<&DalIgnore>) -> Result<bool> {
+    if path.strip_prefix(project_dir)?.components().count() > 64 {
+        bail!("package nesting exceeds limit");
+    }
+    let mut selected = false;
     for entry in fs::read_dir(path).with_context(|| format!("cannot read {}", path.display()))? {
         let entry = entry?;
         if is_ignored_path(ignore, project_dir, &entry.path()) {
@@ -376,16 +698,17 @@ fn validate_tree(path: &Path, project_dir: &Path, ignore: Option<&DalIgnore>) ->
             bail!("symlinks are not allowed in Dal packages");
         }
         if meta.is_dir() {
-            validate_tree(&entry.path(), project_dir, ignore)?;
+            selected |= validate_tree(&entry.path(), project_dir, ignore)?;
         } else if meta.is_file() {
             validate_file(&entry.path(), project_dir)?;
+            selected = true;
         }
     }
     let relative = path.strip_prefix(project_dir).unwrap_or(path);
     if !is_safe_relative_path(relative) {
         bail!("package contains unsafe path `{}`", relative.display());
     }
-    Ok(())
+    Ok(selected)
 }
 
 fn validate_file(path: &Path, project_dir: &Path) -> Result<()> {
@@ -418,14 +741,51 @@ fn package_root_name(manifest: &DalManifest) -> String {
     format!("{}-{}", manifest.package.name, manifest.package.version)
 }
 
-fn load_dalignore(project_dir: &Path) -> Result<Option<DalIgnore>> {
+fn load_dalignore(project_dir: &Path, manifest: &DalManifest) -> Result<Option<DalIgnore>> {
     let ignore_path = project_dir.join(".dalignore");
-    if !ignore_path.is_file() {
-        return Ok(None);
-    }
-    let raw = fs::read_to_string(&ignore_path)
-        .with_context(|| format!("cannot read {}", ignore_path.display()))?;
+    let raw = if ignore_path.is_file() {
+        fs::read_to_string(&ignore_path)
+            .with_context(|| format!("cannot read {}", ignore_path.display()))?
+    } else {
+        String::new()
+    };
     let mut builder = GlobSetBuilder::new();
+    for pattern in [
+        ".git",
+        ".git/**",
+        "target",
+        "target/**",
+        "node_modules",
+        "node_modules/**",
+        ".env",
+        ".env.*",
+        "**/.env",
+        "**/.env.*",
+    ] {
+        builder.add(Glob::new(pattern)?);
+    }
+    let mut include_builder = GlobSetBuilder::new();
+    let mut has_include = false;
+    for key in ["include", "exclude"] {
+        if let Some(value) = manifest.package.additional_metadata.get(key) {
+            for pattern in value
+                .as_array()
+                .context("package include/exclude must be a string array")?
+            {
+                let pattern = pattern
+                    .as_str()
+                    .context("package include/exclude must contain strings")?;
+                for normalized in normalize_ignore_patterns(pattern) {
+                    if key == "include" {
+                        has_include = true;
+                        include_builder.add(Glob::new(&normalized)?);
+                    } else {
+                        builder.add(Glob::new(&normalized)?);
+                    }
+                }
+            }
+        }
+    }
     for (idx, raw_line) in raw.lines().enumerate() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -445,7 +805,14 @@ fn load_dalignore(project_dir: &Path) -> Result<Option<DalIgnore>> {
     let set = builder
         .build()
         .context("cannot compile .dalignore patterns")?;
-    Ok(Some(DalIgnore { set }))
+    Ok(Some(DalIgnore {
+        set,
+        include: if has_include {
+            Some(include_builder.build()?)
+        } else {
+            None
+        },
+    }))
 }
 
 fn normalize_ignore_patterns(pattern: &str) -> Vec<String> {
@@ -468,7 +835,20 @@ fn is_ignored_path(ignore: Option<&DalIgnore>, project_dir: &Path, path: &Path) 
         return false;
     };
     let rel = relative.to_string_lossy().replace('\\', "/");
-    !rel.is_empty() && ignore.set.is_match(rel)
+    if rel.is_empty() {
+        return false;
+    }
+    if ignore.set.is_match(&rel) {
+        return true;
+    }
+    // Traverse directories even with include filters; always ship manifest/lock.
+    if path.is_dir() || matches!(rel.as_str(), "dal.toml" | "dal.lock") {
+        return false;
+    }
+    ignore
+        .include
+        .as_ref()
+        .is_some_and(|set| !set.is_match(rel))
 }
 
 #[cfg(test)]
@@ -476,6 +856,70 @@ mod tests {
     use super::*;
     use fidan_driver::dal::module_dir_name;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn include_selection_ignores_development_directories_but_rejects_forbidden_selected_entries()
+    -> Result<()> {
+        let root = make_temp_dir("fidan_unselected_directory");
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join("scripts"))?;
+        fs::write(
+            root.join("src/init.fdn"),
+            "action version returns integer { return 1 }\n",
+        )?;
+        fs::write(root.join("scripts/check.mjs"), "console.log('local only');")?;
+        let manifest = "[package]\nname='selection'\nversion='1.0.0'\ninclude=['src/**']\n";
+        fs::write(root.join("dal.toml"), manifest)?;
+        let built = build_package_archive(&root)?;
+        visit_archive(&built.archive_bytes, |path, _, _| {
+            assert!(!path.contains("scripts"));
+            Ok(())
+        })?;
+        fs::write(
+            root.join("dal.toml"),
+            manifest.replace("['src/**']", "['src/**', 'scripts/**']"),
+        )?;
+        assert!(
+            build_package_archive(&root)
+                .unwrap_err()
+                .to_string()
+                .contains("top-level entry")
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn packaging_is_reproducible_and_honors_selection_without_shipping_private_files() -> Result<()>
+    {
+        let root = make_temp_dir("fidan_selection");
+        fs::create_dir_all(root.join("src"))?;
+        fs::create_dir_all(root.join(".git"))?;
+        fs::write(root.join("src/init.fdn"), "action hello {}\n")?;
+        fs::write(root.join("src/private.fdn"), "private")?;
+        fs::write(root.join("src/.env"), "fake-only")?;
+        fs::write(root.join(".env"), "fake-only")?;
+        fs::write(root.join(".git/config"), "local metadata")?;
+        fs::write(root.join("README.md"), "selection")?;
+        fs::write(
+            root.join("dal.toml"),
+            "[package]\nname=\"selection\"\nversion=\"0.1.0\"\ninclude=[\"src/**\",\"README.md\"]\nexclude=[\"src/private.fdn\"]\n",
+        )?;
+        let first = build_package_archive(&root)?;
+        let second = build_package_archive(&root)?;
+        assert_eq!(first.archive_bytes, second.archive_bytes);
+        let mut files = Vec::new();
+        visit_archive(&first.archive_bytes, |name, kind, _| {
+            if kind.is_file() {
+                files.push(name.to_string());
+            }
+            Ok(())
+        })?;
+        files.sort();
+        assert_eq!(files, vec!["README.md", "dal.toml", "src/init.fdn"]);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn module_dir_name_normalizes_for_imports() {
@@ -660,6 +1104,126 @@ version = "0.1.0"
         );
 
         fs::remove_dir_all(&sandbox).ok();
+    }
+
+    const TEST_MANIFEST: &[u8] = b"[package]\nname = \"demo\"\nversion = \"0.1.0\"\n";
+
+    fn crafted_archive(extra: &[(&str, EntryType, &[u8])]) -> Vec<u8> {
+        let encoder = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = Builder::new(encoder);
+        for (path, kind, contents) in [
+            ("demo-0.1.0/dal.toml", EntryType::Regular, TEST_MANIFEST),
+            (
+                "demo-0.1.0/src/init.fdn",
+                EntryType::Regular,
+                b"original".as_slice(),
+            ),
+        ]
+        .into_iter()
+        .chain(extra.iter().copied())
+        {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(kind);
+            header.set_mode(0o644);
+            header.set_size(contents.len() as u64);
+            // Raw names deliberately bypass Builder's own path sanitization.
+            header.as_mut_bytes()[..path.len()].copy_from_slice(path.as_bytes());
+            header.set_cksum();
+            builder.append(&header, contents).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn archive_consumers_reject_unsafe_and_remapped_duplicate_entries() {
+        for path in [
+            "demo-0.1.0/../escape",
+            "demo-0.1.0/src/../escape",
+            "demo-0.1.0/src\\..\\escape",
+            "demo-0.1.0/src/C:/escape",
+            "demo-0.1.0/src/NUL.txt",
+            "demo-0.1.0/src/name.",
+            "demo-0.1.0/src/file:stream",
+            "demo-0.1.0/src/init.fdn",
+            "demo-0.1.0/src/dal.toml",
+            "/absolute",
+            "another-0.1.0/src/other.fdn",
+        ] {
+            let bytes = crafted_archive(&[(path, EntryType::Regular, b"attack")]);
+            assert!(
+                read_manifest_from_archive(&bytes).is_err(),
+                "accepted {path}"
+            );
+        }
+        for kind in [
+            EntryType::Symlink,
+            EntryType::Link,
+            EntryType::Fifo,
+            EntryType::Char,
+        ] {
+            let bytes = crafted_archive(&[("demo-0.1.0/src/link", kind, b"")]);
+            assert!(
+                read_manifest_from_archive(&bytes).is_err(),
+                "accepted {kind:?}"
+            );
+        }
+        let case_aliases = crafted_archive(&[
+            ("demo-0.1.0/src/Util/a.fdn", EntryType::Regular, b"a"),
+            ("demo-0.1.0/src/util/b.fdn", EntryType::Regular, b"b"),
+        ]);
+        assert!(read_manifest_from_archive(&case_aliases).is_err());
+    }
+
+    #[test]
+    fn failed_forced_install_preserves_existing_package_and_cleans_staging() -> Result<()> {
+        let sandbox = make_temp_dir("dal_atomic_install");
+        let bytes = crafted_archive(&[]);
+        let target = install_downloaded_package(&bytes, "demo", "0.1.0", &sandbox, false)?;
+        let bad = crafted_archive(&[("demo-0.1.0/src/late", EntryType::Symlink, b"")]);
+        assert!(install_downloaded_package(&bad, "demo", "0.1.0", &sandbox, true).is_err());
+        assert_eq!(fs::read(target.join("init.fdn"))?, b"original");
+        assert_eq!(fs::read_dir(target.parent().unwrap())?.count(), 1);
+        fs::write(target.join("init.fdn"), b"modified cache")?;
+        assert!(install_downloaded_package(&bytes, "demo", "0.1.0", &sandbox, false).is_err());
+        install_downloaded_package(&bytes, "demo", "0.1.0", &sandbox, true)?;
+        assert_eq!(fs::read(target.join("init.fdn"))?, b"original");
+        assert_eq!(fs::read_dir(target.parent().unwrap())?.count(), 1);
+        fs::remove_dir_all(sandbox)?;
+        Ok(())
+    }
+
+    #[test]
+    fn archive_validation_checks_crc_expansion_and_package_identity() {
+        let mut bytes = crafted_archive(&[]);
+        let crc = bytes.len() - 8;
+        bytes[crc] ^= 1;
+        assert!(read_manifest_from_archive(&bytes).is_err());
+        let bomb = vec![0_u8; 1024 * 1024];
+        assert!(
+            read_manifest_from_archive(&crafted_archive(&[(
+                "demo-0.1.0/assets/bomb",
+                EntryType::Regular,
+                &bomb
+            )]))
+            .is_err()
+        );
+        let sandbox = make_temp_dir("dal_identity_install");
+        assert!(
+            install_downloaded_package(&crafted_archive(&[]), "other", "0.1.0", &sandbox, false)
+                .is_err()
+        );
+        assert!(!package_install_dir(&sandbox, "other", "0.1.0").exists());
+        assert!(
+            install_downloaded_package(
+                &crafted_archive(&[]),
+                "../escape",
+                "0.1.0",
+                &sandbox,
+                false
+            )
+            .is_err()
+        );
+        fs::remove_dir_all(sandbox).unwrap();
     }
 
     fn make_temp_dir(prefix: &str) -> PathBuf {

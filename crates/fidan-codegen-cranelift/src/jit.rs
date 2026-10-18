@@ -880,6 +880,16 @@ impl JitCompiler {
         // The raw JIT ABI has no implicit boxing or numeric conversion. Fall
         // back when a call/return would reinterpret a scalar as a boxed pointer.
         for block in &func.blocks {
+            // The raw JIT branch ABI is scalar-only. Boxed conditions must use
+            // the existing interpreter fallback rather than test pointer bits.
+            if let Terminator::Branch { cond, .. } = &block.terminator
+                && !matches!(
+                    jit_operand_type(cond, &local_types),
+                    Some(MirTy::Boolean | MirTy::Integer | MirTy::Float | MirTy::Handle)
+                )
+            {
+                return None;
+            }
             for phi in &block.phis {
                 if phi.operands.iter().any(|(_, operand)| {
                     jit_operand_type(operand, &local_types).as_ref() != local_types.get(&phi.result)
@@ -2495,6 +2505,23 @@ mod tests {
             let exception = unsafe { Box::from_raw(fidan_runtime::ffi::fdn_catch_exception()) };
             assert!(fidan_runtime::display(&exception).contains(code));
         }
+    }
+
+    #[test]
+    fn boxed_branch_condition_uses_interpreter_fallback() {
+        let (mir, interner) = lower(
+            "action choose with (condition oftype flexible) returns integer { if condition { return 1 }; return 0 }",
+        );
+        let function = mir
+            .functions
+            .iter()
+            .find(|f| interner.resolve(f.name).as_ref() == "choose")
+            .unwrap();
+        assert!(
+            !JitCompiler::new()
+                .compile_function(function, &mir, &interner)
+                .is_native()
+        );
     }
 
     #[test]

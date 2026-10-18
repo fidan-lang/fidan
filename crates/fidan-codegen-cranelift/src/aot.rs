@@ -568,6 +568,7 @@ struct RuntimeDecls {
     fn_table_init: cranelift_module::FuncId,
     fn_table_set: cranelift_module::FuncId,
     fn_name_register: cranelift_module::FuncId,
+    namespace_export_register: cranelift_module::FuncId,
     call_dynamic: cranelift_module::FuncId,
     validate_call: cranelift_module::FuncId,
     prepare_argument: cranelift_module::FuncId,
@@ -762,6 +763,10 @@ impl RuntimeDecls {
             fn_table_init: decl!("fdn_fn_table_init", sig!((i64t) -> void)),
             fn_table_set: decl!("fdn_fn_table_set", sig!((i64t, i64t) -> void)),
             fn_name_register: decl!("fdn_fn_name_register", sig!((p, i64t, i64t) -> void)),
+            namespace_export_register: decl!(
+                "fdn_namespace_export_register",
+                sig!((p, i64t, p, i64t) -> void)
+            ),
             call_dynamic: decl!("fdn_call_dynamic", sig!((p, p, i64t) -> ptr)),
             validate_call: decl!("fdn_validate_call", sig!((i64t, i64t, i64t) -> i8)),
             prepare_argument: decl!("fdn_prepare_argument", sig!((p, p, i8t) -> ptr)),
@@ -2048,9 +2053,18 @@ fn lower_terminator(
             then_bb,
             else_bb,
         } => {
-            let cv = lower_operand(builder, cl_vars, cond);
-            // brif requires integer condition; widen if needed.
-            let cv64 = widen_to_i64(builder, cv, local_types, cond);
+            let cv64 = if matches!(
+                operand_mir_ty(local_types, cond),
+                MirTy::Boolean | MirTy::Integer | MirTy::Handle
+            ) {
+                let value = lower_operand(builder, cl_vars, cond);
+                widen_to_i64(builder, value, local_types, cond)
+            } else {
+                // A boxed false/nothing is a non-null pointer. Inspect its value,
+                // matching interpreter branches and LLVM's existing fdn_truthy path.
+                let boxed = lower_operand_boxed(builder, cl_vars, local_types, cond, rt, module)?;
+                call_rt(module, builder, rt.truthy, &[boxed])?.unwrap()
+            };
             let then_args = collect_phi_args(
                 module,
                 rt,
@@ -3775,6 +3789,19 @@ fn emit_c_main(
             let (np, nl) = str_const(module, &mut builder, name_str)?;
             let idx = builder.ins().iconst(I64, i as i64);
             builder.ins().call(reg_ref, &[np, nl, idx]);
+        }
+    }
+
+    for decl in &program.use_decls {
+        if decl.re_export && decl.specific_names.is_none() && decl.alias.contains("::") {
+            let (alias, alias_len) = str_const(module, &mut builder, &decl.alias)?;
+            let (target, target_len) = str_const(module, &mut builder, &decl.module)?;
+            call_rt(
+                module,
+                &mut builder,
+                rt.namespace_export_register,
+                &[alias, alias_len, target, target_len],
+            )?;
         }
     }
 

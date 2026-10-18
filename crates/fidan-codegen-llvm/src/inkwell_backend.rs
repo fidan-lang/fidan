@@ -630,6 +630,30 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             }
         }
 
+        let exports = self
+            .backend
+            .program()
+            .use_decls
+            .iter()
+            .filter(|decl| {
+                decl.re_export && decl.specific_names.is_none() && decl.alias.contains("::")
+            })
+            .map(|decl| (decl.alias.clone(), decl.module.clone()))
+            .collect::<Vec<_>>();
+        for (alias, target) in exports {
+            let (alias_ptr, alias_len) = self.module_string_bytes(&alias);
+            let (target_ptr, target_len) = self.module_string_bytes(&target);
+            self.call_runtime_void(
+                "fdn_namespace_export_register",
+                &[
+                    alias_ptr.into(),
+                    alias_len.into(),
+                    target_ptr.into(),
+                    target_len.into(),
+                ],
+            )?;
+        }
+
         if let Some(init) = self.backend.init_function() {
             trace(&format!(
                 "inkwell:emit_entry_main:init_candidate:{}",
@@ -1245,6 +1269,18 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             );
         }
 
+        self.declare_runtime_fn(
+            "fdn_namespace_export_register",
+            self.context.void_type().fn_type(
+                &[
+                    self.ptr_type.into(),
+                    self.i64_type.into(),
+                    self.ptr_type.into(),
+                    self.i64_type.into(),
+                ],
+                false,
+            ),
+        );
         self.declare_runtime_fn(
             "fdn_fn_name_register",
             self.context.void_type().fn_type(

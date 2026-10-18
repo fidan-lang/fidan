@@ -153,18 +153,21 @@ pub fn collect_effective_local_types(
                 if is_primitive_scalar(map.get(&phi.result.0).unwrap_or(&MirTy::Dynamic)) {
                     continue;
                 }
+                // A boxed join may only become scalar when every incoming value
+                // proves the same scalar type. One scalar arm cannot describe
+                // another arm containing Nothing, a string or an unknown value.
                 let inferred = if is_primitive_scalar(&phi.ty) {
                     Some(phi.ty.clone())
                 } else {
-                    phi.operands.iter().find_map(|(_, operand)| match operand {
-                        Operand::Local(local) => map
-                            .get(&local.0)
-                            .filter(|ty| is_primitive_scalar(ty))
-                            .cloned(),
+                    let mut incoming = phi.operands.iter().map(|(_, operand)| match operand {
+                        Operand::Local(local) => map.get(&local.0).cloned(),
                         Operand::Const(MirLit::Float(_)) => Some(MirTy::Float),
                         Operand::Const(MirLit::Int(_)) => Some(MirTy::Integer),
                         Operand::Const(MirLit::Bool(_)) => Some(MirTy::Boolean),
                         _ => None,
+                    });
+                    incoming.next().flatten().filter(|first| {
+                        is_primitive_scalar(first) && incoming.all(|ty| ty.as_ref() == Some(first))
                     })
                 };
                 if let Some(ty) = inferred {

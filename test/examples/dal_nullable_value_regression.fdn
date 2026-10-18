@@ -1,0 +1,24 @@
+# Nullable values keep their runtime tags through joins, copies and returns.
+@precompile
+action choose_bool with (certain flag oftype boolean) returns boolean { return false if flag else nothing }
+@precompile
+action choose_int with (certain flag oftype boolean) returns integer { return 0 if flag else nothing }
+@precompile
+action choose_float with (certain flag oftype boolean) returns float { return 0.0 if flag else nothing }
+for flag in [false, true] {
+    var value = choose_bool(flag)
+    var copied = value
+    if flag { assert_eq(type(copied), "boolean"); assert_eq(copied, false) }
+    else { assert_eq(type(copied), "nothing"); assert_eq(copied, nothing) }
+    var number = choose_int(flag)
+    if flag { assert_eq(type(number), "integer"); assert_eq(number, 0) }
+    else { assert_eq(type(number), "nothing"); assert_eq(number, nothing) }
+    var decimal = choose_float(flag)
+    if flag { assert_eq(type(decimal), "float"); assert_eq(decimal, 0.0) }
+    else { assert_eq(type(decimal), "nothing"); assert_eq(decimal, nothing) }
+}
+var settings oftype flexible = {}
+for kind in ["flag", "value"] { settings[kind] = false if kind == "flag" else nothing }
+assert_eq(type(settings["flag"]), "boolean")
+assert_eq(type(settings["value"]), "nothing")
+print("nullable values preserved")

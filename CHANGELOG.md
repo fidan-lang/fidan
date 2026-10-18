@@ -12,6 +12,22 @@ compiler releases.
 
 ---
 
+## Unreleased — Dal relaunch integration candidate
+
+- Verify registry archive checksums before install; bound and validate archives,
+  responses, cache contents and portable paths; use staging/rollback for replacement.
+- Preserve manifest metadata, support optional compiler SemVer requirements and
+  resolve transitive constraints/features with bounded deterministic backtracking.
+- Preserve exact checksum locks for yanked artifacts; serialize concurrent CLI updates
+  and atomically replace metadata with rollback on a second-file failure.
+- Fix package/module action, private state and re-export identity, nullable scalar
+  representation and Dynamic native conditions exposed by real package execution.
+- Enforce existing interpreter sandbox policy for std.env and canonical filesystem
+  boundaries. Update the compatible rustls security patch.
+- Require LLVM backend protocol 6 for matching module/export lowering. This needs a
+  future separately versioned compiler/helper release; existing published assets and
+  package versions are unchanged by this local preparation.
+
 ## [1.0.16] — 2026-10-07
 
 ### Fixed

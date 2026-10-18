@@ -23,9 +23,9 @@ pub use ai_analysis::{
     AiTypedBinding,
 };
 pub use frontend::{
-    FrontendOutput, ImportFilter, ResolvedImport, UnresolvedImport, collect_file_import_paths,
-    compile_file_to_mir, compile_source_to_mir, detect_import_cycles, filter_hir_module,
-    pre_register_hir_into_tc,
+    FrontendOutput, ImportFilter, ResolvedImport, UnresolvedImport, bind_hir_file_imports,
+    collect_file_import_paths, collect_file_import_paths_with_root, compile_file_to_mir,
+    compile_source_to_mir, detect_import_cycles, filter_hir_module, pre_register_hir_into_tc,
 };
 pub use install::{
     ActiveVersionMetadata, EffectiveBackend, InstallEntry, InstallsMetadata, ResolvedToolchain,

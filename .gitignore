@@ -61,3 +61,6 @@ LOCAL/
 *~
 .env
 .env.*
+
+# Keep the coordinated audit plan reviewable.
+!/AUDIT_PLAN.md

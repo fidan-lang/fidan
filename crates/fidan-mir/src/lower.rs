@@ -21,6 +21,7 @@ use fidan_hir::{
     HirExprKind, HirExternAbi, HirExternDecl, HirFunction, HirInterpPart, HirModule, HirStmt,
 };
 use fidan_lexer::{Symbol, SymbolInterner};
+use fidan_source::FileId;
 use fidan_typeck::FidanType;
 
 use crate::mir::{
@@ -367,6 +368,7 @@ struct FnCtx<'p> {
     global_map: FxHashMap<Symbol, GlobalId>,
     /// Maps function name → `FunctionId` (populated by pre-pass; top-level fns only).
     fn_map: FxHashMap<Symbol, FunctionId>,
+    function_scopes: Rc<FxHashMap<FileId, FxHashMap<Symbol, FunctionId>>>,
     /// Maps class name → `FunctionId` of its `new` constructor (for `ClassName(args)` calls).
     obj_map: FxHashMap<Symbol, FunctionId>,
     /// Whether the current block has been terminated (Return / Goto etc.).
@@ -408,7 +410,7 @@ struct FnCtx<'p> {
     /// Namespace aliases introduced by `use std.foo as bar` / `use foo as bar`.
     /// Used to lower `bar.method(...)` directly to a namespace literal instead
     /// of loading a boxed namespace sentinel global first.
-    namespace_aliases: FxHashMap<Symbol, String>,
+    namespace_aliases: FxHashMap<(FileId, Symbol), MirLit>,
     /// True only for the top-level init function (FunctionId(0)).  Used to
     /// decide whether a `VarDecl` should also write to the global table.
     is_init_fn: bool,
@@ -433,16 +435,34 @@ impl<'p> FnCtx<'p> {
         self.func_mut().alloc_block()
     }
 
-    fn namespace_receiver(&self, expr: &HirExpr) -> Option<Operand> {
+    fn imported_value(&self, expr: &HirExpr) -> Option<Operand> {
         if let HirExprKind::Var(name) = &expr.kind {
             return self
                 .namespace_aliases
-                .get(name)
+                .get(&(expr.span.file, *name))
+                .filter(|_| self.lookup_var(*name).is_none())
                 .cloned()
-                .map(MirLit::Namespace)
                 .map(Operand::Const);
         }
         None
+    }
+
+    fn namespace_receiver(&self, expr: &HirExpr) -> Option<Operand> {
+        match self.imported_value(expr) {
+            namespace @ Some(Operand::Const(MirLit::Namespace(_))) => namespace,
+            _ => None,
+        }
+    }
+
+    fn function_id(&self, name: Symbol, file: FileId) -> Option<FunctionId> {
+        if self.lookup_var(name).is_some() {
+            return None;
+        }
+        self.function_scopes
+            .get(&file)
+            .unwrap_or(&self.fn_map)
+            .get(&name)
+            .copied()
     }
 
     // ── Instruction emission ─────────────────────────────────────────────────
@@ -592,7 +612,9 @@ impl<'p> FnCtx<'p> {
             HirExprKind::Var(name) => {
                 if let Some(local) = self.lookup_var(*name) {
                     Operand::Local(local)
-                } else if let Some(fid) = self.fn_map.get(name).copied() {
+                } else if let Some(namespace) = self.imported_value(expr) {
+                    namespace
+                } else if let Some(fid) = self.function_id(*name, expr.span.file) {
                     // Function/action referenced as a first-class value.
                     Operand::Const(MirLit::FunctionRef(fid.0))
                 } else if let Some(&gid) = self.global_map.get(name) {
@@ -862,7 +884,7 @@ impl<'p> FnCtx<'p> {
                         }
                     }
                     HirExprKind::Var(name) => {
-                        if let Some(fid) = self.fn_map.get(name).copied() {
+                        if let Some(fid) = self.function_id(*name, expr.span.file) {
                             // ⑤ Extension action free call: prepend nothing for implicit `this`.
                             if self.fn_is_extension.contains(name) {
                                 let dest = self.alloc_local();
@@ -881,6 +903,8 @@ impl<'p> FnCtx<'p> {
                         } else if let Some(&local) = self.env.get(name) {
                             // Local variable holding a function/action value — call dynamically.
                             Callee::Dynamic(Operand::Local(local))
+                        } else if let Some(imported) = self.imported_value(callee) {
+                            Callee::Dynamic(imported)
                         } else if let Some(&gid) = self.global_map.get(name) {
                             // Global variable holding a function/action value — load then call.
                             let loaded = self.alloc_local();
@@ -1038,7 +1062,7 @@ impl<'p> FnCtx<'p> {
                     match &callee.kind {
                         // Direct free-function: `spawn fn(args)` — statically resolved.
                         HirExprKind::Var(name) => {
-                            if let Some(&fn_id) = self.fn_map.get(name) {
+                            if let Some(fn_id) = self.function_id(*name, expr.span.file) {
                                 let arg_ops: Vec<Operand> =
                                     args.iter().map(|a| self.lower_expr(&a.value)).collect();
                                 let dest = self.alloc_local();
@@ -1572,7 +1596,7 @@ impl<'p> FnCtx<'p> {
                                 }
                             }
                             HirExprKind::Var(name) => {
-                                if let Some(fid) = self.fn_map.get(name).copied() {
+                                if let Some(fid) = self.function_id(*name, expr.span.file) {
                                     // ⑤ Extension action free call as statement: prepend nothing for `this`.
                                     if self.fn_is_extension.contains(name) {
                                         let mut call_args = vec![Operand::Const(MirLit::Nothing)];
@@ -1591,6 +1615,8 @@ impl<'p> FnCtx<'p> {
                                 } else if let Some(&local) = self.env.get(name) {
                                     // Local variable holding a function/action value — call dynamically.
                                     Callee::Dynamic(Operand::Local(local))
+                                } else if let Some(imported) = self.imported_value(callee) {
+                                    Callee::Dynamic(imported)
                                 } else if let Some(&gid) = self.global_map.get(name) {
                                     // Global variable holding a function/action value — load then call.
                                     let loaded = self.alloc_local();
@@ -2941,13 +2967,30 @@ pub fn lower_program(
     // fn_name → class it extends (extension actions only)
     let mut ext_fn_map: FxHashMap<Symbol, Symbol> = FxHashMap::default();
 
+    let mut function_scopes: FxHashMap<FileId, FxHashMap<Symbol, FunctionId>> =
+        FxHashMap::default();
+    for (file, _) in &hir.file_paths {
+        function_scopes.entry(*file).or_default();
+    }
     for func in &hir.functions {
         let id = FunctionId(prog.functions.len() as u32);
         fn_map.insert(func.name, id);
+        function_scopes
+            .entry(func.span.file)
+            .or_default()
+            .insert(func.name, id);
         fn_ids_per_hir_fn.push(id);
         prog.functions.push(MirFunction::new(
             id,
-            func.name,
+            if func.span.file == hir.file {
+                func.name
+            } else {
+                interner.intern(&format!(
+                    "__module_{}::{}",
+                    func.span.file.0,
+                    interner.resolve(func.name)
+                ))
+            },
             fidan_ty_to_mir(&func.return_ty),
         ));
         prog.functions.last_mut().unwrap().precompile = func.precompile;
@@ -2957,6 +3000,33 @@ pub fn lower_program(
             ext_fn_map.insert(func.name, cls);
         }
     }
+
+    let import_targets: FxHashMap<_, _> = hir
+        .use_decls
+        .iter()
+        .filter_map(|decl| {
+            let path = decl.target_path.as_ref()?;
+            let (file, _) = hir
+                .file_paths
+                .iter()
+                .find(|(_, candidate)| candidate == path)?;
+            Some((decl.span, *file))
+        })
+        .collect();
+    for decl in &hir.use_decls {
+        if let Some(target) = import_targets.get(&decl.span)
+            && let Some(names) = &decl.specific_names
+        {
+            let exported = function_scopes.get(target).cloned().unwrap_or_default();
+            let scope = function_scopes.entry(decl.span.file).or_default();
+            for (name, id) in exported {
+                if names.is_empty() || names.iter().any(|n| interner.resolve(name).as_ref() == n) {
+                    scope.entry(name).or_insert(id);
+                }
+            }
+        }
+    }
+    let function_scopes = Rc::new(function_scopes);
 
     let fn_is_extension: FxHashSet<Symbol> = ext_fn_map.keys().copied().collect();
 
@@ -3060,7 +3130,7 @@ pub fn lower_program(
     // first so every symbol retains its GID across recompilations.
     // For non-REPL compilation `existing_globals` is empty and this is a no-op.
     let mut global_map: FxHashMap<Symbol, GlobalId> = FxHashMap::default();
-    let mut namespace_aliases: FxHashMap<Symbol, String> = FxHashMap::default();
+    let mut namespace_aliases: FxHashMap<(FileId, Symbol), MirLit> = FxHashMap::default();
     for (i, name) in existing_globals.iter().enumerate() {
         let sym = interner.intern(name.as_str());
         let gid = GlobalId(i as u32);
@@ -3081,7 +3151,10 @@ pub fn lower_program(
             let module = &decl.module_path[1];
             let ns_alias = decl.alias.clone().unwrap_or_else(|| module.clone());
             let alias_sym = interner.intern(&ns_alias);
-            namespace_aliases.insert(alias_sym, module.clone());
+            namespace_aliases.insert(
+                (decl.span.file, alias_sym),
+                MirLit::Namespace(module.clone()),
+            );
             namespace_global_count += 1;
             if let std::collections::hash_map::Entry::Vacant(e) = global_map.entry(alias_sym) {
                 let gid = GlobalId(prog.globals.len() as u32);
@@ -3098,7 +3171,15 @@ pub fn lower_program(
                 .clone()
                 .unwrap_or_else(|| decl.module_path[0].clone());
             let alias_sym = interner.intern(&ns_alias);
-            namespace_aliases.insert(alias_sym, decl.module_path[0].clone());
+            namespace_aliases.insert(
+                (decl.span.file, alias_sym),
+                MirLit::Namespace(
+                    import_targets
+                        .get(&decl.span)
+                        .map(|file| format!("__module_{}", file.0))
+                        .unwrap_or_else(|| decl.module_path[0].clone()),
+                ),
+            );
             namespace_global_count += 1;
             if let std::collections::hash_map::Entry::Vacant(e) = global_map.entry(alias_sym) {
                 let gid = GlobalId(prog.globals.len() as u32);
@@ -3113,6 +3194,13 @@ pub fn lower_program(
             if decl.module_path.len() >= 2 {
                 for fn_name in names {
                     let fn_sym = interner.intern(fn_name);
+                    namespace_aliases.insert(
+                        (decl.span.file, fn_sym),
+                        MirLit::StdlibFn {
+                            module: decl.module_path[1].clone(),
+                            name: fn_name.clone(),
+                        },
+                    );
                     namespace_global_count += 1;
                     if let std::collections::hash_map::Entry::Vacant(e) = global_map.entry(fn_sym) {
                         let gid = GlobalId(prog.globals.len() as u32);
@@ -3159,26 +3247,74 @@ pub fn lower_program(
         }
     }
 
-    // Module-level `var` declarations -- registered after namespace globals.
-    // With stable GIDs, symbols already in the registry are skipped.
+    // Keep a file's private state separate from equally named package globals.
+    // Root names retain their REPL-compatible GIDs; imported names are qualified.
+    let mut global_scopes: FxHashMap<FileId, FxHashMap<Symbol, GlobalId>> = hir
+        .file_paths
+        .iter()
+        .map(|(file, _)| (*file, global_map.clone()))
+        .collect();
+    global_scopes
+        .entry(hir.file)
+        .or_insert_with(|| global_map.clone());
     for stmt in &hir.init_stmts {
-        if let HirStmt::VarDecl { name, ty, .. } = stmt
-            && !global_map.contains_key(name)
-        {
-            let gid = GlobalId(prog.globals.len() as u32);
-            prog.globals.push(MirGlobal {
-                name: *name,
-                ty: fidan_ty_to_mir(ty),
+        if let HirStmt::VarDecl { name, ty, span, .. } = stmt {
+            let qualified = if span.file == hir.file {
+                *name
+            } else {
+                interner.intern(&format!(
+                    "__module_{}::{}",
+                    span.file.0,
+                    interner.resolve(*name)
+                ))
+            };
+            let gid = *global_map.entry(qualified).or_insert_with(|| {
+                let id = GlobalId(prog.globals.len() as u32);
+                prog.globals.push(MirGlobal {
+                    name: qualified,
+                    ty: fidan_ty_to_mir(ty),
+                });
+                id
             });
-            global_map.insert(*name, gid);
+            global_scopes
+                .entry(span.file)
+                .or_default()
+                .insert(*name, gid);
+        }
+    }
+    for decl in &hir.use_decls {
+        if let Some(target) = import_targets.get(&decl.span)
+            && let Some(names) = &decl.specific_names
+        {
+            let imported = hir
+                .init_stmts
+                .iter()
+                .filter_map(|stmt| {
+                    if let HirStmt::VarDecl { name, span, .. } = stmt
+                        && span.file == *target
+                        && (names.is_empty()
+                            || names.iter().any(|n| interner.resolve(*name).as_ref() == n))
+                    {
+                        global_scopes
+                            .get(target)?
+                            .get(name)
+                            .copied()
+                            .map(|id| (*name, id))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+            let scope = global_scopes.entry(decl.span.file).or_default();
+            for (name, id) in imported {
+                scope.entry(name).or_insert(id);
+            }
         }
     }
     // Build FunctionId → param-name-order map for sorting named call args.
     let mut fn_param_names: FxHashMap<FunctionId, Vec<Symbol>> = FxHashMap::default();
-    for func in &hir.functions {
-        if let Some(&fid) = fn_map.get(&func.name) {
-            fn_param_names.insert(fid, func.params.iter().map(|p| p.name).collect());
-        }
+    for (func, &fid) in hir.functions.iter().zip(&fn_ids_per_hir_fn) {
+        fn_param_names.insert(fid, func.params.iter().map(|p| p.name).collect());
     }
     for obj in &hir.objects {
         for method in &obj.methods {
@@ -3234,8 +3370,12 @@ pub fn lower_program(
             fn_id,
             cur_bb: entry_bb,
             env: VarEnv::default(),
-            global_map: global_map.clone(),
+            global_map: global_scopes
+                .get(&func.span.file)
+                .unwrap_or(global_map)
+                .clone(),
             fn_map: fn_map.clone(),
+            function_scopes: Rc::clone(&function_scopes),
             obj_map: obj_map.clone(),
             terminated: false,
             this_reg: None,
@@ -3468,6 +3608,7 @@ pub fn lower_program(
             env: VarEnv::default(),
             global_map: global_map.clone(),
             fn_map: fn_map.clone(),
+            function_scopes: Rc::clone(&function_scopes),
             obj_map: obj_map.clone(),
             terminated: false,
             this_reg: None,
@@ -3518,7 +3659,10 @@ pub fn lower_program(
                 }
             } else if decl.module_path.len() == 1 && decl.specific_names.is_none() {
                 // User module: `use test2` → module_path = ["test2"].
-                let module = decl.module_path[0].clone();
+                let module = import_targets
+                    .get(&decl.span)
+                    .map(|file| format!("__module_{}", file.0))
+                    .unwrap_or_else(|| decl.module_path[0].clone());
                 let ns_alias = decl.alias.clone().unwrap_or_else(|| module.clone());
                 let alias_sym = interner.intern(&ns_alias);
                 let dest = ctx.alloc_local();
@@ -3602,7 +3746,18 @@ pub fn lower_program(
             }
         }
 
-        ctx.lower_stmts(&hir.init_stmts);
+        let mut source = None;
+        for stmt in &hir.init_stmts {
+            if source != Some(stmt.span().file) {
+                ctx.env = VarEnv::default();
+                ctx.global_map = global_scopes
+                    .get(&stmt.span().file)
+                    .unwrap_or(&global_map)
+                    .clone();
+                source = Some(stmt.span().file);
+            }
+            ctx.lower_stmt(stmt);
+        }
         if !ctx.terminated {
             ctx.set_terminator(Terminator::Return(None));
         }
@@ -3629,8 +3784,13 @@ pub fn lower_program(
                     fn_id: pf.fn_id,
                     cur_bb: entry_bb,
                     env: VarEnv::default(),
-                    global_map: global_map.clone(),
+                    global_map: body
+                        .first()
+                        .and_then(|stmt| global_scopes.get(&stmt.span().file))
+                        .unwrap_or(&global_map)
+                        .clone(),
                     fn_map: fn_map.clone(),
+                    function_scopes: Rc::clone(&function_scopes),
                     obj_map: obj_map.clone(),
                     terminated: false,
                     this_reg: None,
@@ -3704,8 +3864,12 @@ pub fn lower_program(
             fn_id: test_fn_id,
             cur_bb: entry_bb,
             env: VarEnv::default(),
-            global_map: global_map.clone(),
+            global_map: global_scopes
+                .get(&test_decl.span.file)
+                .unwrap_or(&global_map)
+                .clone(),
             fn_map: fn_map.clone(),
+            function_scopes: Rc::clone(&function_scopes),
             obj_map: obj_map.clone(),
             terminated: false,
             this_reg: None,
@@ -3758,7 +3922,10 @@ pub fn lower_program(
             // Stored so re-export chaining (`lib.mymod.fn()`) resolves in `get_field`.
             // `is_stdlib: false` prevents the alias from entering `stdlib_modules`,
             // keeping dispatch routed through `user_fn_map`.
-            let module = decl.module_path[0].clone();
+            let module = import_targets
+                .get(&decl.span)
+                .map(|file| format!("__module_{}", file.0))
+                .unwrap_or_else(|| decl.module_path[0].clone());
             let alias = decl.alias.clone().unwrap_or_else(|| module.clone());
             prog.use_decls.push(MirUseDecl {
                 module,
@@ -3768,6 +3935,29 @@ pub fn lower_program(
                 is_stdlib: false,
             });
         }
+    }
+
+    // Re-export lookup is scoped to the defining file, including renamed
+    // stdlib aliases and namespaces passed through flexible parameters.
+    for decl in &hir.use_decls {
+        if !decl.re_export || decl.specific_names.is_some() {
+            continue;
+        }
+        let module = if decl.module_path.len() >= 2 {
+            decl.module_path[1].clone()
+        } else if let Some(file) = import_targets.get(&decl.span) {
+            format!("__module_{}", file.0)
+        } else {
+            continue;
+        };
+        let alias = decl.alias.as_deref().unwrap_or(&module);
+        prog.use_decls.push(MirUseDecl {
+            module: module.clone(),
+            alias: format!("__module_{}::{alias}", decl.span.file.0),
+            specific_names: None,
+            re_export: true,
+            is_stdlib: decl.module_path.len() >= 2,
+        });
     }
 
     prog

@@ -1,0 +1,30 @@
+[package]
+name = "args"
+version = "0.1.0"
+fidan = ">=1.0.16, <2.0.0"
+description = "Small argument parser"
+license = "Apache-2.0"
+repository = "https://github.com/fidan-lang/args"
+homepage = "https://fidan.dev"
+docs = "https://docs.fidan.dev"
+readme = "README.md"
+keywords = ["cli", "arguments"]
+categories = ["command-line"]
+include = ["src/**", "README.md", "LICENSE"]
+exclude = ["tests/large/**"]
+
+[dependencies]
+core = "^1"
+
+[optional-dependencies]
+format = { version = "^2", features = ["color"] }
+
+[dev-dependencies]
+test-support = "^1"
+
+[features]
+pretty = ["dep:format"]
+
+[cli]
+entry = "src/main.fdn"
+name = "args-demo"

@@ -179,17 +179,7 @@ fn display_len_hint(value: &FidanValue) -> usize {
 /// Coerce to `FidanString` if possible, otherwise stringify.
 #[inline]
 fn is_truthy(v: &FidanValue) -> bool {
-    match v {
-        FidanValue::Nothing => false,
-        FidanValue::Boolean(b) => *b,
-        FidanValue::Integer(n) => *n != 0,
-        FidanValue::Float(f) => *f != 0.0,
-        FidanValue::String(s) => !s.is_empty(),
-        FidanValue::List(l) => !l.borrow().is_empty(),
-        FidanValue::Dict(d) => !d.borrow().is_empty(),
-        FidanValue::HashSet(s) => !s.borrow().is_empty(),
-        _ => true,
-    }
+    v.truthy()
 }
 
 /// Build a `String` from a raw UTF-8 pointer + length (copy only).
@@ -1272,7 +1262,24 @@ pub unsafe extern "C" fn fdn_obj_get_field(
                 payload: vec![],
             }
         }
-        FidanValue::Namespace(_) => {
+        FidanValue::Namespace(module) => {
+            let qualified = format!("{module}::{field_name}");
+            if let Some(table) = FN_NAME_TABLE.get()
+                && let Ok(guard) = table.lock()
+                && let Some(member) = guard.get(qualified.as_str())
+            {
+                return into_raw(match member {
+                    RegisteredNamespaceMember::Function(id) => {
+                        FidanValue::Function(FunctionId(*id as u32))
+                    }
+                    RegisteredNamespaceMember::Namespace(target) => {
+                        FidanValue::Namespace(Arc::clone(target))
+                    }
+                });
+            }
+            if module.starts_with("__module_") {
+                return into_raw(FidanValue::Nothing);
+            }
             // `bundle.math` — field access on a namespace returns a sub-namespace.
             // This supports re-export chaining: `bundle.math.sqrt(x)`.
             FidanValue::Namespace(Arc::from(field_name.as_str()))
@@ -1327,9 +1334,15 @@ pub unsafe extern "C" fn fdn_obj_invoke(
                 return v;
             }
             // User namespace: look up method_name in the name table and call through FN_TABLE.
+            let qualified = if ns_name.starts_with("__module_") {
+                format!("{ns_name}::{method_name}")
+            } else {
+                method_name.clone()
+            };
             if let Some(name_table) = FN_NAME_TABLE.get()
                 && let Ok(guard) = name_table.lock()
-                && let Some(&idx) = guard.get(method_name.as_str())
+                && let Some(&RegisteredNamespaceMember::Function(idx)) =
+                    guard.get(qualified.as_str())
             {
                 drop(guard);
                 // Build arg pointers
@@ -3493,9 +3506,14 @@ type FnTrampoline = unsafe extern "C" fn(*const *mut FidanValue, i64) -> *mut Fi
 static FN_TABLE: std::sync::OnceLock<std::sync::Mutex<Vec<Option<FnTrampoline>>>> =
     std::sync::OnceLock::new();
 
-/// Name → trampoline-table index, populated by AOT-generated startup code.
+enum RegisteredNamespaceMember {
+    Function(usize),
+    Namespace(Arc<str>),
+}
+
+/// Qualified namespace member names, populated by AOT-generated startup code.
 static FN_NAME_TABLE: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<String, usize>>,
+    std::sync::Mutex<std::collections::HashMap<String, RegisteredNamespaceMember>>,
 > = std::sync::OnceLock::new();
 
 /// Register a function name → table index mapping (called from AOT startup).
@@ -3505,7 +3523,24 @@ pub unsafe extern "C" fn fdn_fn_name_register(name_bytes: *const u8, name_len: i
     let table =
         FN_NAME_TABLE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Ok(mut guard) = table.lock() {
-        guard.insert(name, idx as usize);
+        guard.insert(name, RegisteredNamespaceMember::Function(idx as usize));
+    }
+}
+
+/// Register a resolved re-export in the same namespace table as user functions.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_namespace_export_register(
+    alias_bytes: *const u8,
+    alias_len: i64,
+    target_bytes: *const u8,
+    target_len: i64,
+) {
+    let alias = str_from_raw(alias_bytes, alias_len);
+    let target = Arc::from(str_from_raw(target_bytes, target_len));
+    let table =
+        FN_NAME_TABLE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Ok(mut guard) = table.lock() {
+        guard.insert(alias, RegisteredNamespaceMember::Namespace(target));
     }
 }
 

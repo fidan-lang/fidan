@@ -1075,6 +1075,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                 alias,
                 re_export,
                 grouped,
+                span,
                 ..
             } => {
                 // Resolve all path symbols to strings.
@@ -1093,6 +1094,8 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                             .map(|sym| interner.resolve(sym).to_string())
                             .unwrap_or_else(|| module_name.clone());
                         use_decls.push(HirUseDecl {
+                            span,
+                            target_path: None,
                             module_path: vec!["std".into(), module_name],
                             alias: Some(ns_alias),
                             specific_names: None,
@@ -1102,6 +1105,8 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                         // `use std.MODULE.name` — specific name import.
                         let fn_name = parts[parts.len() - 1].clone();
                         use_decls.push(HirUseDecl {
+                            span,
+                            target_path: None,
                             module_path: vec!["std".into(), module_name],
                             alias: None,
                             specific_names: Some(vec![fn_name]),
@@ -1113,42 +1118,32 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                         || parts[0].starts_with("../")
                         || parts[0].starts_with('/')
                         || parts[0].ends_with(".fdn");
-                    if is_file_path {
-                        // File-path import with alias: `use "./utils.fdn" as utils`
-                        // → emit a user-namespace HirUseDecl so the MIR lowerer stores
-                        //   `Namespace("utils")` as a global; `utils.fn()` dispatches
-                        //   through `user_fn_map` automatically.
-                        if let Some(alias_str) = alias.map(|sym| interner.resolve(sym).to_string())
-                        {
-                            use_decls.push(HirUseDecl {
-                                module_path: vec![alias_str.clone()],
-                                alias: Some(alias_str),
-                                specific_names: None,
-                                re_export,
-                            });
-                        }
-                    } else if !grouped {
-                        // Namespace user import: `use mymod` / `use mymod.submod`.
-                        // Flat/grouped imports don't create a namespace HirUseDecl.
-                        // Alias defaults to the last path segment:
-                        //   `use test2`        → alias = "test2"
-                        //   `use test2.submod` → alias = "submod"
-                        let ns_alias = alias
-                            .map(|sym| interner.resolve(sym).to_string())
-                            .unwrap_or_else(|| parts.last().unwrap_or(&parts[0]).clone());
-                        use_decls.push(HirUseDecl {
-                            module_path: vec![ns_alias.clone()],
-                            alias: Some(ns_alias),
-                            specific_names: None,
-                            re_export,
-                        });
-                    }
+                    let specific_names = if is_file_path && alias.is_none() {
+                        Some(vec![])
+                    } else if grouped && parts.len() >= 2 {
+                        Some(vec![parts.last().unwrap().clone()])
+                    } else {
+                        None
+                    };
+                    let ns_alias = alias
+                        .map(|sym| interner.resolve(sym).to_string())
+                        .or_else(|| parts.last().cloned());
+                    use_decls.push(HirUseDecl {
+                        span,
+                        target_path: None,
+                        module_path: vec![ns_alias.clone().unwrap_or_default()],
+                        alias: ns_alias,
+                        specific_names,
+                        re_export,
+                    });
                 }
             }
         }
     }
 
     HirModule {
+        file: module.file,
+        file_paths: vec![],
         objects,
         enums,
         functions,
@@ -1166,6 +1161,8 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
 /// before MIR compilation.
 pub fn merge_module(base: HirModule, imported: HirModule) -> HirModule {
     let mut merged = imported;
+    merged.file = base.file;
+    merged.file_paths.extend(base.file_paths);
     merged.objects.extend(base.objects);
     merged.enums.extend(base.enums);
     merged.functions.extend(base.functions);

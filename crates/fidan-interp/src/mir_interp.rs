@@ -306,7 +306,7 @@ pub struct MirMachine {
     stdlib_modules: Arc<FxHashSet<Arc<str>>>,
     /// Set of namespace aliases that were re-exported (`export use mod`) — used by
     /// `get_field` for O(1) chaining lookup (e.g. `lib.math.sqrt`).
-    reexported_namespaces: Arc<FxHashSet<Arc<str>>>,
+    reexported_namespaces: Arc<FxHashMap<Arc<str>, Arc<str>>>,
     /// Builtin callee symbols that resolve to `@extern` declarations.
     extern_builtin_fns: Arc<FxHashMap<Symbol, FunctionId>>,
     /// Maps merged free-function names to their `FunctionId`.
@@ -521,7 +521,7 @@ impl MirMachine {
         // Build the stdlib module set: module names AND aliases, for O(1) is-stdlib lookup.
         let mut stdlib_modules: FxHashSet<Arc<str>> = FxHashSet::default();
         // Build the re-exported namespace set for O(1) get_field chaining lookup.
-        let mut reexported_namespaces: FxHashSet<Arc<str>> = FxHashSet::default();
+        let mut reexported_namespaces: FxHashMap<Arc<str>, Arc<str>> = FxHashMap::default();
         for decl in &program.use_decls {
             // User-module re-export entries (`is_stdlib = false`) only exist to support
             // `get_field` chaining (e.g. `lib.math.sqrt`).  They must NOT be added to
@@ -550,7 +550,10 @@ impl MirMachine {
         // and no specific names becomes a re-exported namespace alias.
         for decl in &program.use_decls {
             if decl.re_export && decl.specific_names.is_none() {
-                reexported_namespaces.insert(Arc::from(decl.alias.as_str()));
+                reexported_namespaces.insert(
+                    Arc::from(decl.alias.as_str()),
+                    Arc::from(decl.module.as_str()),
+                );
             }
         }
 
@@ -2253,7 +2256,12 @@ impl MirMachine {
                     if self.stdlib_modules.contains(module.as_str()) {
                         return self.dispatch_stdlib_call(module, &method_name, args);
                     }
-                    if let Some(&fn_id) = self.user_fn_map.get(method) {
+                    let qualified = if module.starts_with("__module_") {
+                        self.interner.intern(&format!("{module}::{method_name}"))
+                    } else {
+                        *method
+                    };
+                    if let Some(&fn_id) = self.user_fn_map.get(&qualified) {
                         return self.call_function(fn_id, args);
                     }
                     return Err(MirSignal::Panic(format!(
@@ -2325,7 +2333,13 @@ impl MirMachine {
         // Fast path: stdlib namespace dispatch — Symbol lookup, no re-intern.
         if let FidanValue::Namespace(ref module) = receiver {
             if !self.stdlib_modules.contains(module.as_ref()) {
-                if let Some(&fn_id) = self.user_fn_map.get(&method) {
+                let method_name = self.sym_str(method);
+                let qualified = if module.starts_with("__module_") {
+                    self.interner.intern(&format!("{module}::{method_name}"))
+                } else {
+                    method
+                };
+                if let Some(&fn_id) = self.user_fn_map.get(&qualified) {
                     return self.call_function(fn_id, args);
                 }
                 let method_name = self.sym_str(method);
@@ -2631,11 +2645,11 @@ impl MirMachine {
         if module == "__builtin__" {
             return self.dispatch_core_builtin(self.interner.intern(name), args);
         }
-        // Sandbox check: guard all `io` module calls before execution.
+        // Guard resource aliases in both io and env before any execution.
         // Check sandbox first (Option branch) so non-sandbox runs skip the
         // module string comparison entirely on every stdlib call.
         if let Some(ref policy) = self.sandbox
-            && module == "io"
+            && matches!(module, "io" | "env")
         {
             let string_args: Vec<&str> = args
                 .iter()
@@ -2647,7 +2661,16 @@ impl MirMachine {
                     }
                 })
                 .collect();
-            if let Err(violation) = policy.check_io_call(name, &string_args) {
+            let policy_name = if module == "env" {
+                match name {
+                    "get" | "getVar" | "get_var" => "getEnv",
+                    "set" | "setVar" | "set_var" => "setEnv",
+                    other => other,
+                }
+            } else {
+                name
+            };
+            if let Err(violation) = policy.check_io_call(policy_name, &string_args) {
                 let (code, msg) = match &violation {
                     SandboxViolation::ReadDenied { .. } => {
                         (fidan_diagnostics::diag_code!("R4001"), violation.message())
@@ -2826,7 +2849,9 @@ impl MirMachine {
                     && let Some(func) = self.program.functions.get(*id as usize)
                 {
                     let name = self.sym_str(func.name);
-                    return FidanValue::String(FidanString::new(name.as_ref()));
+                    return FidanValue::String(FidanString::new(
+                        name.rsplit("::").next().unwrap_or(name.as_ref()),
+                    ));
                 }
                 FidanValue::Nothing
             }
@@ -2845,13 +2870,27 @@ impl MirMachine {
             // Nothing so the caller gets a proper "no method found" error.
             FidanValue::Namespace(module) if !self.stdlib_modules.contains(module.as_ref()) => {
                 let field_name = self.sym_str(field);
+                let qualified = self.interner.intern(&format!("{module}::{field_name}"));
+                if let Some(&id) = self.user_fn_map.get(&qualified) {
+                    return FidanValue::Function(RuntimeFnId(id.0));
+                }
                 // O(1) lookup: was this namespace re-exported by the imported module?
                 // `reexported_namespaces` is built once at MirMachine::new().
-                if self.reexported_namespaces.contains(field_name.as_ref()) {
-                    FidanValue::Namespace(field_name)
-                } else {
-                    FidanValue::Nothing
-                }
+                let qualified = format!("{module}::{field_name}");
+                let exported = self
+                    .reexported_namespaces
+                    .get(qualified.as_str())
+                    .or_else(|| {
+                        if module.starts_with("__module_") {
+                            None
+                        } else {
+                            self.reexported_namespaces.get(field_name.as_ref())
+                        }
+                    });
+                exported
+                    .cloned()
+                    .map(FidanValue::Namespace)
+                    .unwrap_or(FidanValue::Nothing)
             }
             // Enum type field access: `Direction.North` → EnumVariant { tag: "North" }.
             FidanValue::EnumType(_) => {
