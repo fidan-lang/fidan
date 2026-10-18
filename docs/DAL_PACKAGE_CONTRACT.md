@@ -62,7 +62,10 @@ isolated automation without writing OS keychain state. Never put real tokens in 
 
 Real package execution exposed file-scoped action/global/re-export collisions and
 nullable/Dynamic native representation defects. The fixes retain source-language
-contracts and conservative JIT fallback. LLVM helper protocol is now **6**, because
+contracts. Boxed if/while conditions execute natively in the JIT using the same
+fdn_truthy helper as AOT. Functions using other unsupported instructions still use
+the established selective-JIT fallback; no coverage percentage is claimed.
+LLVM helper protocol is now **6**, because
 old protocol-5 helpers cannot safely consume the new module/export representation.
 The existing exact compatibility gate rejects them rather than silently miscompiling.
 AI helper protocol is unchanged. LLVM 23.1.2/llvm-sys 231 and Cranelift 0.136 are unchanged.

@@ -455,6 +455,7 @@ pub struct JitCompiler {
     int_abs_id: FuncId,
     float_div_id: FuncId,
     has_exception_id: FuncId,
+    truthy_id: FuncId,
     box_int_scoped_id: FuncId,
     box_float_scoped_id: FuncId,
     box_bool_scoped_id: FuncId,
@@ -531,6 +532,7 @@ impl JitCompiler {
             "fdn_has_exception",
             fidan_runtime::ffi::fdn_has_exception as *const u8,
         );
+        builder.symbol("fdn_truthy", fidan_runtime::ffi::fdn_truthy as *const u8);
         builder.symbol("fdn_jit_call_fn_raw", fdn_jit_call_fn_raw as *const u8);
         builder.symbol(
             "fdn_jit_box_int_scoped",
@@ -674,6 +676,7 @@ impl JitCompiler {
         let int_neg_id = declare_import_fn(&mut module, "fdn_int_neg", &[I64], Some(I64));
         let float_div_id = declare_import_fn(&mut module, "fdn_float_div", &[F64, F64], Some(F64));
         let has_exception_id = declare_import_fn(&mut module, "fdn_has_exception", &[], Some(I8));
+        let truthy_id = declare_import_fn(&mut module, "fdn_truthy", &[I64], Some(I8));
         let box_float_scoped_id =
             declare_import_fn(&mut module, "fdn_jit_box_float_scoped", &[F64], Some(I64));
         let box_bool_scoped_id =
@@ -811,6 +814,7 @@ impl JitCompiler {
             int_abs_id,
             float_div_id,
             has_exception_id,
+            truthy_id,
             box_int_scoped_id,
             box_float_scoped_id,
             box_bool_scoped_id,
@@ -880,16 +884,6 @@ impl JitCompiler {
         // The raw JIT ABI has no implicit boxing or numeric conversion. Fall
         // back when a call/return would reinterpret a scalar as a boxed pointer.
         for block in &func.blocks {
-            // The raw JIT branch ABI is scalar-only. Boxed conditions must use
-            // the existing interpreter fallback rather than test pointer bits.
-            if let Terminator::Branch { cond, .. } = &block.terminator
-                && !matches!(
-                    jit_operand_type(cond, &local_types),
-                    Some(MirTy::Boolean | MirTy::Integer | MirTy::Float | MirTy::Handle)
-                )
-            {
-                return None;
-            }
             for phi in &block.phis {
                 if phi.operands.iter().any(|(_, operand)| {
                     jit_operand_type(operand, &local_types).as_ref() != local_types.get(&phi.result)
@@ -1009,6 +1003,9 @@ impl JitCompiler {
             let call_fn_raw_ref = self
                 .module
                 .declare_func_in_func(self.call_fn_raw_id, builder.func);
+            let truthy_ref = self
+                .module
+                .declare_func_in_func(self.truthy_id, builder.func);
             let rt = JitRuntimeRefs {
                 int_abs: self
                     .module
@@ -1355,17 +1352,34 @@ impl JitCompiler {
                         then_bb,
                         else_bb,
                     } => {
-                        let cond_val = load_operand(&mut builder, &cl_vars, cond);
-                        let cond_ty = builder.func.dfg.value_type(cond_val);
-                        // brif needs any-int condition (non-zero = true)
-                        let cond_i64 = match cond_ty {
-                            t if t == I8 => builder.ins().uextend(I64, cond_val),
-                            t if t == F64 => {
-                                let zero = builder.ins().f64const(0.0);
-                                let flag = builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
-                                builder.ins().uextend(I64, flag)
+                        let cond_flag = match jit_operand_type(cond, &local_types) {
+                            Some(MirTy::Boolean | MirTy::Integer | MirTy::Handle) => {
+                                load_operand(&mut builder, &cl_vars, cond)
                             }
-                            _ => cond_val,
+                            Some(MirTy::Float) => {
+                                let value = load_operand(&mut builder, &cl_vars, cond);
+                                let zero = builder.ins().f64const(0.0);
+                                builder.ins().fcmp(FloatCC::NotEqual, value, zero)
+                            }
+                            _ => {
+                                // I64 can also contain a boxed pointer. Reuse the
+                                // interpreter/AOT value contract, not pointer truth.
+                                let emit_ctx = RvalueEmitCtx {
+                                    vars: &cl_vars,
+                                    local_types: &local_types,
+                                    ns_locals: &namespace_locals,
+                                    interner,
+                                    call_fn_raw_ref,
+                                    rt: &rt,
+                                };
+                                let boxed = box_operand_for_abi(
+                                    &mut self.module,
+                                    &mut builder,
+                                    cond,
+                                    &emit_ctx,
+                                )?;
+                                call_runtime(&mut builder, truthy_ref, &[boxed])?
+                            }
                         };
 
                         let then_args = collect_phi_args(
@@ -1386,7 +1400,7 @@ impl JitCompiler {
                         );
 
                         builder.ins().brif(
-                            cond_i64,
+                            cond_flag,
                             cl_blocks[then_bb.0 as usize],
                             &then_args,
                             cl_blocks[else_bb.0 as usize],
@@ -1697,9 +1711,19 @@ fn emit_rvalue(
     ctx: &RvalueEmitCtx<'_>,
 ) -> Option<Value> {
     match rhs {
-        Rvalue::Literal(lit) => Some(emit_literal(builder, lit)),
+        Rvalue::Literal(lit) => match dest_ty {
+            MirTy::Integer | MirTy::Float | MirTy::Boolean | MirTy::Handle => {
+                Some(emit_literal(builder, lit))
+            }
+            _ => box_const_for_abi(module, builder, lit, ctx),
+        },
 
-        Rvalue::Use(op) => Some(load_operand(builder, ctx.vars, op)),
+        Rvalue::Use(op) => match dest_ty {
+            MirTy::Integer | MirTy::Float | MirTy::Boolean | MirTy::Handle => {
+                Some(load_operand(builder, ctx.vars, op))
+            }
+            _ => box_operand_for_abi(module, builder, op, ctx),
+        },
 
         Rvalue::Binary { op, lhs, rhs } => {
             let left = operand_scalar_kind(lhs, ctx.local_types)?;
@@ -2508,20 +2532,163 @@ mod tests {
     }
 
     #[test]
-    fn boxed_branch_condition_uses_interpreter_fallback() {
+    fn boxed_branch_conditions_execute_natively() {
+        use fidan_runtime::{FidanDict, FidanHashSet, FidanList, FidanString, OwnedRef, SharedRef};
+        let live = SharedRef::new(FidanValue::Integer(1));
+        let expired = SharedRef::new(FidanValue::Integer(1)).downgrade();
+        let cases = [
+            (FidanValue::Boolean(false), 0),
+            (FidanValue::Boolean(true), 1),
+            (FidanValue::Nothing, 0),
+            (FidanValue::Integer(0), 0),
+            (FidanValue::Integer(-42), 1),
+            (FidanValue::Float(-0.0), 0),
+            (FidanValue::Float(0.5), 1),
+            (FidanValue::Float(f64::NAN), 1),
+            (FidanValue::Handle(0), 0),
+            (FidanValue::Handle(1), 1),
+            (FidanValue::String(FidanString::new("")), 0),
+            (FidanValue::String(FidanString::new("ä")), 1),
+            (FidanValue::List(OwnedRef::new(FidanList::new())), 1),
+            (FidanValue::Dict(OwnedRef::new(FidanDict::new())), 1),
+            (FidanValue::Tuple(vec![]), 1),
+            (FidanValue::HashSet(OwnedRef::new(FidanHashSet::new())), 0),
+            (
+                FidanValue::HashSet(OwnedRef::new(
+                    FidanHashSet::from_values([FidanValue::Integer(1)]).unwrap(),
+                )),
+                1,
+            ),
+            (
+                FidanValue::Range {
+                    start: 1,
+                    end: 1,
+                    inclusive: false,
+                },
+                0,
+            ),
+            (
+                FidanValue::Range {
+                    start: 1,
+                    end: 1,
+                    inclusive: true,
+                },
+                1,
+            ),
+            (FidanValue::WeakShared(live.downgrade()), 1),
+            (FidanValue::WeakShared(expired), 0),
+        ];
+        for control in ["if", "while"] {
+            let (mir, interner) = lower(&format!(
+                "action choose with (condition oftype flexible) returns integer {{ {control} condition {{ return 1 }}; return 0 }}",
+            ));
+            let function = mir
+                .functions
+                .iter()
+                .find(|f| interner.resolve(f.name).as_ref() == "choose")
+                .unwrap();
+            let mut jit = JitCompiler::new();
+            let entry = jit.compile_function(function, &mir, &interner);
+            assert!(
+                entry.is_native(),
+                "boxed {control} condition must execute native JIT"
+            );
+            for _ in 0..100 {
+                for (condition, expected) in &cases {
+                    let result = with_jit_runtime_context(std::ptr::null_mut(), || {
+                        call_jit_fn(&entry, std::slice::from_ref(condition))
+                    });
+                    assert!(
+                        matches!(result, FidanValue::Integer(value) if value == *expected),
+                        "{control} {condition:?}: {result:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn boxed_branch_literals_are_materialized_for_native_jit() {
         let (mir, interner) = lower(
             "action choose with (condition oftype flexible) returns integer { if condition { return 1 }; return 0 }",
         );
-        let function = mir
+        let original = mir
             .functions
             .iter()
             .find(|f| interner.resolve(f.name).as_ref() == "choose")
             .unwrap();
-        assert!(
-            !JitCompiler::new()
-                .compile_function(function, &mir, &interner)
-                .is_native()
+        for (literal, expected) in [
+            (MirLit::Str("".into()), 0),
+            (MirLit::Str("text".into()), 1),
+            (MirLit::Nothing, 0),
+        ] {
+            let mut function = original.clone();
+            for block in &mut function.blocks {
+                if let Terminator::Branch { cond, .. } = &mut block.terminator {
+                    *cond = Operand::Const(literal.clone());
+                }
+            }
+            let mut jit = JitCompiler::new();
+            let entry = jit.compile_function(&function, &mir, &interner);
+            assert!(entry.is_native());
+            let result = with_jit_runtime_context(std::ptr::null_mut(), || {
+                call_jit_fn(&entry, &[FidanValue::Nothing])
+            });
+            assert!(matches!(result, FidanValue::Integer(value) if value == expected));
+        }
+    }
+
+    #[test]
+    fn boxed_branch_local_literals_and_copies_are_materialized() {
+        let (mir, interner) = lower(
+            "action choose with (condition oftype flexible) returns integer { if condition { return 1 }; return 0 }",
         );
+        let original = mir
+            .functions
+            .iter()
+            .find(|f| interner.resolve(f.name).as_ref() == "choose")
+            .unwrap();
+        for (literal, expected) in [
+            (MirLit::Str("".into()), 0),
+            (MirLit::Str("text".into()), 1),
+            (MirLit::Bool(false), 0),
+            (MirLit::Int(0), 0),
+            (MirLit::Int(42), 1),
+            (MirLit::Float(-0.0), 0),
+            (MirLit::Nothing, 0),
+        ] {
+            for rhs in [
+                Rvalue::Literal(literal.clone()),
+                Rvalue::Use(Operand::Const(literal)),
+            ] {
+                let mut function = original.clone();
+                let local = LocalId(function.local_count);
+                function.local_count += 1;
+                for block in &mut function.blocks {
+                    if let Terminator::Branch { cond, .. } = &mut block.terminator {
+                        *cond = Operand::Local(local);
+                    }
+                }
+                function.blocks[0].instructions.insert(
+                    0,
+                    Instr::Assign {
+                        dest: local,
+                        ty: MirTy::Dynamic,
+                        rhs,
+                    },
+                );
+                let mut jit = JitCompiler::new();
+                let entry = jit.compile_function(&function, &mir, &interner);
+                assert!(entry.is_native());
+                let result = with_jit_runtime_context(std::ptr::null_mut(), || {
+                    call_jit_fn(&entry, &[FidanValue::Nothing])
+                });
+                assert!(
+                    matches!(result, FidanValue::Integer(value) if value == expected),
+                    "{result:?}"
+                );
+            }
+        }
     }
 
     #[test]
