@@ -139,6 +139,16 @@ pub struct AnalysisResult {
 /// The `uri` string is used as the "file name" inside `SourceFile` so that
 /// diagnostics printed to stderr (if any) show a meaningful path.
 pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
+    analyze_inner(text, uri_str, false)
+}
+
+/// Editor refreshes also validate imports against the importing file's location.
+/// Non-file buffers retain syntax/type analysis without guessing a filesystem root.
+pub fn analyze_document(text: &str, uri_str: &str) -> AnalysisResult {
+    analyze_inner(text, uri_str, true)
+}
+
+fn analyze_inner(text: &str, uri_str: &str, resolve_imports: bool) -> AnalysisResult {
     let file = SourceFile::new(FileId(0), uri_str, text);
     let interner = Arc::new(SymbolInterner::new());
 
@@ -204,10 +214,21 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     let cross_module_call_sites = typed.cross_module_call_sites;
 
     // ── Diagnostics ───────────────────────────────────────────────────────────
+    let import_diags = if resolve_imports {
+        lsp::Url::parse(uri_str)
+            .ok()
+            .and_then(|uri| uri.to_file_path().ok())
+            .and_then(|path| path.parent().map(std::path::Path::to_owned))
+            .map(|base| fidan_driver::import_resolution_diagnostics(&module, &interner, &base))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let diagnostics = lex_diags
         .into_iter()
         .chain(parse_diags)
         .chain(typeck_diags)
+        .chain(import_diags)
         .map(|d| fidan_to_lsp(&d, &file))
         .collect();
 
@@ -2576,6 +2597,62 @@ fn extract_type_from_detail(detail: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_unused_import_has_error_and_unused_note() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "fidan-missing-import-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let uri = lsp::Url::from_file_path(root.join("main.fdn")).unwrap();
+        for source in [
+            "use dfjksdfkhdfkjhsdkjfh\n",
+            "use \"./missing.fdn\" as missing\n",
+        ] {
+            let result = analyze_document(source, uri.as_str());
+            assert!(
+                result.diagnostics.iter().any(|d| d.code
+                    == Some(lsp::NumberOrString::String("E0106".into()))
+                    && d.severity == Some(DiagnosticSeverity::ERROR)
+                    && d.range.start.line == 0),
+                "{:?}",
+                result.diagnostics
+            );
+            assert!(
+                result
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("unused import")
+                        && d.severity == Some(DiagnosticSeverity::INFORMATION)),
+                "{:?}",
+                result.diagnostics
+            );
+        }
+        std::fs::create_dir_all(root.join("present")).unwrap();
+        std::fs::write(root.join("present/init.fdn"), "var value = 1\n").unwrap();
+        let result = analyze_document("use present\nuse std.math\n", uri.as_str());
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == Some(lsp::NumberOrString::String("E0106".into()))),
+            "{:?}",
+            result.diagnostics
+        );
+        let result = analyze_document("use unresolved\n", "untitled:buffer");
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == Some(lsp::NumberOrString::String("E0106".into())))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
     use std::path::Path;
 

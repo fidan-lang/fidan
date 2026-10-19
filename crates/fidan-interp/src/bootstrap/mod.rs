@@ -20,6 +20,9 @@ pub fn call_bootstrap_method(
     method: &str,
     args: Vec<FidanValue>,
 ) -> Result<Option<FidanValue>, fidan_runtime::stdlib::StdlibRuntimeError> {
+    if let Some(result) = fidan_runtime::builtins::receiver_conversion(&receiver, method) {
+        return result.map(Some);
+    }
     Ok(match receiver {
         FidanValue::String(s) => string_methods::dispatch(s, method, args),
         FidanValue::List(l) => list_methods::dispatch(l, method, args),

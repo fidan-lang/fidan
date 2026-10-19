@@ -360,6 +360,38 @@ fn resolve_file_imports(
     (path_map.into_iter().collect(), unresolved, bindings)
 }
 
+/// Filesystem import diagnostics for editor documents, using the compiler's
+/// local/locked-package resolution and original source spans.
+pub fn import_resolution_diagnostics(
+    module: &fidan_ast::Module,
+    interner: &SymbolInterner,
+    base_dir: &Path,
+) -> Vec<Diagnostic> {
+    let (_, unresolved, bindings) = resolve_file_imports(module, interner, base_dir, base_dir);
+    unresolved
+        .into_iter()
+        .map(|(name, span)| {
+            Diagnostic::error(
+                diag_code!("E0106"),
+                format!("module `{name}` not found"),
+                span,
+            )
+        })
+        .chain(
+            bindings
+                .into_iter()
+                .filter(|(_, path)| !path.is_file())
+                .map(|(span, path)| {
+                    Diagnostic::error(
+                        diag_code!("E0106"),
+                        format!("module file `{}` not found", path.display()),
+                        span,
+                    )
+                }),
+        )
+        .collect()
+}
+
 /// Preserve each import's file identity for MIR namespace/function resolution.
 pub fn bind_hir_file_imports(
     hir: &mut fidan_hir::HirModule,

@@ -1347,6 +1347,9 @@ pub unsafe extern "C" fn fdn_obj_invoke(
         .map(|i| borrow(*args_ptr.add(i)).clone())
         .collect();
 
+    if let Some(result) = crate::builtins::receiver_conversion(recv, &method_name) {
+        return builtin_value_result(result);
+    }
     match recv {
         FidanValue::Namespace(ns_name) => {
             // Try stdlib first. dispatch_stdlib_inline returns None for unrecognised
@@ -1723,21 +1726,6 @@ fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -
             values.extend(args);
             into_raw(stdlib::string::dispatch(method, values).unwrap_or(FidanValue::Nothing))
         }
-
-        // ── Parsing ───────────────────────────────────────────────────────────
-        "toInt" => match str_val.trim().parse::<i64>() {
-            Ok(n) => into_raw(FidanValue::Integer(n)),
-            Err(_) => into_raw(FidanValue::Nothing),
-        },
-        "toFloat" => match str_val.trim().parse::<f64>() {
-            Ok(f) => into_raw(FidanValue::Float(f)),
-            Err(_) => into_raw(FidanValue::Nothing),
-        },
-        "toBool" => {
-            let b = matches!(str_val.trim().to_lowercase().as_str(), "true" | "1" | "yes");
-            into_raw(FidanValue::Boolean(b))
-        }
-        "toString" => into_raw(FidanValue::String(FidanString::new(&str_val))),
 
         // ── Padding ───────────────────────────────────────────────────────────
         "padStart" => {

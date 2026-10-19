@@ -366,7 +366,7 @@ impl FidanLsp {
     /// the editor.  Also proactively loads file imports that are not yet in
     /// the store.
     async fn refresh(&self, uri: &Url, version: i32, text: &str) {
-        let result = analysis::analyze(text, uri.as_str());
+        let result = analysis::analyze_document(text, uri.as_str());
 
         // Compute absolute URLs for every import in this document.
         let current_path = uri.to_file_path().ok();
@@ -4982,6 +4982,32 @@ action greet with (certain name oftype string) returns string {
             Some(ImportBindingDefinition::ImportDoc(url, name))
                 if url == direct_uri && name == "sub_ints"
         ));
+    }
+
+    #[test]
+    fn refresh_retains_missing_import_error_and_unused_note() {
+        let root = temp_test_dir("missing-unused-import");
+        let uri = path_url(&root.join("main.fdn"));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+            backend.refresh(&uri, 1, "use dfjksdfkhdfkjhsdkjfh\n").await;
+            let doc = backend.store.get(&uri).unwrap();
+            assert!(doc.diagnostics.iter().any(|diag| diag.code
+                == Some(NumberOrString::String("E0106".into()))
+                && diag.severity == Some(DiagnosticSeverity::ERROR)));
+            assert!(
+                doc.diagnostics
+                    .iter()
+                    .any(|diag| diag.message.contains("unused import")
+                        && diag.severity == Some(DiagnosticSeverity::INFORMATION))
+            );
+        });
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -1177,15 +1177,38 @@ pub fn write_global_state(home: &Path, roots: &DalDependencyRoots, lock: &DalLoc
 mod atomic_metadata_tests {
     use super::*;
     fn temporary_project() -> std::path::PathBuf {
+        // Windows clock resolution can give concurrent tests the same timestamp.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("fidan-metadata-{}-{nonce}", std::process::id()));
+        let path = std::env::temp_dir().join(format!(
+            "fidan-metadata-{}-{nonce}-{sequence}",
+            std::process::id()
+        ));
         fs::create_dir(&path).unwrap();
         path
     }
+    #[test]
+    fn parallel_metadata_tests_use_distinct_directories() {
+        let threads: Vec<_> = (0..16)
+            .map(|_| std::thread::spawn(temporary_project))
+            .collect();
+        let paths: Vec<_> = threads
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
+        assert_eq!(
+            paths.iter().collect::<std::collections::HashSet<_>>().len(),
+            paths.len()
+        );
+        for path in paths {
+            fs::remove_dir(path).unwrap();
+        }
+    }
+
     #[test]
     fn failed_lock_commit_restores_exact_original_manifest_and_cleans_backup() {
         let root = temporary_project();

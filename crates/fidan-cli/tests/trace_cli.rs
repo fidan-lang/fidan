@@ -2907,3 +2907,165 @@ fn fix_ai_hunk_mismatch_is_warned_and_hunk_skipped() {
         "expected mismatch warning in stderr:\n{stderr}"
     );
 }
+
+#[test]
+fn format_directories_recurse_check_every_file_and_preserve_other_files() {
+    let root = make_temp_dir("recursive_format");
+    let nested = root.join("nested with spaces");
+    std::fs::create_dir(&nested).unwrap();
+    let first = root.join("a.fdn");
+    let second = nested.join("b.fdn");
+    let other = nested.join("untouched.txt");
+    let source = "action main {\nprint(1)\n}\n";
+    std::fs::write(&first, source).unwrap();
+    std::fs::write(&second, source).unwrap();
+    std::fs::write(&other, "not Fidan").unwrap();
+    std::fs::write(root.join(".fidanfmt"), "indent_width = 4\n").unwrap();
+    std::fs::write(nested.join(".fidanfmt"), "indent_width = 6\n").unwrap();
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .env("FIDAN_HOME", root.join("home"))
+            .arg("format")
+            .current_dir(&root)
+            .arg(".")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let check = run(&["--check"]);
+    let errors = String::from_utf8_lossy(&check.stderr);
+    assert!(!check.status.success(), "{errors}");
+    assert!(
+        errors.contains("a.fdn") && errors.contains("b.fdn"),
+        "{errors}"
+    );
+    let stdout = run(&[]);
+    assert!(stdout.status.success(), "{stdout:?}");
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), source);
+    assert_eq!(
+        String::from_utf8_lossy(&stdout.stdout)
+            .matches("print(1)")
+            .count(),
+        2
+    );
+    assert!(run(&["--in-place"]).status.success());
+    assert!(
+        std::fs::read_to_string(&first)
+            .unwrap()
+            .contains("\n    print(1)")
+    );
+    assert!(
+        std::fs::read_to_string(&second)
+            .unwrap()
+            .contains("\n      print(1)")
+    );
+    assert!(run(&["--check"]).status.success());
+    let formatted = run(&["--in-place", "--indent-width", "2"]);
+    assert!(formatted.status.success(), "{formatted:?}");
+    assert!(
+        std::fs::read_to_string(&first)
+            .unwrap()
+            .contains("\n  print(1)")
+    );
+    assert_eq!(
+        std::fs::read_to_string(&first).unwrap(),
+        std::fs::read_to_string(&second).unwrap()
+    );
+    assert!(run(&["--check", "--indent-width", "2"]).status.success());
+    assert_eq!(std::fs::read_to_string(other).unwrap(), "not Fidan");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn directory_commands_continue_after_errors_and_handle_empty_directories() {
+    let root = make_temp_dir("recursive_errors");
+    for command in ["format", "test"] {
+        let empty = Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .env("FIDAN_HOME", root.join("home"))
+            .arg(command)
+            .arg(&root)
+            .output()
+            .unwrap();
+        assert!(empty.status.success(), "{empty:?}");
+        assert!(String::from_utf8_lossy(&empty.stderr).contains("no .fdn files found"));
+    }
+    let broken = root.join("a.fdn");
+    let nested = root.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let valid = nested.join("z.fdn");
+    let invalid = "var = }";
+    std::fs::write(&broken, invalid).unwrap();
+    std::fs::write(&valid, "test \"nested ran\" {\nassert_eq(2 + 2, 4)\n}\n").unwrap();
+    let formatted = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .env("FIDAN_HOME", root.join("home"))
+        .arg("format")
+        .arg(&root)
+        .arg("--in-place")
+        .output()
+        .unwrap();
+    assert!(!formatted.status.success());
+    assert_eq!(std::fs::read_to_string(&broken).unwrap(), invalid);
+    assert!(
+        std::fs::read_to_string(&valid)
+            .unwrap()
+            .contains("    assert_eq")
+    );
+    let tests = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .env("FIDAN_HOME", root.join("home"))
+        .arg("test")
+        .arg(&root)
+        .output()
+        .unwrap();
+    let errors = String::from_utf8_lossy(&tests.stderr);
+    assert!(!tests.status.success(), "{errors}");
+    assert!(
+        errors.contains("nested ran") && errors.contains("1 test passed"),
+        "{errors}"
+    );
+    for failing_source in [
+        "test \"failure\" { assert_eq(1, 2) }\n",
+        "var value = integer(\"not-an-integer\")\ntest \"unreachable\" {}\n",
+    ] {
+        std::fs::write(&broken, failing_source).unwrap();
+        let tests = Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .env("FIDAN_HOME", root.join("home"))
+            .arg("test")
+            .arg(&root)
+            .output()
+            .unwrap();
+        let errors = String::from_utf8_lossy(&tests.stderr);
+        assert!(!tests.status.success(), "{errors}");
+        assert!(
+            errors.contains("nested ran") && errors.contains("1 test passed"),
+            "{errors}"
+        );
+    }
+    std::fs::remove_file(broken).unwrap();
+    let tests = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .env("FIDAN_HOME", root.join("home"))
+        .arg("test")
+        .current_dir(&root)
+        .arg(".")
+        .output()
+        .unwrap();
+    assert!(tests.status.success(), "{tests:?}");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explicit_non_fidan_files_keep_extension_diagnostic() {
+    let root = make_temp_dir("explicit_extension");
+    let file = root.join("program.txt");
+    std::fs::write(&file, "test \"works\" { assert_eq(1, 1) }\n").unwrap();
+    for command in ["format", "test"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .env("FIDAN_HOME", root.join("home"))
+            .arg(command)
+            .arg(&file)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("W2001"));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

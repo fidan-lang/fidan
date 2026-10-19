@@ -43,6 +43,50 @@ pub fn float(value: &FidanValue) -> Result<FidanValue, StdlibRuntimeError> {
     })
 }
 
+/// Conversion receiver names and aliases come exclusively from fidan-config.
+/// String parsing preserves the existing receiver whitespace/bool contract;
+/// failed numeric parsing is an R0001 error, never a falsely typed Nothing.
+pub fn receiver_conversion(
+    value: &FidanValue,
+    method: &str,
+) -> Option<Result<FidanValue, StdlibRuntimeError>> {
+    use fidan_config::{ReceiverBuiltinKind, infer_receiver_member};
+    let kind = match value {
+        FidanValue::Integer(_) => ReceiverBuiltinKind::Integer,
+        FidanValue::Float(_) => ReceiverBuiltinKind::Float,
+        FidanValue::String(_) => ReceiverBuiltinKind::String,
+        _ => return None,
+    };
+    let method = infer_receiver_member(kind, method)?.canonical_name;
+    Some(match method {
+        "toInt" | "toFloat" => {
+            let trimmed;
+            let input = if let FidanValue::String(s) = value {
+                trimmed = FidanValue::String(FidanString::new(s.as_str().trim()));
+                &trimmed
+            } else {
+                value
+            };
+            if method == "toInt" {
+                integer(input)
+            } else {
+                float(input)
+            }
+        }
+        "toBool" => {
+            let FidanValue::String(s) = value else {
+                return None;
+            };
+            Ok(FidanValue::Boolean(matches!(
+                s.as_str().trim().to_lowercase().as_str(),
+                "true" | "1" | "yes"
+            )))
+        }
+        "toString" => Ok(FidanValue::String(FidanString::new(&display(value)))),
+        _ => return None,
+    })
+}
+
 pub fn len(value: &FidanValue) -> Result<i64, StdlibRuntimeError> {
     Ok(match value {
         FidanValue::String(s) => s.char_len() as i64,

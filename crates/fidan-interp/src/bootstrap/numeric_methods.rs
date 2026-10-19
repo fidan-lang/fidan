@@ -28,8 +28,6 @@ pub fn dispatch(receiver: FidanValue, method: &str) -> Option<FidanValue> {
         (FidanValue::Float(f), "floor") => Some(FidanValue::Integer(f.floor() as i64)),
         (FidanValue::Float(f), "ceil") => Some(FidanValue::Integer(f.ceil() as i64)),
         (FidanValue::Float(f), "round") => Some(FidanValue::Integer(f.round() as i64)),
-        (FidanValue::Integer(n), "to_float") => Some(FidanValue::Float(n as f64)),
-        (FidanValue::Float(f), "to_int") => Some(FidanValue::Integer(f as i64)),
         _ => None,
     }
 }

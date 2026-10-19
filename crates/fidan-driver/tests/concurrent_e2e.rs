@@ -2456,3 +2456,24 @@ fn callable_metadata_and_loop_exit_values_across_aot_backends() {
         }
     }
 }
+
+#[test]
+fn receiver_conversions_across_aot_backends() {
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/receiver-conversions");
+    fs::create_dir_all(&artifacts).unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let binary = artifacts.join(format!(
+            "conversions-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/receiver_conversion_regression.fdn"),
+            backend,
+            &binary,
+        );
+        run_compiled_binary_clean(&binary, "receiver conversions passed");
+    }
+}

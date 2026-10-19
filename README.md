@@ -477,6 +477,14 @@ Existing syntax remains available: `text[1..4]`, `text[.. step 2]`, and `text[1.
 
 File paths in `std.io` and `std.json` resolve relative to the process working directory, not the source file's directory. For example, running `fidan run LOCAL/test_file_manager.fdn` from the repository root reads/writes `./tasks.json` in that root. `io.cwd()` shows the working directory; `io.join(...)` builds a platform path. `io.file_exists(path)` returns `false` for missing paths and reports other filesystem inspection failures.
 
+Conversion receiver methods use the aliases declared centrally in `fidan-config`:
+strings support `toInt`/`to_int`/`parseInt`/`parse_int`, the corresponding Float
+spellings, `toBool`/`to_bool`, and `toString`/`to_string`. Integers support
+`toFloat`/`to_float` and string conversion; floats support `toInt`/`to_int` and
+string conversion. String receiver parsing trims whitespace; invalid numeric text
+raises catchable R0001. Boolean parsing recognizes `true`, `1`, and `yes`
+(case-insensitively) as true, preserving the existing receiver contract.
+
 ### Integer arithmetic and powers
 
 Signed 64-bit addition, subtraction, multiplication, negation and nonnegative integer powers are checked. Overflow reports `R2003`; division or modulo by zero reports `R2001`. `i64::MIN / -1` and `i64::MIN % -1` report overflow without a host trap.
@@ -680,7 +688,7 @@ test "negative numbers" {
 }
 ```
 
-Run them with `fidan test yourfile.fdn`. Each test reports pass/fail with coloured output.
+Run them with `fidan test yourfile.fdn` or recursively with `fidan test path/to/directory`. Each test reports pass/fail with coloured output. Directory runs continue after file-level failures and return a failing status if any file fails.
 
 ---
 
@@ -875,8 +883,8 @@ fidan <COMMAND> [OPTIONS] [FILE]
 | `fidan build <file>` | Compile to a native binary |
 | `fidan check <file>` | Type-check and lint without running |
 | `fidan fix <file>` | Auto-apply high-confidence fixes |
-| `fidan format <file>` | Format source code |
-| `fidan test <file>` | Run inline `test {}` blocks |
+| `fidan format <file-or-directory>` | Format source code (directories recursively) |
+| `fidan test <file-or-directory>` | Run inline `test {}` blocks (directories recursively) |
 | `fidan profile <file>` | Run with profiling output |
 | `fidan repl` | Start the interactive REPL |
 | `fidan lsp` | Start the Language Server (used by editors) |
@@ -894,6 +902,11 @@ fidan <COMMAND> [OPTIONS] [FILE]
 - default mode prints formatted source to stdout and does not modify the file
 - `--in-place` rewrites the file on disk
 - `--check` exits with status 1 when formatting changes are required
+- directory paths (including `.`) select all `.fdn` files recursively in sorted path order;
+  directory symlinks are not traversed, and symlink entries are not selected
+- each selected file uses its own formatter configuration; the CLI overrides still apply
+- directory checks report all file failures; malformed files are never rewritten
+- explicit file paths retain the `.fdn` extension warning
 
 `fidan new` scaffolds `main.fdn` with an explicit `main()` call so the entry
 behavior is obvious in new projects.
@@ -984,6 +997,12 @@ Dal package preflight validation happens locally before archive creation or uplo
 | `--link-runtime static\|dynamic` | Choose runtime linkage mode |
 | `--linker <path-or-name>` | Override the linker used for AOT output |
 | `--emit tokens\|ast\|hir\|mir\|obj` | Dump intermediate representation or object output |
+
+AOT compilation currently targets the host operating system and architecture.
+`--target-cpu` changes CPU tuning/features within that host target; it is not an
+OS/architecture cross-compilation option. Windows-to-Linux builds would also need
+a Linux-target runtime, linker and system libraries, which this release does not
+bundle as a cross-compilation SDK.
 
 ### `fidan self`, `fidan toolchain`, and `fidan exec`
 

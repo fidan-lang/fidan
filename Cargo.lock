@@ -1083,6 +1083,7 @@ dependencies = [
  "fidan-ast",
  "fidan-config",
  "fidan-diagnostics",
+ "fidan-driver",
  "fidan-fmt",
  "fidan-lexer",
  "fidan-parser",

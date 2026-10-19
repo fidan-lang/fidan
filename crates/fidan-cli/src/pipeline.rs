@@ -334,7 +334,109 @@ fn scaffold_dal_package(project_dir: &std::path::Path, project_name: &str) -> Re
     Ok(())
 }
 
+fn warn_source_extension(file: &std::path::Path, suppress: &[String]) {
+    if file.as_os_str() != "-"
+        && file.extension().and_then(|e| e.to_str()) != Some("fdn")
+        && !is_suppressed("W2001", suppress)
+    {
+        let message = format!(
+            "file '{}' does not have the '.fdn' extension",
+            file.display()
+        );
+        last_error::record("W2001", &message);
+        render_message_to_stderr(
+            Severity::Warning,
+            fidan_diagnostics::diag_code!("W2001"),
+            &message,
+        );
+    }
+}
+
+/// Enumerate source files deterministically without following directory symlinks.
+/// Explicit files retain the normal extension diagnostic and IO error handling.
+fn source_files(path: &std::path::Path) -> Result<Vec<PathBuf>> {
+    if !path.is_dir() {
+        return Ok(vec![path.to_owned()]);
+    }
+    let mut pending = vec![path.to_owned()];
+    let mut files = Vec::new();
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("cannot read directory {}", dir.display()))?
+        {
+            let entry = entry.with_context(|| format!("cannot read entry in {}", dir.display()))?;
+            let ty = entry.file_type()?;
+            if ty.is_dir() {
+                pending.push(entry.path());
+            } else if ty.is_file() && entry.path().extension().is_some_and(|ext| ext == "fdn") {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn run_source_files(
+    path: &std::path::Path,
+    mut run: impl FnMut(PathBuf) -> Result<()>,
+) -> Result<()> {
+    let files = source_files(path)?;
+    if files.is_empty() {
+        render_message_to_stderr(Severity::Note, "", "no .fdn files found");
+    }
+    let mut failed = 0;
+    for file in files {
+        if let Err(error) = run(file.clone()) {
+            render_message_to_stderr(
+                Severity::Error,
+                "cli",
+                &format!("{}: {error:#}", file.display()),
+            );
+            failed += 1;
+        }
+    }
+    if failed != 0 {
+        bail!("{failed} source file(s) failed");
+    }
+    Ok(())
+}
+
+pub(crate) fn run_test_path(opts: CompileOptions) -> Result<()> {
+    if !opts.input.is_dir() {
+        return run_pipeline(opts);
+    }
+    run_source_files(&opts.input, |file| {
+        render_message_to_stderr(Severity::Note, "", &format!("testing {}", file.display()));
+        let mut file_opts = opts.clone();
+        file_opts.input = file;
+        run_pipeline(file_opts)
+    })
+}
+
 pub(crate) fn run_fmt(
+    path: PathBuf,
+    in_place: bool,
+    check: bool,
+    indent_width: Option<usize>,
+    max_line_len: Option<usize>,
+) -> Result<()> {
+    if !path.is_dir() {
+        return run_fmt_file(path, in_place, check, indent_width, max_line_len);
+    }
+    run_source_files(&path, |file| {
+        if !in_place && !check {
+            render_message_to_stderr(
+                Severity::Note,
+                "",
+                &format!("formatting {}", file.display()),
+            );
+        }
+        run_fmt_file(file, in_place, check, indent_width, max_line_len)
+    })
+}
+
+fn run_fmt_file(
     file: PathBuf,
     in_place: bool,
     check: bool,
@@ -344,6 +446,8 @@ pub(crate) fn run_fmt(
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
     use std::sync::Arc;
+
+    warn_source_extension(&file, &[]);
 
     let src = std::fs::read_to_string(&file).with_context(|| format!("cannot read {:?}", file))?;
 
@@ -386,7 +490,7 @@ pub(crate) fn run_fmt(
                 file.display()
             ),
         );
-        std::process::exit(1);
+        bail!("source is not formatted");
     }
 
     if in_place {
@@ -644,22 +748,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
 
     let is_stdin = opts.input.as_os_str() == "-";
 
-    // ── Extension check (skipped for stdin) ───────────────────────────────────
-    if !is_stdin
-        && opts.input.extension().and_then(|e| e.to_str()) != Some("fdn")
-        && !is_suppressed("W2001", &opts.suppress)
-    {
-        let message = format!(
-            "file '{}' does not have the '.fdn' extension",
-            opts.input.display()
-        );
-        last_error::record("W2001", &message);
-        render_message_to_stderr(
-            Severity::Warning,
-            fidan_diagnostics::diag_code!("W2001"),
-            &message,
-        );
-    }
+    warn_source_extension(&opts.input, &opts.suppress);
 
     // ── Load source ────────────────────────────────────────────────────────────
     let (source_name, src) = if is_stdin {
@@ -1253,7 +1342,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                                 if !err.trace.is_empty() && opts.trace != TraceMode::None {
                                     render_trace_to_stderr(&err.trace, opts.trace);
                                 }
-                                std::process::exit(1);
+                                bail!("test execution failed");
                             }
                             (Ok(()), results) => {
                                 let mut passed = 0usize;
@@ -1299,7 +1388,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                                         paint(color, "\x1b[1;32m", &format!("{passed} passed")),
                                         paint(color, "\x1b[1;31m", &format!("{failed} failed"))
                                     );
-                                    std::process::exit(1);
+                                    bail!("test execution failed");
                                 }
                             }
                         }
@@ -1310,6 +1399,9 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     }
 
     if error_count > 0 {
+        if opts.mode == ExecutionMode::Test {
+            bail!("test compilation failed");
+        }
         std::process::exit(1);
     }
 

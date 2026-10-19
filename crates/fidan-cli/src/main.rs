@@ -178,8 +178,9 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         suppress: Vec<String>,
     },
-    /// Run `test { ... }` blocks in a Fidan source file
+    /// Run `test { ... }` blocks in a source file or directory (recursively)
     Test {
+        /// Path to a .fdn source file or directory
         file: PathBuf,
         /// Stop after this many errors (default: 1, 0 = no limit)
         #[arg(long, default_value = "1")]
@@ -208,9 +209,9 @@ enum Command {
         #[arg(long)]
         stdio: bool,
     },
-    /// Format a Fidan source file
+    /// Format a Fidan source file or directory (recursively)
     Format {
-        /// Path to the .fdn source file
+        /// Path to a .fdn source file or directory (recursive)
         file: PathBuf,
         /// Rewrite the file in place instead of printing to stdout
         #[arg(long)]
@@ -659,7 +660,7 @@ fn run_cli() -> Result<()> {
                 suppress,
                 ..Default::default()
             };
-            pipeline::run_pipeline(opts)
+            pipeline::run_test_path(opts)
         }
         Command::Check {
             file,
