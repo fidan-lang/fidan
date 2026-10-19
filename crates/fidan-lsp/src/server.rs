@@ -1980,6 +1980,10 @@ impl LanguageServer for FidanLsp {
                     Some(detail) => HoverLookup::Plain(detail),
                     None => HoverLookup::NotFound,
                 }
+            } else if let Some(import_url) = prev_name.and_then(|name| doc.imports.get(name)) {
+                // Namespace actions are imported symbols, not members of a
+                // receiver's runtime type. Resolve them before generic chains.
+                HoverLookup::ImportDoc(import_url.clone(), cur_name.clone())
             } else if let Some(site) =
                 member_access_site_at_offset(&doc.member_access_sites, offset)
             {
@@ -2036,19 +2040,13 @@ impl LanguageServer for FidanLsp {
             {
                 HoverLookup::ModuleDoc(module_url, format!("```fidan\nuse {}\n```", module_path))
             } else if let Some(pn) = prev_name {
-                // `module.Type` — prev is a namespace alias for an imported file.
-                if let Some(import_url) = doc.imports.get(pn) {
-                    HoverLookup::ImportDoc(import_url.clone(), cur_name.clone())
-                } else {
-                    // Type-resolved: prev is a variable with known type.
-                    let ty = doc
-                        .symbol_table
-                        .lookup_visible(offset, pn)
-                        .and_then(|e| e.ty_name.clone());
-                    match ty {
-                        Some(t) => HoverLookup::CrossDoc(t, cur_name.clone()),
-                        None => HoverLookup::NotFound,
-                    }
+                let ty = doc
+                    .symbol_table
+                    .lookup_visible(offset, pn)
+                    .and_then(|e| e.ty_name.clone());
+                match ty {
+                    Some(t) => HoverLookup::CrossDoc(t, cur_name.clone()),
+                    None => HoverLookup::NotFound,
                 }
             } else if let Some(url) = doc.imports.get(cur_name.as_str()) {
                 // The token is a module alias (e.g. hovering over `module` in
@@ -5807,6 +5805,62 @@ Holder.compass.
         let abs = stdlib_member_hover_markdown("math", "abs", Some(&["integer".to_string()]))
             .expect("missing std.math.abs doc");
         assert!(abs.contains("std.math.abs(x oftype float) -> integer"));
+    }
+
+    #[test]
+    fn hover_resolves_namespace_actions_before_generic_receiver_chains() {
+        let root = temp_test_dir("namespace-action-hover");
+        let uri = path_url(&root.join("main.fdn"));
+        std::fs::write(
+            root.join("helper.fdn"),
+            "#> Imported action documentation\naction answer returns integer { return 42 }\n",
+        )
+        .unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+            for text in [
+                "use \"./helper.fdn\" as helpers\nvar value = helpers.answer()\n",
+                "use helper\nvar value = helper.answer()\n",
+            ] {
+                backend.refresh(&uri, 1, text).await;
+                let file = SourceFile::new(FileId(0), uri.as_str(), text);
+                let start = text.find("answer").unwrap() as u32;
+                let position =
+                    convert::span_to_range(&file, Span::new(FileId(0), start, start + 6)).start;
+                let hover = LanguageServer::hover(
+                    backend,
+                    HoverParams {
+                        text_document_position_params: TextDocumentPositionParams {
+                            text_document: TextDocumentIdentifier { uri: uri.clone() },
+                            position,
+                        },
+                        work_done_progress_params: Default::default(),
+                    },
+                )
+                .await
+                .unwrap()
+                .expect("namespace action hover");
+                let HoverContents::Markup(markup) = hover.contents else {
+                    panic!("expected Markdown hover")
+                };
+                assert!(
+                    markup.value.contains("answer") && markup.value.contains("integer"),
+                    "{}",
+                    markup.value
+                );
+                assert!(
+                    markup.value.contains("Imported action documentation"),
+                    "{}",
+                    markup.value
+                );
+            }
+        });
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
