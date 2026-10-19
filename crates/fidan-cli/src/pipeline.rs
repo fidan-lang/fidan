@@ -377,7 +377,7 @@ fn source_files(path: &std::path::Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-fn run_source_files(
+pub(crate) fn run_source_files(
     path: &std::path::Path,
     mut run: impl FnMut(PathBuf) -> Result<()>,
 ) -> Result<()> {
@@ -402,12 +402,22 @@ fn run_source_files(
     Ok(())
 }
 
-pub(crate) fn run_test_path(opts: CompileOptions) -> Result<()> {
-    if !opts.input.is_dir() {
+/// Check/test directories contain independent source files, not a single entry point.
+pub(crate) fn run_pipeline_path(opts: CompileOptions) -> Result<()> {
+    if !opts.input.is_dir() || !matches!(opts.mode, ExecutionMode::Check | ExecutionMode::Test) {
         return run_pipeline(opts);
     }
+    let operation = if opts.mode == ExecutionMode::Test {
+        "testing"
+    } else {
+        "checking"
+    };
     run_source_files(&opts.input, |file| {
-        render_message_to_stderr(Severity::Note, "", &format!("testing {}", file.display()));
+        render_message_to_stderr(
+            Severity::Note,
+            "",
+            &format!("{operation} {}", file.display()),
+        );
         let mut file_opts = opts.clone();
         file_opts.input = file;
         run_pipeline(file_opts)
@@ -1215,10 +1225,8 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             }
         }
         ExecutionMode::Check => {
-            // Parse + typecheck already ran above; non-zero exit if errors found.
-            if error_count > 0 {
-                std::process::exit(1);
-            }
+            // Diagnostics were emitted above; return failures below so directory
+            // checks can continue without executing any source code.
         }
         ExecutionMode::Build => {
             if error_count == 0
@@ -1401,6 +1409,9 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     if error_count > 0 {
         if opts.mode == ExecutionMode::Test {
             bail!("test compilation failed");
+        }
+        if opts.mode == ExecutionMode::Check {
+            bail!("source check failed");
         }
         std::process::exit(1);
     }

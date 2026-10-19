@@ -226,9 +226,9 @@ enum Command {
         #[arg(long)]
         max_line_len: Option<usize>,
     },
-    /// Check a Fidan source file for errors without running it
+    /// Check source files for errors without running them (directories recursively)
     Check {
-        /// Path to the .fdn source file
+        /// Path to a .fdn source file or directory
         file: PathBuf,
         /// Stop after this many errors (0 = no limit)
         #[arg(long, default_value = "0")]
@@ -240,9 +240,9 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         suppress: Vec<String>,
     },
-    /// Apply high-confidence fix suggestions to a Fidan source file
+    /// Apply high-confidence fixes to source files (directories recursively)
     Fix {
-        /// Path to the .fdn source file
+        /// Path to a .fdn source file or directory
         file: PathBuf,
         /// Write changes to the file (default: print diff to stdout)
         #[arg(long)]
@@ -660,7 +660,7 @@ fn run_cli() -> Result<()> {
                 suppress,
                 ..Default::default()
             };
-            pipeline::run_test_path(opts)
+            pipeline::run_pipeline_path(opts)
         }
         Command::Check {
             file,
@@ -680,7 +680,7 @@ fn run_cli() -> Result<()> {
                 suppress,
                 ..Default::default()
             };
-            pipeline::run_pipeline(opts)
+            pipeline::run_pipeline_path(opts)
         }
         Command::Fix {
             file,

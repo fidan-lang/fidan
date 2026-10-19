@@ -881,8 +881,8 @@ fidan <COMMAND> [OPTIONS] [FILE]
 |---|---|
 | `fidan run <file>` | Run a Fidan source file |
 | `fidan build <file>` | Compile to a native binary |
-| `fidan check <file>` | Type-check and lint without running |
-| `fidan fix <file>` | Auto-apply high-confidence fixes |
+| `fidan check <file-or-directory>` | Type-check and lint without running (directories recursively) |
+| `fidan fix <file-or-directory>` | Suggest/apply high-confidence fixes (directories recursively) |
 | `fidan format <file-or-directory>` | Format source code (directories recursively) |
 | `fidan test <file-or-directory>` | Run inline `test {}` blocks (directories recursively) |
 | `fidan profile <file>` | Run with profiling output |
@@ -897,13 +897,21 @@ fidan <COMMAND> [OPTIONS] [FILE]
 | `fidan exec <namespace>` | Run commands registered by installed toolchains, such as `fidan exec ai ...` |
 | `fidan dal <command>` | Work with the Dal package registry |
 
+`format`, `test`, `check`, and `fix` accept directory paths, including `.`. They
+select `.fdn` files recursively in sorted path order without traversing symlinks.
+File-level failures are reported while processing continues; the command returns
+failure if any file operation fails. `check` never executes the source programs.
+
+`fix` previews edits by default; `--in-place` writes them. Explicit `--ai`,
+`--improve`, or `--refactor` options use the existing validated helper workflow for
+each selected file. Without those flags no AI helper is requested. Unresolved
+diagnostics are still reported; use `check` to require an error-free result.
+
 `fidan format` behavior:
 
 - default mode prints formatted source to stdout and does not modify the file
 - `--in-place` rewrites the file on disk
 - `--check` exits with status 1 when formatting changes are required
-- directory paths (including `.`) select all `.fdn` files recursively in sorted path order;
-  directory symlinks are not traversed, and symlink entries are not selected
 - each selected file uses its own formatter configuration; the CLI overrides still apply
 - directory checks report all file failures; malformed files are never rewritten
 - explicit file paths retain the `.fdn` extension warning

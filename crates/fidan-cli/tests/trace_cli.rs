@@ -3057,7 +3057,7 @@ fn explicit_non_fidan_files_keep_extension_diagnostic() {
     let root = make_temp_dir("explicit_extension");
     let file = root.join("program.txt");
     std::fs::write(&file, "test \"works\" { assert_eq(1, 1) }\n").unwrap();
-    for command in ["format", "test"] {
+    for command in ["format", "test", "check"] {
         let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
             .env("FIDAN_HOME", root.join("home"))
             .arg(command)
@@ -3066,6 +3066,177 @@ fn explicit_non_fidan_files_keep_extension_diagnostic() {
             .unwrap();
         assert!(output.status.success(), "{output:?}");
         assert!(String::from_utf8_lossy(&output.stderr).contains("W2001"));
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn check_directories_report_all_errors_without_running_sources() {
+    let root = make_temp_dir("recursive_check");
+    for command in ["check", "fix"] {
+        let empty = Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .env("FIDAN_HOME", root.join("home"))
+            .current_dir(&root)
+            .args([command, "."])
+            .output()
+            .unwrap();
+        assert!(empty.status.success(), "{empty:?}");
+        assert!(String::from_utf8_lossy(&empty.stderr).contains("no .fdn files found"));
+    }
+    let nested = root.join("nested with spaces");
+    std::fs::create_dir(&nested).unwrap();
+    let first = root.join("a.fdn");
+    let second = nested.join("b.fdn");
+    for file in [&first, &second] {
+        std::fs::write(file, "var = }\n").unwrap();
+    }
+    std::fs::write(root.join("ignored.txt"), "not source").unwrap();
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .env("FIDAN_HOME", root.join("home"))
+            .current_dir(&root)
+            .args(["check", ".", "--max-errors", "0", "--strict"])
+            .output()
+            .unwrap()
+    };
+    let failed = run();
+    let errors = String::from_utf8_lossy(&failed.stderr);
+    assert!(!failed.status.success(), "{errors}");
+    assert!(
+        errors.contains("a.fdn") && errors.contains("b.fdn"),
+        "{errors}"
+    );
+    for file in [&first, &second] {
+        std::fs::write(file, "print(\"must not run\")\n").unwrap();
+    }
+    let checked = run();
+    assert!(checked.status.success(), "{checked:?}");
+    assert!(
+        checked.stdout.is_empty(),
+        "check must not execute top-level code"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn fix_directories_preview_and_apply_edits_without_touching_other_files() {
+    let root = make_temp_dir("recursive_fix");
+    let nested = root.join("nested with spaces");
+    std::fs::create_dir(&nested).unwrap();
+    let first = root.join("a.fdn");
+    let second = nested.join("b.fdn");
+    let other = nested.join("keep.txt");
+    let source = "use std.io\nprint(\"keep\")\n";
+    for file in [&first, &second, &other] {
+        std::fs::write(file, source).unwrap();
+    }
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .env("FIDAN_HOME", root.join("home"))
+            .current_dir(&root)
+            .args(["fix", "."])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let preview = run(&[]);
+    assert!(preview.status.success(), "{preview:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&preview.stdout)
+            .matches("- use std.io")
+            .count(),
+        2
+    );
+    for file in [&first, &second, &other] {
+        assert_eq!(std::fs::read_to_string(file).unwrap(), source);
+    }
+    let applied = run(&["--in-place"]);
+    assert!(applied.status.success(), "{applied:?}");
+    for file in [&first, &second] {
+        let actual = std::fs::read_to_string(file).unwrap();
+        assert!(!actual.contains("use std.io"), "{actual}");
+        assert!(actual.contains("print(\"keep\")"), "{actual}");
+    }
+    assert_eq!(std::fs::read_to_string(&other).unwrap(), source);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn fix_directories_continue_after_unreadable_source() {
+    let root = make_temp_dir("recursive_fix_failure");
+    let bad = root.join("a.fdn");
+    let valid = root.join("b.fdn");
+    std::fs::write(&bad, [0xff]).unwrap();
+    std::fs::write(&valid, "use std.io\nprint(1)\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .env("FIDAN_HOME", root.join("home"))
+        .arg("fix")
+        .arg(&root)
+        .arg("--in-place")
+        .output()
+        .unwrap();
+    let errors = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{errors}");
+    assert!(errors.contains("a.fdn"), "{errors}");
+    assert_eq!(std::fs::read(&bad).unwrap(), [0xff]);
+    assert!(
+        !std::fs::read_to_string(valid)
+            .unwrap()
+            .contains("use std.io")
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn fix_directories_forward_ai_modes_to_existing_helper() {
+    let root = make_temp_dir("recursive_fix_ai");
+    let nested = root.join("nested");
+    std::fs::create_dir(&nested).unwrap();
+    let home = root.join("home");
+    let helper_src = root.join("helper");
+    std::fs::create_dir(&helper_src).unwrap();
+    let capture = helper_src.join("capture.json");
+    let response = make_fix_ai_helper_response(serde_json::json!([{
+        "line_start": 2, "line_end": 2,
+        "old_text": "    print(completely_unknown_xyz)",
+        "new_text": "    print(\"hello\")",
+        "reason": "replace undefined identifier"
+    }]));
+    let helper = make_fake_ai_helper(&helper_src, &response.to_string(), &capture);
+    install_fake_ai_toolchain(&home, &helper);
+    let files = [root.join("a.fdn"), nested.join("b.fdn")];
+    for (flag, expected_mode) in [
+        ("--ai", AiFixMode::Diagnostics),
+        ("--improve", AiFixMode::Improve),
+        ("--refactor", AiFixMode::Improve),
+    ] {
+        for file in &files {
+            std::fs::write(file, make_fix_ai_source()).unwrap();
+        }
+        let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .env("FIDAN_HOME", &home)
+            .current_dir(&root)
+            .args(["fix", ".", "--in-place", flag, "preserve behavior"])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        for file in &files {
+            let actual = std::fs::read_to_string(file).unwrap();
+            assert!(actual.contains("print(\"hello\")"), "{actual}");
+            assert!(!actual.contains("completely_unknown_xyz"), "{actual}");
+        }
+        let request: fidan_driver::AiAnalysisHelperRequest =
+            serde_json::from_str(&std::fs::read_to_string(&capture).unwrap()).unwrap();
+        match request.command {
+            fidan_driver::AiAnalysisHelperCommand::Fix {
+                file, mode, prompt, ..
+            } => {
+                assert!(file.ends_with(Path::new("nested").join("b.fdn")));
+                assert_eq!(mode, expected_mode);
+                assert_eq!(prompt.as_deref(), Some("preserve behavior"));
+            }
+            _ => panic!("expected existing Fix helper request"),
+        }
     }
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -10,6 +10,21 @@ pub(crate) fn run_fix(
     ai_prompt: Option<String>,
     improve_prompt: Option<String>,
 ) -> Result<()> {
+    if !file.is_dir() {
+        return run_fix_file(file, in_place, ai_prompt, improve_prompt);
+    }
+    crate::pipeline::run_source_files(&file, |source| {
+        render_message_to_stderr(Severity::Note, "", &format!("fixing {}", source.display()));
+        run_fix_file(source, in_place, ai_prompt.clone(), improve_prompt.clone())
+    })
+}
+
+fn run_fix_file(
+    file: PathBuf,
+    in_place: bool,
+    ai_prompt: Option<String>,
+    improve_prompt: Option<String>,
+) -> Result<()> {
     use fidan_diagnostics::{Confidence, render_to_stderr};
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
