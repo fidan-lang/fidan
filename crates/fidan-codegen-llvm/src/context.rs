@@ -40,6 +40,24 @@ impl<'a> BackendContext<'a> {
         }
     }
 
+    pub fn callable_metadata(&self, function: &MirFunction) -> Result<serde_json::Value> {
+        let invalid = std::cell::Cell::new(None);
+        let metadata = function.callable_metadata(|symbol| match self.symbol_name(symbol) {
+            Ok(name) => name.to_owned(),
+            Err(_) => {
+                invalid.set(Some(symbol));
+                String::new()
+            }
+        });
+        if let Some(symbol) = invalid.get() {
+            bail!(
+                "callable metadata references missing symbol id {}",
+                symbol.0
+            );
+        }
+        Ok(metadata)
+    }
+
     pub fn function(&self, function_id: FunctionId) -> Result<&'a MirFunction> {
         self.payload
             .program
@@ -128,6 +146,20 @@ mod tests {
         MirLit, MirProgram, MirTy, MirUseDecl, Operand, Rvalue, Terminator,
     };
     use fidan_source::Span;
+
+    #[test]
+    fn callable_metadata_rejects_missing_symbols() {
+        let mut payload = sample_payload(sample_function_with_value_return());
+        payload.program.functions[0].name = Symbol(u32::MAX);
+        let backend = BackendContext::new(&payload);
+        assert!(
+            backend
+                .callable_metadata(&payload.program.functions[0])
+                .unwrap_err()
+                .to_string()
+                .contains("missing symbol")
+        );
+    }
 
     #[test]
     fn mangles_main_and_init_consistently() {

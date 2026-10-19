@@ -25,7 +25,7 @@ pub fn collect_effective_local_types(
     let mut namespace_locals: HashMap<LocalId, String> = HashMap::new();
 
     for param in &function.params {
-        map.insert(param.local.0, param.ty.clone());
+        map.insert(param.local.0, param.abi_ty().clone());
     }
 
     for block in &function.blocks {

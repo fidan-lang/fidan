@@ -401,6 +401,7 @@ struct FnCtx<'p> {
     /// Records all `continue` sites: maps continue_target_bb to a list of
     /// (source_bb, env_snapshot_at_that_point).
     continue_sites: ContinueSiteMap,
+    break_sites: ContinueSiteMap,
     /// Symbol for `"_"` — the wildcard pattern in `check` arms.
     wildcard_sym: Symbol,
     /// Symbol for `"__lambda__"` — used as the debug name for synthetic lambda functions.
@@ -794,7 +795,7 @@ impl<'p> FnCtx<'p> {
                 {
                     let dest = self.alloc_local();
                     let mut arg_ops = vec![Operand::Local(tr)];
-                    arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                    arg_ops.extend(self.sort_args_for_fn(pfid, args));
                     self.emit(Instr::Call {
                         dest: Some(dest),
                         result_ty: Some(ty.clone()),
@@ -839,7 +840,7 @@ impl<'p> FnCtx<'p> {
                             && let Some(&pfid) = self.method_ids.get(&(parent_cls, *field))
                         {
                             let mut arg_ops = vec![Operand::Local(tr)];
-                            arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                            arg_ops.extend(self.sort_args_for_fn(pfid, args));
                             let dest = self.alloc_local();
                             self.emit(Instr::Call {
                                 dest: Some(dest),
@@ -1508,7 +1509,7 @@ impl<'p> FnCtx<'p> {
                             && let Some(&pfid) = self.method_ids.get(&(parent_cls, self.new_sym))
                         {
                             let mut arg_ops = vec![Operand::Local(tr)];
-                            arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                            arg_ops.extend(self.sort_args_for_fn(pfid, args));
                             self.emit(Instr::Call {
                                 dest: None,
                                 result_ty: None,
@@ -1532,7 +1533,7 @@ impl<'p> FnCtx<'p> {
                                 },
                             });
                             let mut arg_ops = vec![Operand::Local(this_local)];
-                            arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                            arg_ops.extend(self.sort_args_for_fn(init_fid, args));
                             self.emit(Instr::Call {
                                 dest: None,
                                 result_ty: None,
@@ -1552,7 +1553,7 @@ impl<'p> FnCtx<'p> {
                                     && let Some(&pfid) = self.method_ids.get(&(parent_cls, *field))
                                 {
                                     let mut arg_ops = vec![Operand::Local(tr)];
-                                    arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                                    arg_ops.extend(self.sort_args_for_fn(pfid, args));
                                     self.emit(Instr::Call {
                                         dest: None,
                                         result_ty: None,
@@ -1577,7 +1578,7 @@ impl<'p> FnCtx<'p> {
                                         },
                                     });
                                     let mut arg_ops = vec![Operand::Local(this_local)];
-                                    arg_ops.extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                                    arg_ops.extend(self.sort_args_for_fn(init_fid, args));
                                     self.emit(Instr::Call {
                                         dest: None,
                                         result_ty: None,
@@ -1600,8 +1601,7 @@ impl<'p> FnCtx<'p> {
                                     // ⑤ Extension action free call as statement: prepend nothing for `this`.
                                     if self.fn_is_extension.contains(name) {
                                         let mut call_args = vec![Operand::Const(MirLit::Nothing)];
-                                        call_args
-                                            .extend(args.iter().map(|a| self.lower_expr(&a.value)));
+                                        call_args.extend(self.sort_args_for_fn(fid, args));
                                         self.emit(Instr::Call {
                                             dest: None,
                                             result_ty: None,
@@ -1634,8 +1634,11 @@ impl<'p> FnCtx<'p> {
                                 Callee::Dynamic(op)
                             }
                         };
-                        let arg_ops: Vec<Operand> =
-                            args.iter().map(|a| self.lower_expr(&a.value)).collect();
+                        let arg_ops = if let Callee::Fn(fid) = &callee_op {
+                            self.sort_args_for_fn(*fid, args)
+                        } else {
+                            args.iter().map(|a| self.lower_expr(&a.value)).collect()
+                        };
                         self.emit(Instr::Call {
                             dest: None,
                             result_ty: Some(fidan_ty_to_mir(&expr.ty)),
@@ -1659,6 +1662,10 @@ impl<'p> FnCtx<'p> {
 
             HirStmt::Break { .. } => {
                 if let Some(&(_, exit_bb)) = self.loop_stack.last() {
+                    self.break_sites
+                        .entry(exit_bb)
+                        .or_default()
+                        .push((self.cur_bb, self.env.clone()));
                     self.goto(exit_bb);
                 } else {
                     self.set_terminator(Terminator::Unreachable);
@@ -2311,11 +2318,8 @@ impl<'p> FnCtx<'p> {
         }
 
         // ── Exit ──────────────────────────────────────────────────────────────
-        self.switch_to(exit_bb);
-        // After the loop the phi-merged value is the observable state of each var.
-        for (sym, phi_local) in &phi_vars {
-            self.define_var(*sym, *phi_local);
-        }
+        self.env = env_before;
+        self.finish_loop_exit(exit_bb, header_bb, &phi_vars);
     }
 
     // ── Comprehension desugaring ──────────────────────────────────────────────
@@ -2580,6 +2584,7 @@ impl<'p> FnCtx<'p> {
 
         // Condition (reads phi locals so each iteration sees the updated value).
         let cond = self.lower_expr(condition);
+        let condition_end = self.cur_bb;
         self.set_terminator(Terminator::Branch {
             cond,
             then_bb: body_bb,
@@ -2591,27 +2596,47 @@ impl<'p> FnCtx<'p> {
         self.lower_stmts(body);
         self.loop_stack.pop();
 
-        let body_end = self.cur_bb;
+        let mut back_edges = self.continue_sites.remove(&header_bb).unwrap_or_default();
         if !self.terminated {
+            back_edges.push((self.cur_bb, self.env.clone()));
             self.goto(header_bb);
         }
-
-        // ── Back-patch phis ───────────────────────────────────────────────────
         for (i, (sym, _)) in phi_vars.iter().enumerate() {
-            let body_local = self
-                .env
-                .get(sym)
-                .copied()
-                .unwrap_or_else(|| env_before[sym]);
-            self.func_mut().block_mut(header_bb).phis[i]
-                .operands
-                .push((body_end, Operand::Local(body_local)));
+            for (from, environment) in &back_edges {
+                let local = environment.get(sym).copied().unwrap_or(env_before[sym]);
+                self.func_mut().block_mut(header_bb).phis[i]
+                    .operands
+                    .push((*from, Operand::Local(local)));
+            }
         }
+        self.env = env_before;
+        self.finish_loop_exit(exit_bb, condition_end, &phi_vars);
+    }
 
-        // ── Exit ──────────────────────────────────────────────────────────────
-        self.switch_to(exit_bb);
-        for (sym, phi_local) in &phi_vars {
-            self.define_var(*sym, *phi_local);
+    // A break carries the values at that edge, not the previous header iteration.
+    fn finish_loop_exit(
+        &mut self,
+        exit: BlockId,
+        header: BlockId,
+        variables: &[(Symbol, LocalId)],
+    ) {
+        let breaks = self.break_sites.remove(&exit).unwrap_or_default();
+        self.switch_to(exit);
+        for &(symbol, header_value) in variables {
+            if breaks.is_empty() {
+                self.define_var(symbol, header_value);
+            } else {
+                let mut incoming = vec![(header, Operand::Local(header_value))];
+                incoming.extend(breaks.iter().map(|(from, environment)| {
+                    (
+                        *from,
+                        Operand::Local(environment.get(&symbol).copied().unwrap_or(header_value)),
+                    )
+                }));
+                let result = self.alloc_local();
+                self.add_phi(exit, result, self.local_ty(header_value), incoming);
+                self.define_var(symbol, result);
+            }
         }
     }
 
@@ -3095,13 +3120,13 @@ pub fn lower_program(
 
     // ── Post-pass: resolve custom decorator references now that all FunctionIds are known ──
     // `fn_map` maps top-level Symbol → FunctionId (built in pre-pass ②).
-    for hir_func in &hir.functions {
+    for (hir_func, &decorated_fn_id) in hir.functions.iter().zip(&fn_ids_per_hir_fn) {
         if hir_func.custom_decorators.is_empty() {
             continue;
         }
-        if let Some(&decorated_fn_id) = fn_map.get(&hir_func.name) {
+        if let Some(scope) = function_scopes.get(&hir_func.span.file) {
             for custom_dec in &hir_func.custom_decorators {
-                if let Some(&dec_fn_id) = fn_map.get(&custom_dec.name) {
+                if let Some(&dec_fn_id) = scope.get(&custom_dec.name) {
                     let lit_args: Vec<MirLit> = custom_dec
                         .args
                         .iter()
@@ -3389,6 +3414,7 @@ pub fn lower_program(
             fn_is_extension: fn_is_extension.clone(),
             loop_stack: vec![],
             continue_sites: FxHashMap::default(),
+            break_sites: FxHashMap::default(),
             wildcard_sym,
             lambda_sym,
             builtin_value_names: builtin_value_names.clone(),
@@ -3622,6 +3648,7 @@ pub fn lower_program(
             fn_is_extension: fn_is_extension.clone(),
             loop_stack: vec![],
             continue_sites: FxHashMap::default(),
+            break_sites: FxHashMap::default(),
             wildcard_sym,
             lambda_sym,
             builtin_value_names: builtin_value_names.clone(),
@@ -3804,6 +3831,7 @@ pub fn lower_program(
                     fn_is_extension: fn_is_extension.clone(),
                     loop_stack: vec![],
                     continue_sites: FxHashMap::default(),
+                    break_sites: FxHashMap::default(),
                     wildcard_sym,
                     lambda_sym,
                     builtin_value_names: builtin_value_names.clone(),
@@ -3883,6 +3911,7 @@ pub fn lower_program(
             fn_is_extension: fn_is_extension.clone(),
             loop_stack: vec![],
             continue_sites: FxHashMap::default(),
+            break_sites: FxHashMap::default(),
             wildcard_sym,
             lambda_sym,
             builtin_value_names: builtin_value_names.clone(),

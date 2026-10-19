@@ -2426,3 +2426,33 @@ fn optional_assertion_messages_across_aot_backends() {
     }
     fs::remove_dir_all(sandbox).expect("remove assertion message sandbox");
 }
+
+#[test]
+fn callable_metadata_and_loop_exit_values_across_aot_backends() {
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/callable-regressions");
+    fs::create_dir_all(&artifacts).unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        for (name, source, marker) in [
+            (
+                "metadata",
+                include_str!("../../../test/examples/callable_parameters_regression.fdn"),
+                "callable parameters passed",
+            ),
+            (
+                "loop-exits",
+                include_str!("../../../test/examples/loop_exit_values_regression.fdn"),
+                "loop exit values passed",
+            ),
+        ] {
+            let binary = artifacts.join(format!(
+                "{name}-{backend:?}{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+            compile_program(source, backend, &binary);
+            run_compiled_binary_clean(&binary, marker);
+        }
+    }
+}

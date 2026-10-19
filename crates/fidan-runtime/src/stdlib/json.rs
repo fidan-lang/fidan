@@ -139,7 +139,7 @@ fn fidan_tuple_to_json(items: &[FidanValue]) -> Result<JsonValue, StdlibRuntimeE
     ))
 }
 
-fn json_to_fidan(value: serde_json::Value) -> FidanValue {
+pub(crate) fn json_to_fidan(value: serde_json::Value) -> FidanValue {
     match value {
         serde_json::Value::Null => FidanValue::Nothing,
         serde_json::Value::Bool(value) => FidanValue::Boolean(value),

@@ -616,6 +616,16 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 )?;
 
                 if index > 0 {
+                    let metadata = self.backend.callable_metadata(function)?.to_string();
+                    let (metadata_ptr, metadata_len) = self.module_string_bytes(&metadata);
+                    self.call_runtime_void(
+                        "fdn_fn_metadata_register",
+                        &[
+                            metadata_ptr.into(),
+                            metadata_len.into(),
+                            self.i64_type.const_int(index as u64, false).into(),
+                        ],
+                    )?;
                     let name = self.backend.symbol_name(function.name)?.to_owned();
                     let (name_ptr, name_len) = self.module_string_bytes(&name);
                     self.call_runtime_void(
@@ -652,6 +662,73 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                     target_len.into(),
                 ],
             )?;
+        }
+
+        // Match interpreter startup: declarations' decorators precede fdn_init.
+        for function in &functions {
+            for (decorator, extras) in &function.custom_decorators {
+                let callback = self.call_runtime_ptr(
+                    "fdn_box_fn_ref",
+                    &[self.i64_type.const_int(decorator.0 as u64, false).into()],
+                )?;
+                let decorated = self.call_runtime_ptr(
+                    "fdn_box_fn_ref",
+                    &[self.i64_type.const_int(function.id.0 as u64, false).into()],
+                )?;
+                let mut args = vec![decorated];
+                for literal in extras {
+                    let value = match literal {
+                        MirLit::Int(value) => self.call_runtime_ptr(
+                            "fdn_box_int",
+                            &[self.i64_type.const_int(*value as u64, true).into()],
+                        )?,
+                        MirLit::Float(value) => self.call_runtime_ptr(
+                            "fdn_box_float",
+                            &[self.f64_type.const_float(*value).into()],
+                        )?,
+                        MirLit::Bool(value) => self.call_runtime_ptr(
+                            "fdn_box_bool",
+                            &[self.i8_type.const_int(u64::from(*value), false).into()],
+                        )?,
+                        MirLit::Str(value) => {
+                            let (ptr, len) = self.module_string_bytes(value);
+                            self.call_runtime_ptr("fdn_box_str", &[ptr.into(), len.into()])?
+                        }
+                        _ => bail!("unsupported decorator literal"),
+                    };
+                    args.push(value);
+                }
+                let (array, count) = self.build_ptr_array(&args)?;
+                let result = self.call_runtime_ptr(
+                    "fdn_call_dynamic",
+                    &[callback.into(), array.into(), count.into()],
+                )?;
+                for value in args.into_iter().chain([result, callback]) {
+                    self.call_runtime_void("fdn_drop", &[value.into()])?;
+                }
+                let pending = self.call_runtime_i8("fdn_has_exception", &[])?;
+                let pending = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        pending,
+                        self.i8_type.const_zero(),
+                        "decorator.pending",
+                    )
+                    .map_err(|err| anyhow!("{err}"))?;
+                let failed = self.context.append_basic_block(main, "decorator.failed");
+                let next = self.context.append_basic_block(main, "decorator.next");
+                self.builder
+                    .build_conditional_branch(pending, failed, next)
+                    .map_err(|err| anyhow!("{err}"))?;
+                self.builder.position_at_end(failed);
+                let exception = self.call_runtime_ptr("fdn_catch_exception", &[])?;
+                self.call_runtime_void("fdn_throw_unhandled", &[exception.into()])?;
+                self.builder
+                    .build_return(Some(&self.i32_type.const_int(1, false)))
+                    .map_err(|err| anyhow!("{err}"))?;
+                self.builder.position_at_end(next);
+            }
         }
 
         if let Some(init) = self.backend.init_function() {
@@ -1283,6 +1360,17 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
         );
         self.declare_runtime_fn(
             "fdn_fn_name_register",
+            self.context.void_type().fn_type(
+                &[
+                    self.ptr_type.into(),
+                    self.i64_type.into(),
+                    self.i64_type.into(),
+                ],
+                false,
+            ),
+        );
+        self.declare_runtime_fn(
+            "fdn_fn_metadata_register",
             self.context.void_type().fn_type(
                 &[
                     self.ptr_type.into(),
@@ -2187,7 +2275,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 };
                 self.store_local_boxed(*dest, value)?;
                 self.namespace_locals.remove(dest);
-                Ok(())
+                self.emit_pending_exception_check(current_catch_stack)
             }
             Instr::GetIndex {
                 dest,

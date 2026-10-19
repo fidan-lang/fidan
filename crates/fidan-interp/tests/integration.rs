@@ -3196,3 +3196,16 @@ fn sandbox_checks_env_module_and_erased_callable_aliases() {
         .is_ok()
     );
 }
+
+#[test]
+fn callable_metadata_and_loop_exit_values_through_optimized_pipeline() {
+    for source in [
+        include_str!("../../../test/examples/callable_parameters_regression.fdn"),
+        include_str!("../../../test/examples/loop_exit_values_regression.fdn"),
+    ] {
+        for threshold in [0, 1] {
+            run_src_with_threshold(source, threshold)
+                .unwrap_or_else(|error| panic!("{}", error.message));
+        }
+    }
+}

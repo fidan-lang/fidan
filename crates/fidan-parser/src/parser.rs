@@ -725,7 +725,7 @@ impl<'t> Parser<'t> {
                         params,
                         return_ty: None,
                         body,
-                        decorators: vec![],
+                        decorators: method_decs,
                         is_parallel: false,
                         span: Span::new(self.module.file, item_start, end),
                     });

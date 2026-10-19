@@ -225,6 +225,23 @@ mod tests {
     // ── Well-typed programs produce no errors ─────────────────────────────────
 
     #[test]
+    fn extern_parameters_cannot_have_optional_sentinel_abi() {
+        for annotation in [
+            "optional value oftype float",
+            "optional value oftype integer = 1",
+            "optional value oftype boolean",
+        ] {
+            let source =
+                format!("@extern(\"unused\")\naction external with ({annotation}) returns integer");
+            assert!(
+                check_errors(&source)
+                    .iter()
+                    .any(|message| message.contains("cannot be optional or have a default"))
+            );
+        }
+    }
+
+    #[test]
     fn integer_var_is_clean() {
         assert!(check_errors("var x = 42").is_empty());
     }

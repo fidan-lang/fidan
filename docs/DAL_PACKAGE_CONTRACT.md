@@ -65,16 +65,45 @@ nullable/Dynamic native representation defects. The fixes retain source-language
 contracts. Boxed if/while conditions execute natively in the JIT using the same
 fdn_truthy helper as AOT. Functions using other unsupported instructions still use
 the established selective-JIT fallback; no coverage percentage is claimed.
-LLVM helper protocol is now **6**, because
-old protocol-5 helpers cannot safely consume the new module/export representation.
+LLVM helper protocol is now **7**: protocol 6 covered module/export identity; protocol 7
+adds native callable metadata registration and the optional scalar parameter ABI.
+Older helpers cannot safely execute that contract.
 The existing exact compatibility gate rejects them rather than silently miscompiling.
 AI helper protocol is unchanged. LLVM 23.1.2/llvm-sys 231 and Cranelift 0.136 are unchanged.
 
 A future owner-approved compiler patch and matching LLVM helper patch must be released
 before publishing `args`; choose their versions and tighten its compiler minimum first.
 Do not replace immutable Fidan 1.0.16 or helper 1.0.6 artifacts. Private audit helper
-`1.0.6-audit.3` is local-only evidence, not a published release.
+`1.0.6-audit.4` is local-only evidence, not a published release.
 
 Cross-repository manifest/lock fixtures live under `test/fixtures/dal/`; actual CLI
 loopback regressions are in `crates/fidan-cli/tests/dal_registry.rs`. Full local
 API/auth/storage/worker/browser lifecycle is maintained in the sibling Dal repository.
+
+## Owner-approved signature-driven args support
+
+`action.parameters` returns an independent list of parameter descriptors: `name`,
+source `type`, `certain`, `required`, `default_known`, `default`, `variadic`.
+Required arity means no optional/default sentinel; it is distinct from `certain`'s
+non-Nothing check. Closure capture slots are hidden. Literal defaults preserve their
+runtime kind and Float bits. Unknown/computed defaults report `default_known=false`
+and are never evaluated while inspecting metadata. Stdlib descriptors reuse the
+central fidan-config signatures; their erased parameter types/defaults remain unknown.
+
+`action.invoke(arguments)` takes exactly one list and reuses ordinary dynamic
+call dispatch, arity/default checks, closures, stdlib aliases and exception handling.
+The interpreter projects current MIR metadata; AOT registers metadata beside the
+existing trampoline table. JIT receiver hooks reuse the active MirMachine rather
+than a second registry; a regression requires actual native entries and execution.
+Top-level custom decorators execute in declaration order before module init on both
+AOT backends, matching established interpreter startup. They validate/observe the
+original callable; their return does not replace its binding.
+
+The unpublished args candidate uses `@command` and `run(callback)`, with typed
+`ArgumentError` throws, required positionals, optional typed options, Boolean flags,
+computed defaults, help/version and a final string-list rest parameter. No public
+handwritten parameter schema or error-result dictionary remains. Real usage exposed
+and corrected statement named-argument sorting, loop break/continue edge values,
+computed scalar-default sentinel boxing, constructor decorator loss, and native
+object type tags used by existing typed catches. Object representation remains
+Dict-backed in AOT; this does not claim complete class-system parity.

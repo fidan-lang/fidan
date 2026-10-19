@@ -55,6 +55,7 @@ pub struct JitRuntimeHooks {
     pub load_global_raw: JitLoadGlobalRawFn,
     pub store_global_raw: JitStoreGlobalRawFn,
     pub call_fn_raw: JitCallFnRawFn,
+    pub receiver_raw: unsafe fn(*mut c_void, i64, *const u8, i64, *const i64, i64, i8) -> i64,
 }
 
 static JIT_RUNTIME_HOOKS: OnceLock<JitRuntimeHooks> = OnceLock::new();
@@ -359,6 +360,44 @@ extern "C" fn fdn_jit_store_global_raw(global_id: i64, raw: i64) {
     unsafe { (hooks.store_global_raw)(ctx, global_id as u32, raw) }
 }
 
+// Boxed receiver operations share the active interpreter's dispatch and exception channel.
+unsafe extern "C" fn fdn_jit_receiver_raw(
+    receiver: i64,
+    name: *const u8,
+    len: i64,
+    args: *const i64,
+    count: i64,
+    invoke: i8,
+) -> i64 {
+    unsafe {
+        (active_jit_runtime_hooks().receiver_raw)(
+            active_jit_context(),
+            receiver,
+            name,
+            len,
+            args,
+            count,
+            invoke,
+        )
+    }
+}
+extern "C" fn fdn_jit_box_function_scoped(id: i64) -> i64 {
+    encode_jit_abi_value(
+        &FidanValue::Function(fidan_runtime::FunctionId(id as u32)),
+        &MirTy::Function,
+    )
+}
+unsafe extern "C" fn fdn_jit_box_stdlib_scoped(
+    module: *const u8,
+    module_len: i64,
+    name: *const u8,
+    name_len: i64,
+) -> i64 {
+    register_jit_abi_ptr(unsafe {
+        fidan_runtime::ffi::fdn_box_stdlib_fn(module, module_len, name, name_len)
+    })
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn fdn_jit_call_fn_raw(fn_id: i64, args_ptr: *const i64, arg_cnt: i64) -> i64 {
     let hooks = active_jit_runtime_hooks();
@@ -418,7 +457,7 @@ impl JitFnEntry {
     fn fallback(func: &MirFunction) -> Self {
         Self {
             fn_ptr: None,
-            param_tys: func.params.iter().map(|p| p.ty.clone()).collect(),
+            param_tys: func.params.iter().map(|p| p.abi_ty().clone()).collect(),
             return_ty: func.return_ty.clone(),
         }
     }
@@ -447,6 +486,9 @@ pub struct JitCompiler {
     load_global_raw_id: FuncId,
     store_global_raw_id: FuncId,
     call_fn_raw_id: FuncId,
+    receiver_raw_id: FuncId,
+    box_function_scoped_id: FuncId,
+    box_stdlib_scoped_id: FuncId,
     int_add_id: FuncId,
     int_sub_id: FuncId,
     int_mul_id: FuncId,
@@ -535,6 +577,15 @@ impl JitCompiler {
             fidan_runtime::ffi::fdn_has_exception as *const u8,
         );
         builder.symbol("fdn_truthy", fidan_runtime::ffi::fdn_truthy as *const u8);
+        builder.symbol("fdn_jit_receiver_raw", fdn_jit_receiver_raw as *const u8);
+        builder.symbol(
+            "fdn_jit_box_function_scoped",
+            fdn_jit_box_function_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_box_stdlib_scoped",
+            fdn_jit_box_stdlib_scoped as *const u8,
+        );
         builder.symbol("fdn_jit_call_fn_raw", fdn_jit_call_fn_raw as *const u8);
         builder.symbol(
             "fdn_jit_box_int_scoped",
@@ -666,6 +717,24 @@ impl JitCompiler {
                 .declare_function("fdn_jit_call_fn_raw", Linkage::Import, &sig)
                 .expect("declare fdn_jit_call_fn_raw")
         };
+        let receiver_raw_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_receiver_raw",
+            &[I64, I64, I64, I64, I64, I8],
+            Some(I64),
+        );
+        let box_function_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_box_function_scoped",
+            &[I64],
+            Some(I64),
+        );
+        let box_stdlib_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_box_stdlib_scoped",
+            &[I64, I64, I64, I64],
+            Some(I64),
+        );
         let box_int_scoped_id =
             declare_import_fn(&mut module, "fdn_jit_box_int_scoped", &[I64], Some(I64));
         let int_add_id = declare_import_fn(&mut module, "fdn_int_add", &[I64, I64], Some(I64));
@@ -806,6 +875,9 @@ impl JitCompiler {
             load_global_raw_id,
             store_global_raw_id,
             call_fn_raw_id,
+            receiver_raw_id,
+            box_function_scoped_id,
+            box_stdlib_scoped_id,
             int_add_id,
             int_sub_id,
             int_mul_id,
@@ -873,7 +945,7 @@ impl JitCompiler {
     ) -> Option<JitFnEntry> {
         // ── Eligibility check ─────────────────────────────────────────────────
         for p in &func.params {
-            if !is_jit_abi_supported(&p.ty) {
+            if !is_jit_abi_supported(p.abi_ty()) {
                 return None;
             }
         }
@@ -919,7 +991,7 @@ impl JitCompiler {
                     let target = program.functions.get(id.0 as usize)?;
                     if args.len() != target.params.len()
                         || args.iter().zip(&target.params).any(|(arg, param)| {
-                            jit_operand_type(arg, &local_types).as_ref() != Some(&param.ty)
+                            jit_operand_type(arg, &local_types).as_ref() != Some(param.abi_ty())
                         })
                     {
                         return None;
@@ -1009,6 +1081,15 @@ impl JitCompiler {
                 .module
                 .declare_func_in_func(self.truthy_id, builder.func);
             let rt = JitRuntimeRefs {
+                receiver_raw: self
+                    .module
+                    .declare_func_in_func(self.receiver_raw_id, builder.func),
+                box_function_scoped: self
+                    .module
+                    .declare_func_in_func(self.box_function_scoped_id, builder.func),
+                box_stdlib_scoped: self
+                    .module
+                    .declare_func_in_func(self.box_stdlib_scoped_id, builder.func),
                 int_abs: self
                     .module
                     .declare_func_in_func(self.int_abs_id, builder.func),
@@ -1143,7 +1224,7 @@ impl JitCompiler {
                 let entry_params: Vec<Value> = builder.block_params(cl_blocks[0]).to_vec();
                 for (idx, param) in func.params.iter().enumerate() {
                     let raw_i64 = entry_params[idx];
-                    let actual = abi_i64_to_native(&mut builder, raw_i64, &param.ty);
+                    let actual = abi_i64_to_native(&mut builder, raw_i64, param.abi_ty());
                     builder.def_var(cl_vars[param.local.0 as usize], actual);
                 }
             }
@@ -1225,16 +1306,36 @@ impl JitCompiler {
                                         let dest_ty = dest
                                             .and_then(|local| local_types.get(&local))
                                             .unwrap_or(&MirTy::Nothing);
-                                        emit_container_method_call(
-                                            &mut builder,
-                                            &cl_vars,
-                                            &local_types,
-                                            &rt,
-                                            receiver,
-                                            mname.as_ref(),
-                                            args,
-                                            dest_ty,
-                                        )?
+                                        if mname.as_ref() == "invoke" && !is_scalar_ty(dest_ty) {
+                                            let emit_ctx = RvalueEmitCtx {
+                                                vars: &cl_vars,
+                                                local_types: &local_types,
+                                                ns_locals: &namespace_locals,
+                                                interner,
+                                                call_fn_raw_ref,
+                                                rt: &rt,
+                                            };
+                                            emit_receiver_operation(
+                                                &mut self.module,
+                                                &mut builder,
+                                                receiver,
+                                                "invoke",
+                                                args,
+                                                true,
+                                                &emit_ctx,
+                                            )?
+                                        } else {
+                                            emit_container_method_call(
+                                                &mut builder,
+                                                &cl_vars,
+                                                &local_types,
+                                                &rt,
+                                                receiver,
+                                                mname.as_ref(),
+                                                args,
+                                                dest_ty,
+                                            )?
+                                        }
                                     }
                                 }
                                 Callee::Fn(fid) => {
@@ -1256,6 +1357,31 @@ impl JitCompiler {
                             if let Some(d) = dest {
                                 builder.def_var(cl_vars[d.0 as usize], val);
                             }
+                            emit_jit_exception_check(&mut builder, &rt)?;
+                        }
+                        Instr::GetField {
+                            dest,
+                            object,
+                            field,
+                        } => {
+                            let emit_ctx = RvalueEmitCtx {
+                                vars: &cl_vars,
+                                local_types: &local_types,
+                                ns_locals: &namespace_locals,
+                                interner,
+                                call_fn_raw_ref,
+                                rt: &rt,
+                            };
+                            let value = emit_receiver_operation(
+                                &mut self.module,
+                                &mut builder,
+                                object,
+                                interner.resolve(*field).as_ref(),
+                                &[],
+                                false,
+                                &emit_ctx,
+                            )?;
+                            builder.def_var(cl_vars[dest.0 as usize], value);
                             emit_jit_exception_check(&mut builder, &rt)?;
                         }
                         Instr::GetIndex {
@@ -1315,8 +1441,7 @@ impl JitCompiler {
                         | Instr::AwaitPending { .. }
                         | Instr::JoinAll { .. }
                         | Instr::ParallelIter { .. }
-                        | Instr::SetField { .. }
-                        | Instr::GetField { .. } => return None,
+                        | Instr::SetField { .. } => return None,
 
                         Instr::CertainCheck { .. } => {}
                         Instr::Drop { .. } | Instr::Nop => {}
@@ -1435,7 +1560,7 @@ impl JitCompiler {
 
         Some(JitFnEntry {
             fn_ptr: Some(fn_ptr),
-            param_tys: func.params.iter().map(|p| p.ty.clone()).collect(),
+            param_tys: func.params.iter().map(|p| p.abi_ty().clone()).collect(),
             return_ty: func.return_ty.clone(),
         })
     }
@@ -1453,6 +1578,9 @@ struct RvalueEmitCtx<'a> {
 }
 
 struct JitRuntimeRefs {
+    receiver_raw: cranelift_codegen::ir::FuncRef,
+    box_function_scoped: cranelift_codegen::ir::FuncRef,
+    box_stdlib_scoped: cranelift_codegen::ir::FuncRef,
     int_add: cranelift_codegen::ir::FuncRef,
     int_sub: cranelift_codegen::ir::FuncRef,
     int_mul: cranelift_codegen::ir::FuncRef,
@@ -1786,7 +1914,7 @@ fn emit_rvalue(
                     method,
                 },
             args,
-        } => {
+        } if ctx.ns_locals.contains_key(recv) => {
             let ns = ctx.ns_locals.get(recv)?;
             let mname = ctx.interner.resolve(*method);
             emit_stdlib_method_call(
@@ -1805,6 +1933,11 @@ fn emit_rvalue(
             args,
         } => {
             let mname = ctx.interner.resolve(*method);
+            if mname.as_ref() == "invoke" && !is_scalar_ty(dest_ty) {
+                return emit_receiver_operation(
+                    module, builder, receiver, "invoke", args, true, ctx,
+                );
+            }
             emit_container_method_call(
                 builder,
                 ctx.vars,
@@ -1819,6 +1952,37 @@ fn emit_rvalue(
 
         _ => None,
     }
+}
+
+fn is_scalar_ty(ty: &MirTy) -> bool {
+    matches!(
+        ty,
+        MirTy::Integer | MirTy::Float | MirTy::Boolean | MirTy::Handle
+    )
+}
+
+fn emit_receiver_operation(
+    module: &mut JITModule,
+    builder: &mut FunctionBuilder,
+    receiver: &Operand,
+    name: &str,
+    args: &[Operand],
+    invoke: bool,
+    ctx: &RvalueEmitCtx<'_>,
+) -> Option<Value> {
+    let receiver = box_operand_for_abi(module, builder, receiver, ctx)?;
+    let (np, nl) = str_const(module, builder, name)?;
+    let values = args
+        .iter()
+        .map(|arg| box_operand_for_abi(module, builder, arg, ctx))
+        .collect::<Option<Vec<_>>>()?;
+    let (ap, ac) = stack_i64_array(builder, &values);
+    let mode = builder.ins().iconst(I8, i64::from(invoke));
+    call_runtime(
+        builder,
+        ctx.rt.receiver_raw,
+        &[receiver, np, nl, ap, ac, mode],
+    )
 }
 
 fn emit_tuple_rvalue(
@@ -1896,6 +2060,18 @@ fn box_const_for_abi(
         MirLit::Str(text) => {
             let (ptr, len) = str_const(module, builder, text)?;
             call_runtime(builder, ctx.rt.box_str_scoped_ref, &[ptr, len])
+        }
+        MirLit::FunctionRef(id) => {
+            let id = builder.ins().iconst(I64, *id as i64);
+            call_runtime(builder, ctx.rt.box_function_scoped, &[id])
+        }
+        MirLit::StdlibFn {
+            module: module_name,
+            name,
+        } => {
+            let (mp, ml) = str_const(module, builder, module_name)?;
+            let (np, nl) = str_const(module, builder, name)?;
+            call_runtime(builder, ctx.rt.box_stdlib_scoped, &[mp, ml, np, nl])
         }
         _ => None,
     }

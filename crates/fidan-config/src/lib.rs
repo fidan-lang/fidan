@@ -806,12 +806,21 @@ const WEAK_SHARED_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
     ),
 ];
 
-const FUNCTION_MEMBER_SPECS: &[ReceiverMemberSpec] = &[spec(
-    &["name"],
-    "name",
-    Some(ReceiverReturnKind::String),
-    None,
-)];
+const FUNCTION_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
+    spec(&["name"], "name", Some(ReceiverReturnKind::String), None),
+    spec(
+        &["parameters"],
+        "parameters",
+        Some(ReceiverReturnKind::ListOfDynamic),
+        None,
+    ),
+    spec(
+        &["invoke"],
+        "invoke",
+        None,
+        Some(ReceiverReturnKind::Dynamic),
+    ),
+];
 
 pub fn receiver_member_specs(receiver_kind: ReceiverBuiltinKind) -> &'static [ReceiverMemberSpec] {
     use ReceiverBuiltinKind as Kind;
@@ -1440,7 +1449,13 @@ pub fn receiver_member_params(
             _ => return None,
         },
         ReceiverBuiltinKind::Function => match canonical {
-            "name" => NO_RECEIVER_PARAMS,
+            "name" | "parameters" => NO_RECEIVER_PARAMS,
+            "invoke" => &[ReceiverParamInfo {
+                name: "arguments",
+                type_name: "list oftype dynamic",
+                optional: false,
+                variadic: false,
+            }],
             _ => return None,
         },
         ReceiverBuiltinKind::Handle

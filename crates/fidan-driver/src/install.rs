@@ -915,7 +915,7 @@ mod tests {
     }
 
     #[test]
-    fn llvm_protocol5_helper_is_not_selected_for_qualified_module_mir() {
+    fn previous_llvm_protocol_helper_is_not_selected() {
         let home = sandbox();
         let root = home
             .join("toolchains/llvm")
@@ -929,7 +929,7 @@ mod tests {
             tool_version: "23.1.2".into(),
             host_triple: host_triple(),
             supported_fidan_versions: "^1".into(),
-            backend_protocol_version: 5,
+            backend_protocol_version: LLVM_BACKEND_PROTOCOL_VERSION - 1,
             helper_relpath: "helper/not-executed".into(),
             exec_commands: vec![],
             archive_sha256: None,

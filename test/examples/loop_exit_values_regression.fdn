@@ -1,0 +1,68 @@
+@precompile
+action exits returns dynamic {
+    var number = 0
+    var text = "before"
+
+    while number < 5 {
+        number = number + 1
+
+        if number == 2 {
+            text = "after"
+            break
+        }
+
+        continue
+    }
+
+    assert_eq(number, 2)
+    assert_eq(text, "after")
+
+    for value in 0 .. 10 {
+        number = value + 10
+
+        if value == 3 {
+            break
+        }
+
+        continue
+    }
+
+    assert_eq(number, 13)
+
+    var outer = 0
+
+    while outer < 3 {
+        outer = outer + 1
+
+        var inner = 0
+
+        while inner < 10 {
+            inner = inner + 1
+
+            if inner == 2 {
+                break
+            }
+        }
+
+        assert_eq(inner, 2)
+    }
+
+    return (number, text, outer)
+}
+
+assert_eq(exits(), (13, "after", 3))
+print("loop exit values passed")
+
+action conditional_exit with (certain enabled oftype boolean) returns integer {
+    var value = 0
+
+    while value < 10 if enabled else false {
+        value = 9
+        break
+    }
+
+    return value
+}
+
+assert_eq(conditional_exit(true), 9)
+assert_eq(conditional_exit(false), 0)

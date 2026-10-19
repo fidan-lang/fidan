@@ -420,7 +420,7 @@ unsafe fn jit_call_fn_raw(ctx: *mut c_void, fn_id: u32, args_ptr: *const i64, ar
         .function(func_id)
         .params
         .iter()
-        .map(|param| param.ty.clone())
+        .map(|param| param.abi_ty().clone())
         .collect::<Vec<_>>();
     let return_ty = machine.program.function(func_id).return_ty.clone();
     let raw_args = if arg_cnt <= 0 || args_ptr.is_null() {
@@ -450,6 +450,48 @@ unsafe fn jit_call_fn_raw(ctx: *mut c_void, fn_id: u32, args_ptr: *const i64, ar
         }
     };
     machine.encode_jit_abi_value(&result, &return_ty)
+}
+
+unsafe fn jit_receiver_raw(
+    ctx: *mut c_void,
+    receiver: i64,
+    name: *const u8,
+    len: i64,
+    args: *const i64,
+    count: i64,
+    invoke: i8,
+) -> i64 {
+    let machine = unsafe { &mut *(ctx as *mut MirMachine) };
+    let receiver = machine.decode_jit_abi_value(receiver, &MirTy::Dynamic);
+    // Names and argument arrays are emitted by this JIT and live for the call.
+    let name =
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(name, len as usize)) };
+    let symbol = machine.interner.intern(name);
+    let args = if count == 0 {
+        Vec::new()
+    } else {
+        unsafe { std::slice::from_raw_parts(args, count as usize) }
+            .iter()
+            .map(|raw| machine.decode_jit_abi_value(*raw, &MirTy::Dynamic))
+            .collect()
+    };
+    let result = if invoke != 0 {
+        machine.dispatch_method_sym_typed(receiver, symbol, args, None)
+    } else {
+        machine.get_field(&receiver, symbol)
+    };
+    match result {
+        Ok(value) => machine.encode_jit_abi_value(&value, &MirTy::Dynamic),
+        Err(signal) => {
+            machine.jit_signal = Some(signal);
+            unsafe {
+                let exception = fidan_runtime::ffi::fdn_box_nothing();
+                fidan_runtime::ffi::fdn_store_exception(exception);
+                fidan_runtime::ffi::fdn_drop(exception);
+            }
+            0
+        }
+    }
 }
 
 impl MirMachine {
@@ -487,6 +529,7 @@ impl MirMachine {
             load_global_raw: jit_load_global_raw,
             store_global_raw: jit_store_global_raw,
             call_fn_raw: jit_call_fn_raw,
+            receiver_raw: jit_receiver_raw,
         });
     }
 
@@ -1593,7 +1636,7 @@ impl MirMachine {
                 field,
             } => {
                 let obj_val = self.eval_operand(object, frame);
-                let val = self.get_field(&obj_val, *field);
+                let val = self.get_field(&obj_val, *field)?;
                 frame.store(*dest, val);
             }
             Instr::GetIndex {
@@ -2351,6 +2394,14 @@ impl MirMachine {
             let method_name = self.sym_str(method);
             return self.dispatch_stdlib_call(module, &method_name, args);
         }
+        if matches!(
+            receiver,
+            FidanValue::Function(_) | FidanValue::Closure { .. } | FidanValue::StdlibFn(..)
+        ) && self.sym_str(method).as_ref() == "invoke"
+        {
+            let values = fidan_runtime::callable::invocation_arguments(args)?;
+            return self.call_value(receiver, values);
+        }
         // Shared<T> built-in methods (small fixed set — resolve string lazily).
         if let FidanValue::Shared(ref sr) = receiver {
             let method_name = self.sym_str(method);
@@ -2835,26 +2886,42 @@ impl MirMachine {
 
     // ── Field access ──────────────────────────────────────────────────────────
 
-    fn get_field(&self, val: &FidanValue, field: Symbol) -> FidanValue {
-        match val {
+    fn get_field(&self, val: &FidanValue, field: Symbol) -> MirResult {
+        let callable = match val {
+            FidanValue::Function(RuntimeFnId(id)) => Some((*id, 0)),
+            FidanValue::Closure {
+                fn_id: RuntimeFnId(id),
+                captured,
+            } => Some((*id, captured.len())),
+            FidanValue::StdlibFn(module, name) => {
+                let metadata = fidan_runtime::callable::stdlib_metadata(module, name)?;
+                return Ok(
+                    fidan_runtime::callable::field(&metadata, 0, &self.sym_str(field))?
+                        .unwrap_or(FidanValue::Nothing),
+                );
+            }
+            _ => None,
+        };
+        if let Some((id, captures)) = callable {
+            let function = self.program.functions.get(id as usize).ok_or_else(|| {
+                MirSignal::RuntimeError(
+                    fidan_diagnostics::diag_code!("R0001"),
+                    "unknown callable".into(),
+                )
+            })?;
+            return Ok(fidan_runtime::callable::field(
+                &function.callable_metadata(|symbol| self.interner.resolve(symbol).to_string()),
+                captures,
+                &self.sym_str(field),
+            )?
+            .unwrap_or(FidanValue::Nothing));
+        }
+        Ok(match val {
             FidanValue::Object(obj_ref) => obj_ref
                 .borrow()
                 .get_field(field)
                 .cloned()
                 .unwrap_or(FidanValue::Nothing),
-            // `.name` on a first-class action value returns its declared name.
-            FidanValue::Function(RuntimeFnId(id)) => {
-                let field_name = self.sym_str(field);
-                if field_name.as_ref() == "name"
-                    && let Some(func) = self.program.functions.get(*id as usize)
-                {
-                    let name = self.sym_str(func.name);
-                    return FidanValue::String(FidanString::new(
-                        name.rsplit("::").next().unwrap_or(name.as_ref()),
-                    ));
-                }
-                FidanValue::Nothing
-            }
             FidanValue::Namespace(module) if self.stdlib_modules.contains(module.as_ref()) => {
                 let field_name = self.sym_str(field);
                 if module_exports(module.as_ref()).contains(&field_name.as_ref()) {
@@ -2872,7 +2939,7 @@ impl MirMachine {
                 let field_name = self.sym_str(field);
                 let qualified = self.interner.intern(&format!("{module}::{field_name}"));
                 if let Some(&id) = self.user_fn_map.get(&qualified) {
-                    return FidanValue::Function(RuntimeFnId(id.0));
+                    return Ok(FidanValue::Function(RuntimeFnId(id.0)));
                 }
                 // O(1) lookup: was this namespace re-exported by the imported module?
                 // `reexported_namespaces` is built once at MirMachine::new().
@@ -2901,7 +2968,7 @@ impl MirMachine {
                 }
             }
             _ => FidanValue::Nothing,
-        }
+        })
     }
 
     fn set_field(&self, val: &mut FidanValue, field: Symbol, new_val: FidanValue) {
@@ -3261,6 +3328,54 @@ pub use api::{
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callable_metadata_and_invocation_use_native_jit_entries() {
+        use fidan_lexer::Lexer;
+        let source = r#"
+action metadata with (certain callback oftype action) returns flexible { return callback.parameters }
+action invoke with (certain callback oftype action, certain arguments oftype list oftype dynamic) returns flexible { return callback.invoke(arguments) }
+action target with (certain value oftype string) returns string { return value }
+for index in 0..100 {
+    assert_eq(metadata(target)[0]["name"], "value")
+    assert_eq(invoke(target, ["ok"]), "ok")
+}
+var caught = false
+attempt { invoke(target, []) } catch error { caught = true }
+assert_eq(caught, true)
+"#;
+        let interner = Arc::new(SymbolInterner::new());
+        let sources = Arc::new(SourceMap::new());
+        let file = sources.add_file("<native-callables>", source);
+        let (tokens, diagnostics) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        assert!(diagnostics.is_empty());
+        let (module, diagnostics) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+        assert!(diagnostics.is_empty());
+        let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+        let hir = fidan_hir::lower_module(&module, &typed, &interner);
+        let mut program = fidan_mir::lower_program(&hir, &interner, &[]);
+        fidan_passes::run_preserving_call_frames(&mut program);
+        let mut machine = MirMachine::new(Arc::new(program), interner, sources);
+        machine.set_jit_threshold(1);
+        machine
+            .run()
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        for name in ["metadata", "invoke"] {
+            let function = machine
+                .program
+                .functions
+                .iter()
+                .find(|function| machine.interner.resolve(function.name).as_ref() == name)
+                .unwrap();
+            let entries = machine.jit_fns.read();
+            assert!(
+                entries[function.id.0 as usize]
+                    .as_ref()
+                    .is_some_and(JitFnEntry::is_native),
+                "{name} must execute native JIT code"
+            );
+        }
+    }
 
     #[test]
     fn boxed_integer_arithmetic_reports_overflow_at_i64_boundaries() {

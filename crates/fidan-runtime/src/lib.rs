@@ -3,6 +3,7 @@
 use std::sync::{OnceLock, RwLock};
 
 pub mod builtins;
+pub mod callable;
 mod dict;
 pub mod ffi;
 mod hashset;

@@ -67,6 +67,41 @@ impl MirTy {
         serde_json::to_string(self).expect("MIR types are serializable")
     }
 
+    /// Source-facing type spelling for callable metadata; no type information is inferred here.
+    pub fn source_name(&self, resolve: impl Fn(fidan_lexer::Symbol) -> String + Copy) -> String {
+        match self {
+            Self::Integer => "integer".into(),
+            Self::Float => "float".into(),
+            Self::Boolean => "boolean".into(),
+            Self::String => "string".into(),
+            Self::Handle => "handle".into(),
+            Self::Nothing => "nothing".into(),
+            Self::Dynamic | Self::Error => "dynamic".into(),
+            Self::Function => "action".into(),
+            Self::List(inner) => format!("list oftype {}", inner.source_name(resolve)),
+            Self::Dict(key, value) => format!(
+                "dict oftype ({}, {})",
+                key.source_name(resolve),
+                value.source_name(resolve)
+            ),
+            Self::HashSet(inner) => format!("hashset oftype {}", inner.source_name(resolve)),
+            Self::Tuple(items) => format!(
+                "({})",
+                items
+                    .iter()
+                    .map(|item| item.source_name(resolve))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Object(name) | Self::Enum(name) => {
+                resolve(*name).rsplit("::").next().unwrap_or("").to_owned()
+            }
+            Self::Shared(inner) => format!("Shared oftype {}", inner.source_name(resolve)),
+            Self::WeakShared(inner) => format!("WeakShared oftype {}", inner.source_name(resolve)),
+            Self::Pending(inner) => format!("Pending oftype {}", inner.source_name(resolve)),
+        }
+    }
+
     pub fn is_nothing(&self) -> bool {
         matches!(self, MirTy::Nothing)
     }
@@ -409,6 +444,18 @@ pub struct MirParam {
     pub default: Option<MirLit>,
 }
 
+impl MirParam {
+    /// Optional parameters with a Nothing sentinel must stay boxed until their
+    /// prologue resolves it. Scalar unboxing would erase a computed default.
+    pub fn abi_ty(&self) -> &MirTy {
+        if !self.certain && matches!(self.default, Some(MirLit::Nothing)) {
+            &MirTy::Dynamic
+        } else {
+            &self.ty
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MirFunction {
     pub id: FunctionId,
@@ -455,6 +502,31 @@ impl MirFunction {
             extern_decl: None,
             custom_decorators: vec![],
         }
+    }
+
+    /// Pure metadata from the same parameters used by all call paths. Computed defaults
+    /// stay deferred to the existing prologue; reading metadata never evaluates them.
+    pub fn callable_metadata(
+        &self,
+        resolve: impl Fn(fidan_lexer::Symbol) -> String + Copy,
+    ) -> serde_json::Value {
+        let parameters = self.params.iter().map(|param| {
+            let default = match &param.default {
+                Some(MirLit::Float(value)) => serde_json::json!({"FloatBits": value.to_bits()}),
+                Some(literal) => serde_json::to_value(literal).expect("MIR literals are serializable"),
+                None => serde_json::Value::Null,
+            };
+            serde_json::json!({
+                "name": resolve(param.name),
+                "type": param.ty.source_name(resolve),
+                "certain": param.certain,
+                "required": param.default.is_none(),
+                "default_known": param.default.as_ref().is_some_and(|value| !matches!(value, MirLit::Nothing)),
+                "default": default,
+                "variadic": false,
+            })
+        }).collect::<Vec<_>>();
+        serde_json::json!({"name": resolve(self.name).rsplit("::").next().unwrap_or(""), "parameters": parameters})
     }
 
     /// Allocate a fresh `LocalId` for this function.

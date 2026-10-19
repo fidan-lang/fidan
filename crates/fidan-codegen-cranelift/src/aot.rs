@@ -568,6 +568,7 @@ struct RuntimeDecls {
     fn_table_init: cranelift_module::FuncId,
     fn_table_set: cranelift_module::FuncId,
     fn_name_register: cranelift_module::FuncId,
+    fn_metadata_register: cranelift_module::FuncId,
     namespace_export_register: cranelift_module::FuncId,
     call_dynamic: cranelift_module::FuncId,
     validate_call: cranelift_module::FuncId,
@@ -763,6 +764,7 @@ impl RuntimeDecls {
             fn_table_init: decl!("fdn_fn_table_init", sig!((i64t) -> void)),
             fn_table_set: decl!("fdn_fn_table_set", sig!((i64t, i64t) -> void)),
             fn_name_register: decl!("fdn_fn_name_register", sig!((p, i64t, i64t) -> void)),
+            fn_metadata_register: decl!("fdn_fn_metadata_register", sig!((p, i64t, i64t) -> void)),
             namespace_export_register: decl!(
                 "fdn_namespace_export_register",
                 sig!((p, i64t, p, i64t) -> void)
@@ -830,7 +832,7 @@ fn declare_all_functions(
         let mangled = mangle_fn(name.as_ref(), mf.id.0);
         let mut sig = module.make_signature();
         for p in &mf.params {
-            sig.params.push(AbiParam::new(mir_ty_to_cl(&p.ty)));
+            sig.params.push(AbiParam::new(mir_ty_to_cl(p.abi_ty())));
         }
         // If the declared return type is Nothing/Error but the body contains
         // a `return expr` terminator (e.g. an `action` that returns a value),
@@ -1150,7 +1152,7 @@ fn lower_function(
     // Build the Cranelift function signature.
     let mut sig = module.make_signature();
     for p in &mf.params {
-        sig.params.push(AbiParam::new(mir_ty_to_cl(&p.ty)));
+        sig.params.push(AbiParam::new(mir_ty_to_cl(p.abi_ty())));
     }
     let eff_ret = effective_return_ty(mf);
     let has_return = !matches!(&eff_ret, MirTy::Nothing | MirTy::Error);
@@ -1312,7 +1314,11 @@ fn box_fidan_abi_params(
     let mut boxed = Vec::with_capacity(params.len());
     for (param, value) in mf.params.iter().zip(params.iter().copied()) {
         boxed.push(box_raw_value_for_type(
-            module, rt, builder, value, &param.ty,
+            module,
+            rt,
+            builder,
+            value,
+            param.abi_ty(),
         )?);
     }
     Ok(boxed)
@@ -1575,6 +1581,18 @@ fn lower_instr(
                 .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0))
             };
             builder.def_var(cl_vars[dest.0 as usize], r);
+            emit_pending_exception_check(
+                module,
+                rt,
+                builder,
+                cl_blocks,
+                cl_vars,
+                local_types,
+                mf,
+                bi,
+                current_catch_stack,
+                interner,
+            )?;
         }
 
         Instr::SetField {
@@ -2750,12 +2768,12 @@ fn emit_call(
                         cl_vars,
                         local_types,
                         arg_op,
-                        &param.ty,
+                        param.abi_ty(),
                         rt,
                         module,
                     )?
                 } else if let Some(default_lit) = &param.default {
-                    let raw = if is_scalar(&param.ty) {
+                    let raw = if is_scalar(param.abi_ty()) {
                         lower_lit(module, builder, rt, default_lit, interner)?
                     } else {
                         lower_owned_boxed_operand(
@@ -2767,7 +2785,7 @@ fn emit_call(
                             module,
                         )?
                     };
-                    let expected_cl_ty = mir_ty_to_cl(&param.ty);
+                    let expected_cl_ty = mir_ty_to_cl(param.abi_ty());
                     let actual_cl_ty = builder.func.dfg.value_type(raw);
                     if actual_cl_ty != expected_cl_ty {
                         coerce_value(builder, module, rt, raw, actual_cl_ty, expected_cl_ty)?
@@ -2783,7 +2801,7 @@ fn emit_call(
                 };
                 // This is precisely lower_owned_boxed_operand's fdn_clone
                 // branch. Do not treat unknown or scalar arguments as clones.
-                if !is_scalar(&param.ty)
+                if !is_scalar(param.abi_ty())
                     && let Some(Operand::Local(local)) = args.get(i)
                     && matches!(local_types.get(&local.0), Some(ty) if !matches!(ty, MirTy::Error) && !is_scalar(ty))
                 {
@@ -3649,7 +3667,7 @@ fn emit_trampolines(
             call_rt(module, &mut builder, rt.drop_any, &[prepared])?;
             let prepared = checked;
             owned_args.push(prepared);
-            let value = match &param.ty {
+            let value = match param.abi_ty() {
                 MirTy::Integer => {
                     call_rt(module, &mut builder, rt.unbox_int, &[prepared])?.unwrap()
                 }
@@ -3789,6 +3807,16 @@ fn emit_c_main(
             let (np, nl) = str_const(module, &mut builder, name_str)?;
             let idx = builder.ins().iconst(I64, i as i64);
             builder.ins().call(reg_ref, &[np, nl, idx]);
+            let metadata = mf
+                .callable_metadata(|symbol| interner.resolve(symbol).to_string())
+                .to_string();
+            let (metadata_ptr, metadata_len) = str_const(module, &mut builder, &metadata)?;
+            call_rt(
+                module,
+                &mut builder,
+                rt.fn_metadata_register,
+                &[metadata_ptr, metadata_len, idx],
+            )?;
         }
     }
 
@@ -3802,6 +3830,58 @@ fn emit_c_main(
                 rt.namespace_export_register,
                 &[alias, alias_len, target, target_len],
             )?;
+        }
+    }
+
+    // Top-level decorators run in declaration order before module initialization,
+    // matching interpreter startup. Dispatch through the normal arity/default ABI.
+    for function in &program.functions {
+        for (decorator, extras) in &function.custom_decorators {
+            let callback = lower_lit(
+                module,
+                &mut builder,
+                rt,
+                &MirLit::FunctionRef(decorator.0),
+                interner,
+            )?;
+            let mut args = vec![Operand::Const(MirLit::FunctionRef(function.id.0))];
+            args.extend(extras.iter().cloned().map(Operand::Const));
+            let (array, count) = build_ptr_array(
+                module,
+                rt,
+                &mut builder,
+                &[],
+                &HashMap::new(),
+                &args,
+                interner,
+            )?;
+            let result = call_rt(
+                module,
+                &mut builder,
+                rt.call_dynamic,
+                &[callback, array, count],
+            )?
+            .context("decorator result")?;
+            call_rt(module, &mut builder, rt.drop_any, &[result])?;
+            call_rt(module, &mut builder, rt.drop_any, &[callback])?;
+            for index in 0..args.len() {
+                let arg =
+                    builder
+                        .ins()
+                        .load(PTR_TY, MemFlagsData::new(), array, (index * 8) as i32);
+                call_rt(module, &mut builder, rt.drop_any, &[arg])?;
+            }
+            let pending =
+                call_rt(module, &mut builder, rt.has_exception, &[])?.context("exception flag")?;
+            let failed = builder.create_block();
+            let next = builder.create_block();
+            builder.ins().brif(pending, failed, &[], next, &[]);
+            builder.switch_to_block(failed);
+            let exception = call_rt(module, &mut builder, rt.catch_exception, &[])?
+                .context("decorator exception")?;
+            call_rt(module, &mut builder, rt.throw_unhandled, &[exception])?;
+            builder.ins().trap(TrapCode::unwrap_user(2));
+            builder.switch_to_block(next);
         }
     }
 

@@ -949,11 +949,23 @@ pub unsafe extern "C" fn fdn_assert_ne_with_message(
 }
 
 /// Return the runtime type name as a new owned `String`.  Borrows `ptr`.
+// AOT objects already carry their class tag in the established Dict representation.
+// Preserve the interpreter's `type(object) == "object"`, including typed catches.
+fn native_type_name(value: &FidanValue) -> &'static str {
+    if let FidanValue::Dict(fields) = value {
+        let key = FidanValue::String(FidanString::new("__class__"));
+        if matches!(fields.borrow().get(&key), Ok(Some(FidanValue::String(_)))) {
+            return "object";
+        }
+    }
+    value.type_name()
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_type_name(ptr: *mut FidanValue) -> *mut FidanValue {
-    into_raw(FidanValue::String(FidanString::new(
-        borrow(ptr).type_name(),
-    )))
+    into_raw(FidanValue::String(FidanString::new(native_type_name(
+        borrow(ptr),
+    ))))
 }
 
 /// Stringify via `display` and return a new owned `String`.  Borrows `ptr`.
@@ -1252,6 +1264,16 @@ pub unsafe extern "C" fn fdn_obj_get_field(
             .flatten()
             .cloned()
             .unwrap_or(FidanValue::Nothing),
+        value @ (FidanValue::Function(_)
+        | FidanValue::Closure { .. }
+        | FidanValue::StdlibFn(..)) => {
+            let result = registered_callable_metadata(value)
+                .and_then(|(metadata, captures)| {
+                    crate::callable::field(&metadata, captures, &field_name)
+                })
+                .map(|value| value.unwrap_or(FidanValue::Nothing));
+            return builtin_value_result(result);
+        }
         FidanValue::EnumVariant { tag, .. } if field_name == "tag" => {
             FidanValue::String(FidanString::new(tag))
         }
@@ -1359,6 +1381,16 @@ pub unsafe extern "C" fn fdn_obj_invoke(
                 method_name, ns_name
             );
             into_raw(FidanValue::Nothing)
+        }
+        value @ (FidanValue::Function(_)
+        | FidanValue::Closure { .. }
+        | FidanValue::StdlibFn(..))
+            if method_name == "invoke" =>
+        {
+            match crate::callable::invocation_arguments(extra) {
+                Ok(args) => into_raw(call_dynamic_owned(value.clone(), args)),
+                Err(error) => builtin_value_result(Err(error)),
+            }
         }
         FidanValue::Integer(n) if method_name == "abs" => {
             into_raw(FidanValue::Integer(fdn_int_abs(*n)))
@@ -2673,7 +2705,7 @@ fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut Fid
             BuiltinSemantic::Type => {
                 let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
                 Some(into_raw(FidanValue::String(FidanString::new(
-                    value.type_name(),
+                    native_type_name(&value),
                 ))))
             }
             BuiltinSemantic::HashSetConstructor => {
@@ -3503,7 +3535,13 @@ pub unsafe extern "C" fn fdn_make_closure(
 
 type FnTrampoline = unsafe extern "C" fn(*const *mut FidanValue, i64) -> *mut FidanValue;
 
-static FN_TABLE: std::sync::OnceLock<std::sync::Mutex<Vec<Option<FnTrampoline>>>> =
+#[derive(Clone, Default)]
+struct RegisteredFunction {
+    trampoline: Option<FnTrampoline>,
+    metadata: Option<serde_json::Value>,
+}
+
+static FN_TABLE: std::sync::OnceLock<std::sync::Mutex<Vec<RegisteredFunction>>> =
     std::sync::OnceLock::new();
 
 enum RegisteredNamespaceMember {
@@ -3527,6 +3565,64 @@ pub unsafe extern "C" fn fdn_fn_name_register(name_bytes: *const u8, name_len: i
     }
 }
 
+/// Populate metadata in the existing function table, before user code executes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_fn_metadata_register(bytes: *const u8, length: i64, idx: i64) {
+    let descriptor = str_from_raw(bytes, length);
+    let parsed = serde_json::from_str::<serde_json::Value>(&descriptor);
+    if let Ok(metadata) = parsed
+        && metadata["name"].is_string()
+        && metadata["parameters"].is_array()
+        && let Some(table) = FN_TABLE.get()
+        && let Ok(mut guard) = table.lock()
+        && let Some(function) = usize::try_from(idx)
+            .ok()
+            .and_then(|index| guard.get_mut(index))
+    {
+        function.metadata = Some(metadata);
+    } else {
+        drop(Box::from_raw(runtime_call_error(
+            "invalid compiler callable registration",
+        )));
+    }
+}
+
+fn registered_callable_metadata(
+    value: &FidanValue,
+) -> Result<(serde_json::Value, usize), stdlib::StdlibRuntimeError> {
+    let (id, captures) = match value {
+        FidanValue::Function(FunctionId(id)) => (*id, 0),
+        FidanValue::Closure {
+            fn_id: FunctionId(id),
+            captured,
+        } => (*id, captured.len()),
+        FidanValue::StdlibFn(module, name) => {
+            return crate::callable::stdlib_metadata(module, name).map(|metadata| (metadata, 0));
+        }
+        _ => {
+            return Err(stdlib::StdlibRuntimeError::new(
+                fidan_diagnostics::diag_code!("R0001"),
+                "expected a callable value",
+            ));
+        }
+    };
+    FN_TABLE
+        .get()
+        .and_then(|table| table.lock().ok())
+        .and_then(|guard| {
+            guard
+                .get(id as usize)
+                .and_then(|function| function.metadata.clone())
+        })
+        .map(|metadata| (metadata, captures))
+        .ok_or_else(|| {
+            stdlib::StdlibRuntimeError::new(
+                fidan_diagnostics::diag_code!("R0001"),
+                "callable metadata is not registered",
+            )
+        })
+}
+
 /// Register a resolved re-export in the same namespace table as user functions.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_namespace_export_register(
@@ -3548,7 +3644,10 @@ pub unsafe extern "C" fn fdn_namespace_export_register(
 /// Called once from the generated `fdn_init` before any user code runs.
 #[unsafe(no_mangle)]
 pub extern "C" fn fdn_fn_table_init(count: i64) {
-    let _ = FN_TABLE.set(std::sync::Mutex::new(vec![None; count as usize]));
+    let _ = FN_TABLE.set(std::sync::Mutex::new(vec![
+        RegisteredFunction::default();
+        count as usize
+    ]));
 }
 
 /// Register the trampoline for function index `idx`.
@@ -3561,7 +3660,7 @@ pub extern "C" fn fdn_fn_table_set(idx: i64, ptr: usize) {
         let i = idx as usize;
         if i < guard.len() {
             // SAFETY: the AOT compiler guarantees `ptr` is a valid trampoline.
-            guard[i] = Some(unsafe { std::mem::transmute::<usize, FnTrampoline>(ptr) });
+            guard[i].trampoline = Some(unsafe { std::mem::transmute::<usize, FnTrampoline>(ptr) });
         }
     }
 }
@@ -3571,7 +3670,7 @@ unsafe fn call_trampoline_by_idx(idx: usize, arg_ptrs: &[*mut FidanValue]) -> *m
     let trampoline = FN_TABLE
         .get()
         .and_then(|t| t.lock().ok())
-        .and_then(|g| g.get(idx).copied().flatten());
+        .and_then(|g| g.get(idx).and_then(|function| function.trampoline));
     match trampoline {
         Some(t) => t(arg_ptrs.as_ptr(), arg_ptrs.len() as i64),
         None => {
@@ -3615,10 +3714,10 @@ pub unsafe extern "C" fn fdn_call_dynamic(
         }
     };
 
-    let trampoline = FN_TABLE
-        .get()
-        .and_then(|t| t.lock().ok())
-        .and_then(|g| g.get(fn_id as usize).copied().flatten());
+    let trampoline = FN_TABLE.get().and_then(|t| t.lock().ok()).and_then(|g| {
+        g.get(fn_id as usize)
+            .and_then(|function| function.trampoline)
+    });
 
     let Some(trampoline) = trampoline else {
         return runtime_call_error(format!("no callback trampoline for function {fn_id}"));
