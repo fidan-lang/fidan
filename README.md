@@ -8,7 +8,7 @@
 
 **An AI-native general-purpose programming language and compiler toolchain built for human-readable code, native backends, and compiler-grounded AI tooling.**
 
-[![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; [![CI](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml/badge.svg)](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://marketplace.visualstudio.com/items?itemName=fidan.fidan)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) &nbsp; [![CI](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml/badge.svg)](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://marketplace.visualstudio.com/items?itemName=fidan.fidan)
 
 [Getting Started](#getting-started) • [Language Tour](#language-tour) • [CLI Reference](#cli-reference) • [Standard Library](#standard-library) • [VS Code Extension](#vs-code-extension) • [Contributing](#contributing)
 
@@ -971,7 +971,7 @@ Dal package preflight validation happens locally before archive creation or uplo
 
 - `dal.toml`
 - `src/init.fdn`
-- only allowed top-level entries such as `README*`, `LICENSE*`, `CHANGELOG.md`, `src/`, `examples/`, `tests/`, `docs/`, and `assets/`
+- only allowed top-level entries such as `README*`, `LICENSE*`, `NOTICE*`, `CHANGELOG.md`, `src/`, `examples/`, `tests/`, `docs/`, and `assets/`
 - no symlinks, path traversal, or unsafe archive paths
 
 ### `fidan run` flags
@@ -1314,18 +1314,17 @@ The 1.0.15 release preparation focuses on correctness and maintenance of the imp
 
 ## License
 
-The Fidan programming language — including its source code, compiler, interpreter, runtime, and official distributions — is licensed under the **Apache License 2.0 with Fidan Additional Terms**.
+Fidan's source code, compiler, interpreter, and runtime are licensed under the
+standard [Apache License 2.0](LICENSE), with attribution in [NOTICE](NOTICE).
 
-**Key points**:
-- ✅ You can use Fidan to write and ship programs — those programs are entirely yours
-- ✅ You can contribute to this repository
-- ✅ You can study and read the source
-- ❌ You cannot commercially redistribute or sell the Fidan compiler/runtime as a competing product
-- ❌ You cannot use the Fidan™ name or logo for derivative languages without permission
+Fidan is free to use. You may use, modify, fork, redistribute, host, and sell the
+Apache-licensed software, including commercial compiler/runtime distributions.
+You may develop and sell software using Fidan; comply with the licenses of any
+components you redistribute. Third-party packages retain their own licenses.
 
-See [LICENSE](LICENSE) for the full text.
-
-**Fidan™ is a trademark of Kaan Gönüldinc (AppSolves).**
+Branding is addressed separately in [TRADEMARKS.md](TRADEMARKS.md). Truthful
+references and attribution are welcome; unofficial projects must not misleadingly
+claim official affiliation, sponsorship, or endorsement.
 
 ---
 

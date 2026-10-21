@@ -279,8 +279,8 @@ Copy-Item -LiteralPath $libfidanExample -Destination (Join-Path $stageDir "examp
 if (Test-Path -LiteralPath "README.md") {
   Copy-Item -LiteralPath "README.md" -Destination (Join-Path $stageDir "README.md")
 }
-if (Test-Path -LiteralPath "LICENSE") {
-  Copy-Item -LiteralPath "LICENSE" -Destination (Join-Path $stageDir "LICENSE")
+foreach ($legalFile in @("LICENSE", "NOTICE")) {
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot "../$legalFile") -Destination (Join-Path $stageDir $legalFile)
 }
 
 try {

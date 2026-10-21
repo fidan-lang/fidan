@@ -61,6 +61,7 @@ try {
 
   # Run the complete archive script in an isolated repository skeleton.
   New-Item -ItemType Directory -Force scripts/shared, crates/libfidan/include, crates/libfidan/examples/embed_c | Out-Null
+  Copy-Item (Join-Path $repoRoot "LICENSE"), (Join-Path $repoRoot "NOTICE") .
   Copy-Item (Join-Path $repoRoot "scripts/package-release.ps1") scripts/
   Copy-Item (Join-Path $repoRoot "scripts/shared/host-platform.ps1") scripts/shared/
   Set-Content scripts/shared/windows-vc-redist.ps1 'function Get-WindowsVcRedistReleaseMetadata { [pscustomobject]@{ MinimumVersion = "14.0.0.0" } }'
@@ -80,6 +81,11 @@ if ($env:FIDAN_RELEASE_PROBE_MUTATE -eq "1") { Set-Content target/release/fidan.
   New-Item -ItemType Directory extracted | Out-Null
   & tar -xzf $archive.FullName -C extracted ./fidan.exe
   Assert-ReleaseCheck ($LASTEXITCODE -eq 0 -and (Get-FileHash extracted/fidan.exe).Hash -eq $originalHash -and (Get-FileHash $binary).Hash -eq $originalHash) "Archive differs from the compiled binary"
+  & tar -xzf $archive.FullName -C extracted ./LICENSE ./NOTICE
+  Assert-ReleaseCheck ($LASTEXITCODE -eq 0) "Release archive must include LICENSE and NOTICE"
+  foreach ($legalFile in @("LICENSE", "NOTICE")) {
+    Assert-ReleaseCheck ((Get-FileHash (Join-Path extracted $legalFile)).Hash -eq (Get-FileHash (Join-Path $repoRoot $legalFile)).Hash) "Release legal file differs from source: $legalFile"
+  }
   $env:FIDAN_RELEASE_PROBE_MUTATE = "1"
   Assert-ReleaseFailure { & ./scripts/package-release.ps1 -Version 1.0.15 -SkipBuild -OutputRoot dist/mutation-probe } '*installer packaging modified*'
   Assert-ReleaseCheck (-not (Test-Path dist/mutation-probe)) "Mutated binary was packaged"

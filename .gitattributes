@@ -32,3 +32,6 @@
 *.dll binary
 *.so binary
 *.dylib binary
+
+# Keep the standard license byte-identical in checkouts and packages.
+LICENSE text eol=lf

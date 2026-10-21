@@ -14,7 +14,7 @@ PackageUrl: https://fidan.dev
 License: Apache-2.0
 LicenseUrl: https://github.com/fidan-lang/fidan/blob/main/LICENSE
 Copyright: Copyright © 2025 Kaan Gönüldinc. All rights reserved.
-CopyrightUrl: https://github.com/fidan-lang/fidan/blob/main/LICENSE
+CopyrightUrl: https://github.com/fidan-lang/fidan/blob/main/NOTICE
 ShortDescription: An AI-native programming language and compiler toolchain with static typing, native backends, and compiler-grounded AI tooling.
 Description: Fidan is an AI-native general-purpose programming language and
   compiler toolchain with human-readable syntax and static typing. Its Rust-based

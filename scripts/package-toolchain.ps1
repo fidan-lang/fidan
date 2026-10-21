@@ -826,6 +826,9 @@ else {
 }
 
 try {
+  foreach ($legalFile in @("LICENSE", "NOTICE")) {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "../$legalFile") -Destination (Join-Path $stageDir $legalFile)
+  }
   $helperDir = Join-Path $stageDir "helper"
   New-Item -ItemType Directory -Force -Path $helperDir | Out-Null
 

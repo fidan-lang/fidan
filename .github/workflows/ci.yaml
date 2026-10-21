@@ -27,10 +27,27 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Verify standard Apache license and attribution
+        shell: pwsh
+        run: |
+          if ((Get-FileHash LICENSE -Algorithm SHA256).Hash -ne 'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30') { throw 'LICENSE must be unmodified Apache 2.0' }
+          if (-not (Test-Path NOTICE -PathType Leaf)) { throw 'NOTICE must be preserved' }
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
+
+      - name: Verify crate attribution copies
+        shell: pwsh
+        run: |
+          foreach ($file in @('LICENSE', 'NOTICE')) {
+            $expected = (Get-FileHash $file -Algorithm SHA256).Hash
+            foreach ($manifest in Get-ChildItem crates/*/Cargo.toml) {
+              $copy = Join-Path $manifest.DirectoryName $file
+              if ((Get-FileHash $copy -Algorithm SHA256).Hash -ne $expected) { throw "Crate legal file differs: $copy" }
+            }
+          }
 
       - name: Cache Cargo
         uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2

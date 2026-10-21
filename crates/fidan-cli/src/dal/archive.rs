@@ -170,7 +170,7 @@ fn visit_archive(
         let relative = parts[1..].join("/");
         if !ALLOWED_TOP_DIRS.contains(&parts[1])
             && !(parts.len() == 2
-                && (ALLOWED_TOP_FILES.contains(&parts[1]) || is_license_file(parts[1])))
+                && (ALLOWED_TOP_FILES.contains(&parts[1]) || is_legal_file(parts[1])))
         {
             bail!("archive contains unsupported top-level entry");
         }
@@ -475,7 +475,7 @@ fn validate_package_dir(
         if is_ignored_path(ignore, project_dir, &path) {
             continue;
         }
-        if !allowed.contains(&file_name) && !is_license_file(&file_name) {
+        if !allowed.contains(&file_name) && !is_legal_file(&file_name) {
             // A package include list selects archive files, not every development
             // directory in the source checkout. Still reject selected forbidden files.
             if ignore.is_some_and(|rules| rules.include.is_some())
@@ -521,7 +521,7 @@ fn validate_package_dir(
     {
         let entry = entry?;
         let file_name = entry.file_name().to_string_lossy().to_string();
-        if is_license_file(&file_name) && !is_ignored_path(ignore, project_dir, &entry.path()) {
+        if is_legal_file(&file_name) && !is_ignored_path(ignore, project_dir, &entry.path()) {
             validate_file(&entry.path(), project_dir)?;
         }
     }
@@ -592,7 +592,7 @@ fn append_allowed_entries(
         if name == "dal.toml" {
             continue;
         }
-        if ALLOWED_TOP_FILES.contains(&name.as_str()) || is_license_file(&name) {
+        if ALLOWED_TOP_FILES.contains(&name.as_str()) || is_legal_file(&name) {
             if name != ".dalignore" && path.is_file() {
                 append_file(builder, &path, Path::new(root_name).join(&name))?;
             }
@@ -719,8 +719,12 @@ fn validate_file(path: &Path, project_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn is_license_file(name: &str) -> bool {
-    name == "LICENSE" || name.starts_with("LICENSE.")
+fn is_legal_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "license"
+        || lower.starts_with("license.")
+        || lower == "notice"
+        || lower.starts_with("notice.")
 }
 
 fn is_safe_relative_path(path: &Path) -> bool {
@@ -918,6 +922,48 @@ mod tests {
         files.sort();
         assert_eq!(files, vec!["README.md", "dal.toml", "src/init.fdn"]);
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn package_build_and_install_preserve_legal_attribution() -> Result<()> {
+        for name in [
+            "NOTICE",
+            "NOTICE.txt",
+            "NOTICE.md",
+            "notice",
+            "notice.txt",
+            "license.txt",
+        ] {
+            let root = make_temp_dir("fidan_legal_archive");
+            let project = root.join("project");
+            fs::create_dir_all(project.join("src"))?;
+            fs::write(
+                project.join("src/init.fdn"),
+                "action version returns integer { return 1 }\n",
+            )?;
+            fs::write(
+                project.join("dal.toml"),
+                format!(
+                    "[package]\nname='legal-archive'\nversion='0.1.0'\ninclude=['src/**','{name}']\n"
+                ),
+            )?;
+            fs::write(project.join(name), "Original legal attribution\n")?;
+            let built = build_package_archive(&project)?;
+            read_manifest_from_archive(&built.archive_bytes)?;
+            let installed = install_downloaded_package(
+                &built.archive_bytes,
+                "legal-archive",
+                "0.1.0",
+                &root.join("store"),
+                false,
+            )?;
+            assert_eq!(
+                fs::read(installed.join(name))?,
+                b"Original legal attribution\n"
+            );
+            fs::remove_dir_all(root)?;
+        }
         Ok(())
     }
 
