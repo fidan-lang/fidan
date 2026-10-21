@@ -144,26 +144,6 @@ fn run_install(version: &str) -> Result<()> {
                 refresh_active_version = true;
             }
         }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            fs::remove_dir_all(&final_dir).with_context(|| {
-                format!(
-                    "failed to replace existing Fidan version directory `{}`",
-                    final_dir.display()
-                )
-            })?;
-        }
-
-        #[cfg(target_os = "windows")]
-        if !refresh_active_version {
-            fs::remove_dir_all(&final_dir).with_context(|| {
-                format!(
-                    "failed to replace existing Fidan version directory `{}`",
-                    final_dir.display()
-                )
-            })?;
-        }
     }
 
     let cache_path = home
@@ -193,7 +173,7 @@ fn run_install(version: &str) -> Result<()> {
     #[cfg(not(target_os = "windows"))]
     let install_dir = &final_dir;
 
-    materialize_release_root(&staging, &expected, install_dir)?;
+    materialize_release_root(&staging, &expected, install_dir, None)?;
 
     let first_install = register_install(&root, &release.version, Some(&release.sha256))?;
     #[cfg(target_os = "windows")]

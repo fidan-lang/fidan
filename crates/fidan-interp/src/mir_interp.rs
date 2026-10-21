@@ -11,7 +11,7 @@ use std::collections::VecDeque;
 use std::ffi::c_void;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use fidan_ast::{BinOp, UnOp};
@@ -23,7 +23,7 @@ use fidan_mir::{
 };
 use fidan_runtime::{
     FidanClass, FidanDict, FidanList, FidanObject, FidanPending, FidanString, FidanValue, FieldDef,
-    FunctionId as RuntimeFnId, OwnedRef, ParallelArgs, ParallelCapture, display as fidan_display,
+    FunctionId as RuntimeFnId, OwnedRef, ParallelArgs, display as fidan_display,
 };
 use fidan_source::{SourceMap, Span};
 use fidan_stdlib::{
@@ -31,6 +31,8 @@ use fidan_stdlib::{
     parallel::ParallelOp,
 };
 use rustc_hash::{FxHashMap, FxHashSet};
+
+static NEXT_PENDING_OWNER: AtomicU64 = AtomicU64::new(1);
 
 use crate::builtins;
 use crate::externs;
@@ -345,6 +347,7 @@ pub struct MirMachine {
     pending_tasks: FxHashMap<u64, PendingTaskState>,
     pending_ready: VecDeque<u64>,
     next_pending_task_id: u64,
+    pending_owner: u64,
     /// Pre-interned symbol for the string `"drop"`.
     ///
     /// Stored here so `exec_drop_dispatch` can call `class.find_method(drop_sym)`
@@ -379,8 +382,8 @@ pub struct TestResult {
 }
 
 // SAFETY: `MirMachine` only crosses thread boundaries through `clone_for_thread`.
-// That path rebuilds globals/frozen_globals as thread-local `parallel_capture()`
-// copies before the machine is moved into the worker thread.
+// The child starts with empty globals. Its detached argument/global payload is
+// installed on the worker before any Fidan code runs.
 unsafe impl Send for MirMachine {}
 
 unsafe fn jit_load_global_raw(ctx: *mut c_void, global_id: u32) -> i64 {
@@ -680,6 +683,7 @@ impl MirMachine {
             pending_tasks: FxHashMap::default(),
             pending_ready: VecDeque::new(),
             next_pending_task_id: 1,
+            pending_owner: NEXT_PENDING_OWNER.fetch_add(1, Ordering::Relaxed),
             drop_sym,
             profile_data: None,
             stdin_capture: Vec::new(),
@@ -804,15 +808,6 @@ impl MirMachine {
     /// refcount.  The `classes` map clones its `Arc<FidanClass>` pointers —
     /// O(n-classes), but class tables are small.
     fn clone_for_thread(&self) -> MirMachine {
-        let thread_globals: Vec<FidanValue> = if let Some(ref frozen) = self.frozen_globals {
-            frozen.iter().map(FidanValue::parallel_capture).collect()
-        } else {
-            self.globals
-                .read()
-                .iter()
-                .map(FidanValue::parallel_capture)
-                .collect()
-        };
         MirMachine {
             program: Arc::clone(&self.program),
             interner: Arc::clone(&self.interner),
@@ -827,8 +822,8 @@ impl MirMachine {
             reexported_namespaces: self.reexported_namespaces.clone(),
             extern_builtin_fns: self.extern_builtin_fns.clone(),
             user_fn_map: self.user_fn_map.clone(),
-            globals: Rc::new(parking_lot::RwLock::new(thread_globals.clone())),
-            frozen_globals: Some(thread_globals.into_boxed_slice()),
+            globals: Rc::new(parking_lot::RwLock::new(Vec::new())),
+            frozen_globals: None,
             // One atomic bump on the outer Arc; all Arc<str> entries are shared.
             str_table: Arc::clone(&self.str_table),
             test_results: Vec::new(),
@@ -840,6 +835,7 @@ impl MirMachine {
             pending_tasks: FxHashMap::default(),
             pending_ready: VecDeque::new(),
             next_pending_task_id: 1,
+            pending_owner: NEXT_PENDING_OWNER.fetch_add(1, Ordering::Relaxed),
             drop_sym: self.drop_sym,
             profile_data: self.profile_data.as_ref().map(Arc::clone),
             // Parallel threads get a fresh capture buffer.
@@ -851,6 +847,29 @@ impl MirMachine {
             sandbox: self.sandbox.as_ref().map(Arc::clone),
             frame_pool: Vec::new(),
         }
+    }
+
+    /// Capture arguments and globals as one graph before crossing the thread boundary.
+    fn thread_payload(&self, args: Vec<FidanValue>) -> ParallelArgs {
+        let globals = if let Some(frozen) = &self.frozen_globals {
+            frozen.to_vec()
+        } else {
+            self.globals.read().clone()
+        };
+        ParallelArgs::new(&[FidanValue::Tuple(globals), FidanValue::Tuple(args)])
+    }
+
+    fn install_thread_payload(&mut self, payload: ParallelArgs) -> Vec<FidanValue> {
+        let mut values = payload.into_vec().into_iter();
+        let Some(FidanValue::Tuple(globals)) = values.next() else {
+            unreachable!()
+        };
+        let Some(FidanValue::Tuple(args)) = values.next() else {
+            unreachable!()
+        };
+        self.frozen_globals = Some(globals.clone().into_boxed_slice());
+        *self.globals.write() = globals;
+        args
     }
 
     /// Activate sandbox policy on this machine.  Must be called before [`run`].
@@ -970,13 +989,20 @@ impl MirMachine {
         self.pending_tasks
             .insert(id, PendingTaskState::Queued(task));
         self.pending_ready.push_back(id);
-        FidanValue::PendingTask(id)
+        FidanValue::PendingTask(fidan_runtime::PendingTaskId {
+            owner: self.pending_owner,
+            id,
+        })
     }
 
     fn try_take_same_thread_pending_now(
         &mut self,
-        id: u64,
+        task: fidan_runtime::PendingTaskId,
     ) -> Option<Result<FidanValue, DeferredTaskError>> {
+        if task.owner != self.pending_owner {
+            return Some(Err(self.foreign_pending_error()));
+        }
+        let id = task.id;
         match self.pending_tasks.remove(&id) {
             Some(PendingTaskState::Ready(result)) => Some(result),
             Some(state) => {
@@ -1001,9 +1027,14 @@ impl MirMachine {
     ) -> Option<Result<FidanValue, DeferredTaskError>> {
         match value {
             FidanValue::PendingTask(id) => self.try_take_same_thread_pending_now(*id),
-            FidanValue::Pending(pending) => pending.try_take_ready().map(|result| {
-                result.map_err(|message| DeferredTaskError::Signal(MirSignal::Panic(message)))
-            }),
+            FidanValue::Pending(pending) => {
+                if let Err(error) = pending.validate_await_thread() {
+                    return Some(Err(DeferredTaskError::Signal(error.into())));
+                }
+                pending.try_take_ready().map(|result| {
+                    result.map_err(|message| DeferredTaskError::Signal(MirSignal::Panic(message)))
+                })
+            }
             other => Some(Ok(other.clone())),
         }
     }
@@ -1012,6 +1043,9 @@ impl MirMachine {
         &mut self,
         pending: &FidanPending,
     ) -> Result<FidanValue, DeferredTaskError> {
+        pending
+            .validate_await_thread()
+            .map_err(|error| DeferredTaskError::Signal(error.into()))?;
         loop {
             if let Some(result) = pending.try_take_ready() {
                 return result
@@ -1142,7 +1176,21 @@ impl MirMachine {
         false
     }
 
-    fn resolve_same_thread_pending(&mut self, id: u64) -> Result<FidanValue, DeferredTaskError> {
+    fn foreign_pending_error(&self) -> DeferredTaskError {
+        DeferredTaskError::Signal(MirSignal::RuntimeError(
+            fidan_diagnostics::diag_code!("R0001"),
+            fidan_runtime::parallel::COOPERATIVE_PENDING_THREAD_MESSAGE.into(),
+        ))
+    }
+
+    fn resolve_same_thread_pending(
+        &mut self,
+        task: fidan_runtime::PendingTaskId,
+    ) -> Result<FidanValue, DeferredTaskError> {
+        if task.owner != self.pending_owner {
+            return Err(self.foreign_pending_error());
+        }
+        let id = task.id;
         loop {
             match self.pending_tasks.get(&id) {
                 Some(PendingTaskState::Queued(_)) | Some(PendingTaskState::Running) => {
@@ -1717,10 +1765,9 @@ impl MirMachine {
             // `spawn expr` / `spawn dynamic` are same-thread deferred tasks:
             // they do not execute eagerly and instead run when first awaited.
             //
-            // Each thread gets its own `MirMachine` (clone_for_thread is O(1)
-            // for Arc fields).  Captured values go through `parallel_capture()`
-            // to produce fresh `Rc<RefCell<T>>` wrappers around the shared CoW
-            // `Arc<…>` inner data — zero data copying until first mutation.
+            // Each worker gets its own machine and a detached snapshot of the
+            // complete argument/global graph. Ordinary Rc storage never crosses
+            // threads; aliases within a worker are preserved.
             //
             // IMPORTANT: closures capture `ParallelArgs` (whole type, Send) and
             // unwrap via `.into_vec()` method call — NOT `.0` field access.
@@ -1759,14 +1806,13 @@ impl MirMachine {
                     let func = self.program.function(task_fn);
                     self.sym_str(func.name).to_string()
                 };
-                let args_bundle = ParallelArgs::from_captures(
-                    args.iter()
-                        .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture())),
-                );
+                let values = args.iter().map(|a| self.eval_operand(a, frame)).collect();
+                let args_bundle = self.thread_payload(values);
                 let mut child = self.clone_for_thread();
                 let pending = FidanPending::spawn_fallible(args_bundle, move |bundle| {
+                    let args = child.install_thread_payload(bundle);
                     child
-                        .call_function(task_fn, bundle.into_vec())
+                        .call_function(task_fn, args)
                         .map_err(|sig| MirMachine::format_task_failure(&task_name, sig))
                 });
                 frame.store(*handle, FidanValue::Pending(pending));
@@ -1886,9 +1932,9 @@ impl MirMachine {
                 let coll = self.eval_operand(collection, frame);
                 // Capture the shared "environment" args once; per-item bundles
                 // below each include a capture-clone of these.
-                let env_caps: Vec<ParallelCapture> = closure_args
+                let environment: Vec<FidanValue> = closure_args
                     .iter()
-                    .map(|a| ParallelCapture(self.eval_operand(a, frame).parallel_capture()))
+                    .map(|a| self.eval_operand(a, frame))
                     .collect();
 
                 let items = self.iterable_items_snapshot(coll);
@@ -1903,17 +1949,14 @@ impl MirMachine {
                     std::thread::scope(|s| {
                         for item in &items {
                             // Build per-thread bundle using whole-struct captures.
-                            let mut caps = vec![ParallelCapture(item.parallel_capture())];
-                            caps.extend(
-                                env_caps
-                                    .iter()
-                                    .map(|c| ParallelCapture(c.0.parallel_capture())),
-                            );
-                            let bundle = ParallelArgs::from_captures(caps);
+                            let mut values = vec![item.clone()];
+                            values.extend(environment.iter().cloned());
+                            let bundle = self.thread_payload(values);
                             let mut child = self.clone_for_thread();
                             let err_slot = std::sync::Arc::clone(&first_err);
                             s.spawn(move || {
-                                if let Err(sig) = child.call_function(body_fn, bundle.into_vec()) {
+                                let args = child.install_thread_payload(bundle);
+                                if let Err(sig) = child.call_function(body_fn, args) {
                                     // body_fn is Copy
                                     let msg = match sig {
                                         MirSignal::Panic(m) => m,
@@ -2407,24 +2450,21 @@ impl MirMachine {
             let method_name = self.sym_str(method);
             match canonical_receiver_method_name(ReceiverBuiltinKind::Shared, &method_name) {
                 Some("get") => {
-                    return Ok(sr
-                        .lock()
-                        .map_err(|error| {
-                            MirSignal::RuntimeError(
-                                fidan_diagnostics::diag_code!("R0001"),
-                                error.into(),
-                            )
-                        })?
-                        .clone());
-                }
-                Some("set") => {
-                    let val = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-                    *sr.lock().map_err(|error| {
+                    return sr.snapshot().map_err(|error| {
                         MirSignal::RuntimeError(
                             fidan_diagnostics::diag_code!("R0001"),
                             error.into(),
                         )
-                    })? = val;
+                    });
+                }
+                Some("set") => {
+                    let val = args.into_iter().next().unwrap_or(FidanValue::Nothing);
+                    sr.store_value(val).map_err(|error| {
+                        MirSignal::RuntimeError(
+                            fidan_diagnostics::diag_code!("R0001"),
+                            error.into(),
+                        )
+                    })?;
                     return Ok(FidanValue::Nothing);
                 }
                 Some("update") => {
@@ -2446,21 +2486,15 @@ impl MirMachine {
                             format!("cannot call value of type `{}`", callback.type_name()),
                         ));
                     }
-                    let mut current = sr.lock().map_err(|error| {
-                        MirSignal::RuntimeError(
-                            fidan_diagnostics::diag_code!("R0001"),
-                            error.into(),
-                        )
-                    })?;
-                    let result = self.call_value(callback, vec![current.clone()])?;
-                    let result = if let Some(ty) = result_ty {
-                        fidan_runtime::contracts::prepare(result, &ty.runtime_descriptor())
-                            .map_err(MirSignal::from)?
-                    } else {
-                        result
-                    };
-                    *current = result.clone();
-                    return Ok(result);
+                    return sr.transform(|current| {
+                        let result = self.call_value(callback, vec![current])?;
+                        if let Some(ty) = result_ty {
+                            fidan_runtime::contracts::prepare(result, &ty.runtime_descriptor())
+                                .map_err(MirSignal::from)
+                        } else {
+                            Ok(result)
+                        }
+                    });
                 }
                 Some("weak") => return Ok(FidanValue::WeakShared(sr.downgrade())),
                 _ => {}

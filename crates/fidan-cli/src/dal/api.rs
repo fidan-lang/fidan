@@ -15,26 +15,13 @@ pub struct DalClient {
     base: String,
     token: Option<String>,
     http: Client,
+    authenticated_http: Client,
 }
 
 impl DalClient {
     pub fn new(base: String, token: Option<String>) -> Result<Self> {
-        let url = reqwest::Url::parse(&base).context("invalid Dal registry URL")?;
-        let loopback = matches!(
-            url.host_str(),
-            Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
-        );
-        if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            bail!(
-                "Dal registry requires HTTPS (HTTP only on literal loopback), without credentials, query or fragment"
-            );
-        }
-        let base = base.trim_end_matches('/').to_owned();
+        let base = super::config::canonical_registry(&base)?;
+        let url = reqwest::Url::parse(&base)?;
         let http = Client::builder()
             .https_only(url.scheme() == "https")
             .user_agent(concat!("fidan/", env!("CARGO_PKG_VERSION"), " dal-cli"))
@@ -43,7 +30,22 @@ impl DalClient {
             .build()
             .context("failed to build Dal HTTP client")?;
 
-        Ok(Self { base, token, http })
+        // Credentials must not follow even same-origin redirects outside the registry prefix.
+        // Public downloads retain redirect support for presigned object-store URLs.
+        let authenticated_http = Client::builder()
+            .https_only(url.scheme() == "https")
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(concat!("fidan/", env!("CARGO_PKG_VERSION"), " dal-cli"))
+            .connect_timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(120))
+            .build()
+            .context("failed to build authenticated Dal HTTP client")?;
+        Ok(Self {
+            base,
+            token,
+            http,
+            authenticated_http,
+        })
     }
 
     pub fn whoami(&self) -> Result<UserInfo> {
@@ -159,7 +161,7 @@ impl DalClient {
         );
 
         let response = self
-            .http
+            .authenticated_http
             .post(&url)
             .bearer_auth(token)
             .multipart(form)
@@ -193,7 +195,10 @@ impl DalClient {
     ) -> Result<T> {
         let token = self.require_token()?;
         let url = format!("{}{}", self.base, path);
-        let mut request = self.http.request(method, &url).bearer_auth(token);
+        let mut request = self
+            .authenticated_http
+            .request(method, &url)
+            .bearer_auth(token);
         if let Some(json_body) = body {
             request = request.json(json_body);
         }

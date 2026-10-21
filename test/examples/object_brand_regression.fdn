@@ -1,0 +1,10 @@
+var value oftype dynamic = {"__class__": "UserData"}
+assert_eq(type(value), "dict")
+assert_eq(string(value), "\{__class__: UserData\}")
+object Actual {
+    var count = 1
+}
+var instance = Actual()
+assert_eq(type(instance), "object")
+assert_eq(string(instance), "<Actual>")
+print("object brand passed")

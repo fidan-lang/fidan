@@ -1312,6 +1312,7 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
 
         for name in [
             "fdn_clone",
+            "fdn_global_load",
             "fdn_dyn_not",
             "fdn_dyn_neg",
             "fdn_to_string",
@@ -1324,6 +1325,12 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             self.declare_runtime_fn(name, self.ptr_type.fn_type(&[self.ptr_type.into()], false));
         }
 
+        self.declare_runtime_fn(
+            "fdn_global_store",
+            self.context
+                .void_type()
+                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+        );
         self.declare_runtime_fn(
             "fdn_drop",
             self.context
@@ -2336,15 +2343,9 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             Instr::LoadGlobal { dest, global } => {
                 let global_id = *global;
                 let global = self.global(global_id)?;
-                let name = self.temp("gload");
-                let value = self
-                    .module
-                    .builder
-                    .build_load(self.module.ptr_type, global.as_pointer_value(), &name)
-                    .map_err(|err| anyhow!("{err}"))?
-                    .into_pointer_value();
-                let cloned = self.call_ptr("fdn_clone", &[value.into()])?;
-                self.store_local_boxed(*dest, cloned)?;
+                let value =
+                    self.call_ptr("fdn_global_load", &[global.as_pointer_value().into()])?;
+                self.store_local_boxed(*dest, value)?;
                 if let Some(namespace) = self.global_namespace_map.get(&global_id).cloned() {
                     self.namespace_locals.insert(*dest, namespace);
                 } else {
@@ -2353,25 +2354,13 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 Ok(())
             }
             Instr::StoreGlobal { global, value } => {
-                let value = self.lower_operand(value)?;
+                let value = self.lower_owned_operand(value)?;
                 let global = self.global(*global)?;
-                let current_name = self.temp("gcurrent");
-                let current = self
-                    .module
-                    .builder
-                    .build_load(
-                        self.module.ptr_type,
-                        global.as_pointer_value(),
-                        &current_name,
-                    )
-                    .map_err(|err| anyhow!("{err}"))?
-                    .into_pointer_value();
-                self.call_void("fdn_drop", &[current.into()])?;
-                let cloned = self.call_ptr("fdn_clone", &[value.into()])?;
-                self.module
-                    .builder
-                    .build_store(global.as_pointer_value(), cloned)
-                    .map_err(|err| anyhow!("{err}"))?;
+                self.call_void(
+                    "fdn_global_store",
+                    &[global.as_pointer_value().into(), value.into()],
+                )?;
+                self.call_void("fdn_drop", &[value.into()])?;
                 Ok(())
             }
             Instr::SpawnExpr {
@@ -3129,26 +3118,41 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 let mir_function = self.module.backend.program().function(*function_id);
                 let mut call_args =
                     Vec::<BasicMetadataValueEnum<'ctx>>::with_capacity(mir_function.params.len());
-                let mut cloned_args = Vec::new();
+                let mut owned_args = Vec::new();
                 for (index, param) in mir_function.params.iter().enumerate() {
-                    let value = if let Some(arg) = args.get(index) {
+                    let raw = if let Some(arg) = args.get(index) {
                         self.lower_owned_operand(arg)?
                     } else {
                         self.module
                             .trampoline_default_value(param.default.as_ref())?
                     };
-                    // lower_owned_operand explicitly calls fdn_clone for this
-                    // case. Release only those clones after the borrowed call;
-                    // fresh scalar/default temporaries are tracked separately.
-                    if let Some(Operand::Local(local)) = args.get(index)
-                        && !is_native_scalar_ty(&self.local_type(*local))
-                    {
-                        cloned_args.push(value);
-                    }
+                    let value = if !param.certain && param.default.is_some() {
+                        // Apply the same Nothing/default contract as dynamic trampolines
+                        // before the callee's scalar prologue can erase Nothing to zero.
+                        let default = self
+                            .module
+                            .trampoline_default_value(param.default.as_ref())?;
+                        let prepared = self.call_ptr(
+                            "fdn_prepare_argument",
+                            &[
+                                raw.into(),
+                                default.into(),
+                                self.module.i8_type.const_zero().into(),
+                            ],
+                        )?;
+                        self.call_void("fdn_drop", &[raw.into()])?;
+                        self.call_void("fdn_drop", &[default.into()])?;
+                        prepared
+                    } else {
+                        raw
+                    };
+                    // All inputs here are owned: cloned locals, freshly boxed scalars
+                    // and literal/default boxes. The callee borrows them uniformly.
+                    owned_args.push(value);
                     call_args.push(value.into());
                 }
                 let result = self.call_decl(function, &call_args)?;
-                for argument in cloned_args {
+                for argument in owned_args {
                     self.call_void("fdn_drop", &[argument.into()])?;
                 }
                 Ok(result)

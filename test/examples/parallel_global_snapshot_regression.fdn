@@ -1,0 +1,25 @@
+# Globals read through transitive calls must be visible in detached worker graphs.
+var globalItems = [[1, 2], [3, 4]]
+var globalAlias = globalItems
+var scalar = 7
+var total = Shared(0)
+action readGlobals returns integer {
+    assert_eq(globalItems[0][1], 2)
+    assert_eq(globalAlias[1][0], 3)
+    return scalar
+}
+for repetition in 0..20 {
+    total.set(0)
+    parallel {
+        task first { total.update(action with (value) { return value + readGlobals() }) }
+        task second { total.update(action with (value) { return value + readGlobals() }) }
+    }
+    assert_eq(total.get(), 14)
+    assert_eq(globalItems, [[1, 2], [3, 4]])
+}
+total.set(0)
+parallel for i in 0..64 {
+    total.update(action with (value) { return value + readGlobals() })
+}
+assert_eq(total.get(), 448)
+print("parallel global snapshots passed")

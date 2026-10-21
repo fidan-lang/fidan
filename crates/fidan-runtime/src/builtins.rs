@@ -215,7 +215,7 @@ mod tests {
         ])));
         let set = hashset(values).unwrap();
         assert!(matches!(hashset(set), Ok(FidanValue::HashSet(set)) if set.borrow().len() == 1));
-        let shared = crate::SharedRef::new(FidanValue::Integer(7));
+        let shared = crate::SharedRef::from_value(FidanValue::Integer(7));
         let weak = weak_shared(FidanValue::Shared(shared.clone())).unwrap();
         assert!(matches!(weak_shared(weak), Ok(FidanValue::WeakShared(weak)) if weak.is_alive()));
         for result in [

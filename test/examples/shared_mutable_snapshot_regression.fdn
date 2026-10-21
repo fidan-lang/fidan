@@ -1,0 +1,45 @@
+# Shared owns a snapshot; ordinary mutable aliases never escape its mutex.
+action verifyMutableShared {
+    var source = [1]
+    var shared = Shared(source)
+    source.append(2)
+    assert_eq(shared.get(), [1])
+    var snapshot = shared.get()
+    snapshot.append(3)
+    assert_eq(shared.get(), [1])
+    shared.set(source)
+    source.append(4)
+    assert_eq(shared.get(), [1, 2])
+    var caught = false
+    attempt {
+        shared.update(action with (values) {
+            values.append(99)
+            var zero oftype flexible = 0
+            var failure = 1 / zero
+            return values
+        })
+    } catch error {
+        assert(error.contains("R2001"))
+        caught = true
+    }
+    assert_eq(caught, true)
+    assert_eq(shared.get(), [1, 2])
+    var returned = shared.update(action with (values) {
+        values.append(5)
+        return values
+    })
+    returned.append(6)
+    assert_eq(shared.get(), [1, 2, 5])
+    for repetition in 0..10 {
+        var counter = Shared([0])
+        parallel for i in 0..128 {
+            counter.update(action with (values) {
+                values[0] = values[0] + 1
+                return values
+            })
+        }
+        assert_eq(counter.get(), [128])
+    }
+}
+verifyMutableShared()
+print("mutable shared snapshots passed")

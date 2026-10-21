@@ -464,6 +464,8 @@ struct RuntimeDecls {
     unbox_handle: cranelift_module::FuncId,
     // Reference counting
     clone_any: cranelift_module::FuncId,
+    global_load: cranelift_module::FuncId,
+    global_store: cranelift_module::FuncId,
     drop_any: cranelift_module::FuncId,
     // Truthiness
     truthy: cranelift_module::FuncId,
@@ -653,6 +655,8 @@ impl RuntimeDecls {
             unbox_bool: decl!("fdn_unbox_bool", sig!((p) -> i8)),
             unbox_handle: decl!("fdn_unbox_handle", sig!((p) -> i64)),
             clone_any: decl!("fdn_clone", sig!((p) -> ptr)),
+            global_load: decl!("fdn_global_load", sig!((p) -> ptr)),
+            global_store: decl!("fdn_global_store", sig!((p, p) -> void)),
             drop_any: decl!("fdn_drop", sig!((p) -> void)),
             truthy: decl!("fdn_truthy", sig!((p) -> i8)),
             null_coalesce: decl!("fdn_null_coalesce", sig!((p, p) -> ptr)),
@@ -1702,8 +1706,9 @@ fn lower_instr(
                 }
                 let gv = module.declare_data_in_func(data_id, builder.func);
                 let addr = builder.ins().symbol_value(PTR_TY, gv);
-                let val = builder.ins().load(PTR_TY, MemFlagsData::new(), addr, 0);
+                let val = call_rt(module, builder, rt.global_load, &[addr])?.unwrap();
                 store_local_from_boxed(builder, cl_vars, local_types, *dest, val, rt, module)?;
+                call_rt(module, builder, rt.drop_any, &[val])?;
             } else {
                 namespace_locals.remove(dest);
                 let zero = zero_value_for_local(builder, local_types.get(&dest.0));
@@ -1717,13 +1722,12 @@ fn lower_instr(
                 let gv = module.declare_data_in_func(data_id, builder.func);
                 let addr = builder.ins().symbol_value(PTR_TY, gv);
                 let val = lower_operand_boxed(builder, cl_vars, local_types, value, rt, module)?;
-                let cloned = call_rt(module, builder, rt.clone_any, &[val])?
-                    .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
-                // The global owns its box; replacing it must release the old
-                // owner so WeakShared observes the same lifetime as the interpreter.
-                let current = builder.ins().load(PTR_TY, MemFlagsData::new(), addr, 0);
-                call_rt(module, builder, rt.drop_any, &[current])?;
-                builder.ins().store(MemFlagsData::new(), cloned, addr, 0);
+                call_rt(module, builder, rt.global_store, &[addr, val])?;
+                if matches!(value, Operand::Const(_))
+                    || is_scalar(&operand_mir_ty(local_types, value))
+                {
+                    call_rt(module, builder, rt.drop_any, &[val])?;
+                }
             }
         }
 
@@ -2762,16 +2766,53 @@ fn emit_call(
             let mut arg_vals = Vec::with_capacity(mir_fn.params.len());
             let mut cloned_args = Vec::new();
             for (i, param) in mir_fn.params.iter().enumerate() {
-                let v = if let Some(arg_op) = args.get(i) {
-                    lower_operand_coerced(
-                        builder,
-                        cl_vars,
-                        local_types,
-                        arg_op,
-                        param.abi_ty(),
-                        rt,
-                        module,
-                    )?
+                // Named omissions carry Nothing in MIR, just like explicit Nothing.
+                // Resolve literal defaults before entering a scalar ABI/unboxer.
+                let provided = args.get(i).filter(|argument| {
+                    param.default.is_none() || !matches!(argument, Operand::Const(MirLit::Nothing))
+                });
+                let mut prepared_owned = false;
+                let v = if let Some(arg_op) = provided {
+                    if !param.certain
+                        && param.default.is_some()
+                        && !is_scalar(&operand_mir_ty(local_types, arg_op))
+                    {
+                        // A flexible/nullable value may become Nothing only at runtime.
+                        // Reuse the dynamic-call default contract, preserving zero/false.
+                        let raw =
+                            lower_operand_boxed(builder, cl_vars, local_types, arg_op, rt, module)?;
+                        let default = emit_trampoline_default_value(
+                            module,
+                            rt,
+                            builder,
+                            param.default.as_ref(),
+                            &MirTy::Dynamic,
+                        )?;
+                        let certain = builder.ins().iconst(I8, 0);
+                        let prepared = call_rt(
+                            module,
+                            builder,
+                            rt.prepare_argument,
+                            &[raw, default, certain],
+                        )?
+                        .unwrap();
+                        call_rt(module, builder, rt.drop_any, &[default])?;
+                        if matches!(arg_op, Operand::Const(_)) {
+                            call_rt(module, builder, rt.drop_any, &[raw])?;
+                        }
+                        prepared_owned = !is_scalar(param.abi_ty());
+                        coerce_boxed_call_result(module, rt, builder, prepared, param.abi_ty())?
+                    } else {
+                        lower_operand_coerced(
+                            builder,
+                            cl_vars,
+                            local_types,
+                            arg_op,
+                            param.abi_ty(),
+                            rt,
+                            module,
+                        )?
+                    }
                 } else if let Some(default_lit) = &param.default {
                     let raw = if is_scalar(param.abi_ty()) {
                         lower_lit(module, builder, rt, default_lit, interner)?
@@ -2799,11 +2840,12 @@ fn emit_call(
                         interner.resolve(mir_fn.name)
                     );
                 };
-                // This is precisely lower_owned_boxed_operand's fdn_clone
-                // branch. Do not treat unknown or scalar arguments as clones.
+                // Prepared arguments and boxed defaults are owned temporaries;
+                // ordinary boxed locals are cloned by lower_owned_boxed_operand.
+                let cloned_local = provided.is_some_and(|argument| matches!(argument,
+                    Operand::Local(local) if matches!(local_types.get(&local.0), Some(ty) if !matches!(ty, MirTy::Error) && !is_scalar(ty))));
                 if !is_scalar(param.abi_ty())
-                    && let Some(Operand::Local(local)) = args.get(i)
-                    && matches!(local_types.get(&local.0), Some(ty) if !matches!(ty, MirTy::Error) && !is_scalar(ty))
+                    && (prepared_owned || provided.is_none() || cloned_local)
                 {
                     cloned_args.push(v);
                 }

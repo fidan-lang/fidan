@@ -2712,8 +2712,8 @@ mod tests {
     #[test]
     fn boxed_branch_conditions_execute_natively() {
         use fidan_runtime::{FidanDict, FidanHashSet, FidanList, FidanString, OwnedRef, SharedRef};
-        let live = SharedRef::new(FidanValue::Integer(1));
-        let expired = SharedRef::new(FidanValue::Integer(1)).downgrade();
+        let live = SharedRef::from_value(FidanValue::Integer(1));
+        let expired = SharedRef::from_value(FidanValue::Integer(1)).downgrade();
         let cases = [
             (FidanValue::Boolean(false), 0),
             (FidanValue::Boolean(true), 1),

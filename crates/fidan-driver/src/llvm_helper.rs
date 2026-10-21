@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 
 // File-qualified MIR members and resolved re-exports require the matching
 // helper/runtime lowering. Protocol5 helpers can silently miscompile these values.
-pub const LLVM_BACKEND_PROTOCOL_VERSION: u32 = 7;
+pub const LLVM_BACKEND_PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlvmCompileRequest {

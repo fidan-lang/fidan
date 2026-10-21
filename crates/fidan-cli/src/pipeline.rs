@@ -495,7 +495,7 @@ fn run_fmt_file(
             Severity::Error,
             "fmt",
             &format!(
-                "{} is not formatted — run `fidan format {}` to fix",
+                "{} is not formatted — run `fidan format --in-place \"{}\"` to fix",
                 file.display(),
                 file.display()
             ),

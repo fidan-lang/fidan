@@ -1,0 +1,54 @@
+# Branches deliberately prevent inlining from hiding direct-call ABI mistakes.
+action sum with (optional x oftype integer = 1, optional y oftype integer = 2) returns integer {
+    if x > 0 {
+        return x + y
+    }
+
+    return y
+}
+
+action scale with (optional x oftype float = 1.5, optional y oftype float = 2.5) returns float {
+    if x > 0.0 {
+        return x + y
+    }
+
+    return y
+}
+
+action choose with (optional value oftype boolean = true, optional other oftype boolean = false) returns boolean {
+    if value {
+        return true
+    }
+
+    return other
+}
+
+action text with (optional left oftype string = "default", optional right oftype string = "suffix") returns string {
+    if len(left) > 0 {
+        return left + right
+    }
+
+    return right
+}
+
+action empty with (certain yes oftype boolean) returns dynamic {
+    if yes {
+        return nothing
+    }
+
+    return 0
+}
+
+var absent = empty(true)
+
+assert_eq(sum(absent, 2), 3)
+assert_eq(sum(y = 2), 3)
+assert_eq(sum(0, 2), 2)
+assert_eq(sum(nothing, 2), 3)
+assert_eq(scale(y = 2.5), 4.0)
+assert_eq(scale(0.0, 2.5), 2.5)
+assert_eq(choose(other = false), true)
+assert_eq(choose(false, false), false)
+assert_eq(text(right = "!"), "default!")
+assert_eq(text("", "!"), "!")
+print("named defaults passed")

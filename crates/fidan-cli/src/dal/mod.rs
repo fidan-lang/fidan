@@ -1,6 +1,8 @@
 mod api;
 mod archive;
 mod config;
+#[cfg(test)]
+mod credential_tests;
 mod resolver;
 use resolver::PackageResolver;
 
@@ -47,7 +49,11 @@ pub(crate) enum DalCommand {
         registry: Option<String>,
     },
     /// Remove the stored Dal API token from the OS keychain
-    Logout,
+    Logout {
+        /// Override the Dal registry whose saved token is removed
+        #[arg(long)]
+        registry: Option<String>,
+    },
     /// Show the currently authenticated Dal account
     Whoami {
         /// Override the Dal registry base URL
@@ -139,7 +145,7 @@ pub(crate) enum DalCommand {
 pub(crate) fn run(command: DalCommand) -> Result<()> {
     match command {
         DalCommand::Login { token, registry } => run_login(token, registry),
-        DalCommand::Logout => run_logout(),
+        DalCommand::Logout { registry } => run_logout(registry),
         DalCommand::Whoami { registry } => run_whoami(registry),
         DalCommand::Search {
             query,
@@ -190,8 +196,7 @@ fn run_login(token: Option<String>, registry: Option<String>) -> Result<()> {
         "Dal token verification failed — make sure you pasted a valid API token from the dashboard",
     )?;
 
-    config::store_token(&token)?;
-    config::verify_stored_token(&token)?;
+    config::store_token(&registry, &token)?;
 
     println!(
         "Logged in to {} as {}{}",
@@ -206,9 +211,10 @@ fn run_login(token: Option<String>, registry: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn run_logout() -> Result<()> {
-    config::clear_token()?;
-    println!("Dal API token removed from the OS keychain.");
+fn run_logout(registry: Option<String>) -> Result<()> {
+    let registry = config::resolve_registry(registry.as_deref())?;
+    config::clear_token(&registry)?;
+    println!("Dal API token for {registry} removed from the OS keychain.");
     Ok(())
 }
 
@@ -912,7 +918,7 @@ fn run_unyank(package: &str, version: &str, registry: Option<String>) -> Result<
 
 fn authenticated_client(registry: Option<String>) -> Result<DalClient> {
     let registry = config::resolve_registry(registry.as_deref())?;
-    let token = config::resolve_token(None)?;
+    let token = config::resolve_token(&registry, None)?;
     DalClient::new(registry, token)
 }
 

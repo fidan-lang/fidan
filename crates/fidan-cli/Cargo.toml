@@ -43,3 +43,6 @@ urlencoding = { workspace = true }
 crossterm = { workspace = true }
 sha2 = { workspace = true }
 globset = { workspace = true }
+
+[dev-dependencies]
+keyring-core = { workspace = true }

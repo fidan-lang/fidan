@@ -617,7 +617,7 @@ parallel {
 print(counter.get())   # 2, after both tasks join
 ```
 
-`get()` and `set()` synchronize individual accesses. A separate get followed by set, such as `counter.set(counter.get() + 1)`, is not an atomic read-modify-write. `update(callback)` holds the Shared mutex while calling the action with the current value and replacing it with the result. It returns the new value. Named actions, inline actions, and captured closures use the normal callable dispatch.
+`get()` and `set()` synchronize individual accesses. A separate get followed by set, such as `counter.set(counter.get() + 1)`, is not an atomic read-modify-write. `update(callback)` holds the Shared mutex while calling the action with the current value and replacing it with the result. It returns the new value. Named actions, inline actions, and captured closures use the normal callable dispatch. Ordinary mutable collections and objects cross the Shared boundary as detached snapshots: changing a value passed to `Shared`/`set`, or returned by `get`/`update`, cannot mutate the stored value through an escaped alias. A failed callback leaves the committed value unchanged, including nested collections. Use `update` to commit compound mutation. Cooperative `spawn`/`async` pending handles must be awaited by their creator; awaiting them from another parallel worker raises R0001 and leaves the original handle usable. Thread-backed parallel results remain transferable.
 
 ```fidan
 var counter = Shared(0)
@@ -924,7 +924,7 @@ behavior is obvious in new projects.
 | Command | Description |
 |---|---|
 | `fidan dal login` | Store a Dal API token in the OS keychain for CLI use |
-| `fidan dal logout` | Remove the stored Dal API token from the OS keychain |
+| `fidan dal logout [--registry URL]` | Remove the saved token for the selected registry |
 | `fidan dal whoami` | Show the authenticated Dal account |
 | `fidan dal search <query>` | Search packages on Dal |
 | `fidan dal info <package>` | Show package metadata and published versions |
@@ -952,17 +952,20 @@ fidan dal add my-tool --global
 
 Dal resolves dependencies into `dal.lock`, supports optional dependencies through feature wiring, and can install package-provided CLI entries declared in `[cli]` metadata. The local relaunch branch adds verified archive integrity, explicit compiler constraints and bounded backtracking; see the [source-branch package contract](docs/DAL_PACKAGE_CONTRACT.md) for compatibility and release-order gates.
 
-Dal token lookup order:
+Dal login verifies the token supplied with `--token` (or a masked interactive
+prompt) and saves it for the selected registry. Authenticated commands use
+`FIDAN_DAL_API_TOKEN` when present; an empty value explicitly disables saved-token
+lookup. Otherwise they load the OS keychain entry bound to that registry.
+`fidan dal logout --registry URL` removes only that registry's saved token; it does
+not unset an environment override. Tokens are never printed by login/logout.
 
-1. `--token` argument to `fidan dal login`
-2. `FIDAN_DAL_API_TOKEN` environment override
-3. OS keychain / credential manager
-
-Registry lookup order:
-
-1. `--registry`
-2. `FIDAN_DAL_REGISTRY`
-3. default: `https://api.dal.fidan.dev`
+Registry lookup order is `--registry`, then `FIDAN_DAL_REGISTRY`, then
+`https://api.dal.fidan.dev`. Registry identity includes the normalized scheme,
+host/effective port and significant path prefix. HTTPS is required, with HTTP
+allowed only for literal loopback development endpoints. URL credentials, queries
+and fragments are rejected. Authenticated requests do not follow redirects;
+public archive downloads can follow object-store redirects. An old unscoped
+keychain entry migrates only to the canonical official default, never an override.
 
 Dal package preflight validation happens locally before archive creation or upload. A package must contain:
 

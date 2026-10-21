@@ -2477,3 +2477,110 @@ fn receiver_conversions_across_aot_backends() {
         run_compiled_binary_clean(&binary, "receiver conversions passed");
     }
 }
+
+#[test]
+fn non_inlined_named_defaults_preserve_scalar_and_boxed_arguments() {
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/named-defaults");
+    fs::create_dir_all(&artifacts).unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let binary = artifacts.join(format!(
+            "named-defaults-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/named_defaults_regression.fdn"),
+            backend,
+            &binary,
+        );
+        run_compiled_binary_clean(&binary, "named defaults passed");
+    }
+}
+
+#[test]
+fn ordinary_dict_keys_do_not_forge_native_object_identity() {
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/object-brand");
+    fs::create_dir_all(&artifacts).unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let binary = artifacts.join(format!(
+            "object-brand-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/object_brand_regression.fdn"),
+            backend,
+            &binary,
+        );
+        run_compiled_binary_clean(&binary, "object brand passed");
+    }
+}
+
+#[test]
+fn mutable_shared_snapshots_across_aot_backends() {
+    let artifacts = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/shared-snapshots");
+    fs::create_dir_all(&artifacts).unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let binary = artifacts.join(format!(
+            "shared-snapshots-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/shared_mutable_snapshot_regression.fdn"),
+            backend,
+            &binary,
+        );
+        run_compiled_binary_clean(&binary, "mutable shared snapshots passed");
+    }
+}
+
+#[test]
+fn parallel_global_snapshots_across_aot_backends() {
+    let artifacts =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/parallel-global-snapshots");
+    fs::create_dir_all(&artifacts).unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let binary = artifacts.join(format!(
+            "global-snapshots-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/parallel_global_snapshot_regression.fdn"),
+            backend,
+            &binary,
+        );
+        run_compiled_binary_clean(&binary, "parallel global snapshots passed");
+    }
+}
+
+#[test]
+fn cooperative_pending_boundaries_across_aot_backends() {
+    let artifacts =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/cooperative-pending-boundary");
+    fs::create_dir_all(&artifacts).unwrap();
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let binary = artifacts.join(format!(
+            "pending-boundary-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(
+            include_str!("../../../test/examples/cooperative_pending_boundary_regression.fdn"),
+            backend,
+            &binary,
+        );
+        run_compiled_binary_clean(&binary, "cooperative pending boundary passed");
+    }
+}

@@ -65,16 +65,16 @@ nullable/Dynamic native representation defects. The fixes retain source-language
 contracts. Boxed if/while conditions execute natively in the JIT using the same
 fdn_truthy helper as AOT. Functions using other unsupported instructions still use
 the established selective-JIT fallback; no coverage percentage is claimed.
-LLVM helper protocol is now **7**: protocol 6 covered module/export identity; protocol 7
-adds native callable metadata registration and the optional scalar parameter ABI.
-Older helpers cannot safely execute that contract.
-The existing exact compatibility gate rejects them rather than silently miscompiling.
-AI helper protocol is unchanged. LLVM 23.1.2/llvm-sys 231 and Cranelift 0.136 are unchanged.
+LLVM helper protocol is now **8**. Protocol 6 covered module/export identity;
+protocol 7 added callable metadata and optional scalar parameter ABI support.
+Protocol 8 requires runtime-owned thread-local native globals and complete worker
+argument/global snapshots. Helpers using protocols 5/6/7 cannot satisfy this ABI
+and are rejected before compilation. Select a new compiler/helper patch pair
+before publishing the unpublished `args` candidate and tighten its minimum first.
+Do not replace immutable Fidan 1.0.16 or helper 1.0.6 artifacts. Private helper
+`1.0.6-reaudit.4` is local test evidence, not a public release.
 
-A future owner-approved compiler patch and matching LLVM helper patch must be released
-before publishing `args`; choose their versions and tighten its compiler minimum first.
-Do not replace immutable Fidan 1.0.16 or helper 1.0.6 artifacts. Private audit helper
-`1.0.6-audit.4` is local-only evidence, not a published release.
+AI helper protocol is unchanged. LLVM 23.1.2/llvm-sys 231 and Cranelift 0.136 are unchanged.
 
 Cross-repository manifest/lock fixtures live under `test/fixtures/dal/`; actual CLI
 loopback regressions are in `crates/fidan-cli/tests/dal_registry.rs`. Full local
@@ -107,3 +107,22 @@ and corrected statement named-argument sorting, loop break/continue edge values,
 computed scalar-default sentinel boxing, constructor decorator loss, and native
 object type tags used by existing typed catches. Object representation remains
 Dict-backed in AOT; this does not claim complete class-system parity.
+
+## Registry credential boundary (2026-10-20 local remediation)
+
+Saved CLI tokens are scoped by SHA-256 of the canonical registry URL (scheme,
+normalized host/effective port and case-sensitive path prefix). URL parsing rejects
+userinfo, query, fragment and remote plaintext HTTP before any keychain lookup.
+Explicit token input takes precedence; a present environment override is intentional
+for the selected registry, including an empty value disabling stored credentials.
+An absent environment variable now correctly allows the saved login to be read.
+
+Legacy `fidan` / `dal_api_token` credentials migrate only at the exact canonical
+`https://api.dal.fidan.dev` identity, after scoped write/read-back verification.
+Keychain errors propagate without fallback; logout clears the selected scoped
+entry and, only for the default, the legacy entry to prevent resurrection.
+`dal logout --registry URL` is additive; plain logout uses normal registry selection.
+Authenticated API calls and publish refuse redirects, including same-origin paths
+outside the prefix. Unauthenticated downloads retain object-store redirect support.
+Tests use an in-memory keychain in child processes and two isolated HTTP registries;
+no real user credential store or production API is involved.

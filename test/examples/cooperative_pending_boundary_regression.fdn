@@ -1,0 +1,20 @@
+use std.async
+# spawn is cooperative: another machine/thread must not steal its scheduler ID.
+action work returns integer { return 7 }
+var pending = spawn work()
+var caught = Shared(false)
+parallel {
+    task worker {
+        attempt {
+            var value = await pending
+        } catch error {
+            assert(error.contains("R0001"))
+            caught.set(true)
+        }
+    }
+}
+assert_eq(caught.get(), true)
+assert_eq(await pending, 7)
+var repeated = await async.waitAny([pending])
+assert_eq(repeated[1], nothing)
+print("cooperative pending boundary passed")

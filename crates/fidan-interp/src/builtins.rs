@@ -121,7 +121,7 @@ pub fn call_builtin_constructor(
         }
         Some(BuiltinSemantic::SharedConstructor) => {
             let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            Ok(Some(FidanValue::Shared(SharedRef::new(inner))))
+            Ok(Some(FidanValue::Shared(SharedRef::from_value(inner))))
         }
         Some(BuiltinSemantic::WeakSharedConstructor) => {
             let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);

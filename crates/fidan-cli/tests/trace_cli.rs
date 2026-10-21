@@ -2939,6 +2939,10 @@ fn format_directories_recurse_check_every_file_and_preserve_other_files() {
         errors.contains("a.fdn") && errors.contains("b.fdn"),
         "{errors}"
     );
+    assert!(
+        errors.contains("fidan format --in-place"),
+        "repair command must actually write changes: {errors}"
+    );
     let stdout = run(&[]);
     assert!(stdout.status.success(), "{stdout:?}");
     assert_eq!(std::fs::read_to_string(&first).unwrap(), source);
@@ -3238,5 +3242,205 @@ fn fix_directories_forward_ai_modes_to_existing_helper() {
             _ => panic!("expected existing Fix helper request"),
         }
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn named_defaults_execute_with_both_jit_thresholds() {
+    for threshold in ["0", "1"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .args(["run", "--jit-threshold", threshold])
+            .arg(workspace_root().join("test/examples/named_defaults_regression.fdn"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("named defaults passed"));
+    }
+}
+
+#[test]
+fn failed_toolchain_refresh_preserves_existing_helper_and_metadata() {
+    let root = make_temp_dir("toolchain_failed_refresh");
+    let home = root.join("home");
+    let helper = root.join("helper-fixture");
+    std::fs::write(&helper, b"OLD helper bytes").unwrap();
+    install_fake_toolchain(
+        &home,
+        "llvm",
+        "99.0.0-test",
+        fidan_driver::LLVM_BACKEND_PROTOCOL_VERSION,
+        &helper,
+        vec![],
+    );
+    let installed = home
+        .join("toolchains/llvm")
+        .join(host_triple())
+        .join("99.0.0-test");
+    let original_metadata = std::fs::read(installed.join("metadata.json")).unwrap();
+    let manifest = root.join("manifest.json");
+    std::fs::write(&manifest,serde_json::to_vec(&serde_json::json!({"schema_version":1,"toolchains":[{
+        "kind":"llvm","toolchain_version":"99.0.0-test","tool_version":"23.1.2","host_triple":host_triple(),
+        "supported_fidan_versions":format!("^{}",env!("CARGO_PKG_VERSION")),"backend_protocol_version":fidan_driver::LLVM_BACKEND_PROTOCOL_VERSION,
+        "helper_relpath":"helper-fixture","url":format!("file://{}",root.join("missing-archive.tar.gz").display()),"sha256":"a".repeat(64)
+    }]})).unwrap()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .args(["toolchain", "add", "llvm", "--version", "99.0.0-test"])
+        .env("FIDAN_HOME", &home)
+        .env(
+            "FIDAN_DIST_MANIFEST",
+            format!("file://{}", manifest.display()),
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        std::fs::read(installed.join("helper-fixture"))
+            .expect("failed refresh must preserve working helper"),
+        b"OLD helper bytes"
+    );
+    assert_eq!(
+        std::fs::read(installed.join("metadata.json")).unwrap(),
+        original_metadata
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_inactive_compiler_refresh_preserves_existing_binary() {
+    let root = make_temp_dir("compiler_failed_refresh");
+    let data = root.join("data");
+    let user_home = root.join("user");
+    let install = if cfg!(windows) {
+        data.join("Programs/Fidan")
+    } else if cfg!(target_os = "macos") {
+        user_home.join("Applications/Fidan")
+    } else {
+        data.join("fidan/installs")
+    };
+    let version = "98.0.1-test";
+    let installed = install.join("versions").join(version);
+    let active = install.join("versions/99.0.0-test");
+    for dir in [&installed, &active] {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join(if cfg!(windows) { "fidan.exe" } else { "fidan" }),
+            b"OLD compiler bytes",
+        )
+        .unwrap();
+    }
+    let manifest = root.join("manifest.json");
+    std::fs::write(&manifest,serde_json::to_vec(&serde_json::json!({"schema_version":1,"fidan_versions":[{
+        "version":version,"host_triple":host_triple(),"url":format!("file://{}",root.join("missing.tar.gz").display()),"sha256":"a".repeat(64)
+    }]})).unwrap()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .args(["self", "install", version])
+        .env("FIDAN_HOME", root.join("fidan-home"))
+        .env("LOCALAPPDATA", &data)
+        .env("XDG_DATA_HOME", &data)
+        .env("HOME", &user_home)
+        .env("USERPROFILE", &user_home)
+        .env(
+            "FIDAN_DIST_MANIFEST",
+            format!("file://{}", manifest.display()),
+        )
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(
+        std::fs::read(installed.join(if cfg!(windows) { "fidan.exe" } else { "fidan" }))
+            .expect("failed refresh must preserve existing binary"),
+        b"OLD compiler bytes"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn mutable_shared_and_parallel_globals_execute_with_both_jit_thresholds() {
+    for (source, marker) in [
+        (
+            include_str!("../../../test/examples/shared_mutable_snapshot_regression.fdn"),
+            "mutable shared snapshots passed",
+        ),
+        (
+            include_str!("../../../test/examples/parallel_global_snapshot_regression.fdn"),
+            "parallel global snapshots passed",
+        ),
+        (
+            include_str!("../../../test/examples/cooperative_pending_boundary_regression.fdn"),
+            "cooperative pending boundary passed",
+        ),
+    ] {
+        let root = make_temp_dir("mutable_parallel_snapshots");
+        let file = root.join("main.fdn");
+        std::fs::write(&file, source).unwrap();
+        for threshold in ["0", "1"] {
+            let result = Command::new(env!("CARGO_BIN_EXE_fidan"))
+                .args(["run"])
+                .arg(&file)
+                .args(["--jit-threshold", threshold])
+                .env("FIDAN_HOME", root.join("home"))
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert!(String::from_utf8_lossy(&result.stdout).contains(marker));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn toolchain_remove_rejects_path_escaping_selectors() {
+    let root = make_temp_dir("toolchain_remove_escape");
+    let home = root.join("home");
+    let parent = home.join("toolchains/llvm").join(host_triple());
+    let outside = home.join("outside");
+    std::fs::create_dir_all(&parent).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("sentinel"), b"PRESERVE").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .args([
+            "toolchain",
+            "remove",
+            "llvm",
+            "--version",
+            "../../../outside",
+            "--confirm",
+        ])
+        .env("FIDAN_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        outside.join("sentinel").is_file(),
+        "invalid version must never delete outside the selected toolchain root"
+    );
+    assert!(!output.status.success());
+    let escaped_kind = root.join(host_triple()).join("1.2.3");
+    std::fs::create_dir_all(&escaped_kind).unwrap();
+    std::fs::write(escaped_kind.join("sentinel"), b"PRESERVE").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .args([
+            "toolchain",
+            "remove",
+            "../..",
+            "--version",
+            "1.2.3",
+            "--confirm",
+        ])
+        .env("FIDAN_HOME", &home)
+        .output()
+        .unwrap();
+    assert!(
+        escaped_kind.join("sentinel").is_file(),
+        "invalid name must never escape FIDAN_HOME"
+    );
+    assert!(!output.status.success());
     std::fs::remove_dir_all(root).unwrap();
 }

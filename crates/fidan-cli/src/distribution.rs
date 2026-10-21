@@ -67,7 +67,35 @@ pub fn fetch_manifest(explicit: Option<&str>) -> Result<DistributionManifest> {
     if manifest.schema_version == 0 {
         bail!("distribution manifest `{url}` has invalid schema_version 0");
     }
+    // Release identifiers and members become filesystem paths later. Validate
+    // them at the metadata boundary, before a cache write or installation swap.
+    for release in &manifest.fidan_versions {
+        Version::parse(&release.version).context("invalid Fidan release version")?;
+        if let Some(path) = &release.binary_relpath {
+            validate_release_member(path)?;
+        }
+    }
+    for release in &manifest.toolchains {
+        Version::parse(&release.toolchain_version).context("invalid toolchain release version")?;
+        validate_release_member(&release.kind)?;
+        validate_release_member(&release.helper_relpath)?;
+    }
     Ok(manifest)
+}
+
+pub(crate) fn validate_release_member(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.contains(['\\', ':'])
+        || value
+            .split('/')
+            .any(|part| part.is_empty() || matches!(part, "." | "..") || part.ends_with(['.', ' ']))
+        || !Path::new(value)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+    {
+        bail!("release member must be a safe relative archive path: `{value}`");
+    }
+    Ok(())
 }
 
 pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
@@ -211,7 +239,29 @@ pub fn materialize_release_root(
     staging_dir: &Path,
     expected_relpath: &Path,
     final_dir: &Path,
+    metadata: Option<&[u8]>,
 ) -> Result<()> {
+    let parent = final_dir
+        .parent()
+        .context("release directory has no parent")?;
+    fs::create_dir_all(parent)?;
+    let mut lock_name = final_dir
+        .file_name()
+        .context("release directory has no name")?
+        .to_os_string();
+    lock_name.push(".install.lock");
+    // Keep this sibling file in place: unlinking a locked file permits a second
+    // inode/handle to bypass serialization on Unix. OS ownership ends on crash.
+    let publication_lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(parent.join(lock_name))?;
+    publication_lock
+        .try_lock()
+        .context("another installer is publishing this release; retry after it finishes")?;
+
     let candidate = if staging_dir.join(expected_relpath).exists() {
         staging_dir.to_path_buf()
     } else {
@@ -236,16 +286,57 @@ pub fn materialize_release_root(
         nested
     };
 
-    if final_dir.exists() {
-        bail!("destination `{}` already exists", final_dir.display());
+    if !fs::symlink_metadata(candidate.join(expected_relpath))?.is_file() {
+        bail!("downloaded executable must be a regular file");
     }
-    fs::rename(&candidate, final_dir).with_context(|| {
-        format!(
-            "failed to move extracted release from `{}` to `{}`",
-            candidate.display(),
-            final_dir.display()
-        )
-    })?;
+    if !candidate
+        .join(expected_relpath)
+        .canonicalize()?
+        .starts_with(candidate.canonicalize()?)
+    {
+        bail!("downloaded executable escapes the prepared release directory");
+    }
+    // Finish metadata while the candidate is private, before touching a working install.
+    if let Some(bytes) = metadata {
+        let path = candidate.join("metadata.json");
+        if let Ok(kind) = fs::symlink_metadata(&path)
+            && !kind.is_file()
+        {
+            bail!("downloaded toolchain metadata must be a regular file");
+        }
+        write_bytes(&path, bytes)?;
+    }
+    let parent = final_dir
+        .parent()
+        .context("release directory has no parent")?;
+    let backup = stage_dir(parent, "release-backup");
+    let previous = match fs::symlink_metadata(final_dir) {
+        Ok(kind) if kind.is_dir() && !kind.file_type().is_symlink() => {
+            fs::rename(final_dir, &backup)
+                .context("cannot retain previous release before replacement")?;
+            true
+        }
+        Ok(_) => bail!("release destination must be a regular directory"),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    if let Err(error) = fs::rename(&candidate, final_dir) {
+        if previous && let Err(restore) = fs::rename(&backup, final_dir) {
+            bail!(
+                "release replacement failed ({error}); rollback failed ({restore}); previous release retained at `{}`",
+                backup.display()
+            );
+        }
+        return Err(error)
+            .context("cannot publish prepared release; previous installation restored");
+    }
+    // Publication is committed. Cleanup failures retain evidence without reporting rollback.
+    if previous && let Err(error) = fs::remove_dir_all(&backup) {
+        eprintln!(
+            "warning: release installed; previous backup retained at `{}`: {error}",
+            backup.display()
+        );
+    }
 
     if staging_dir.exists() {
         let _ = fs::remove_dir_all(staging_dir);
@@ -405,6 +496,151 @@ mod tests {
         let mut hasher = Sha256::new();
         hasher.update(bytes);
         sha256_hex_bytes(hasher.finalize().as_slice())
+    }
+
+    #[test]
+    fn concurrent_release_publication_preserves_previous_pair() {
+        let root = test_temp_dir("release-lock");
+        let staging = root.join("candidate");
+        let final_dir = root.join("installed");
+        fs::create_dir_all(&staging).unwrap();
+        fs::create_dir_all(&final_dir).unwrap();
+        fs::write(staging.join("helper"), b"NEW").unwrap();
+        fs::write(final_dir.join("helper"), b"OLD").unwrap();
+        fs::write(final_dir.join("metadata.json"), b"OLD metadata").unwrap();
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join("installed.install.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        let candidate = staging.clone();
+        let destination = final_dir.clone();
+        let result = std::thread::spawn(move || {
+            materialize_release_root(
+                &candidate,
+                Path::new("helper"),
+                &destination,
+                Some(b"NEW metadata"),
+            )
+        })
+        .join()
+        .unwrap();
+        assert!(
+            result.is_err(),
+            "a competing publication must fail before replacing the live pair"
+        );
+        assert_eq!(fs::read(final_dir.join("helper")).unwrap(), b"OLD");
+        assert_eq!(
+            fs::read(final_dir.join("metadata.json")).unwrap(),
+            b"OLD metadata"
+        );
+        drop(lock);
+        // The persistent lock file is reusable: closing the OS handle releases ownership.
+        materialize_release_root(
+            &staging,
+            Path::new("helper"),
+            &final_dir,
+            Some(b"NEW metadata"),
+        )
+        .unwrap();
+        assert_eq!(fs::read(final_dir.join("helper")).unwrap(), b"NEW");
+        assert_eq!(
+            fs::read(final_dir.join("metadata.json")).unwrap(),
+            b"NEW metadata"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manifest_rejects_install_path_escape_before_any_download() {
+        let root = test_temp_dir("unsafe-manifest");
+        let path = root.join("manifest.json");
+        for (version, binary) in [
+            ("../escaped", "fidan.exe"),
+            ("1.0.16", "../outside.exe"),
+            ("1.0.16", "/outside.exe"),
+            ("1.0.16", "C:\\outside.exe"),
+        ] {
+            fs::write(&path, serde_json::to_vec(&serde_json::json!({"schema_version":1,"fidan_versions":[{
+                "version":version,"host_triple":"host","url":"https://example.test/archive.tar.gz","sha256":"a".repeat(64),"binary_relpath":binary
+            }]})).unwrap()).unwrap();
+            assert!(
+                fetch_manifest(Some(&format!("file://{}", path.display()))).is_err(),
+                "unsafe manifest accepted: {version} / {binary}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepared_release_refresh_preserves_or_publishes_the_complete_pair() {
+        for nested in [false, true] {
+            let root = test_temp_dir("release-swap");
+            let staging = root.join("staging");
+            let candidate = if nested {
+                staging.join("archive-root")
+            } else {
+                staging.clone()
+            };
+            let final_dir = root.join("installed");
+            fs::create_dir_all(&candidate).unwrap();
+            fs::create_dir_all(&final_dir).unwrap();
+            fs::write(candidate.join("helper"), b"NEW").unwrap();
+            fs::write(final_dir.join("helper"), b"OLD").unwrap();
+            fs::write(final_dir.join("metadata.json"), b"OLD metadata").unwrap();
+            fs::create_dir(candidate.join("metadata.json")).unwrap();
+            assert!(
+                materialize_release_root(
+                    &staging,
+                    Path::new("helper"),
+                    &final_dir,
+                    Some(b"NEW metadata")
+                )
+                .is_err()
+            );
+            assert_eq!(fs::read(final_dir.join("helper")).unwrap(), b"OLD");
+            assert_eq!(
+                fs::read(final_dir.join("metadata.json")).unwrap(),
+                b"OLD metadata"
+            );
+            fs::remove_dir(candidate.join("metadata.json")).unwrap();
+            materialize_release_root(
+                &staging,
+                Path::new("helper"),
+                &final_dir,
+                Some(b"NEW metadata"),
+            )
+            .unwrap();
+            assert_eq!(fs::read(final_dir.join("helper")).unwrap(), b"NEW");
+            assert_eq!(
+                fs::read(final_dir.join("metadata.json")).unwrap(),
+                b"NEW metadata"
+            );
+            assert!(!staging.exists());
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn failed_release_rename_restores_the_previous_pair() {
+        let root = test_temp_dir("release-rollback");
+        let staging = root.join("staging");
+        // Moving a directory inside itself fails on both Unix and Windows.
+        let final_dir = staging.join("installed");
+        fs::create_dir_all(&final_dir).unwrap();
+        fs::write(staging.join("helper"), b"NEW").unwrap();
+        fs::write(final_dir.join("helper"), b"OLD").unwrap();
+        fs::write(final_dir.join("metadata.json"), b"OLD metadata").unwrap();
+        assert!(materialize_release_root(&staging, Path::new("helper"), &final_dir, None).is_err());
+        assert_eq!(fs::read(final_dir.join("helper")).unwrap(), b"OLD");
+        assert_eq!(
+            fs::read(final_dir.join("metadata.json")).unwrap(),
+            b"OLD metadata"
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

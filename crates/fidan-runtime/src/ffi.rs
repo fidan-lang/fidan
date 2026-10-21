@@ -55,6 +55,7 @@ use crate::{
 use fidan_config::{
     BuiltinSemantic, ReceiverBuiltinKind, ReceiverMethodOp, builtin_semantic, infer_receiver_member,
 };
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{
@@ -105,6 +106,44 @@ impl Write for StdoutBuffer {
 
 thread_local! {
     static STDOUT_BUFFER: RefCell<StdoutBuffer> = RefCell::new(StdoutBuffer::new());
+    // Native AOT globals live in the executing thread. The generated data slots
+    // provide stable identities only; storing FidanValue pointers in them would
+    // let a real parallel worker clone an Rc-backed value from another thread.
+    static AOT_GLOBALS: RefCell<HashMap<usize, FidanValue>> = RefCell::new(HashMap::new());
+}
+
+/// The captured globals for one real native worker. ParallelArgs snapshots
+/// globals and call arguments as one graph, so aliases spanning that boundary
+/// remain aliases in the worker without retaining an Rc from its parent.
+struct AotWorkerGlobals {
+    slots: Vec<usize>,
+}
+
+fn capture_aot_worker_payload(
+    task_values: impl IntoIterator<Item = FidanValue>,
+) -> (AotWorkerGlobals, ParallelArgs) {
+    let (slots, mut values): (Vec<_>, Vec<_>) = AOT_GLOBALS.with(|globals| {
+        globals
+            .borrow()
+            .iter()
+            .map(|(slot, value)| (*slot, value.clone()))
+            .unzip()
+    });
+    values.extend(task_values);
+    (AotWorkerGlobals { slots }, ParallelArgs::new(&values))
+}
+
+impl AotWorkerGlobals {
+    /// Install this worker's detached global snapshot and return its task args.
+    /// Worker threads are fresh, so replacing rather than merging prevents an
+    /// accidental ambient global from observing a parent-thread Rc allocation.
+    fn install(self, payload: ParallelArgs) -> Vec<FidanValue> {
+        let mut values = payload.into_vec();
+        let task_args = values.split_off(self.slots.len());
+        let globals = self.slots.into_iter().zip(values).collect();
+        AOT_GLOBALS.with(|current| *current.borrow_mut() = globals);
+        task_args
+    }
 }
 
 fn with_stdout_buffer<R>(callback: impl FnOnce(&mut StdoutBuffer) -> R) -> R {
@@ -265,7 +304,9 @@ pub unsafe extern "C" fn fdn_box_class_type(bytes: *const u8, len: i64) -> *mut 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_make_shared(ptr: *mut FidanValue) -> *mut FidanValue {
-    into_raw(FidanValue::Shared(SharedRef::new(borrow(ptr).clone())))
+    into_raw(FidanValue::Shared(SharedRef::from_value(
+        borrow(ptr).clone(),
+    )))
 }
 
 // ── Ownership ──────────────────────────────────────────────────────────────────
@@ -277,6 +318,32 @@ pub unsafe extern "C" fn fdn_clone(ptr: *mut FidanValue) -> *mut FidanValue {
         return std::ptr::null_mut();
     }
     into_raw(borrow(ptr).clone())
+}
+
+/// Load a native AOT global by its generated slot address.
+///
+/// The address is an opaque stable key. It is deliberately never dereferenced:
+/// ordinary Fidan values may contain Rc-backed collections and are therefore
+/// owned by the current thread's global map rather than process-global storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_global_load(slot: *mut FidanValue) -> *mut FidanValue {
+    debug_assert!(!slot.is_null(), "fdn_global_load requires a slot address");
+    let key = slot as usize;
+    let value = AOT_GLOBALS.with(|globals| globals.borrow().get(&key).cloned());
+    into_raw(value.unwrap_or(FidanValue::Nothing))
+}
+
+/// Store a native AOT global in the current thread's runtime-owned map.
+///
+/// value is borrowed. The map owns its clone, preserving regular same-thread
+/// Fidan alias semantics while preventing static storage from retaining an Rc.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_global_store(slot: *mut FidanValue, value: *mut FidanValue) {
+    debug_assert!(!slot.is_null(), "fdn_global_store requires a slot address");
+    let key = slot as usize;
+    AOT_GLOBALS.with(|globals| {
+        globals.borrow_mut().insert(key, borrow(value).clone());
+    });
 }
 
 /// Drop: the ONLY function that consumes its argument.
@@ -952,11 +1019,10 @@ pub unsafe extern "C" fn fdn_assert_ne_with_message(
 // AOT objects already carry their class tag in the established Dict representation.
 // Preserve the interpreter's `type(object) == "object"`, including typed catches.
 fn native_type_name(value: &FidanValue) -> &'static str {
-    if let FidanValue::Dict(fields) = value {
-        let key = FidanValue::String(FidanString::new("__class__"));
-        if matches!(fields.borrow().get(&key), Ok(Some(FidanValue::String(_)))) {
-            return "object";
-        }
+    if let FidanValue::Dict(fields) = value
+        && fields.borrow().aot_class_name().is_some()
+    {
+        return "object";
     }
     value.type_name()
 }
@@ -1240,6 +1306,7 @@ pub unsafe extern "C" fn fdn_obj_new(class_bytes: *const u8, class_len: i64) -> 
     let mut d = FidanDict::new();
     if !class_bytes.is_null() && class_len > 0 {
         let class_name = str_from_raw(class_bytes, class_len);
+        d.mark_aot_object(FidanString::new(&class_name));
         let _ = d.insert(
             FidanValue::String(FidanString::new("__class__")),
             FidanValue::String(FidanString::new(&class_name)),
@@ -1433,17 +1500,14 @@ pub unsafe extern "C" fn fdn_obj_invoke(
             match infer_receiver_member(ReceiverBuiltinKind::Shared, method_name.as_str())
                 .map(|info| info.canonical_name)
             {
-                Some("get") => match sr.lock() {
-                    Ok(value) => into_raw(value.clone()),
+                Some("get") => match sr.snapshot() {
+                    Ok(value) => into_raw(value),
                     Err(error) => runtime_call_error(error),
                 },
                 Some("set") => {
                     let val = extra.into_iter().next().unwrap_or(FidanValue::Nothing);
-                    match sr.lock() {
-                        Ok(mut value) => {
-                            *value = val;
-                            into_raw(FidanValue::Nothing)
-                        }
+                    match sr.store_value(val) {
+                        Ok(()) => into_raw(FidanValue::Nothing),
                         Err(error) => runtime_call_error(error),
                     }
                 }
@@ -1520,24 +1584,26 @@ unsafe fn shared_update(
     callback: FidanValue,
     contract: Option<&str>,
 ) -> *mut FidanValue {
-    let mut current = match shared.lock() {
-        Ok(value) => value,
-        Err(error) => return runtime_call_error(error),
-    };
-    let result = call_dynamic_owned(callback, vec![current.clone()]);
-    if fdn_has_exception() != 0 {
-        return into_raw(result);
-    }
-    let result = if let Some(contract) = contract {
-        match crate::contracts::prepare(result, contract) {
-            Ok(value) => value,
-            Err(error) => return runtime_call_error(error.message),
+    let result = shared.transform(|current| {
+        let result = call_dynamic_owned(callback, vec![current]);
+        if fdn_has_exception() != 0 {
+            // Keep the original callback exception in its established channel.
+            return Err(stdlib::StdlibRuntimeError::new(
+                fidan_diagnostics::diag_code!("R0001"),
+                "Shared.update callback failed",
+            ));
         }
-    } else {
-        result
-    };
-    *current = result.clone();
-    into_raw(result)
+        if let Some(contract) = contract {
+            crate::contracts::prepare(result, contract)
+        } else {
+            Ok(result)
+        }
+    });
+    match result {
+        Ok(value) => into_raw(value),
+        Err(_) if fdn_has_exception() != 0 => into_raw(FidanValue::Nothing),
+        Err(error) => runtime_call_error(error.message),
+    }
 }
 
 /// Atomic typed transformation. Arguments are borrowed; the result is owned.
@@ -2702,7 +2768,7 @@ fn dispatch_builtin_inline(func: &str, args: Vec<FidanValue>) -> Option<*mut Fid
             }
             BuiltinSemantic::SharedConstructor => {
                 let inner = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-                Some(into_raw(FidanValue::Shared(SharedRef::new(inner))))
+                Some(into_raw(FidanValue::Shared(SharedRef::from_value(inner))))
             }
             BuiltinSemantic::WeakSharedConstructor => {
                 let value = args.into_iter().next().unwrap_or(FidanValue::Nothing);
@@ -3067,48 +3133,38 @@ fn dispatch_async(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
                 into_raw(FidanValue::Pending(FidanPending::ready_result(Ok(value))))
             }
             stdlib::async_std::AsyncOp::Gather { values } => {
-                let captures = values
-                    .into_iter()
-                    .map(|value| ParallelCapture(value.parallel_capture()))
-                    .collect::<Vec<_>>();
-                let pending =
-                    FidanPending::defer_fallible(ParallelArgs::from_captures(captures), |bundle| {
-                        let mut out = FidanList::new();
-                        for value in bundle.into_vec() {
-                            out.append(resolve_async_value_owned(value)?);
-                        }
-                        Ok(FidanValue::List(OwnedRef::new(out)))
-                    });
+                let captures = ParallelArgs::new(&values);
+                let pending = FidanPending::defer_fallible(captures, |bundle| {
+                    let mut out = FidanList::new();
+                    for value in bundle.into_vec() {
+                        out.append(resolve_async_value_owned(value)?);
+                    }
+                    Ok(FidanValue::List(OwnedRef::new(out)))
+                });
                 into_raw(FidanValue::Pending(pending))
             }
             stdlib::async_std::AsyncOp::WaitAny { values } => {
-                let captures = values
-                    .into_iter()
-                    .map(|value| ParallelCapture(value.parallel_capture()))
-                    .collect::<Vec<_>>();
-                let pending =
-                    FidanPending::defer_fallible(ParallelArgs::from_captures(captures), |bundle| {
-                        let values = bundle.into_vec();
-                        if values.is_empty() {
-                            return Ok(async_wait_any_result(-1, FidanValue::Nothing));
-                        }
-                        loop {
-                            for (index, value) in values.iter().enumerate() {
-                                if let Some(result) = try_take_async_value_ready(value) {
-                                    return result.map(|resolved| {
-                                        async_wait_any_result(index as i64, resolved)
-                                    });
-                                }
+                let captures = ParallelArgs::new(&values);
+                let pending = FidanPending::defer_fallible(captures, |bundle| {
+                    let values = bundle.into_vec();
+                    if values.is_empty() {
+                        return Ok(async_wait_any_result(-1, FidanValue::Nothing));
+                    }
+                    loop {
+                        for (index, value) in values.iter().enumerate() {
+                            if let Some(result) = try_take_async_value_ready(value) {
+                                return result
+                                    .map(|resolved| async_wait_any_result(index as i64, resolved));
                             }
-                            std::thread::sleep(Duration::from_millis(1));
                         }
-                    });
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                });
                 into_raw(FidanValue::Pending(pending))
             }
             stdlib::async_std::AsyncOp::Timeout { handle, ms } => {
-                let pending = FidanPending::defer_fallible(
-                    ParallelArgs::from_captures([ParallelCapture(handle.parallel_capture())]),
-                    move |bundle| {
+                let pending =
+                    FidanPending::defer_fallible(ParallelArgs::new(&[handle]), move |bundle| {
                         let handle = bundle
                             .into_vec()
                             .into_iter()
@@ -3127,8 +3183,7 @@ fn dispatch_async(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
                             let remaining = deadline.saturating_duration_since(Instant::now());
                             std::thread::sleep(remaining.min(Duration::from_millis(1)));
                         }
-                    },
-                );
+                    });
                 into_raw(FidanValue::Pending(pending))
             }
         },
@@ -3179,29 +3234,23 @@ pub unsafe extern "C" fn fdn_parallel_iter_seq(
     };
 
     if let Some(items) = items {
-        let env_caps: Vec<ParallelCapture> = env_slice
-            .iter()
-            .map(|ptr| ParallelCapture(borrow(*ptr).parallel_capture()))
-            .collect();
+        let environment: Vec<FidanValue> =
+            env_slice.iter().map(|ptr| borrow(*ptr).clone()).collect();
         let first_exception: std::sync::Arc<std::sync::Mutex<Option<ParallelCapture>>> =
             std::sync::Arc::new(std::sync::Mutex::new(None));
 
         std::thread::scope(|scope| {
             for item in items {
-                let mut caps = Vec::with_capacity(1 + env_caps.len());
-                caps.push(ParallelCapture(item.parallel_capture()));
-                caps.extend(
-                    env_caps
-                        .iter()
-                        .map(|cap| ParallelCapture(cap.0.parallel_capture())),
-                );
+                let mut values = vec![item];
+                values.extend(environment.iter().cloned());
+                let (worker_globals, payload) = capture_aot_worker_payload(values);
                 let err_slot = std::sync::Arc::clone(&first_exception);
                 scope.spawn(move || {
                     let result =
-                        call_trampoline_owned(fn_idx as usize, ParallelArgs(caps).into_vec());
+                        call_trampoline_owned(fn_idx as usize, worker_globals.install(payload));
                     if fdn_has_exception() != 0 {
                         let exn_ptr = fdn_catch_exception();
-                        let exn_cap = ParallelCapture(borrow(exn_ptr).parallel_capture());
+                        let exn_cap = ParallelCapture::new(borrow(exn_ptr));
                         drop(Box::from_raw(exn_ptr));
                         let mut slot = err_slot.lock().unwrap();
                         if slot.is_none() {
@@ -3231,11 +3280,23 @@ unsafe fn build_parallel_args_from_ptrs(
         &[]
     };
 
-    ParallelArgs::from_captures(
-        args_slice
-            .iter()
-            .map(|ptr| ParallelCapture(borrow(*ptr).parallel_capture())),
-    )
+    let values = args_slice
+        .iter()
+        .map(|ptr| borrow(*ptr).clone())
+        .collect::<Vec<_>>();
+    ParallelArgs::new(&values)
+}
+
+unsafe fn build_aot_worker_payload_from_ptrs(
+    args_ptr: *const *mut FidanValue,
+    args_cnt: i64,
+) -> (AotWorkerGlobals, ParallelArgs) {
+    let args_slice: &[*mut FidanValue] = if args_cnt > 0 && !args_ptr.is_null() {
+        std::slice::from_raw_parts(args_ptr, args_cnt as usize)
+    } else {
+        &[]
+    };
+    capture_aot_worker_payload(args_slice.iter().map(|ptr| borrow(*ptr).clone()))
 }
 
 unsafe fn call_trampoline_owned(fn_idx: usize, values: Vec<FidanValue>) -> FidanValue {
@@ -3325,9 +3386,9 @@ pub unsafe extern "C" fn fdn_spawn_task(
     args_cnt: i64,
 ) -> *mut FidanValue {
     let task_name = str_from_raw(name_bytes, name_len);
-    let args = build_parallel_args_from_ptrs(args_ptr, args_cnt);
+    let (worker_globals, args) = build_aot_worker_payload_from_ptrs(args_ptr, args_cnt);
     let pending = FidanPending::spawn_fallible(args, move |bundle: ParallelArgs| {
-        let result = call_trampoline_owned(fn_idx as usize, bundle.into_vec());
+        let result = call_trampoline_owned(fn_idx as usize, worker_globals.install(bundle));
         if fdn_has_exception() != 0 {
             let exn_ptr = fdn_catch_exception();
             let message = display(borrow(exn_ptr));
@@ -3371,14 +3432,9 @@ pub unsafe extern "C" fn fdn_spawn_dynamic(
     args_ptr: *const *mut FidanValue,
     args_cnt: i64,
 ) -> *mut FidanValue {
-    let mut captures = vec![ParallelCapture(
-        borrow(function_or_receiver).parallel_capture(),
-    )];
-    captures.extend(
-        (0..args_cnt as usize)
-            .map(|i| ParallelCapture(borrow(*args_ptr.add(i)).parallel_capture())),
-    );
-    let args = ParallelArgs::from_captures(captures);
+    let mut values = vec![borrow(function_or_receiver).clone()];
+    values.extend((0..args_cnt as usize).map(|i| borrow(*args_ptr.add(i)).clone()));
+    let args = ParallelArgs::new(&values);
     let method_name =
         (!method_bytes.is_null() && method_len > 0).then(|| str_from_raw(method_bytes, method_len));
     let pending = FidanPending::defer_fallible(args, move |bundle: ParallelArgs| {
@@ -3736,6 +3792,72 @@ pub unsafe extern "C" fn fdn_call_dynamic(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_workers_capture_global_and_argument_aliases_as_one_graph() {
+        let mut slot = FidanValue::Nothing;
+        let slot_address = (&mut slot as *mut FidanValue) as usize;
+        let source = OwnedRef::new(FidanList::from_vec(vec![FidanValue::Integer(1)]));
+        let source_identity = source.identity();
+        let value = into_raw(FidanValue::List(source.clone()));
+        unsafe {
+            fdn_global_store(slot_address as *mut FidanValue, value);
+            fdn_drop(value);
+        }
+        let (globals, payload) = capture_aot_worker_payload([FidanValue::List(source.clone())]);
+        std::thread::spawn(move || {
+            let args = globals.install(payload);
+            let global = unsafe { Box::from_raw(fdn_global_load(slot_address as *mut FidanValue)) };
+            let FidanValue::List(global_list) = &*global else {
+                panic!("list global")
+            };
+            let FidanValue::List(argument_list) = &args[0] else {
+                panic!("list argument")
+            };
+            assert_eq!(
+                global_list.identity(),
+                argument_list.identity(),
+                "worker aliases must survive"
+            );
+            assert_ne!(
+                global_list.identity(),
+                source_identity,
+                "worker must not retain parent Rc"
+            );
+            argument_list.borrow_mut().append(FidanValue::Integer(2));
+            assert_eq!(global_list.borrow().len(), 2);
+        })
+        .join()
+        .unwrap();
+        assert_eq!(source.borrow().len(), 1);
+        let global = unsafe { Box::from_raw(fdn_global_load(slot_address as *mut FidanValue)) };
+        let FidanValue::List(parent) = &*global else {
+            panic!("parent list")
+        };
+        assert_eq!(parent.borrow().len(), 1);
+        AOT_GLOBALS.with(|globals| globals.borrow_mut().remove(&slot_address));
+    }
+
+    #[test]
+    fn ordinary_dict_class_key_cannot_forge_object_identity() {
+        let mut dict = FidanDict::new();
+        dict.insert(
+            FidanValue::String(FidanString::new("__class__")),
+            FidanValue::String(FidanString::new("UserData")),
+        )
+        .unwrap();
+        let value = FidanValue::Dict(OwnedRef::new(dict));
+        assert_eq!(native_type_name(&value), "dict");
+        assert_eq!(crate::display(&value), "{__class__: UserData}");
+        assert!(crate::contracts::prepare(value, r#"{"Object":0}"#).is_err());
+        unsafe {
+            let object = fdn_obj_new(b"Actual".as_ptr(), 6);
+            assert_eq!(native_type_name(borrow(object)), "object");
+            assert_eq!(crate::display(borrow(object)), "<Actual>");
+            assert!(crate::contracts::prepare(borrow(object).clone(), r#"{"Object":0}"#).is_ok());
+            fdn_drop(object);
+        }
+    }
+
     use super::*;
 
     #[test]

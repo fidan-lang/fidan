@@ -10,6 +10,15 @@ compiler releases.
 
 ## [Unreleased]
 
+- Bind saved Dal credentials to canonical registry identities and reject authenticated redirects.
+- Preserve working compiler/helper installations on failed refresh; validate install selectors
+  and archive members, and serialize release publication using an OS-owned file lock.
+- Correct native named/default argument preparation and object/dict provenance.
+- Isolate mutable parallel capture/global graphs and Shared snapshots; failed updates
+  roll back callback mutations. Reject foreign cooperative scheduler handles cleanly.
+- Require matching LLVM backend protocol8 for thread-local native globals. Existing
+  public1.0.16/helper1.0.6 assets are unchanged; a coordinated future patch pair is required.
+
 ---
 
 ## Unreleased — Dal relaunch integration candidate
@@ -24,7 +33,7 @@ compiler releases.
   representation and Dynamic native conditions exposed by real package execution.
 - Enforce existing interpreter sandbox policy for std.env and canonical filesystem
   boundaries. Update the compatible rustls security patch.
-- Require LLVM backend protocol 6 for matching module/export lowering. This needs a
+- Require LLVM backend protocol 8 for the current module/callable/thread-local-global ABI. This needs a
   future separately versioned compiler/helper release; existing published assets and
   package versions are unchanged by this local preparation.
 
