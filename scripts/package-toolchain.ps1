@@ -18,6 +18,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "shared/cargo-artifacts.ps1")
+
 function Get-WorkspaceVersion {
   $cargoToml = Get-Content "Cargo.toml" -Raw
   $match = [regex]::Match($cargoToml, '(?ms)\[workspace\.package\].*?version\s*=\s*"([^"]+)"')
@@ -545,7 +547,7 @@ function Invoke-HelperBuild {
   }
 
   try {
-    $helperPath = Join-Path "target/release" $HelperBinary
+    $helperPath = Join-Path (Get-CargoReleaseDirectory) $HelperBinary
     if (Test-Path -LiteralPath $helperPath) {
       Remove-Item -LiteralPath $helperPath -Force
     }
@@ -866,7 +868,7 @@ try {
       -HelperAdditionalLibPaths $HelperAdditionalLibPaths
   }
 
-  $helperPath = Join-Path "target/release" $helperBinary
+  $helperPath = Join-Path (Get-CargoReleaseDirectory) $helperBinary
   if (-not (Test-Path -LiteralPath $helperPath)) {
     throw "Expected helper binary at '$helperPath'"
   }

@@ -12,9 +12,15 @@ foreach ($function in $ast.FindAll({ param($node) $node -is [System.Management.A
     . ([scriptblock]::Create($function.Extent.Text))
 }
 
+. (Join-Path $repoRoot "scripts/shared/cargo-artifacts.ps1")
+
 # Stub only external Cargo: verify the environment passed to every command,
 # including cleanup when that command fails, without rebuilding LLVM four times.
 function cargo {
+    if ($args[0] -eq "metadata") {
+        $global:LASTEXITCODE = 0
+        return (@{ target_directory = (Join-Path $repoRoot "target") } | ConvertTo-Json)
+    }
     $script:cargoLto.Add($env:CARGO_PROFILE_RELEASE_LTO)
     $global:LASTEXITCODE = if ($script:failCargo) { 17 } else { 0 }
 }

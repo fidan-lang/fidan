@@ -11,6 +11,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "shared/cargo-artifacts.ps1")
+
 $hostPlatformHelperPath = Join-Path $PSScriptRoot "shared/host-platform.ps1"
 if (-not (Test-Path -LiteralPath $hostPlatformHelperPath)) {
   throw "Missing host platform helper: '$hostPlatformHelperPath'"
@@ -200,7 +202,8 @@ if (-not $SkipBuild) {
   cargo build -p fidan-cli -p fidan-runtime -p libfidan --release
 }
 
-$binaryPath = Join-Path "target/release" $binaryName
+$releaseDirectory = Get-CargoReleaseDirectory
+$binaryPath = Join-Path $releaseDirectory $binaryName
 if (-not (Test-Path -LiteralPath $binaryPath)) {
   throw "Expected release binary at '$binaryPath'"
 }
@@ -217,7 +220,7 @@ if ($shouldBuildWindowsInstaller) {
 
 $runtimeArtifacts = @()
 foreach ($name in (Get-RuntimeArtifactNames)) {
-  $path = Join-Path "target/release" $name
+  $path = Join-Path $releaseDirectory $name
   if (-not (Test-Path -LiteralPath $path)) {
     throw "Expected runtime artifact at '$path'"
   }
@@ -226,7 +229,7 @@ foreach ($name in (Get-RuntimeArtifactNames)) {
 
 $libfidanArtifacts = @()
 foreach ($artifact in (Get-LibFidanArtifactNames)) {
-  $path = Join-Path "target/release" $artifact.Source
+  $path = Join-Path $releaseDirectory $artifact.Source
   if (-not (Test-Path -LiteralPath $path)) {
     throw "Expected libfidan artifact at '$path'"
   }

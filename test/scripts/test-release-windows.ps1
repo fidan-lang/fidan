@@ -64,6 +64,17 @@ try {
   Copy-Item (Join-Path $repoRoot "LICENSE"), (Join-Path $repoRoot "NOTICE") .
   Copy-Item (Join-Path $repoRoot "scripts/package-release.ps1") scripts/
   Copy-Item (Join-Path $repoRoot "scripts/shared/host-platform.ps1") scripts/shared/
+  Copy-Item (Join-Path $repoRoot "scripts/shared/cargo-artifacts.ps1") scripts/shared/
+  Set-Content Cargo.toml '[package]
+name = "release-packaging-probe"
+version = "0.0.0"
+edition = "2024"
+[lib]
+path = "probe.rs"
+[workspace]'
+  Set-Content probe.rs ''
+  & cargo generate-lockfile --offline
+  if ($LASTEXITCODE -ne 0) { throw "Failed to create isolated Cargo fixture" }
   Set-Content scripts/shared/windows-vc-redist.ps1 'function Get-WindowsVcRedistReleaseMetadata { [pscustomobject]@{ MinimumVersion = "14.0.0.0" } }'
   Set-Content scripts/package-release-windows.ps1 @'
 param($Mode, $Version, $OutputRoot, $HostTriple, $BootstrapScriptUrl)

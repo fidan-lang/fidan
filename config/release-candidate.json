@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "status": "PROPOSED_NOT_RELEASED",
+  "compiler_version": "1.1.0-rc.1",
+  "llvm_helper_version": "1.1.0-rc.1",
+  "llvm_backend_protocol": 8,
+  "args_version": "0.1.0",
+  "args_compiler_requirement": "=1.1.0-rc.1"
+}

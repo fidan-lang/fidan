@@ -6,6 +6,7 @@ param(
     [switch]$Release,
     [string]$Case,
     [string]$FidanHome,
+    [string]$FidanBinary,
     [int]$DefaultTimeoutSeconds = 10,
     [int]$BenchmarkProbeSeconds = 5
 )
@@ -113,7 +114,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\\..")).Path
 $buildMode = if ($Release) { "--release" } else { "" }
 $binDir = Join-Path $repoRoot ($(if ($Release) { "target\\release" } else { "target\\debug" }))
 $fidanName = if ($IsWindows) { "fidan.exe" } else { "fidan" }
-$fidan = Join-Path $binDir $fidanName
+$fidan = if ($FidanBinary) { (Resolve-Path -LiteralPath $FidanBinary).Path } else { Join-Path $binDir $fidanName }
 $outDir = Join-Path $repoRoot "target\\aot_examples"
 $binarySuffix = if ($IsWindows) { ".exe" } else { "" }
 
@@ -133,14 +134,16 @@ Write-Host ""
 
 Push-Location $repoRoot
 try {
-    Write-Host "[build] cargo build $buildMode -p fidan-cli ..."
-    if ($Release) {
-        cargo build --release -p fidan-cli
-    } else {
-        cargo build -p fidan-cli
-    }
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo build failed"
+    if (-not $FidanBinary) {
+        Write-Host "[build] cargo build $buildMode -p fidan-cli ..."
+        if ($Release) {
+            cargo build --release -p fidan-cli
+        } else {
+            cargo build -p fidan-cli
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed"
+        }
     }
 
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
