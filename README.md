@@ -61,6 +61,22 @@ still be called before their textual declaration in the same module.
 
 ---
 
+## Operational diagnostics
+
+The upcoming compiler candidate provides `-v` (INFO), `-vv` (DEBUG), and `-vvv`
+(TRACE). `-V` still prints the version. Diagnostics go to stderr; program output
+and LSP JSON-RPC keep stdout. Existing errors, warnings and progress stay active
+without verbosity. Put verbosity before the source path when running a program:
+
+```sh
+fidan -vv run main.fdn -- --verbose
+fidan -v build main.fdn --backend llvm --lto full
+fidan toolchain list -vv
+```
+
+See [global CLI diagnostics](docs/CLI_DIAGNOSTICS.md) for forwarding rules,
+RUST_LOG precedence, editor integration and log privacy.
+
 ## Project status
 
 Fidan is an actively developed language implementation. Examples and regression tests exercise objects, control flow, collections, concurrency, native interop, and tooling. Language APIs and compiler behavior may evolve; the existence of a compiler stage does not imply complete support for every construct in every backend.

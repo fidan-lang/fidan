@@ -61,6 +61,7 @@ pub(crate) fn run(command: SelfCommand) -> Result<()> {
 
 fn run_list() -> Result<()> {
     let root = resolve_install_root()?;
+    fidan_diagnostics::tracing::debug!(root = %root.display(), "compiler installation root resolved");
     let installed = scan_installed_versions(&root)?;
     if installed.is_empty() {
         render_message_to_stderr(
@@ -84,6 +85,7 @@ fn run_list() -> Result<()> {
 
 fn run_current() -> Result<()> {
     let root = resolve_install_root()?;
+    fidan_diagnostics::tracing::debug!(root = %root.display(), "compiler installation root resolved");
     let home = resolve_fidan_home()?;
     let (active, _) = load_or_repair_metadata(&root)?;
     let current_binary = resolve_current_binary(&root)?;
@@ -99,6 +101,7 @@ fn run_current() -> Result<()> {
 
 fn run_install(version: &str) -> Result<()> {
     let root = resolve_install_root()?;
+    fidan_diagnostics::tracing::debug!(root = %root.display(), "compiler installation root resolved");
     let home = resolve_fidan_home()?;
     let manifest = fetch_manifest(None)?;
     let host = fidan_driver::install::host_triple();
@@ -208,6 +211,7 @@ fn run_install(version: &str) -> Result<()> {
 
 fn run_use(version: &str) -> Result<()> {
     let root = resolve_install_root()?;
+    fidan_diagnostics::tracing::debug!(root = %root.display(), "compiler installation root resolved");
     let version = resolve_version_selector(&root, version)?;
 
     #[cfg(target_os = "windows")]
@@ -237,6 +241,7 @@ fn run_use(version: &str) -> Result<()> {
 
 fn run_remove(version: &str, confirm: bool) -> Result<()> {
     let root = resolve_install_root()?;
+    fidan_diagnostics::tracing::debug!(root = %root.display(), "compiler installation root resolved");
     let home = resolve_fidan_home()?;
     let version = resolve_version_selector(&root, version)?;
     if !confirm

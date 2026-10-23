@@ -283,6 +283,7 @@ fn render_plain_diagnostics(
 }
 
 pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Result<()> {
+    fidan_diagnostics::tracing::info!("REPL started");
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
     use rustyline::error::ReadlineError;
@@ -613,7 +614,7 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
         // ── Fresh type-check (consumes exec_tc to produce TypedModule) ──────
         let mut exec_tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
         exec_tc.set_repl(true);
-        exec_tc.check_module(&full_module);
+        fidan_diagnostics::logging::phase("repl_typecheck", || exec_tc.check_module(&full_module));
         let typed = exec_tc.finish_typed();
         if !typed.diagnostics.is_empty() {
             let has_errors = typed
@@ -656,7 +657,7 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
         if diag_budget.error_count() > 0 {
             continue;
         }
-        fidan_passes::run_all(&mut mir);
+        fidan_diagnostics::logging::phase("repl_optimize", || fidan_passes::run_all(&mut mir));
 
         // ── Execute the new delta on the MIR machine ───────────────────────
         match fidan_interp::run_mir_repl_line(

@@ -47,9 +47,15 @@ fn run_fix_file(
     let source_map = Arc::new(SourceMap::new());
     let interner = Arc::new(SymbolInterner::new());
     let f = source_map.add_file(source_name.as_str(), src.as_str());
-    let (tokens, lex_diags) = Lexer::new(&f, Arc::clone(&interner)).tokenise();
-    let (module, parse_diags) = fidan_parser::parse(&tokens, f.id, Arc::clone(&interner));
-    let type_diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
+    let (tokens, lex_diags) = fidan_diagnostics::logging::phase("fix_lex", || {
+        Lexer::new(&f, Arc::clone(&interner)).tokenise()
+    });
+    let (module, parse_diags) = fidan_diagnostics::logging::phase("fix_parse", || {
+        fidan_parser::parse(&tokens, f.id, Arc::clone(&interner))
+    });
+    let type_diags = fidan_diagnostics::logging::phase("fix_typecheck", || {
+        fidan_typeck::typecheck(&module, Arc::clone(&interner))
+    });
 
     // In AI mode the assistant will handle remaining diagnostics; only print
     // them when running the deterministic-only path so the output isn't noisy.
@@ -85,6 +91,12 @@ fn run_fix_file(
     // Sort descending by byte offset — apply back-to-front to preserve earlier offsets.
     edits.sort_by_key(|b| std::cmp::Reverse(b.0));
     edits.dedup_by_key(|e| e.0);
+    fidan_diagnostics::tracing::debug!(
+        edits = edits.len(),
+        ai_requested,
+        in_place,
+        "fix analysis completed"
+    );
 
     let src_bytes = src.as_bytes();
 
@@ -367,9 +379,15 @@ fn analyze_source_state(source: &str, source_name: &str) -> Result<SourceDiagnos
     let source_map = Arc::new(SourceMap::new());
     let interner = Arc::new(SymbolInterner::new());
     let f = source_map.add_file(source_name, source);
-    let (tokens, lex_diags) = Lexer::new(&f, Arc::clone(&interner)).tokenise();
-    let (module, parse_diags) = fidan_parser::parse(&tokens, f.id, Arc::clone(&interner));
-    let type_diags = fidan_typeck::typecheck(&module, Arc::clone(&interner));
+    let (tokens, lex_diags) = fidan_diagnostics::logging::phase("fix_lex", || {
+        Lexer::new(&f, Arc::clone(&interner)).tokenise()
+    });
+    let (module, parse_diags) = fidan_diagnostics::logging::phase("fix_parse", || {
+        fidan_parser::parse(&tokens, f.id, Arc::clone(&interner))
+    });
+    let type_diags = fidan_diagnostics::logging::phase("fix_typecheck", || {
+        fidan_typeck::typecheck(&module, Arc::clone(&interner))
+    });
 
     let all_diags = type_diags
         .iter()
@@ -504,6 +522,12 @@ fn invoke_ai_fix_helper(
     let request_bytes =
         serde_json::to_vec(&request).context("failed to serialize ai-fix helper request")?;
 
+    fidan_diagnostics::tracing::info!("requesting AI source analysis");
+    fidan_diagnostics::tracing::debug!(
+        protocol = AI_ANALYSIS_HELPER_PROTOCOL_VERSION,
+        bytes = request_bytes.len(),
+        "AI helper request prepared; payload omitted"
+    );
     let mut child = Command::new(&toolchain.helper_path)
         .arg("analyze")
         .stdin(Stdio::piped())
@@ -540,8 +564,7 @@ fn invoke_ai_fix_helper(
         indicatif::ProgressBar::hidden()
     };
 
-    let output = child
-        .wait_with_output()
+    let output = fidan_diagnostics::logging::phase("ai_helper_wait", || child.wait_with_output())
         .context("failed while waiting for ai-fix helper to finish")?;
 
     spinner.finish_and_clear();

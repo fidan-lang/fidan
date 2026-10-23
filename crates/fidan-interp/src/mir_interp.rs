@@ -1392,6 +1392,11 @@ impl MirMachine {
                     let mut compiler = JitCompiler::new();
                     let entry = compiler.compile_function(func, &self.program, &self.interner);
                     let is_native = entry.is_native();
+                    fidan_diagnostics::tracing::debug!(
+                        function_index = idx,
+                        native = is_native,
+                        "selective JIT compilation completed"
+                    );
                     self.jit_fns.write()[idx] = Some(entry);
                     let _ = Box::leak(Box::new(compiler));
                     // Publish the compiled flag AFTER the function is stored.

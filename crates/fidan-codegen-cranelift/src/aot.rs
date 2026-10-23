@@ -142,6 +142,11 @@ impl AotCompiler {
         flag_builder
             .set("is_pic", "true")
             .expect("Cranelift: unknown is_pic");
+        fidan_diagnostics::tracing::debug!(
+            optimization = opt_str,
+            functions = program.functions.len(),
+            "Cranelift target initialization"
+        );
         let flags = settings::Flags::new(flag_builder);
         let isa = build_target_isa(opts.target_cpu.as_deref(), flags)?;
 
@@ -237,6 +242,7 @@ impl AotCompiler {
         )?;
 
         // ── Finalise and write object file ─────────────────────────────────────
+        fidan_diagnostics::tracing::trace!("Cranelift object emission started");
         let obj = module
             .finish()
             .emit()
@@ -248,6 +254,7 @@ impl AotCompiler {
         std::fs::write(&obj_path, &obj)
             .with_context(|| format!("writing object file to {:?}", obj_path))?;
 
+        fidan_diagnostics::tracing::debug!(bytes = obj.len(), "Cranelift object emitted");
         // ── Link ───────────────────────────────────────────────────────────────
         link(
             &obj_path,
@@ -4479,6 +4486,8 @@ fn link(
     extern_link_inputs: &[String],
 ) -> Result<()> {
     let linker = find_linker()?;
+    fidan_diagnostics::tracing::info!("linking native executable");
+    fidan_diagnostics::tracing::debug!(linker = %linker, "native linker selected");
     let runtime_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_owned()))

@@ -86,6 +86,7 @@ pub fn compile_request(helper_path: &Path, request: &CompileRequest) -> Result<P
 }
 
 pub(crate) fn trace(message: &str) {
+    fidan_diagnostics::tracing::trace!(transition = message, "LLVM backend transition");
     let enabled = std::env::var("FIDAN_LLVM_TRACE")
         .ok()
         .map(|value| {
@@ -98,7 +99,11 @@ pub(crate) fn trace(message: &str) {
     }
 
     use std::io::Write as _;
-    let _ = writeln!(std::io::stderr(), "[fidan-llvm] {message}");
+    let _ = writeln!(
+        std::io::stderr(),
+        "[fidan-llvm] {}",
+        fidan_diagnostics::logging::redact(message)
+    );
     let _ = std::io::stderr().flush();
 }
 

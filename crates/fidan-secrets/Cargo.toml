@@ -7,6 +7,7 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+fidan-diagnostics = { workspace = true }
 anyhow = { workspace = true }
 keyring-core = { workspace = true }
 

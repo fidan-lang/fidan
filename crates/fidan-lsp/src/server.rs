@@ -539,6 +539,11 @@ impl FidanLsp {
             all_diags,
         );
         all_diags = dedupe_diagnostics(all_diags);
+        fidan_diagnostics::tracing::debug!(
+            version,
+            count = all_diags.len(),
+            "LSP diagnostics ready"
+        );
         self.client
             .publish_diagnostics(uri.clone(), all_diags, Some(version))
             .await;
@@ -1942,6 +1947,7 @@ impl LanguageServer for FidanLsp {
     // ── Lifecycle ──────────────────────────────────────────────────────────
 
     async fn initialize(&self, params: InitializeParams) -> RpcResult<InitializeResult> {
+        fidan_diagnostics::tracing::info!("LSP initialize received");
         if let Ok(mut defaults) = self.editor_format_defaults.write() {
             *defaults = editor_format_defaults_from_init(&params);
         }
@@ -2014,6 +2020,7 @@ impl LanguageServer for FidanLsp {
     }
 
     async fn shutdown(&self) -> RpcResult<()> {
+        fidan_diagnostics::tracing::info!("LSP shutdown received");
         Ok(())
     }
 
@@ -2021,11 +2028,20 @@ impl LanguageServer for FidanLsp {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let td = params.text_document;
+        fidan_diagnostics::tracing::debug!(
+            version = td.version,
+            bytes = td.text.len(),
+            "LSP document opened"
+        );
         self.refresh(&td.uri, td.version, &td.text).await;
         self.refresh_dependents(&td.uri).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
+        fidan_diagnostics::tracing::trace!(
+            version = params.text_document.version,
+            "LSP document change received"
+        );
         if let Some(change) = params.content_changes.into_iter().last() {
             self.refresh(
                 &params.text_document.uri,

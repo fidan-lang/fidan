@@ -89,5 +89,8 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      - name: Verbose LSP transport regression
+        run: python test/scripts/test_args_lsp.py ArgsLspTests.test_verbose_json_rpc_transport_and_errors
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings

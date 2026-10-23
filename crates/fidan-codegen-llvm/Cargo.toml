@@ -17,6 +17,7 @@ llvm-toolchain-23 = [
 ]
 
 [dependencies]
+fidan-diagnostics = { workspace = true }
 anyhow = { workspace = true }
 fidan-lexer = { workspace = true }
 fidan-mir = { workspace = true }

@@ -4764,6 +4764,12 @@ fn optimize_module(module: &Module<'_>, machine: &TargetMachine, level: OptLevel
             }
         }
     }
+    fidan_diagnostics::tracing::debug!(
+        pipeline,
+        optsize = matches!(level, OptLevel::Os | OptLevel::Oz),
+        minsize = matches!(level, OptLevel::Oz),
+        "LLVM optimization policy selected"
+    );
     let options = PassBuilderOptions::create();
     module
         .run_passes(pipeline, machine, options)

@@ -58,6 +58,8 @@ fidan-fmt = { path = "crates/fidan-fmt" }
 fidan-lsp = { path = "crates/fidan-lsp" }
 
 # External
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "registry", "std"] }
 dashmap = "6"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"

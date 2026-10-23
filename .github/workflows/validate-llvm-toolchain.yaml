@@ -27,6 +27,8 @@ on:
       - "test/scripts/test_examples_aot.ps1"
       - "test/scripts/test_examples_aot.sh"
       - "vcpkg.json"
+      - "crates/fidan-diagnostics/**"
+      - "crates/fidan-secrets/**"
       - "crates/fidan-cli/**"
       - "crates/fidan-codegen-llvm/**"
       - "crates/fidan-driver/**"

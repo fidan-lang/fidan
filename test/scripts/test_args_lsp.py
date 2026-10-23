@@ -16,14 +16,21 @@ BINARY = Path(os.environ.get("FIDAN_BIN", ROOT / "target/debug" / ("fidan.exe" i
 
 
 class Rpc:
-    def __init__(self):
-        self.process = subprocess.Popen([str(BINARY), "lsp"], stdin=subprocess.PIPE,
+    def __init__(self, cli_args=()):
+        self.process = subprocess.Popen([str(BINARY), *cli_args, "lsp"], stdin=subprocess.PIPE,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.stderr = bytearray()
+        self.stderr_reader = threading.Thread(target=self.read_stderr, daemon=True)
+        self.stderr_reader.start()
         self.messages = queue.Queue()
         self.diagnostics = {}
         self.next_id = 0
         self.reader = threading.Thread(target=self.read, daemon=True)
         self.reader.start()
+
+    def read_stderr(self):
+        while chunk := self.process.stderr.read(4096):
+            self.stderr.extend(chunk)
 
     def read(self):
         try:
@@ -98,17 +105,43 @@ class Rpc:
             identifier = self.send("shutdown", request=True)
             self.wait(lambda value: value.get("id") == identifier)
             self.send("exit")
+            self.process.stdin.close()  # The client closes transport after exit.
         try:
             self.process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             self.process.kill()
             self.process.wait(timeout=5)
+        self.stderr_reader.join(timeout=5)
         for pipe in (self.process.stdin, self.process.stdout, self.process.stderr):
             pipe.close()
         self.reader.join(timeout=5)
 
 
 class ArgsLspTests(unittest.TestCase):
+    def test_verbose_json_rpc_transport_and_errors(self):
+        for flags in [(), ("-v",), ("-vv",), ("-vvv",)]:
+            with self.subTest(flags=flags):
+                rpc = Rpc(flags)
+                try:
+                    rpc.initialize()
+                    path = ROOT / "target/verbosity-contract/editor.fdn"
+                    diagnostics = rpc.open(path, "var value = unknown_verbosity_symbol\n")
+                    self.assertTrue(any(item.get("severity") == 1 for item in diagnostics))
+                    self.assertFalse(any(item.get("severity") == 1 for item in rpc.change(path, "print(42)\n", 2)))
+                    identifier = rpc.send("unsupported/verbosityProbe", {}, request=True)
+                    response = rpc.wait(lambda value: value.get("id") == identifier)
+                    self.assertEqual(response["error"]["code"], -32601)
+                finally:
+                    rpc.close()
+                self.assertEqual(rpc.process.returncode, 0)
+                logs = rpc.stderr.decode("utf-8")
+                self.assertNotIn("\x1b", logs)
+                if flags:
+                    self.assertIn("LSP initialize received", logs)
+                    self.assertIn("LSP shutdown received", logs)
+                else:
+                    self.assertNotIn("INFO fidan", logs)
+
     def test_actual_args_documents_and_negative_controls(self):
         rpc = Rpc()
         try:

@@ -61,6 +61,8 @@ pub fn resolve_manifest_url(explicit: Option<&str>) -> String {
 
 pub fn fetch_manifest(explicit: Option<&str>) -> Result<DistributionManifest> {
     let url = resolve_manifest_url(explicit);
+    fidan_diagnostics::tracing::info!("reading distribution manifest");
+    fidan_diagnostics::tracing::debug!(origin = %url, "distribution source selected");
     let body = fetch_text(&url)?;
     let manifest: DistributionManifest = serde_json::from_str(&body)
         .with_context(|| format!("failed to parse distribution manifest `{url}`"))?;
@@ -156,14 +158,22 @@ fn read_response_bytes(
 }
 
 pub fn fetch_cached_bytes(url: &str, cache_path: &Path, expected_sha256: &str) -> Result<Vec<u8>> {
+    let _span = fidan_diagnostics::tracing::debug_span!("artifact_download").entered();
     if let Ok(bytes) = fs::read(cache_path)
         && verify_sha256(&bytes, expected_sha256).is_ok()
     {
+        fidan_diagnostics::tracing::debug!(
+            bytes = bytes.len(),
+            "artifact cache hit; checksum verified"
+        );
         return Ok(bytes);
     }
 
+    fidan_diagnostics::tracing::debug!("artifact cache missing or checksum invalid");
+    fidan_diagnostics::tracing::info!("downloading distribution artifact");
     let bytes = fetch_bytes(url)?;
     verify_sha256(&bytes, expected_sha256)?;
+    fidan_diagnostics::tracing::trace!(bytes = bytes.len(), "distribution checksum verified");
     write_bytes(cache_path, &bytes)?;
     Ok(bytes)
 }

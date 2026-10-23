@@ -4,6 +4,10 @@ use crate::replay::save_replay_bundle;
 use crate::terminal::paint;
 use anyhow::{Context, Result, bail};
 use fidan_diagnostics::{Diagnostic, Severity, render_message_to_stderr};
+use fidan_diagnostics::{
+    logging::phase,
+    tracing::{debug, info, trace},
+};
 use fidan_driver::dal::validate_package_name;
 use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, TraceMode};
 use fidan_runtime::push_program_args;
@@ -371,6 +375,7 @@ fn source_files(path: &std::path::Path) -> Result<Vec<PathBuf>> {
         }
     }
     files.sort();
+    trace!(files = files.len(), "recursive source discovery completed");
     Ok(files)
 }
 
@@ -388,7 +393,7 @@ pub(crate) fn run_source_files(
             render_message_to_stderr(
                 Severity::Error,
                 "cli",
-                &format!("{}: {error:#}", file.display()),
+                &fidan_diagnostics::logging::redact(&format!("{}: {error:#}", file.display())),
             );
             failed += 1;
         }
@@ -456,6 +461,7 @@ fn run_fmt_file(
 
     warn_source_extension(&file, &[]);
 
+    debug!(input = %file.display(), in_place, check, "formatting source");
     let src = std::fs::read_to_string(&file).with_context(|| format!("cannot read {:?}", file))?;
 
     let source_map = Arc::new(SourceMap::new());
@@ -749,6 +755,9 @@ pub(crate) fn emit_mir_safety_diags(
 }
 
 pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
+    let _span = fidan_diagnostics::tracing::info_span!("compilation").entered();
+    info!(mode = ?opts.mode, input = %opts.input.display(), "compilation started");
+    debug!(jit_threshold = opts.jit_threshold, optimization = ?opts.opt_level, strict = opts.strict_mode, "compilation configuration");
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
     use std::sync::Arc;
@@ -779,7 +788,15 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     let mut budget = DiagnosticBudget::new(opts.max_errors);
 
     // ── Lex ────────────────────────────────────────────────────────────────────
-    let (tokens, lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+    let (tokens, lex_diags) = phase("lex", || {
+        Lexer::new(&file, Arc::clone(&interner)).tokenise()
+    });
+    debug!(
+        lexed_items = tokens.len(),
+        diagnostics = lex_diags.len(),
+        bytes = src.len(),
+        "lexer completed"
+    );
     for diag in &lex_diags {
         budget.render_diag(diag, &source_map, &opts.suppress);
         if budget.would_block_further_errors() {
@@ -796,7 +813,14 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     }
 
     // ── Parse ──────────────────────────────────────────────────────────────────
-    let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+    let (module, parse_diags) = phase("parse", || {
+        fidan_parser::parse(&tokens, file.id, Arc::clone(&interner))
+    });
+    debug!(
+        items = module.items.len(),
+        diagnostics = parse_diags.len(),
+        "parser completed"
+    );
 
     // Surface parse diagnostics via the diagnostics renderer
     for diag in &parse_diags {
@@ -834,17 +858,25 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     };
 
-    let imported = fidan_driver::load_imported_hirs(
-        &module,
-        &interner,
-        &base_dir,
-        &source_map,
-        if is_stdin {
-            None
-        } else {
-            Some(opts.input.as_path())
-        },
-        &|path| std::fs::read_to_string(path),
+    info!("discovering imports and checking types");
+    let imported = phase("imports", || {
+        fidan_driver::load_imported_hirs(
+            &module,
+            &interner,
+            &base_dir,
+            &source_map,
+            if is_stdin {
+                None
+            } else {
+                Some(opts.input.as_path())
+            },
+            &|path| std::fs::read_to_string(path),
+        )
+    });
+    debug!(
+        modules = imported.modules.len(),
+        diagnostics = imported.diagnostics.len(),
+        "import graph loaded"
     );
     for diagnostic in &imported.diagnostics {
         budget.render_diag(diagnostic, &source_map, &opts.suppress);
@@ -865,7 +897,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                 pre_register_hir_into_tc(&mut tc, hir, filter.as_ref(), &interner);
             }
         }
-        tc.check_module(&module);
+        phase("typecheck", || tc.check_module(&module));
         let tm = tc.finish_typed();
         for diag in &tm.diagnostics {
             if is_suppressed(diag.code.as_str(), &opts.suppress) {
@@ -899,7 +931,12 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     // Compute once; all --emit and run blocks share the merged result without
     // re-calling lower_module.
     let merged_hir: Option<fidan_hir::HirModule> = typed_module.as_ref().map(|tm| {
-        let mut base = fidan_hir::lower_module(&module, tm, &interner);
+        let mut base = phase("hir", || fidan_hir::lower_module(&module, tm, &interner));
+        debug!(
+            functions = base.functions.len(),
+            globals = base.globals.len(),
+            "HIR lowered"
+        );
         bind_hir_file_imports(
             &mut base,
             &module,
@@ -976,7 +1013,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     // ── --emit mir ─────────────────────────────────────────────────────────────
     if opts.emit.contains(&EmitKind::Mir) {
         if let Some(ref hir) = merged_hir {
-            let mir = fidan_mir::lower_program(hir, &interner, &[]);
+            let mir = phase("mir", || fidan_mir::lower_program(hir, &interner, &[]));
             println!("=== mir: {source_name} ===");
             println!("  functions: {}", mir.functions.len());
             fidan_mir::print_program(&mir);
@@ -1010,7 +1047,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             if error_count == 0
                 && let Some(ref hir) = merged_hir
             {
-                let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                let mut mir = phase("mir", || fidan_mir::lower_program(hir, &interner, &[]));
                 // ── MIR safety analysis (E0401, W1004) ───────────────────────
                 emit_mir_safety_diags(
                     &mir,
@@ -1023,15 +1060,22 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                 if error_count == 0 {
                     // ── Optimisation passes (Phase 6) ─────────────────────
                     if opts.trace == TraceMode::Full {
-                        fidan_passes::run_preserving_call_frames(&mut mir);
+                        phase("optimize_preserving_frames", || {
+                            fidan_passes::run_preserving_call_frames(&mut mir)
+                        });
                     } else {
-                        fidan_passes::run_all(&mut mir);
+                        phase("optimize", || fidan_passes::run_all(&mut mir));
                     }
                     let mut program_argv = vec![opts.input.display().to_string()];
                     program_argv.extend(opts.program_args.iter().cloned());
                     let _program_args_guard = push_program_args(program_argv);
                     let replay_inputs = std::mem::take(&mut opts.replay_inputs);
                     let sandbox = opts.sandbox.take();
+                    info!(
+                        backend = "interpreter",
+                        selective_jit = opts.jit_threshold > 0,
+                        "executing program"
+                    );
                     let (result, captured) = fidan_interp::run_mir_with_replay(
                         mir,
                         Arc::clone(&interner),
@@ -1084,7 +1128,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             if error_count == 0
                 && let Some(ref hir) = merged_hir
             {
-                let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                let mut mir = phase("mir", || fidan_mir::lower_program(hir, &interner, &[]));
                 emit_mir_safety_diags(
                     &mir,
                     &interner,
@@ -1094,7 +1138,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                 );
                 error_count = budget.error_count();
                 if error_count == 0 {
-                    fidan_passes::run_all(&mut mir);
+                    phase("optimize", || fidan_passes::run_all(&mut mir));
                     let session = fidan_driver::Session::new();
                     if let Err(e) =
                         fidan_driver::compile(&session, mir, Arc::clone(&interner), &opts)
@@ -1103,7 +1147,9 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                         render_message_to_stderr(
                             Severity::Error,
                             "",
-                            &format!("AOT compilation failed: {e:#}"),
+                            &fidan_diagnostics::logging::redact(&format!(
+                                "AOT compilation failed: {e:#}"
+                            )),
                         );
                     }
                 }
@@ -1113,11 +1159,11 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             if error_count == 0
                 && let Some(ref hir) = merged_hir
             {
-                let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                let mut mir = phase("mir", || fidan_mir::lower_program(hir, &interner, &[]));
                 // Safety analysis warns about potential issues — profile run
                 // continues regardless (warnings don't block profiling).
                 emit_mir_safety_diags(&mir, &interner, false, &opts.suppress, &mut budget);
-                fidan_passes::run_all(&mut mir);
+                phase("optimize", || fidan_passes::run_all(&mut mir));
                 let prog_name = opts
                     .input
                     .file_name()
@@ -1168,7 +1214,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             if error_count == 0
                 && let Some(ref hir) = merged_hir
             {
-                let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                let mut mir = phase("mir", || fidan_mir::lower_program(hir, &interner, &[]));
                 // ── MIR safety analysis (E0401, W1004) ───────────────────
                 emit_mir_safety_diags(
                     &mir,
@@ -1179,7 +1225,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                 );
                 error_count = budget.error_count();
                 if error_count == 0 {
-                    fidan_passes::run_all(&mut mir);
+                    phase("optimize", || fidan_passes::run_all(&mut mir));
                     let test_count = mir.test_functions.len();
                     if test_count == 0 {
                         render_message_to_stderr(Severity::Note, "", "no test blocks found");

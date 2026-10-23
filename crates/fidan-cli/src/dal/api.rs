@@ -20,7 +20,11 @@ pub struct DalClient {
 
 impl DalClient {
     pub fn new(base: String, token: Option<String>) -> Result<Self> {
+        if let Some(token) = &token {
+            fidan_diagnostics::logging::register_secret(token);
+        }
         let base = super::config::canonical_registry(&base)?;
+        fidan_diagnostics::tracing::debug!(registry = %base, authenticated = token.is_some(), "registry client initialized");
         let url = reqwest::Url::parse(&base)?;
         let http = Client::builder()
             .https_only(url.scheme() == "https")
@@ -74,6 +78,7 @@ impl DalClient {
     }
 
     pub fn index(&self, name: &str) -> Result<Vec<IndexEntry>> {
+        fidan_diagnostics::tracing::debug!(package = name, "fetching sparse index");
         let url = format!("{}/index/{name}", self.base);
         let response = self
             .http
@@ -122,6 +127,7 @@ impl DalClient {
     }
 
     pub fn download_archive(&self, name: &str, version: &str, checksum: &str) -> Result<Vec<u8>> {
+        fidan_diagnostics::tracing::info!(package = name, version, "downloading package archive");
         validate_checksum(checksum)?;
         let url = format!("{}/packages/{name}/versions/{version}/download", self.base);
         let response = self
@@ -142,6 +148,7 @@ impl DalClient {
             .read_to_end(&mut bytes)
             .context("failed to read downloaded archive")?;
         verify_archive_checksum(&bytes, checksum)?;
+        fidan_diagnostics::tracing::debug!(bytes = bytes.len(), "package checksum verified");
         Ok(bytes)
     }
 
@@ -224,6 +231,7 @@ impl DalClient {
         url: &str,
         body: Option<&Value>,
     ) -> Result<T> {
+        fidan_diagnostics::tracing::trace!(method = %method, "registry request started");
         let mut request = self.http.request(method, url);
         if let Some(json_body) = body {
             request = request.json(json_body);
@@ -272,6 +280,7 @@ fn ensure_success_bytes(
     }
 
     let status = response.status();
+    fidan_diagnostics::tracing::debug!(status = status.as_u16(), "registry request rejected");
     let mut body = String::new();
     response
         .take(16 * 1024)

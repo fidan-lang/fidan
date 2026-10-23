@@ -41,6 +41,7 @@ pub fn build_package_archive(project_dir: &Path) -> Result<BuiltPackage> {
         .canonicalize()
         .with_context(|| format!("cannot access {}", project_dir.display()))?;
     let manifest = read_manifest(&project_dir)?;
+    fidan_diagnostics::tracing::info!(package = %manifest.package.name, version = %manifest.package.version, "building package archive");
     let ignore = load_dalignore(&project_dir, &manifest)?;
     validate_package_dir(&project_dir, &manifest, ignore.as_ref())?;
     validate_pack_budget(&project_dir, &project_dir, ignore.as_ref(), &mut (0, 0))?;
@@ -61,6 +62,7 @@ pub fn build_package_archive(project_dir: &Path) -> Result<BuiltPackage> {
         .context("failed to finalize gzip archive")?;
 
     visit_archive(&archive_bytes, |_, _, _| Ok(()))?;
+    fidan_diagnostics::tracing::debug!(bytes = archive_bytes.len(), "package archive validated");
     Ok(BuiltPackage {
         manifest,
         archive_name,
@@ -342,6 +344,7 @@ pub fn install_downloaded_package(
         .parent()
         .context("missing package parent directory")?;
     fs::create_dir_all(parent)?;
+    fidan_diagnostics::tracing::info!(package, version, "installing verified package");
     let staging = StagedDirectory::new(parent)?;
     let root = visit_archive(archive_bytes, |relative, kind, reader| {
         let output = remap_install_path(&staging.0, Path::new(relative));
@@ -389,6 +392,7 @@ pub fn install_downloaded_package(
     } else {
         fs::rename(&staging.0, &target)?;
     }
+    fidan_diagnostics::tracing::debug!(path = %target.display(), "package installation committed");
     Ok(target)
 }
 

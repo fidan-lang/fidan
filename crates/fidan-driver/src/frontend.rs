@@ -46,6 +46,7 @@ pub fn detect_import_cycles(entry_path: &Path) -> Vec<String> {
             ));
             return;
         }
+        fidan_diagnostics::tracing::trace!(path = %canon.display(), cached = visited.contains(&canon), "import graph visit");
         if !visited.insert(canon.clone()) {
             return;
         }
@@ -596,7 +597,9 @@ pub fn compile_source_to_mir(
     let file = source_map.add_file(source_name, src);
     let interner = Arc::new(SymbolInterner::new());
 
-    let (tokens, lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+    let (tokens, lex_diags) = fidan_diagnostics::logging::phase("frontend_lex", || {
+        Lexer::new(&file, Arc::clone(&interner)).tokenise()
+    });
     let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
 
     let mut errors = Vec::new();
@@ -623,7 +626,7 @@ pub fn compile_source_to_mir(
                 pre_register_hir_into_tc(&mut tc, hir, filter.as_ref(), &interner);
             }
         }
-        tc.check_module(&module);
+        fidan_diagnostics::logging::phase("frontend_typecheck", || tc.check_module(&module));
         let typed = tc.finish_typed();
         let type_errs = collect_error_messages(&typed.diagnostics, &mut errors);
         if type_errs == 0 { Some(typed) } else { None }
@@ -668,7 +671,7 @@ pub fn compile_source_to_mir(
         bail!(join_errors(errors));
     }
 
-    fidan_passes::run_all(&mut mir);
+    fidan_diagnostics::logging::phase("frontend_optimize", || fidan_passes::run_all(&mut mir));
 
     Ok(FrontendOutput {
         interner,

@@ -26,6 +26,7 @@ struct ParsedImport {
 }
 
 fn canonical(path: &Path) -> PathBuf {
+    fidan_diagnostics::tracing::trace!(path = %path.display(), "resolving imported module path");
     path.canonicalize().unwrap_or_else(|_| path.to_owned())
 }
 

@@ -3554,3 +3554,43 @@ fn format_refuses_empty_interpolation_without_changing_bytes() {
         );
     }
 }
+
+#[test]
+fn exec_preserves_program_verbosity_arguments() {
+    let home = make_temp_dir("exec_verbosity_home");
+    let helper_src = make_temp_dir("exec_verbosity_helper");
+    let capture = helper_src.join("args.txt");
+    let helper = make_fake_exec_helper(&helper_src, "delegation ok", &capture);
+    install_fake_ai_toolchain(&home, &helper);
+    for (arguments, expected) in [
+        (
+            vec!["-vv", "exec", "ai", "--verbose", "-v", "-V"],
+            "exec ai --verbose -v -V",
+        ),
+        (
+            vec!["exec", "-vv", "ai", "--", "--verbose", "-v", "-V"],
+            "exec ai --verbose -v -V",
+        ),
+        (
+            vec!["-vv", "exec", "ai", "doctor", "--verbose", "-v", "-V"],
+            "exec ai doctor --verbose -v -V",
+        ),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .args(arguments)
+            .env_remove("RUST_LOG")
+            .env("FIDAN_HOME", &home)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(std::fs::read_to_string(&capture).unwrap().trim(), expected);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("launching external namespace"));
+        assert!(String::from_utf8_lossy(&output.stdout).contains("delegation ok"));
+    }
+    std::fs::remove_dir_all(&home).unwrap();
+    std::fs::remove_dir_all(&helper_src).unwrap();
+}

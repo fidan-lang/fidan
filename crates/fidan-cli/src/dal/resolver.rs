@@ -89,6 +89,11 @@ impl<'a> PackageResolver<'a> {
         top: &str,
         roots: &BTreeMap<String, DalDependencySpec>,
     ) -> Result<ResolvedGraph> {
+        fidan_diagnostics::tracing::info!(
+            roots = roots.len(),
+            locked = self.lock.is_some(),
+            "resolving package graph"
+        );
         let mut graph = self
             .search(roots, BTreeMap::new())?
             .with_context(|| format!("no compatible package graph: {}", self.conflict))?;
@@ -98,6 +103,10 @@ impl<'a> PackageResolver<'a> {
             .context("requested package missing from graph")?
             .version
             .clone();
+        fidan_diagnostics::tracing::info!(
+            packages = graph.packages.len(),
+            "package graph resolved"
+        );
         Ok(graph)
     }
     fn search(
@@ -106,6 +115,11 @@ impl<'a> PackageResolver<'a> {
         selected: BTreeMap<String, Candidate>,
     ) -> Result<Option<ResolvedGraph>> {
         self.decisions += 1;
+        fidan_diagnostics::tracing::trace!(
+            decision = self.decisions,
+            selected = selected.len(),
+            "resolver branch"
+        );
         if self.decisions > MAX_DECISIONS || selected.len() > fidan_driver::dal::MAX_LOCKED_PACKAGES
         {
             bail!("package resolution complexity limit exceeded");
@@ -199,6 +213,7 @@ impl<'a> PackageResolver<'a> {
             }
             return Ok(Some(graph));
         };
+        fidan_diagnostics::tracing::debug!(package = %name, index_cached = self.indexes.contains_key(&name), "resolving dependency");
         if !self.indexes.contains_key(&name) {
             self.indexes.insert(name.clone(), self.client.index(&name)?);
         }
@@ -246,6 +261,7 @@ impl<'a> PackageResolver<'a> {
             "no allowed version of `{name}` satisfies its requirements (yanked versions require an existing checksum lock)"
         );
         for (entry, _) in entries {
+            fidan_diagnostics::tracing::trace!(package = %name, version = %entry.vers, cached = self.candidates.contains_key(&(name.clone(), entry.vers.clone())), "considering package candidate");
             let key = (name.clone(), entry.vers.clone());
             if !self.candidates.contains_key(&key) {
                 let bytes = self

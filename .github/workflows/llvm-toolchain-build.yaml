@@ -176,6 +176,14 @@ jobs:
           tar -xzf $archive.FullName -C $installRoot
           "FIDAN_HOME=$fidanHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      - name: Verbosity and native helper contracts
+        if: inputs.validate
+        env:
+          FIDAN_REQUIRE_LLVM: "1"
+        run: |
+          cargo build --workspace --locked
+          cargo test -p fidan-cli --test verbosity_cli --locked -- --nocapture
+
       - name: Validate packaged LLVM toolchain (Windows)
         if: inputs.validate && runner.os == 'Windows'
         shell: pwsh

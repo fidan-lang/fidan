@@ -116,15 +116,26 @@ fn parse_source(file: &Path, src: String) -> Result<ParsedFile> {
     let source_map = Arc::new(SourceMap::new());
     let source_name = file.display().to_string();
     let f = source_map.add_file(&*source_name, &*src);
-    let (tokens, lex_diags) = Lexer::new(&f, Arc::clone(&interner)).tokenise();
+    let (tokens, lex_diags) = fidan_diagnostics::logging::phase("analysis_lex", || {
+        Lexer::new(&f, Arc::clone(&interner)).tokenise()
+    });
     if !lex_diags.is_empty() {
         bail!("lex errors prevent ai-analysis");
     }
-    let (module, parse_diags) = fidan_parser::parse(&tokens, f.id, Arc::clone(&interner));
+    let (module, parse_diags) = fidan_diagnostics::logging::phase("analysis_parse", || {
+        fidan_parser::parse(&tokens, f.id, Arc::clone(&interner))
+    });
     if !parse_diags.is_empty() {
         bail!("parse errors prevent ai-analysis");
     }
-    let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+    let typed = fidan_diagnostics::logging::phase("analysis_typecheck", || {
+        fidan_typeck::typecheck_full(&module, Arc::clone(&interner))
+    });
+    fidan_diagnostics::tracing::debug!(
+        items = module.items.len(),
+        diagnostics = typed.diagnostics.len(),
+        "source analysis completed"
+    );
     Ok(ParsedFile {
         file: file.to_path_buf(),
         src: src.clone(),

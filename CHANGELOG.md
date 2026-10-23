@@ -10,6 +10,12 @@ compiler releases.
 
 ## [Unreleased]
 
+### Added
+- Global `-v`/`-vv`/`-vvv` operational diagnostics on stderr, with compiler,
+  package/toolchain, native helper and LSP instrumentation, bounded redaction,
+  and documented first-party RUST_LOG filters. Program argument forwarding,
+  application stdout and existing language diagnostics are preserved.
+
 - **Semantic change:** logical `and`/`or` (including `&&`/`||`) now short-circuit
   left-to-right. Both operands remain statically typechecked; only evaluated
   flexible operands undergo runtime Boolean validation. Skipped RHS callbacks,
