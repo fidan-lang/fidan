@@ -2832,7 +2832,7 @@ pub unsafe extern "C" fn fdn_spawn_expr(
         let result = call_trampoline_owned(fn_idx as usize, bundle.into_vec());
         if fdn_has_exception() != 0 {
             let exn_ptr = fdn_catch_exception();
-            let message = display(borrow(exn_ptr));
+            let message = crate::display_exception(borrow(exn_ptr), None);
             drop(Box::from_raw(exn_ptr));
             Err(message)
         } else {
@@ -2856,7 +2856,7 @@ pub unsafe extern "C" fn fdn_spawn_task(
         let result = call_trampoline_owned(fn_idx as usize, worker_globals.install(bundle));
         if fdn_has_exception() != 0 {
             let exn_ptr = fdn_catch_exception();
-            let message = display(borrow(exn_ptr));
+            let message = crate::display_exception(borrow(exn_ptr), None);
             drop(Box::from_raw(exn_ptr));
             Err(format!("task `{task_name}` failed: {message}"))
         } else {
@@ -2879,7 +2879,7 @@ pub unsafe extern "C" fn fdn_spawn_concurrent(
         let result = call_trampoline_owned(fn_idx as usize, bundle.into_vec());
         if fdn_has_exception() != 0 {
             let exn_ptr = fdn_catch_exception();
-            let message = display(borrow(exn_ptr));
+            let message = crate::display_exception(borrow(exn_ptr), None);
             drop(Box::from_raw(exn_ptr));
             Err(message)
         } else {
@@ -2912,7 +2912,7 @@ pub unsafe extern "C" fn fdn_spawn_dynamic(
         };
         if fdn_has_exception() != 0 {
             let exn_ptr = fdn_catch_exception();
-            let message = display(borrow(exn_ptr));
+            let message = crate::display_exception(borrow(exn_ptr), None);
             drop(Box::from_raw(exn_ptr));
             Err(message)
         } else {
@@ -2994,14 +2994,20 @@ pub unsafe extern "C" fn fdn_store_exception(val: *mut FidanValue) {
 /// Legacy throw stub — used when there is no enclosing catch handler.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_throw(val: *mut FidanValue) -> ! {
-    eprintln!("unhandled exception: {}", display(borrow(val)));
+    eprintln!(
+        "unhandled exception: {}",
+        crate::display_exception(borrow(val), None)
+    );
     std::process::exit(1);
 }
 
 /// Called when `throw` has no enclosing catch in the current function.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_throw_unhandled(val: *mut FidanValue) -> ! {
-    eprintln!("unhandled exception: {}", display(borrow(val)));
+    eprintln!(
+        "unhandled exception: {}",
+        crate::display_exception(borrow(val), None)
+    );
     std::process::exit(1);
 }
 

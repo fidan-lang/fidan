@@ -166,83 +166,17 @@ pub fn string_method(
                 1,
             ))))
         }
-        "repeat" => {
-            let n = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0)
-                .max(0) as usize;
-            Ok(FidanValue::String(FidanString::new(&str_val.repeat(n))))
-        }
         "reverse" => {
             let rev: String = str_val.chars().rev().collect();
             Ok(FidanValue::String(FidanString::new(&rev)))
         }
 
         // ── Indexing / slicing ────────────────────────────────────────────────
-        "charAt" | "substring" => {
+        "charAt" | "substring" | "padStart" | "padEnd" | "repeat" => {
             let mut values = Vec::with_capacity(args.len() + 1);
             values.push(FidanValue::String(s));
             values.extend(args);
             Ok(stdlib::string::dispatch(method, values).unwrap_or(FidanValue::Nothing))
-        }
-
-        // ── Padding ───────────────────────────────────────────────────────────
-        "padStart" => {
-            let total = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n as usize)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-            let pad_char = args
-                .get(1)
-                .map(crate::stdlib::common::display_string)
-                .unwrap_or_else(|| " ".to_owned());
-            let pad_ch = pad_char.chars().next().unwrap_or(' ');
-            let len = str_val.chars().count();
-            let padded = if total > len {
-                let padding: String = std::iter::repeat_n(pad_ch, total - len).collect();
-                padding + &str_val
-            } else {
-                str_val
-            };
-            Ok(FidanValue::String(FidanString::new(&padded)))
-        }
-        "padEnd" => {
-            let total = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n as usize)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-            let pad_char = args
-                .get(1)
-                .map(crate::stdlib::common::display_string)
-                .unwrap_or_else(|| " ".to_owned());
-            let pad_ch = pad_char.chars().next().unwrap_or(' ');
-            let len = str_val.chars().count();
-            let padded = if total > len {
-                let padding: String = std::iter::repeat_n(pad_ch, total - len).collect();
-                str_val + &padding
-            } else {
-                str_val
-            };
-            Ok(FidanValue::String(FidanString::new(&padded)))
         }
 
         // ── Bytes / char codes ────────────────────────────────────────────────

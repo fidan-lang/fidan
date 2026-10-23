@@ -294,6 +294,45 @@ pub fn display(val: &FidanValue) -> String {
     out
 }
 
+/// Conventional payload field for a user-defined exception's human-readable text.
+pub const EXCEPTION_MESSAGE_FIELD: &str = "message";
+
+/// Render an uncaught exception without changing ordinary value display or its
+/// catchable payload. The interpreter supplies its interned field identifier;
+/// native objects use the existing branded, string-keyed representation.
+pub fn display_exception(value: &FidanValue, message_field: Option<fidan_lexer::Symbol>) -> String {
+    let message = match value {
+        FidanValue::Object(object) => {
+            message_field.and_then(|field| match object.borrow().get_field(field) {
+                Some(FidanValue::String(message)) => Some(message.clone()),
+                _ => None,
+            })
+        }
+        FidanValue::Dict(dictionary) => {
+            let dictionary = dictionary.borrow();
+            if dictionary.aot_class_name().is_some() {
+                dictionary
+                    .iter()
+                    .find_map(|(key, value)| match (key, value) {
+                        (FidanValue::String(key), FidanValue::String(message))
+                            if key.as_str() == EXCEPTION_MESSAGE_FIELD =>
+                        {
+                            Some(message.clone())
+                        }
+                        _ => None,
+                    })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    match message {
+        Some(message) => format!("{}: {}", display(value), message.as_str()),
+        None => display(value),
+    }
+}
+
 pub fn write_display_io<W: io::Write>(out: &mut W, val: &FidanValue) -> io::Result<()> {
     match val {
         FidanValue::Integer(n) => {
@@ -578,6 +617,31 @@ pub fn display_into(out: &mut String, val: &FidanValue) {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn exception_display_only_reads_a_branded_objects_string_message() {
+        let mut dictionary = FidanDict::new();
+        let key = FidanValue::String(FidanString::new(EXCEPTION_MESSAGE_FIELD));
+        dictionary
+            .insert(key.clone(), FidanValue::String(FidanString::new("details")))
+            .unwrap();
+        let ordinary = FidanValue::Dict(OwnedRef::new(dictionary.clone()));
+        assert_eq!(display_exception(&ordinary, None), display(&ordinary));
+        dictionary.mark_aot_object(FidanString::new("Problem"));
+        let object = FidanValue::Dict(OwnedRef::new(dictionary));
+        assert_eq!(display(&object), "<Problem>");
+        assert_eq!(display_exception(&object, None), "<Problem>: details");
+        let FidanValue::Dict(fields) = &object else {
+            unreachable!()
+        };
+        fields
+            .borrow_mut()
+            .insert(key, FidanValue::Integer(42))
+            .unwrap();
+        assert_eq!(display_exception(&object, None), "<Problem>");
+        let string = FidanValue::String(FidanString::new("plain error"));
+        assert_eq!(display_exception(&string, None), "plain error");
+    }
+
+    #[test]
     fn parallel_capture_detaches_nested_mutable_values() {
         let child = OwnedRef::new(FidanList::from_vec(vec![FidanValue::Integer(1)]));
         let source = FidanValue::List(OwnedRef::new(FidanList::from_vec(vec![FidanValue::List(
@@ -686,8 +750,10 @@ mod tests {
         assert!(!set.borrow().contains(&object).unwrap());
     }
 
-    use super::{FidanValue, display, write_display_io};
-    use crate::{FidanHashSet, FidanList, FidanString, OwnedRef};
+    use super::{
+        EXCEPTION_MESSAGE_FIELD, FidanValue, display, display_exception, write_display_io,
+    };
+    use crate::{FidanDict, FidanHashSet, FidanList, FidanString, OwnedRef};
 
     #[test]
     fn io_display_matches_string_display_for_nested_values() {

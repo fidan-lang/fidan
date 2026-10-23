@@ -11,7 +11,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::builtins;
 use crate::profiler::ProfileReport;
 use fidan_lexer::SymbolInterner;
 use fidan_mir::{BlockId, FunctionId, LocalId, MirProgram, Terminator};
@@ -122,7 +121,7 @@ impl MirMachine {
             Ok(_) => Ok(()),
             Err(MirSignal::Throw(v)) => Err(RunError {
                 code: fidan_diagnostics::diag_code!("R1002"),
-                message: format!("unhandled exception: {}", builtins::display(&v)),
+                message: format!("unhandled exception: {}", self.display_exception(&v)),
                 trace: std::mem::take(&mut self.panic_trace),
             }),
             Err(MirSignal::Panic(msg)) => Err(RunError {
@@ -167,7 +166,7 @@ impl MirMachine {
             Ok(_) => Ok(()),
             Err(MirSignal::Throw(v)) => Err(RunError {
                 code: fidan_diagnostics::diag_code!("R1002"),
-                message: format!("unhandled exception: {}", builtins::display(&v)),
+                message: format!("unhandled exception: {}", self.display_exception(&v)),
                 trace: std::mem::take(&mut self.panic_trace),
             }),
             Err(MirSignal::Panic(msg)) => Err(RunError {
@@ -475,7 +474,10 @@ impl MirMachine {
                 Err(MirSignal::Throw(v)) => TestResult {
                     name: name.clone(),
                     passed: false,
-                    message: Some(format!("unhandled exception: {}", builtins::display(&v))),
+                    message: Some(format!(
+                        "unhandled exception: {}",
+                        self.display_exception(&v)
+                    )),
                 },
                 Err(MirSignal::ParallelFail(msg)) => TestResult {
                     name: name.clone(),

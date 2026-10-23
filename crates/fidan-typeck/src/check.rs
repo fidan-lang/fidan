@@ -940,17 +940,27 @@ impl TypeChecker {
                                 .with_label(Label::secondary(prev.span, "declared here")),
                             );
                         }
-                        self.table.define(
-                            binding_sym,
-                            SymbolInfo {
-                                kind: SymbolKind::Var,
-                                ty: FidanType::Dynamic,
-                                span: *span,
-                                is_mutable: false,
-                                initialized: Initialized::Yes,
-                                const_value: None,
-                            },
-                        );
+                        // The shared import graph pre-registers real contracts. Keep
+                        // foreign declarations: erasing an object here also loses
+                        // its named-method parameter binding during MIR lowering.
+                        if !self
+                            .table
+                            .lookup_current_scope(binding_sym)
+                            .is_some_and(|binding| binding.span.file != span.file)
+                        {
+                            self.table.define(
+                                binding_sym,
+                                SymbolInfo {
+                                    kind: SymbolKind::Var,
+                                    ty: FidanType::Dynamic,
+                                    span: *span,
+                                    is_mutable: false,
+                                    initialized: Initialized::Yes,
+                                    const_value: None,
+                                },
+                            );
+                        }
+
                         self.record_import_binding(binding_sym, *span, *grouped, *re_export);
                     }
                 }
@@ -5523,6 +5533,58 @@ impl TypeChecker {
 #[cfg(test)]
 mod const_regressions {
     use super::*;
+    #[test]
+    fn selective_import_retains_registered_object_types_and_method_checks() {
+        for (value, invalid) in [("[\"alias\"]", false), ("42", true)] {
+            let interner = Arc::new(SymbolInterner::new());
+            let name = interner.intern("Registry");
+            let method = interner.intern("label");
+            let parameter = interner.intern("aliases");
+            let span = Span::new(FileId(1), 0, 1);
+            let source = format!(
+                "use models.{{Registry}}\nvar registry = Registry()\nregistry.label(aliases = {value})\n"
+            );
+            let file =
+                fidan_source::SourceFile::new(FileId(0), "<selective-import>", source.as_str());
+            let (tokens, lexical) =
+                fidan_lexer::Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, parsed) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+            assert!(lexical.is_empty() && parsed.is_empty());
+            let mut checker = TypeChecker::new(Arc::clone(&interner), file.id);
+            checker.pre_register_object_data(
+                name,
+                None,
+                span,
+                [],
+                [(
+                    method,
+                    ActionInfo {
+                        params: vec![ParamInfo {
+                            name: parameter,
+                            ty: FidanType::List(Box::new(FidanType::String)),
+                            certain: true,
+                            optional: false,
+                            has_default: false,
+                        }],
+                        return_ty: FidanType::String,
+                        span,
+                    },
+                )],
+            );
+            checker.check_module(&module);
+            let typed = checker.finish_typed();
+            let errors = typed
+                .diagnostics
+                .iter()
+                .filter(|diag| diag.severity == fidan_diagnostics::Severity::Error)
+                .collect::<Vec<_>>();
+            assert_eq!(!errors.is_empty(), invalid, "{source}: {errors:?}");
+            if invalid {
+                assert!(errors.iter().any(|diag| diag.code == "E0302"));
+            }
+        }
+    }
+
     #[test]
     fn full_width_integer_constant_ordering_and_checked_arithmetic() {
         let checker = TypeChecker::new(Arc::new(SymbolInterner::new()), FileId(0));

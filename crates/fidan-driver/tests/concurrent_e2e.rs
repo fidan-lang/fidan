@@ -2707,3 +2707,57 @@ fn short_circuit_preserves_runtime_effects_at_native_optimization_levels() {
     }
     fs::remove_dir_all(directory).expect("remove generated logical optimization fixtures");
 }
+
+#[test]
+fn unhandled_object_exception_messages_across_aot_backends() {
+    let directory = temp_dir("fidan_object_exception_message");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let output = directory.join(format!("error-{backend:?}{}", std::env::consts::EXE_SUFFIX));
+        compile_program(
+            "object Problem { var message oftype string = \"useful failure details\" }\nvar problem = Problem()\nassert_eq(string(problem), \"<Problem>\")\nattempt { panic(problem) } catch caught oftype Problem { assert_eq(caught.message, \"useful failure details\") }\npanic(problem)\n",
+            backend,
+            &output,
+        );
+        run_compiled_binary_expect_failure(&output, "useful failure details");
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn selective_object_import_preserves_named_method_contracts() {
+    let sandbox = temp_dir("fidan_selective_object_methods");
+    // Keep native images under target: Windows scanners can retain exited images.
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/native-regressions")
+        .join(sandbox.file_name().unwrap());
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("models.fdn"), r#"
+object Registry {
+    action label with (certain name oftype string, optional description oftype string = "default", optional aliases oftype list oftype string = []) returns string {
+        assert_eq(description, "default")
+        assert_eq(aliases, ["alias"])
+        return name
+    }
+}
+"#).unwrap();
+    let source = r#"use models.{Registry}
+var registry = Registry()
+assert_eq(registry.label("entry", aliases = ["alias"]), "entry")
+print("selective object methods passed")
+"#;
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let output = directory.join(format!(
+            "import-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program(source, backend, &output);
+        run_compiled_binary_clean(&output, "selective object methods passed");
+    }
+    fs::remove_dir_all(sandbox).unwrap();
+}

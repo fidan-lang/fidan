@@ -543,13 +543,20 @@ impl MirMachine {
         });
     }
 
-    fn format_task_failure(task_name: &str, sig: MirSignal) -> String {
+    fn display_exception(&self, value: &FidanValue) -> String {
+        fidan_runtime::display_exception(
+            value,
+            Some(self.interner.intern(fidan_runtime::EXCEPTION_MESSAGE_FIELD)),
+        )
+    }
+
+    fn format_task_failure(&self, task_name: &str, sig: MirSignal) -> String {
         match sig {
             MirSignal::Panic(m) => format!("task `{}` panicked: {}", task_name, m),
             MirSignal::Throw(v) => format!(
                 "task `{}` threw an uncaught error: {}",
                 task_name,
-                crate::builtins::display(&v)
+                self.display_exception(&v)
             ),
             MirSignal::ParallelFail(m) => format!("task `{}` failed: {}", task_name, m),
             MirSignal::RuntimeError(code, m) => {
@@ -1272,7 +1279,7 @@ impl MirMachine {
                         code: fidan_diagnostics::diag_code!("R1002"),
                         message: format!(
                             "decorator: unhandled exception: {}",
-                            builtins::display(&v)
+                            self.display_exception(&v)
                         ),
                         trace: std::mem::take(&mut self.panic_trace),
                     });
@@ -1313,7 +1320,7 @@ impl MirMachine {
             Ok(_) => Ok(()),
             Err(MirSignal::Throw(v)) => Err(RunError {
                 code: fidan_diagnostics::diag_code!("R1002"),
-                message: format!("unhandled exception: {}", builtins::display(&v)),
+                message: format!("unhandled exception: {}", self.display_exception(&v)),
                 trace: std::mem::take(&mut self.panic_trace),
             }),
             Err(MirSignal::Panic(msg)) => Err(RunError {
@@ -1827,7 +1834,7 @@ impl MirMachine {
                     let args = child.install_thread_payload(bundle);
                     child
                         .call_function(task_fn, args)
-                        .map_err(|sig| MirMachine::format_task_failure(&task_name, sig))
+                        .map_err(|sig| child.format_task_failure(&task_name, sig))
                 });
                 frame.store(*handle, FidanValue::Pending(pending));
             }
@@ -1877,11 +1884,11 @@ impl MirMachine {
                                 Ok(v) => v,
                                 Err(DeferredTaskError::ConcurrentTask { task_name, signal }) => {
                                     block_kind = "concurrent";
-                                    failures.push(Self::format_task_failure(&task_name, signal));
+                                    failures.push(self.format_task_failure(&task_name, signal));
                                     FidanValue::Nothing
                                 }
                                 Err(DeferredTaskError::Signal(signal)) => {
-                                    failures.push(Self::format_task_failure("<task>", signal));
+                                    failures.push(self.format_task_failure("<task>", signal));
                                     FidanValue::Nothing
                                 }
                             },
@@ -1977,7 +1984,7 @@ impl MirMachine {
                                         MirSignal::Throw(v) => {
                                             format!(
                                                 "uncaught throw in parallel iteration: {}",
-                                                crate::builtins::display(&v)
+                                                child.display_exception(&v)
                                             )
                                         }
                                         MirSignal::ParallelFail(m) => m,

@@ -11,4 +11,13 @@ assert_eq(values.slice(3, 1), [])
 assert_eq([[1], [2, 3], 4].flatten(), [1, 2, 3, 4])
 assert_eq(" , ".join(["one", "two"]), "one , two")
 assert_eq("hello".capitalize(), "Hello")
+
+use std.string as text
+
+assert_eq("é".padStart(-1), "é")
+assert_eq("é".padEnd(-1), "é")
+assert_eq("é".repeat(-1), "")
+assert_eq(text.padStart("é", -1), "é")
+assert_eq(text.padEnd("é", -1), "é")
+assert_eq(text.repeat("é", -1), "")
 print("pure receivers passed")

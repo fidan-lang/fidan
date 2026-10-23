@@ -3324,3 +3324,25 @@ fn receiver_conversions_interpreter_and_jit() {
         .unwrap_or_else(|error| panic!("receiver conversions: {}", error.message));
     }
 }
+
+#[test]
+fn unhandled_object_exception_keeps_typed_payload_and_displays_its_message() {
+    let source = r#"
+object Problem { var message oftype string = "useful failure details" }
+var problem = Problem()
+assert_eq(string(problem), "<Problem>")
+attempt { panic(problem) } catch caught oftype Problem { assert_eq(caught.message, "useful failure details") }
+panic(problem)
+"#;
+    for threshold in [0, 1] {
+        let error =
+            run_src_with_threshold(source, threshold).expect_err("uncaught typed exception");
+        assert_eq!(error.code, fidan_diagnostics::diag_code!("R1002"));
+        assert!(error.message.contains("Problem"));
+        assert!(
+            error.message.contains("useful failure details"),
+            "{}",
+            error.message
+        );
+    }
+}
