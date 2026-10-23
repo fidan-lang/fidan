@@ -853,6 +853,8 @@ pub struct DecoratorInfo {
     pub name: &'static str,
     pub doc: &'static str,
     pub reserved_only: bool,
+    /// None delegates to the attribute's specialized checker (extern/reserved).
+    pub params: Option<&'static [ReceiverParamInfo]>,
 }
 
 pub const LANGUAGE_BUILTINS: &[BuiltinInfo] = &[
@@ -1059,26 +1061,31 @@ pub const LANGUAGE_DECORATORS: &[DecoratorInfo] = &[
         name: "precompile",
         doc: "Eagerly compile the action before the first hot-path call. Useful for avoiding first-call JIT latency in performance-sensitive code.",
         reserved_only: false,
+        params: Some(&[]),
     },
     DecoratorInfo {
         name: "deprecated",
         doc: "Mark an action as deprecated so callers receive a warning and can migrate to a replacement before removal.",
         reserved_only: false,
+        params: Some(&[optional_param("message", "string")]),
     },
     DecoratorInfo {
         name: "extern",
         doc: "Declare a foreign action imported from a native library. Used for ABI-bound native interop.",
         reserved_only: false,
+        params: None,
     },
     DecoratorInfo {
         name: "unsafe",
         doc: "Acknowledge an intentionally unsafe boundary, typically alongside native extern usage.",
         reserved_only: false,
+        params: Some(&[]),
     },
     DecoratorInfo {
         name: "gpu",
         doc: "Reserved for future GPU/offload support. This spelling is reserved but not implemented yet.",
         reserved_only: true,
+        params: None,
     },
 ];
 

@@ -1329,6 +1329,9 @@ pub unsafe extern "C" fn fdn_obj_get_field(
     field_len: i64,
 ) -> *mut FidanValue {
     let field_name = str_from_raw(field_bytes, field_len);
+    if let Some(value) = crate::receivers::shared_field(borrow(obj), &field_name) {
+        return into_raw(value);
+    }
     let result = match borrow(obj) {
         FidanValue::Dict(d) => {
             let fields = d.borrow();
@@ -1438,6 +1441,9 @@ pub unsafe extern "C" fn fdn_obj_invoke(
     if let Some(result) = crate::builtins::receiver_conversion(recv, &method_name) {
         return builtin_value_result(result);
     }
+    if let Some(result) = crate::receivers::numeric_method(recv, &method_name, &extra) {
+        return builtin_value_result(result);
+    }
     match recv {
         FidanValue::Namespace(ns_name) => {
             // Try stdlib first. dispatch_stdlib_inline returns None for unrecognised
@@ -1483,10 +1489,6 @@ pub unsafe extern "C" fn fdn_obj_invoke(
                 Err(error) => builtin_value_result(Err(error)),
             }
         }
-        FidanValue::Integer(n) if method_name == "abs" => {
-            into_raw(FidanValue::Integer(fdn_int_abs(*n)))
-        }
-        FidanValue::Float(f) if method_name == "abs" => into_raw(FidanValue::Float(f.abs())),
         FidanValue::String(s) => dispatch_string_method(s.clone(), &method_name, extra),
         FidanValue::List(l) => dispatch_list_method(l, &method_name, extra),
         FidanValue::Dict(d) => {

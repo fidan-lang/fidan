@@ -1,0 +1,13 @@
+# Compiler attributes validate their own arguments; they are not runtime calls.
+@deprecated("Use replacement")
+action old returns integer {
+    return 42
+}
+
+@precompile
+action replacement returns integer {
+    return 42
+}
+
+assert_eq(old(), replacement())
+print("compiler attributes passed")

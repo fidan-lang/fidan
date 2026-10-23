@@ -156,10 +156,10 @@ pub struct TypeChecker {
     local_actions: Vec<FxHashMap<Symbol, ActionInfo>>,
     expr_actions: FxHashMap<ExprId, ActionInfo>,
     /// `@deprecated` markers for lexically-scoped nested actions.
-    local_deprecated_actions: Vec<rustc_hash::FxHashSet<Symbol>>,
-    /// Set of action names decorated with `@deprecated`.
+    local_deprecated_actions: Vec<FxHashMap<Symbol, Option<String>>>,
+    /// Action names decorated with `@deprecated`, retaining their optional reason.
     /// Used by `infer_call` to emit W2005 at call sites.
-    deprecated_actions: rustc_hash::FxHashSet<Symbol>,
+    deprecated_actions: FxHashMap<Symbol, Option<String>>,
     /// Non-call field / method accesses that hit a cross-module parent during
     /// `resolve_field`.  The LSP validates them cross-document.
     pub cross_module_field_accesses: Vec<(String, String, Span)>,
@@ -200,8 +200,8 @@ impl TypeChecker {
             actions: FxHashMap::default(),
             expr_actions: FxHashMap::default(),
             local_actions: vec![FxHashMap::default()],
-            local_deprecated_actions: vec![rustc_hash::FxHashSet::default()],
-            deprecated_actions: rustc_hash::FxHashSet::default(),
+            local_deprecated_actions: vec![FxHashMap::default()],
+            deprecated_actions: FxHashMap::default(),
             cross_module_field_accesses: vec![],
             cross_module_call_sites: vec![],
             import_bindings: vec![],
@@ -1159,11 +1159,8 @@ impl TypeChecker {
                     },
                 );
                 // Track @deprecated actions for call-site warnings (W2005).
-                if decorators
-                    .iter()
-                    .any(|d| self.interner.resolve(d.name).as_ref() == "deprecated")
-                {
-                    self.deprecated_actions.insert(*name);
+                if let Some(reason) = self.action_deprecation(decorators, module) {
+                    self.deprecated_actions.insert(*name, reason);
                 }
                 if self.has_marker_decorator(decorators, "extern") {
                     if return_ty.is_none() {
@@ -1238,11 +1235,8 @@ impl TypeChecker {
                     },
                 );
                 // Track @deprecated extension actions.
-                if decorators
-                    .iter()
-                    .any(|d| self.interner.resolve(d.name).as_ref() == "deprecated")
-                {
-                    self.deprecated_actions.insert(*name);
+                if let Some(reason) = self.action_deprecation(decorators, module) {
+                    self.deprecated_actions.insert(*name, reason);
                 }
                 let ext_ty = FidanType::Object(*extends);
                 let prev_this = self.this_ty.replace(ext_ty.clone());
@@ -1584,11 +1578,8 @@ impl TypeChecker {
                     return;
                 }
 
-                let is_deprecated = decorators
-                    .iter()
-                    .any(|d| self.interner.resolve(d.name).as_ref() == "deprecated");
-
-                self.define_local_action(name, info, is_deprecated);
+                let deprecation = self.action_deprecation(&decorators, module);
+                self.define_local_action(name, info, deprecation);
                 self.table.define(
                     name,
                     SymbolInfo {
@@ -1996,7 +1987,7 @@ impl TypeChecker {
             None => inferred,
         };
         if let Some(info) = init.and_then(|expr| self.callable_info(expr, module)) {
-            self.define_local_action(name, info, false);
+            self.define_local_action(name, info, None);
         }
         self.table.define(
             name,
@@ -3714,22 +3705,20 @@ impl TypeChecker {
                             // The checker keeps the action signature up to date for
                             // unannotated actions once their body has been analyzed.
                             // Use that return type here instead of discarding it.
-                            if self.is_action_deprecated(name) {
-                                let n = self.interner.resolve(name).to_string();
+                            if let Some(message) = self.deprecation_warning(name) {
                                 self.emit_warning(
                                     fidan_diagnostics::diag_code!("W2005"),
-                                    format!("`{n}` is marked `@deprecated` and may be removed in a future version"),
+                                    message,
                                     callee_span,
                                 );
                             }
                             return info.return_ty;
                         }
                         // Emit W2005 if the action is marked @deprecated.
-                        if self.is_action_deprecated(name) {
-                            let n = self.interner.resolve(name).to_string();
+                        if let Some(message) = self.deprecation_warning(name) {
                             self.emit_warning(
                                 fidan_diagnostics::diag_code!("W2005"),
-                                format!("`{n}` is marked `@deprecated` and may be removed in a future version"),
+                                message,
                                 callee_span,
                             );
                         }
@@ -5054,8 +5043,7 @@ impl TypeChecker {
     fn push_scope(&mut self, kind: ScopeKind) {
         self.table.push_scope(kind);
         self.local_actions.push(FxHashMap::default());
-        self.local_deprecated_actions
-            .push(rustc_hash::FxHashSet::default());
+        self.local_deprecated_actions.push(FxHashMap::default());
     }
 
     fn pop_scope(&mut self) {
@@ -5068,12 +5056,19 @@ impl TypeChecker {
         }
     }
 
-    fn define_local_action(&mut self, name: Symbol, info: ActionInfo, is_deprecated: bool) {
+    fn define_local_action(
+        &mut self,
+        name: Symbol,
+        info: ActionInfo,
+        deprecation: Option<Option<String>>,
+    ) {
         if let Some(scope) = self.local_actions.last_mut() {
             scope.insert(name, info);
         }
-        if is_deprecated && let Some(scope) = self.local_deprecated_actions.last_mut() {
-            scope.insert(name);
+        if let Some(reason) = deprecation
+            && let Some(scope) = self.local_deprecated_actions.last_mut()
+        {
+            scope.insert(name, reason);
         }
     }
 
@@ -5085,7 +5080,24 @@ impl TypeChecker {
             .or_else(|| self.actions.get(&name).cloned())
     }
 
-    fn is_action_deprecated(&self, name: Symbol) -> bool {
+    fn action_deprecation(
+        &self,
+        decorators: &[Decorator],
+        module: &Module,
+    ) -> Option<Option<String>> {
+        let decorator = decorators
+            .iter()
+            .find(|decorator| self.interner.resolve(decorator.name).as_ref() == "deprecated")?;
+        Some(decorator.args.first().and_then(|argument| {
+            match self.eval_const_value(argument.value, module) {
+                Some(ConstValue::String(message)) => Some(message),
+                _ => None,
+            }
+        }))
+    }
+
+    fn deprecation_warning(&self, name: Symbol) -> Option<String> {
+        let mut reason = self.deprecated_actions.get(&name);
         for (actions, deprecated) in self
             .local_actions
             .iter()
@@ -5093,10 +5105,20 @@ impl TypeChecker {
             .rev()
         {
             if actions.contains_key(&name) {
-                return deprecated.contains(&name);
+                reason = deprecated.get(&name);
+                break;
             }
         }
-        self.deprecated_actions.contains(&name)
+        let reason = reason?;
+        let mut message = format!(
+            "`{}` is marked `@deprecated` and may be removed in a future version",
+            self.interner.resolve(name)
+        );
+        if let Some(reason) = reason {
+            message.push_str(": ");
+            message.push_str(reason);
+        }
+        Some(message)
     }
 
     fn inject_this_and_parent(
@@ -5408,6 +5430,51 @@ impl TypeChecker {
                         format!("decorator `@{name}` is reserved but not implemented"),
                         dec.span,
                     );
+                }
+                if let Some(parameters) = metadata.params {
+                    for argument in &dec.args {
+                        self.infer_expr(argument.value, module);
+                    }
+                    let parameters = parameters
+                        .iter()
+                        .map(|parameter| ParamInfo {
+                            name: self.interner.intern(parameter.name),
+                            ty: self
+                                .receiver_parameter_type(&FidanType::Dynamic, parameter.type_name),
+                            certain: true,
+                            optional: parameter.optional,
+                            has_default: parameter.optional,
+                        })
+                        .collect::<Vec<_>>();
+                    let arguments = dec
+                        .args
+                        .iter()
+                        .map(|argument| CallArgInfo {
+                            name: argument.name,
+                            value: argument.value,
+                            span: argument.span,
+                        })
+                        .collect::<Vec<_>>();
+                    self.check_call_arguments(&parameters, &arguments, dec.span, module);
+                    // Compiler attributes never execute user code to obtain metadata.
+                    // A supplied message must actually be usable at compile time.
+                    if metadata.name == "deprecated" {
+                        for argument in &dec.args {
+                            if matches!(
+                                self.expr_types.get(&argument.value),
+                                Some(FidanType::String | FidanType::Dynamic | FidanType::Unknown)
+                            ) && !matches!(
+                                self.eval_const_value(argument.value, module),
+                                Some(ConstValue::String(_))
+                            ) {
+                                self.emit_error(
+                                    fidan_diagnostics::diag_code!("E0303"),
+                                    "@deprecated message must be a compile-time string",
+                                    argument.span,
+                                );
+                            }
+                        }
+                    }
                 }
                 continue;
             }

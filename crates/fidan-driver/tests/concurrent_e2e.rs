@@ -2642,6 +2642,16 @@ fn declaration_and_expression_semantics_across_aot_backends() {
                 "pure receivers passed",
             ),
             (
+                "receiver_catalog",
+                include_str!("../../../test/examples/receiver_catalog_regression.fdn"),
+                "receiver catalog passed",
+            ),
+            (
+                "compiler_attributes",
+                include_str!("../../../test/examples/compiler_attribute_regression.fdn"),
+                "compiler attributes passed",
+            ),
+            (
                 "receiver_callbacks",
                 include_str!("../../../test/examples/receiver_callbacks_regression.fdn"),
                 "receiver callbacks passed",

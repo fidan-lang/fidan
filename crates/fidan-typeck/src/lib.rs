@@ -1635,6 +1635,130 @@ var result = choose(true)
         assert!(check_errors("var empty = hashset()\nvar one = hashset([1])\nvar shared = Shared(1)\nvar weak = WeakShared(shared)").is_empty());
     }
     #[test]
+    fn receiver_catalog_covers_metadata_and_finite_method_arity_errors() {
+        use fidan_config::{
+            ReceiverBuiltinKind as Kind, receiver_member_specs, receiver_method_arity_bounds,
+        };
+        let fixture = include_str!("../../../test/examples/receiver_catalog_regression.fdn");
+        let actual = fixture
+            .lines()
+            .filter_map(|line| line.strip_prefix("# "))
+            .filter(|line| line.contains('.') && !line.contains(' '))
+            .map(str::to_owned)
+            .collect::<std::collections::HashSet<_>>();
+        let mut expected = std::collections::HashSet::new();
+        for (kind, name, value) in [
+            (Kind::Integer, "integer", "4"),
+            (Kind::Float, "float", "2.25"),
+            (Kind::String, "string", "\"é\""),
+            (Kind::List, "list", "[1]"),
+            (Kind::Dict, "dict", "{\"a\": 1}"),
+            (Kind::HashSet, "hashset", "hashset([1])"),
+            (Kind::Shared, "shared", "shared"),
+            (Kind::WeakShared, "weak_shared", "WeakShared(shared)"),
+            (Kind::Function, "function", "sample"),
+        ] {
+            let prefix = format!(
+                "action sample with (certain n oftype integer) returns integer {{return n}}\nvar shared = Shared(1)\nvar receiver = {value}\n"
+            );
+            assert!(check_errors(&prefix).is_empty(), "{prefix}");
+            for member in receiver_member_specs(kind) {
+                expected.insert(format!("{name}.{}", member.info.canonical_name));
+                if member.info.method_return.is_none() {
+                    continue;
+                }
+                let Some((_, Some(max))) =
+                    receiver_method_arity_bounds(kind, member.info.canonical_name)
+                else {
+                    continue;
+                };
+                let arguments = std::iter::repeat_n("nothing", max + 1)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let source = format!(
+                    "{prefix}receiver.{}({arguments})\n",
+                    member.info.canonical_name
+                );
+                let interner = Arc::new(SymbolInterner::new());
+                let file = SourceFile::new(FileId(0), "<receiver-arity>", source.as_str());
+                let (tokens, lexical) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+                let (module, parsed) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+                assert!(lexical.is_empty() && parsed.is_empty(), "{source}");
+                let diagnostics = typecheck(&module, interner);
+                assert!(
+                    diagnostics.iter().any(|diag| diag.code == "E0305"),
+                    "Missing arity diagnostic for {source}: {diagnostics:?}"
+                );
+            }
+        }
+        assert_eq!(
+            actual, expected,
+            "Every declared receiver requires an observable positive fixture"
+        );
+    }
+
+    #[test]
+    fn compiler_attributes_do_not_silently_discard_arguments() {
+        for source in [
+            "@precompile(42)\naction value {}",
+            "@unsafe(42)\naction value {}",
+            "@deprecated(42)\naction value {}",
+            "@deprecated(\"first\", \"second\")\naction value {}",
+            "@deprecated(missing_reason)\naction value {}",
+            "action reason returns string {return \"runtime\"}\n@deprecated(reason())\naction value {}",
+        ] {
+            assert!(
+                !check_errors(source).is_empty(),
+                "silently accepted attribute arguments: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecation_warnings_preserve_constant_reasons_and_lexical_scope() {
+        let source = r#"
+@deprecated("Use " + "replacement")
+action old {}
+action outer {
+    @deprecated(message = "Use local replacement")
+    action old {}
+    old()
+}
+old()
+outer()
+old()
+"#;
+        let interner = Arc::new(SymbolInterner::new());
+        let file = SourceFile::new(FileId(0), "<deprecation-message>", source);
+        let (tokens, lexical) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        let (module, parsed) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+        assert!(lexical.is_empty() && parsed.is_empty());
+        let diagnostics = typecheck(&module, interner);
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diag| diag.severity == Severity::Error),
+            "{diagnostics:?}"
+        );
+        let warnings = diagnostics
+            .iter()
+            .filter(|diag| diag.code == "W2005")
+            .map(|diag| diag.message.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), 3, "{diagnostics:?}");
+        assert!(
+            warnings[0].contains("Use local replacement"),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[1..]
+                .iter()
+                .all(|message| message.contains("Use replacement")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
     fn short_circuit_still_typechecks_both_operands() {
         for (expression, expected) in [
             ("false and 1", "E0203"),

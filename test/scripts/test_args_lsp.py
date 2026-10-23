@@ -131,6 +131,20 @@ class ArgsLspTests(unittest.TestCase):
         finally:
             rpc.close()
 
+    def test_compiler_attribute_contracts_and_deprecation_messages(self):
+        rpc = Rpc()
+        try:
+            rpc.initialize()
+            path = ROOT / "test/examples/decorator_semantics_regression.fdn"
+            source = '@deprecated("Use replacement")\naction old {}\nold()\n'
+            diagnostics = rpc.open(path, source)
+            self.assertFalse([item for item in diagnostics if item.get("severity", 1) == 1], diagnostics)
+            self.assertTrue(any(item.get("code") == "W2005" and "Use replacement" in item["message"] for item in diagnostics), diagnostics)
+            invalid = rpc.change(path, '@precompile(42)\naction invalid {}\n', 2)
+            self.assertTrue(any(item.get("code") == "E0305" for item in invalid), invalid)
+        finally:
+            rpc.close()
+
     def test_short_circuit_does_not_hide_rhs_diagnostics_on_change(self):
         rpc = Rpc()
         try:

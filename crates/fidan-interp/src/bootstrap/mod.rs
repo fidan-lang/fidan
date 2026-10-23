@@ -6,8 +6,6 @@
 pub mod dict_methods;
 pub mod hashset_methods;
 
-pub mod numeric_methods;
-
 use fidan_runtime::FidanValue;
 
 /// Dispatch `receiver.method(args)` to the correct bootstrap implementation.
@@ -22,14 +20,14 @@ pub fn call_bootstrap_method(
     if let Some(result) = fidan_runtime::builtins::receiver_conversion(&receiver, method) {
         return result.map(Some);
     }
+    if let Some(result) = fidan_runtime::receivers::numeric_method(&receiver, method, &args) {
+        return result.map(Some);
+    }
     Ok(match receiver {
         FidanValue::String(s) => Some(fidan_runtime::receivers::string_method(s, method, args)?),
         FidanValue::List(l) => fidan_runtime::receivers::list_method(&l, method, args)?,
         FidanValue::Dict(d) => dict_methods::dispatch(d, method, args),
         FidanValue::HashSet(s) => hashset_methods::dispatch(s, method, args),
-        v @ (FidanValue::Integer(_) | FidanValue::Float(_)) => {
-            numeric_methods::dispatch_result(v, method)?
-        }
         FidanValue::Range {
             start,
             end,

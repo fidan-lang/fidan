@@ -3532,3 +3532,25 @@ print("logical repl finished")
         "{stderr}"
     );
 }
+
+#[test]
+fn format_refuses_empty_interpolation_without_changing_bytes() {
+    for original in ["print(\"{}\")\n", "print(\"{   }\")\n"] {
+        let file = make_temp_program("format_empty_interpolation", original);
+        let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .args(["format", "--in-place"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        let after = std::fs::read_to_string(&file).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert!(
+            !output.status.success(),
+            "formatter accepted empty interpolation"
+        );
+        assert_eq!(
+            after, original,
+            "formatter must never replace invalid source with placeholder expressions"
+        );
+    }
+}

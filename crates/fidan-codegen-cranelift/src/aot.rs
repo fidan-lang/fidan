@@ -3079,7 +3079,6 @@ fn emit_container_method_call(
         (ReceiverBuiltinKind::Dict, ReceiverMethodOp::IsEmpty) => {
             let len = call_rt(module, builder, rt.dict_len, &[recv])?.unwrap_or(recv);
             let is_empty = builder.ins().icmp_imm_s(IntCC::Equal, len, 0);
-            let is_empty = builder.ins().uextend(I8, is_empty);
             return box_container_scalar_result(
                 module,
                 rt,
@@ -3167,7 +3166,6 @@ fn emit_container_method_call(
         (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::IsEmpty) => {
             let len = call_rt(module, builder, rt.len_fn, &[recv])?.unwrap_or(recv);
             let is_empty = builder.ins().icmp_imm_s(IntCC::Equal, len, 0);
-            let is_empty = builder.ins().uextend(I8, is_empty);
             return box_container_scalar_result(
                 module,
                 rt,

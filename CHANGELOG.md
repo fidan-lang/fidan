@@ -16,6 +16,11 @@ compiler releases.
   defaults, side effects and exceptions no longer execute. Explicitly sequence
   any RHS work that was intended to run unconditionally.
 
+- Enforce compiler-attribute arguments and retain constant deprecation reasons.
+- Complete native numeric receiver methods and Shared/WeakShared type fields;
+  correct Cranelift Dict/HashSet emptiness lowering.
+- Reject empty interpolation before in-place formatting can replace invalid source.
+
 - Bind saved Dal credentials to canonical registry identities and reject authenticated redirects.
 - Preserve working compiler/helper installations on failed refresh; validate install selectors
   and archive members, and serialize release publication using an OS-owned file lock.

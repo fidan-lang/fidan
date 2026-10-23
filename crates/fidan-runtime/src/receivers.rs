@@ -6,6 +6,44 @@ fn error(message: impl Into<String>) -> StdlibRuntimeError {
     StdlibRuntimeError::new(fidan_diagnostics::diag_code!("R0001"), message)
 }
 
+/// Pure fields of shared handles describe the handle, never its locked payload.
+pub fn shared_field(receiver: &FidanValue, field: &str) -> Option<FidanValue> {
+    let kind = match receiver {
+        FidanValue::Shared(_) => ReceiverBuiltinKind::Shared,
+        FidanValue::WeakShared(_) => ReceiverBuiltinKind::WeakShared,
+        _ => return None,
+    };
+    let member = infer_receiver_member(kind, field)?;
+    if member.canonical_name != "type" || member.field_return.is_none() {
+        return None;
+    }
+    Some(FidanValue::String(FidanString::new(receiver.type_name())))
+}
+
+/// Numeric receivers use the existing checked std.math implementation, not a
+/// second interpreter/native arithmetic table. The receiver is its first argument.
+pub fn numeric_method(
+    receiver: &FidanValue,
+    method: &str,
+    args: &[FidanValue],
+) -> Option<Result<FidanValue, StdlibRuntimeError>> {
+    let kind = match receiver {
+        FidanValue::Integer(_) => ReceiverBuiltinKind::Integer,
+        FidanValue::Float(_) => ReceiverBuiltinKind::Float,
+        _ => return None,
+    };
+    let method = infer_receiver_member(kind, method)?.canonical_name;
+    if !matches!(method, "abs" | "sqrt" | "floor" | "ceil" | "round") {
+        return None;
+    }
+    Some(
+        stdlib::validate_callable_arity("math", method, args.len() + 1).and_then(|()| {
+            stdlib::math::dispatch_result(method, vec![receiver.clone()])
+                .unwrap_or_else(|| Err(error(format!("no numeric implementation for `{method}`"))))
+        }),
+    )
+}
+
 pub fn string_method(
     s: FidanString,
     method: &str,
