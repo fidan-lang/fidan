@@ -729,10 +729,11 @@ mod tests {
 
     #[test]
     fn select_toolchain_release_prefers_latest_compatible_version() {
+        let compatible = format!("={}", env!("CARGO_PKG_VERSION"));
         let manifest = test_manifest_with_toolchains(vec![
             test_toolchain_release("9.9.9", "^999.0.0"),
-            test_toolchain_release("1.2.0", "^1.0.0"),
-            test_toolchain_release("1.1.0", "^1.0.0"),
+            test_toolchain_release("1.2.0", &compatible),
+            test_toolchain_release("1.1.0", &compatible),
         ]);
 
         let selected =

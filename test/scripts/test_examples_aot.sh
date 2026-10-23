@@ -219,13 +219,13 @@ while IFS= read -r file; do
     fi
 
     timeout_secs="$DEFAULT_TIMEOUT_SECONDS"
-    allow_timeout=0
+    run_args=()
     expected_failure_message=""
     stdin_flag=()
     case "$base_name" in
         parallel_benchmark.fdn)
             timeout_secs="$BENCHMARK_PROBE_SECONDS"
-            allow_timeout=1
+            run_args=("${FIDAN_BENCHMARK_WORK_ITEMS:-10000}")
             ;;
         replay_demo.fdn)
             stdin_flag=(--stdin-lines "6\\n3")
@@ -240,18 +240,13 @@ while IFS= read -r file; do
 
     set +e
     if [ "${#stdin_flag[@]}" -gt 0 ]; then
-        run_with_timeout "$timeout_secs" "$stdout" "$stderr" "${stdin_flag[@]}" "$bin"
+        run_with_timeout "$timeout_secs" "$stdout" "$stderr" "${stdin_flag[@]}" "$bin" "${run_args[@]}"
     else
-        run_with_timeout "$timeout_secs" "$stdout" "$stderr" "$bin"
+        run_with_timeout "$timeout_secs" "$stdout" "$stderr" "$bin" "${run_args[@]}"
     fi
     exit_code=$?
     set -e
 
-    if [ "$allow_timeout" -eq 1 ] && [ "$exit_code" -eq 124 ]; then
-        echo "[PASS] $rel - long-running benchmark reached timeout window"
-        PASS=$((PASS + 1))
-        continue
-    fi
     if [ "$exit_code" -eq 124 ]; then
         echo "[FAIL] $rel - timed out after ${DEFAULT_TIMEOUT_SECONDS}s"
         FAIL=$((FAIL + 1))

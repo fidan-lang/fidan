@@ -10,12 +10,18 @@
 #
 # Usage:
 #   fidan run test/examples/parallel_benchmark.fdn
+#   fidan run test/examples/parallel_benchmark.fdn -- 10000  # bounded validation
 
 use std.time
 use std.math
+use std.env
 
-var N     = 800_000_000   # total work items
-var CHUNK = N / 4         # work items per parallel task
+var work_args = env.args()
+var N = integer(work_args[0]) if len(work_args) > 0 else 800000000
+
+assert(N > 0, "Work item count must be positive")
+
+var CHUNK = N / 4  # work items per parallel task
 
 # ── Workload ──────────────────────────────────────────────────────────────────
 #
@@ -25,10 +31,12 @@ var CHUNK = N / 4         # work items per parallel task
 action compute_range with (from oftype integer, to oftype integer) returns float {
     var acc = 0.0
     var i = from
+
     while i < to {
         acc = acc + math.sqrt(i + 1)
         i = i + 1
     }
+
     return acc
 }
 
@@ -40,10 +48,11 @@ action approx_equal with (
     certain a oftype float,
     certain b oftype float,
     optional rel_tol oftype float = 0.000000000001,
-    optional abs_tol oftype float = 0.001
+    optional abs_tol oftype float = 0.001,
 ) returns boolean {
     var diff = math.abs(a - b)
     var scale = math.max(math.abs(a), math.abs(b))
+
     return diff <= abs_tol or diff <= scale * rel_tol
 }
 
@@ -51,10 +60,11 @@ action approx_equal with (
 action print_speedup with (
     certain label oftype string,
     certain baseline_ms oftype integer,
-    certain candidate_ms oftype integer
+    certain candidate_ms oftype integer,
 ) returns nothing {
     if baseline_ms > 0 and candidate_ms > 0 {
         var speedup = float(baseline_ms) / float(candidate_ms)
+
         print("{label} : {speedup}x")
     } else {
         print("{label} : n/a")
@@ -67,41 +77,53 @@ var _warmup = compute_range(0, 16)
 
 # ── Sequential baseline ───────────────────────────────────────────────────────
 print("--- Sequential (N = {N}) ---")
+
 var t0 = time.now()
 var seq_res = compute_range(0, N)
 var seq_ms = time.elapsed(t0)
+
 print("result : {seq_res}")
 print("time   : {seq_ms} ms")
 print("")
-
 # ── parallel { task } — 4 named OS-thread tasks ──────────────────────────────
 # Each task writes ONLY to its own Shared slot (no race, no shared mutation).
 print("--- parallel block (4 named tasks) ---")
+
 var r1 = Shared(0.0)
 var r2 = Shared(0.0)
 var r3 = Shared(0.0)
 var r4 = Shared(0.0)
-
 var t1 = time.now()
+
 parallel {
-    task A { r1.set(compute_range(0,         CHUNK))     }
-    task B { r2.set(compute_range(CHUNK,     CHUNK * 2)) }
-    task C { r3.set(compute_range(CHUNK * 2, CHUNK * 3)) }
-    task D { r4.set(compute_range(CHUNK * 3, N))         }
+    task A {
+        r1.set(compute_range(0, CHUNK))
+    }
+    task B {
+        r2.set(compute_range(CHUNK, CHUNK * 2))
+    }
+    task C {
+        r3.set(compute_range(CHUNK * 2, CHUNK * 3))
+    }
+    task D {
+        r4.set(compute_range(CHUNK * 3, N))
+    }
 }
+
 var ptask_res = r1.get() + r2.get() + r3.get() + r4.get()
 var ptask_ms = time.elapsed(t1)
+
 print("result : {ptask_res}")
 print("time   : {ptask_ms} ms")
 print("")
-
 # ── spawn / await — 4 deferred same-thread tasks ─────────────────────────────
 # This demonstrates structured async-style scheduling, not multicore speedup.
 # For real CPU parallelism, prefer the `parallel` block above.
 print("--- spawn / await (4 tasks) ---")
+
 var t2 = time.now()
-var h1 = spawn compute_range(0,         CHUNK)
-var h2 = spawn compute_range(CHUNK,     CHUNK * 2)
+var h1 = spawn compute_range(0, CHUNK)
+var h2 = spawn compute_range(CHUNK, CHUNK * 2)
 var h3 = spawn compute_range(CHUNK * 2, CHUNK * 3)
 var h4 = spawn compute_range(CHUNK * 3, N)
 var s1 = await h1
@@ -110,6 +132,7 @@ var s3 = await h3
 var s4 = await h4
 var spawn_res = s1 + s2 + s3 + s4
 var spawn_ms = time.elapsed(t2)
+
 print("result : {spawn_res}")
 print("time   : {spawn_ms} ms")
 print("")
@@ -120,12 +143,13 @@ var diff_spawn = math.abs(seq_res - spawn_res)
 var ok_ptask = approx_equal(seq_res, ptask_res)
 var ok_spawn = approx_equal(seq_res, spawn_res)
 
+assert(ok_ptask, "Parallel result must match sequential result")
+assert(ok_spawn, "Deferred result must match sequential result")
 print("=== Summary ===")
 print("sequential    : {seq_ms} ms")
 print("parallel task : {ptask_ms} ms  (correct={ok_ptask}, diff={diff_ptask})")
 print("spawn / await : {spawn_ms} ms  (correct={ok_spawn}, diff={diff_spawn})")
 print("")
-
 print_speedup("parallel task speedup", seq_ms, ptask_ms)
 print_speedup("spawn/await speedup  ", seq_ms, spawn_ms)
 print("(expected: `parallel` benefits from cores; `spawn/await` shows deferred task composition)")

@@ -201,9 +201,10 @@ fn assert_success(output: &Output) {
 #[test]
 fn real_cli_verifies_installs_imports_and_rejects_modified_cache() {
     let sandbox = Sandbox::new();
+    let requirement = format!("={}", env!("CARGO_PKG_VERSION"));
     let registry = Registry::new(routes(
-        package("demo", "1.0.0", Some(">=1.0.16, <2"), ""),
-        serde_json::json!({"name":"demo", "vers":"1.0.0", "yanked":false, "fidan":">=1.0.16, <2"}),
+        package("demo", "1.0.0", Some(&requirement), ""),
+        serde_json::json!({"name":"demo", "vers":"1.0.0", "yanked":false, "fidan":requirement}),
     ));
     assert_success(&add(&sandbox.0, &registry, false));
     let installed = fidan_driver::dal::package_install_dir(

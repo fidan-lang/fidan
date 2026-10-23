@@ -8,7 +8,9 @@ param(
     [string]$FidanHome,
     [string]$FidanBinary,
     [int]$DefaultTimeoutSeconds = 10,
-    [int]$BenchmarkProbeSeconds = 5
+    [int]$BenchmarkProbeSeconds = 5,
+    [ValidateRange(1, [int]::MaxValue)]
+    [int]$BenchmarkWorkItems = 10000
 )
 
 $ErrorActionPreference = "Stop"
@@ -243,14 +245,14 @@ try {
 
         $timeoutMs = $DefaultTimeoutSeconds * 1000
         $stdinLines = $null
-        $allowTimeout = $false
+        $runArguments = @()
         $expectFailure = $false
         $expectedFailureMessage = ""
 
         switch ($baseName) {
             "parallel_benchmark.fdn" {
                 $timeoutMs = $BenchmarkProbeSeconds * 1000
-                $allowTimeout = $true
+                $runArguments = @([string]$BenchmarkWorkItems)
             }
             "release_mega_1_0.fdn" {
                 $timeoutMs = [Math]::Max($timeoutMs, 30000)
@@ -266,7 +268,7 @@ try {
 
         $exitCode = Invoke-ProgramWithTimeout `
             -ExePath $bin `
-            -Arguments @() `
+            -Arguments $runArguments `
             -WorkingDirectory $repoRoot `
             -StdoutPath $stdout `
             -StderrPath $stderr `
@@ -274,11 +276,6 @@ try {
             -StdinLines $stdinLines `
             -Label "run $rel"
 
-        if ($allowTimeout -and $exitCode -eq 124) {
-            Write-Host "[PASS] $rel - long-running benchmark reached timeout window"
-            $pass += 1
-            continue
-        }
 
         if ($exitCode -eq 124) {
             Write-Host "[FAIL] $rel - timed out after $DefaultTimeoutSeconds s"

@@ -1027,12 +1027,15 @@ mod lock_contract_tests {
     fn shared_lock_fixture_preserves_integrity_and_rejects_broken_graphs() {
         let mut lock: DalLock =
             toml::from_str(include_str!("../../../test/fixtures/dal/lock-v1.toml")).unwrap();
-        normalize_lock(&mut lock).unwrap();
         assert_eq!(
             lock.packages[0].checksum.as_deref(),
             Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
         );
         assert_eq!(lock.packages[0].fidan.as_deref(), Some(">=1.0.16, <2.0.0"));
+        // Preserve the shared stable-version fixture above; graph-integrity checks
+        // below must also run when the test compiler itself is a prerelease.
+        lock.packages[0].fidan = Some(format!("={}", env!("CARGO_PKG_VERSION")));
+        normalize_lock(&mut lock).unwrap();
         lock.packages[0]
             .dependencies
             .insert("missing".into(), "^1".into());

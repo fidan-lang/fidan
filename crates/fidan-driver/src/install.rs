@@ -928,7 +928,7 @@ mod tests {
             toolchain_version: "0.0.0-test".into(),
             tool_version: "23.1.2".into(),
             host_triple: host_triple(),
-            supported_fidan_versions: "^1".into(),
+            supported_fidan_versions: format!("={}", env!("CARGO_PKG_VERSION")),
             backend_protocol_version: LLVM_BACKEND_PROTOCOL_VERSION - 1,
             helper_relpath: "helper/not-executed".into(),
             exec_commands: vec![],
