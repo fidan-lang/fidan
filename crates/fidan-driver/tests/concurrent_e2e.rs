@@ -16,9 +16,29 @@ fn temp_dir(prefix: &str) -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .expect("clock before unix epoch")
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), nonce));
+    let path = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "{prefix}_{}_{}",
+        std::process::id(),
+        nonce
+    ));
     fs::create_dir_all(&path).expect("create temp dir");
     path
+}
+
+fn remove_native_fixtures(path: &Path) {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    if let Err(error) = fs::remove_dir_all(path) {
+        // Windows can retain an executed image after the child has exited.
+        // Keep that evidence under Cargo's target/tmp, without hiding real IO errors.
+        if cfg!(windows) && error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) {
+            eprintln!(
+                "Windows still holds a test image; retained {}: {error}",
+                path.display()
+            );
+        } else {
+            panic!("remove native fixtures {}: {error}", path.display());
+        }
+    }
 }
 
 fn concurrent_source() -> &'static str {
@@ -855,7 +875,7 @@ fn shared_update_is_atomic_across_aot_backends() {
             run_compiled_binary_clean(&output, "shared update ok");
         }
     }
-    fs::remove_dir_all(sandbox).expect("remove Shared update sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -882,7 +902,7 @@ fn release_semantics_across_aot_backends() {
         );
         run_compiled_binary_clean(&output, "release semantics ok");
     }
-    fs::remove_dir_all(sandbox).expect("remove semantic sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -906,7 +926,7 @@ fn stdlib_callable_arity_across_aot_backends() {
         );
         run_compiled_binary_clean(&output, "stdlib callable arity ok");
     }
-    fs::remove_dir_all(sandbox).expect("remove stdlib arity sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -934,7 +954,7 @@ fn strength_reduction_preserves_values_and_types_across_aot_backends() {
         );
         run_compiled_binary_clean(&output, "strength reduction ok");
     }
-    fs::remove_dir_all(sandbox).expect("remove optimizer regression sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -962,7 +982,7 @@ fn integer_arithmetic_reports_consistent_errors_across_aot_backends() {
         );
         run_compiled_binary_clean(&output, "integer arithmetic ok");
     }
-    fs::remove_dir_all(sandbox).expect("remove integer regression sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -985,7 +1005,7 @@ fn string_receiver_unicode_and_bounds_across_aot_backends() {
         );
         run_compiled_binary_clean(&output, "string receivers ok");
     }
-    fs::remove_dir_all(sandbox).expect("remove string regression sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1013,7 +1033,7 @@ fn boolean_negation_is_logical_across_aot_backends() {
         );
         run_compiled_binary_clean(&output, "boolean negation ok");
     }
-    fs::remove_dir_all(sandbox).expect("remove boolean regression sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1034,7 +1054,7 @@ fn syntax_reference_parallel_results_are_deterministic() {
             run_compiled_binary_clean(&output, "All done!");
         }
     }
-    fs::remove_dir_all(sandbox).expect("remove syntax reference sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1051,7 +1071,7 @@ fn slicing_cranelift_aot_regression() {
         &output,
     );
     run_compiled_binary_clean(&output, "slicing ok");
-    fs::remove_dir_all(&sandbox).expect("remove slicing sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1072,7 +1092,7 @@ fn slicing_llvm_aot_regression() {
         &output,
     );
     run_compiled_binary_clean(&output, "slicing ok");
-    fs::remove_dir_all(&sandbox).expect("remove slicing sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1108,7 +1128,7 @@ var result = "abc"[::bad()]"#,
             run_compiled_binary_expect_failure(&output, message);
         }
     }
-    fs::remove_dir_all(&sandbox).expect("remove slicing sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1121,7 +1141,7 @@ fn concurrent_cranelift_aot_same_thread_ok() {
     };
     compile_program(concurrent_source(), Backend::Cranelift, &output);
     run_compiled_binary(&output, "200000");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1141,7 +1161,7 @@ fn concurrent_llvm_aot_same_thread_ok() {
     };
     compile_program(concurrent_source(), Backend::Llvm, &output);
     run_compiled_binary(&output, "200000");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1154,7 +1174,7 @@ fn spawn_cranelift_aot_defers_until_await() {
     };
     compile_program(spawn_source(), Backend::Cranelift, &output);
     run_compiled_binary(&output, "2");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1174,7 +1194,7 @@ fn spawn_llvm_aot_defers_until_await() {
     };
     compile_program(spawn_source(), Backend::Llvm, &output);
     run_compiled_binary(&output, "2");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1187,7 +1207,7 @@ fn weak_shared_cranelift_aot_round_trip_ok() {
     };
     compile_program(weak_shared_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "weak-ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1207,7 +1227,7 @@ fn weak_shared_llvm_aot_round_trip_ok() {
     };
     compile_program(weak_shared_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "weak-ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1220,7 +1240,7 @@ fn concurrent_cranelift_aot_scheduler_yields_across_spawn_await() {
     };
     compile_program(scheduler_source(), Backend::Cranelift, &output);
     run_compiled_binary(&output, "1234");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1240,7 +1260,7 @@ fn concurrent_llvm_aot_scheduler_yields_across_spawn_await() {
     };
     compile_program(scheduler_source(), Backend::Llvm, &output);
     run_compiled_binary(&output, "1234");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1253,7 +1273,7 @@ fn object_method_cranelift_aot_preserves_object_args() {
     };
     compile_program(object_method_source(), Backend::Cranelift, &output);
     run_compiled_binary(&output, "5");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1273,7 +1293,7 @@ fn object_method_llvm_aot_preserves_object_args() {
     };
     compile_program(object_method_source(), Backend::Llvm, &output);
     run_compiled_binary(&output, "5");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1286,7 +1306,7 @@ fn stdlib_function_values_cranelift_aot_are_callable() {
     };
     compile_program(stdlib_function_value_source(), Backend::Cranelift, &output);
     run_compiled_binary(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1306,7 +1326,7 @@ fn stdlib_function_values_llvm_aot_are_callable() {
     };
     compile_program(stdlib_function_value_source(), Backend::Llvm, &output);
     run_compiled_binary(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1319,7 +1339,7 @@ fn builtin_asserts_cranelift_aot_do_not_fall_through_to_builtin_stderr() {
     };
     compile_program(builtin_assert_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1339,7 +1359,7 @@ fn builtin_asserts_llvm_aot_do_not_crash_or_fall_through() {
     };
     compile_program(builtin_assert_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1352,7 +1372,7 @@ fn parallel_reduce_cranelift_aot_uses_initial_then_callback_order() {
     };
     compile_program(parallel_reduce_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "10");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1369,7 +1389,7 @@ fn parallel_reduce_top_level_cranelift_aot_uses_callback_as_third_arg() {
         &output,
     );
     run_compiled_binary_clean(&output, "10");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1382,7 +1402,7 @@ fn scalar_conversions_cranelift_aot_round_trip_cleanly() {
     };
     compile_program(scalar_conversion_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1395,7 +1415,7 @@ fn percent_compound_assign_cranelift_aot_round_trip_cleanly() {
     };
     compile_program(percent_assign_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1408,7 +1428,7 @@ fn time_formatting_cranelift_aot_matches_stdlib_contract() {
     };
     compile_program(time_format_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1428,7 +1448,7 @@ fn default_args_llvm_aot_fill_missing_parameters() {
     };
     compile_program(default_args_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1448,7 +1468,7 @@ fn percent_compound_assign_llvm_aot_round_trip_cleanly() {
     };
     compile_program(percent_assign_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1461,7 +1481,7 @@ fn repeated_cranelift_aot_runs_keep_dynamic_asserts_stable() {
     };
     compile_program(repeated_assert_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean_n_times(&output, "ok", 12);
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1474,7 +1494,7 @@ fn branching_input_loop_cranelift_aot_survives_invalid_then_exit() {
     };
     compile_program(branching_input_loop_source(), Backend::Cranelift, &output);
     run_compiled_binary_with_input_clean(&output, "bad\nexit\n", &["bad", "bye"]);
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1494,7 +1514,7 @@ fn branching_input_loop_llvm_aot_survives_invalid_then_exit() {
     };
     compile_program(branching_input_loop_source(), Backend::Llvm, &output);
     run_compiled_binary_with_input_clean(&output, "bad\nexit\n", &["bad", "bye"]);
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1507,7 +1527,7 @@ fn collections_helpers_cranelift_aot_match_interpreter_contract() {
     };
     compile_program(collections_helpers_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1527,7 +1547,7 @@ fn collections_helpers_llvm_aot_match_interpreter_contract() {
     };
     compile_program(collections_helpers_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1540,7 +1560,7 @@ fn hashset_cranelift_aot_matches_interpreter_contract() {
     };
     compile_program(hashset_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1560,7 +1580,7 @@ fn hashset_llvm_aot_matches_interpreter_contract() {
     };
     compile_program(hashset_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1573,7 +1593,7 @@ fn iterable_for_cranelift_aot_supports_hashsets_and_tuples() {
     };
     compile_program(iterable_loop_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1593,7 +1613,7 @@ fn iterable_for_llvm_aot_supports_hashsets_and_tuples() {
     };
     compile_program(iterable_loop_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1613,7 +1633,7 @@ fn hashset_constructor_cranelift_aot_reports_runtime_error_for_invalid_dynamic_i
         &output,
         "hashset(items) expects a list or hashset, got integer",
     );
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1636,7 +1656,7 @@ fn hashset_constructor_llvm_aot_reports_runtime_error_for_invalid_dynamic_input(
         &output,
         "hashset(items) expects a list or hashset, got integer",
     );
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1655,7 +1675,7 @@ fn json_roundtrip_cranelift_aot_preserves_typed_dict_keys_and_hashsets() {
     );
     compile_program(&source, Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1681,7 +1701,7 @@ fn json_roundtrip_llvm_aot_preserves_typed_dict_keys_and_hashsets() {
     );
     compile_program(&source, Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1696,7 +1716,7 @@ fn io_runtime_error_cranelift_aot_is_catchable() {
     let source = io_runtime_error_catch_source(&missing.display().to_string().replace('\\', "/"));
     compile_program(&source, Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "io-caught");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1718,7 +1738,7 @@ fn io_runtime_error_llvm_aot_is_catchable() {
     let source = io_runtime_error_catch_source(&missing.display().to_string().replace('\\', "/"));
     compile_program(&source, Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "io-caught");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1734,7 +1754,7 @@ fn json_runtime_error_cranelift_aot_reports_unhandled_failure() {
         json_runtime_error_unhandled_source(&missing.display().to_string().replace('\\', "/"));
     compile_program(&source, Backend::Cranelift, &output);
     run_compiled_binary_expect_failure(&output, "R3001");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1757,7 +1777,7 @@ fn json_runtime_error_llvm_aot_reports_unhandled_failure() {
         json_runtime_error_unhandled_source(&missing.display().to_string().replace('\\', "/"));
     compile_program(&source, Backend::Llvm, &output);
     run_compiled_binary_expect_failure(&output, "R3001");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1770,7 +1790,7 @@ fn tuple_literals_cranelift_aot_preserve_tuple_runtime_contract() {
     };
     compile_program(tuple_literal_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1790,7 +1810,7 @@ fn tuple_literals_llvm_aot_preserve_tuple_runtime_contract() {
     };
     compile_program(tuple_literal_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1803,7 +1823,7 @@ fn async_std_cranelift_aot_supports_pending_combinators() {
     };
     compile_program(async_std_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1823,7 +1843,7 @@ fn async_std_llvm_aot_supports_pending_combinators() {
     };
     compile_program(async_std_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1836,7 +1856,7 @@ fn raw_string_cranelift_aot_stays_literal() {
     };
     compile_program(raw_string_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1856,7 +1876,7 @@ fn raw_string_llvm_aot_stays_literal() {
     };
     compile_program(raw_string_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1869,7 +1889,7 @@ fn multiline_strings_cranelift_aot_round_trip_cleanly() {
     };
     compile_program(multiline_string_source(), Backend::Cranelift, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1889,7 +1909,7 @@ fn multiline_strings_llvm_aot_round_trip_cleanly() {
     };
     compile_program(multiline_string_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1906,7 +1926,7 @@ fn top_level_scalar_globals_cranelift_aot_round_trip_cleanly() {
         &output,
     );
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1926,7 +1946,7 @@ fn top_level_scalar_globals_llvm_aot_round_trip_cleanly() {
     };
     compile_program(top_level_scalar_globals_source(), Backend::Llvm, &output);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1948,7 +1968,7 @@ fn cranelift_aot_accepts_target_cpu_native() {
         &settings,
     );
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -1970,7 +1990,7 @@ fn cranelift_aot_accepts_target_cpu_generic() {
         &settings,
     );
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1993,7 +2013,7 @@ fn cranelift_aot_accepts_custom_target_cpu_preset() {
         &settings,
     );
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -2016,7 +2036,7 @@ fn cranelift_aot_accepts_custom_target_cpu_feature_aliases() {
         &settings,
     );
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -2041,7 +2061,7 @@ fn cranelift_aot_rejects_unknown_target_cpu_feature() {
         error.contains("target CPU feature `totally_fake_feature`"),
         "unexpected error: {error}"
     );
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -2065,7 +2085,7 @@ fn llvm_aot_accepts_target_cpu_generic() {
     };
     compile_program_with_settings(builtin_assert_source(), Backend::Llvm, &output, &settings);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -2089,7 +2109,7 @@ fn llvm_aot_accepts_target_cpu_native() {
     };
     compile_program_with_settings(builtin_assert_source(), Backend::Llvm, &output, &settings);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -2114,7 +2134,7 @@ fn llvm_aot_accepts_custom_target_cpu_spec() {
     };
     compile_program_with_settings(builtin_assert_source(), Backend::Llvm, &output, &settings);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -2141,7 +2161,7 @@ fn cranelift_aot_emit_obj_keeps_object_sidecar() {
         "expected object sidecar at `{}`",
         sidecar_object_path(&output).display()
     );
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -2170,7 +2190,7 @@ fn llvm_aot_emit_obj_keeps_object_sidecar() {
         "expected object sidecar at `{}`",
         sidecar_object_path(&output).display()
     );
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -2192,7 +2212,7 @@ fn cranelift_aot_lto_full_smoke() {
         &settings,
     );
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -2216,7 +2236,7 @@ fn llvm_aot_lto_full_smoke() {
     };
     compile_program_with_settings(builtin_assert_source(), Backend::Llvm, &output, &settings);
     run_compiled_binary_clean(&output, "ok");
-    fs::remove_dir_all(&sandbox).ok();
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -2261,7 +2281,7 @@ fn operator_builtin_parity_across_aot_backends() {
             run_compiled_binary_expect_failure(&failure, "R0001");
         }
     }
-    fs::remove_dir_all(sandbox).expect("remove operator builtin parity sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -2390,7 +2410,7 @@ print("input success ok")"#;
             &["nothingprompt>input success ok"],
         );
     }
-    fs::remove_dir_all(sandbox).expect("remove core builtin sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -2426,7 +2446,7 @@ fn optional_assertion_messages_across_aot_backends() {
             run_compiled_binary_expect_failure(&output, expected);
         }
     }
-    fs::remove_dir_all(sandbox).expect("remove assertion message sandbox");
+    remove_native_fixtures(&sandbox);
 }
 
 #[test]
@@ -2682,7 +2702,7 @@ fn declaration_and_expression_semantics_across_aot_backends() {
             run_compiled_binary_clean(&output, expected);
         }
     }
-    fs::remove_dir_all(directory).expect("remove generated semantic fixtures");
+    remove_native_fixtures(&directory);
 }
 
 #[test]
@@ -2693,7 +2713,14 @@ fn short_circuit_preserves_runtime_effects_at_native_optimization_levels() {
             eprintln!("SKIP LLVM short-circuit optimization: no compatible local helper");
             continue;
         }
-        for opt_level in [OptLevel::O0, OptLevel::O2] {
+        for opt_level in [
+            OptLevel::O0,
+            OptLevel::O1,
+            OptLevel::O2,
+            OptLevel::O3,
+            OptLevel::Os,
+            OptLevel::Oz,
+        ] {
             let output = directory.join(format!(
                 "logical-{backend:?}-{opt_level:?}{}",
                 std::env::consts::EXE_SUFFIX
@@ -2715,7 +2742,7 @@ fn short_circuit_preserves_runtime_effects_at_native_optimization_levels() {
             run_compiled_binary_clean(&output, "short circuit passed");
         }
     }
-    fs::remove_dir_all(directory).expect("remove generated logical optimization fixtures");
+    remove_native_fixtures(&directory);
 }
 
 #[test]
@@ -2733,7 +2760,7 @@ fn unhandled_object_exception_messages_across_aot_backends() {
         );
         run_compiled_binary_expect_failure(&output, "useful failure details");
     }
-    fs::remove_dir_all(directory).unwrap();
+    remove_native_fixtures(&directory);
 }
 
 #[test]
@@ -2769,5 +2796,5 @@ print("selective object methods passed")
         compile_program(source, backend, &output);
         run_compiled_binary_clean(&output, "selective object methods passed");
     }
-    fs::remove_dir_all(sandbox).unwrap();
+    remove_native_fixtures(&sandbox);
 }

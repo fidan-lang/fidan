@@ -16,6 +16,7 @@ use fidan_stdlib::{
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
 use inkwell::OptimizationLevel;
+use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::basic_block::BasicBlock as LlvmBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -4744,9 +4745,25 @@ fn optimize_module(module: &Module<'_>, machine: &TargetMachine, level: OptLevel
         OptLevel::O1 => "default<O1>",
         OptLevel::O2 => "default<O2>",
         OptLevel::O3 => "default<O3>",
-        OptLevel::Os => "default<Os>",
-        OptLevel::Oz => "default<Oz>",
+        OptLevel::Os | OptLevel::Oz => "default<O2>",
     };
+    // LLVM 23 removed default<Os/Oz>. Size policy now belongs to function
+    // attributes, which also survive bitcode emission for the full-LTO linker.
+    for (name, enabled) in [
+        ("optsize", matches!(level, OptLevel::Os | OptLevel::Oz)),
+        ("minsize", matches!(level, OptLevel::Oz)),
+    ] {
+        if enabled {
+            let attribute = module
+                .get_context()
+                .create_enum_attribute(Attribute::get_named_enum_kind_id(name), 0);
+            for function in module.get_functions() {
+                if function.get_first_basic_block().is_some() {
+                    function.add_attribute(AttributeLoc::Function, attribute);
+                }
+            }
+        }
+    }
     let options = PassBuilderOptions::create();
     module
         .run_passes(pipeline, machine, options)
@@ -4939,6 +4956,74 @@ fn literal_name(literal: &MirLit) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{merge_feature_strings, normalize_feature_string, parse_custom_cpu_spec};
+
+    #[test]
+    fn size_optimization_levels_use_llvm23_pipeline_and_function_attributes() {
+        use crate::model::OptLevel;
+        use inkwell::attributes::{Attribute, AttributeLoc};
+        use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
+
+        Target::initialize_native(&InitializationConfig::default())
+            .expect("initialize native target");
+        let triple = TargetMachine::get_default_triple();
+        let target = Target::from_triple(&triple).expect("native target");
+        let machine = target
+            .create_target_machine(
+                &triple,
+                "generic",
+                "",
+                inkwell::OptimizationLevel::Default,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .expect("native target machine");
+        for (level, optsize, minsize) in [
+            (OptLevel::O2, false, false),
+            (OptLevel::Os, true, false),
+            (OptLevel::Oz, true, true),
+        ] {
+            let context = inkwell::context::Context::create();
+            let module = context.create_module("size_policy");
+            let external = module.add_function(
+                "external_effect",
+                context.void_type().fn_type(&[], false),
+                None,
+            );
+            let function =
+                module.add_function("probe", context.i64_type().fn_type(&[], false), None);
+            let builder = context.create_builder();
+            builder.position_at_end(context.append_basic_block(function, "entry"));
+            builder
+                .build_call(external, &[], "")
+                .expect("external effect");
+            builder
+                .build_return(Some(&context.i64_type().const_int(42, false)))
+                .expect("return");
+            super::optimize_module(&module, &machine, level)
+                .expect("supported LLVM optimization pipeline");
+            module.verify().expect("optimized module remains valid");
+            let function = module.get_function("probe").expect("exported definition");
+            let external = module
+                .get_function("external_effect")
+                .expect("used declaration");
+            for (name, expected) in [("optsize", optsize), ("minsize", minsize)] {
+                let kind = Attribute::get_named_enum_kind_id(name);
+                assert_eq!(
+                    function
+                        .get_enum_attribute(AttributeLoc::Function, kind)
+                        .is_some(),
+                    expected,
+                    "{level:?}: {name}"
+                );
+                assert!(
+                    external
+                        .get_enum_attribute(AttributeLoc::Function, kind)
+                        .is_none(),
+                    "must not change external ABI declarations"
+                );
+            }
+        }
+    }
 
     #[test]
     fn emitted_bitcode_preserves_trailing_binary_bytes() {

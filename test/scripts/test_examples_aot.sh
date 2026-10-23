@@ -3,6 +3,7 @@ set -euo pipefail
 
 BACKEND="llvm"
 LTO="off"
+OPT="O2"
 RELEASE=0
 CASE=""
 FIDAN_HOME_OVERRIDE=""
@@ -19,6 +20,11 @@ while [ "$#" -gt 0 ]; do
         --lto)
             shift
             LTO="${1:?missing value for --lto}"
+            shift
+            ;;
+        --opt)
+            shift
+            OPT="${1:?missing value for --opt}"
             shift
             ;;
         --release)
@@ -66,6 +72,11 @@ case "$LTO" in
         echo "[FAIL] unsupported lto mode '$LTO' (expected: off, full)" >&2
         exit 1
         ;;
+esac
+
+case "$OPT" in
+    O0|O1|O2|O3|Os|Oz) ;;
+    *) echo "[FAIL] unsupported optimization level '$OPT'" >&2; exit 1 ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -136,6 +147,7 @@ echo " Fidan AOT Example Sweep"
 echo "========================================================"
 echo " backend: $BACKEND"
 echo " lto: $LTO"
+echo " opt: $OPT"
 [ -n "$CASE" ] && echo " case: $CASE"
 [ -n "${FIDAN_HOME:-}" ] && echo " FIDAN_HOME: $FIDAN_HOME"
 echo ""
@@ -202,7 +214,7 @@ while IFS= read -r file; do
 
     set +e
     run_with_timeout 600 "$compile_out" "$compile_err" \
-        "$FIDAN" build --backend "$BACKEND" --lto "$LTO" "$file" -o "$bin"
+        "$FIDAN" build --backend "$BACKEND" --lto "$LTO" --opt "$OPT" "$file" -o "$bin"
     compile_exit=$?
     set -e
     if [ "$compile_exit" -eq 124 ]; then

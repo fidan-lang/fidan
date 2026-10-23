@@ -3,6 +3,8 @@ param(
     [string]$Backend = "llvm",
     [ValidateSet("off", "full")]
     [string]$Lto = "off",
+    [ValidateSet("O0", "O1", "O2", "O3", "Os", "Oz")]
+    [string]$Opt = "O2",
     [switch]$Release,
     [string]$Case,
     [string]$FidanHome,
@@ -130,6 +132,7 @@ Write-Host " Fidan AOT Example Sweep"
 Write-Host "========================================================"
 Write-Host " backend: $Backend"
 Write-Host " lto: $Lto"
+Write-Host " opt: $Opt"
 if ($Case) { Write-Host " case: $Case" }
 if ($env:FIDAN_HOME) { Write-Host " FIDAN_HOME: $env:FIDAN_HOME" }
 Write-Host ""
@@ -204,7 +207,7 @@ try {
 
         $compileExit = Invoke-ProgramWithTimeout `
             -ExePath $fidan `
-            -Arguments @("build", "--backend", $Backend, "--lto", $Lto, $file.FullName, "-o", $bin) `
+            -Arguments @("build", "--backend", $Backend, "--lto", $Lto, "--opt", $Opt, $file.FullName, "-o", $bin) `
             -WorkingDirectory $repoRoot `
             -StdoutPath $compileOut `
             -StderrPath $compileErr `

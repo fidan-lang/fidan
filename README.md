@@ -1016,6 +1016,12 @@ Dal package preflight validation happens locally before archive creation or uplo
 | `--linker <path-or-name>` | Override the linker used for AOT output |
 | `--emit tokens\|ast\|hir\|mir\|obj` | Dump intermediate representation or object output |
 
+Optimization labels are backend-specific, not a guarantee that O3 runs faster
+than O2. LLVM O3 enables more aggressive transformations; Os/Oz use LLVM 23's O2
+pipeline with `optsize`/`minsize` function attributes. Cranelift maps O0 to `none`,
+O1/O2 to `speed`, and O3/Os/Oz to `speed_and_size`. Measure the workload and code
+size before choosing a performance preset.
+
 AOT compilation currently targets the host operating system and architecture.
 `--target-cpu` changes CPU tuning/features within that host target; it is not an
 OS/architecture cross-compilation option. Windows-to-Linux builds would also need
