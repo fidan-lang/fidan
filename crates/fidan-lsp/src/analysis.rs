@@ -76,12 +76,14 @@ pub struct ReceiverChainMethodCallSite {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileImport {
+    pub re_export: bool,
     pub path: String,
     pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserModuleImport {
+    pub re_export: bool,
     pub path: Vec<String>,
     pub alias: Option<String>,
     pub grouped: bool,
@@ -319,7 +321,13 @@ fn extract_imports(module: &Module, interner: &SymbolInterner) -> Vec<FileImport
         .items
         .iter()
         .filter_map(|&iid| {
-            if let Item::Use { path, alias, .. } = module.arena.get_item(iid) {
+            if let Item::Use {
+                path,
+                alias,
+                re_export,
+                ..
+            } = module.arena.get_item(iid)
+            {
                 if path.len() != 1 {
                     return None;
                 }
@@ -333,6 +341,7 @@ fn extract_imports(module: &Module, interner: &SymbolInterner) -> Vec<FileImport
                     return None;
                 }
                 Some(FileImport {
+                    re_export: *re_export,
                     path: path_str,
                     alias: alias.map(|a| interner.resolve(a).to_string()),
                 })
@@ -357,6 +366,7 @@ fn extract_user_module_imports(
                 path,
                 alias,
                 grouped,
+                re_export,
                 ..
             } = module.arena.get_item(iid)
             {
@@ -373,6 +383,7 @@ fn extract_user_module_imports(
                     return None;
                 }
                 Some(UserModuleImport {
+                    re_export: *re_export,
                     path: path
                         .iter()
                         .map(|sym| interner.resolve(*sym).to_string())
@@ -2910,10 +2921,12 @@ use "./utils_lib.fdn" as lib
             result.imports,
             vec![
                 FileImport {
+                    re_export: false,
                     path: "./utils.fdn".to_string(),
                     alias: None,
                 },
                 FileImport {
+                    re_export: false,
                     path: "./utils_lib.fdn".to_string(),
                     alias: Some("lib".to_string()),
                 },
@@ -2933,16 +2946,19 @@ use nested.tools as tools
             result.user_module_imports,
             vec![
                 UserModuleImport {
+                    re_export: false,
                     path: vec!["utils_lib".to_string()],
                     alias: None,
                     grouped: false,
                 },
                 UserModuleImport {
+                    re_export: false,
                     path: vec!["utils_flat".to_string(), "sub_ints".to_string()],
                     alias: None,
                     grouped: true,
                 },
                 UserModuleImport {
+                    re_export: false,
                     path: vec!["nested".to_string(), "tools".to_string()],
                     alias: Some("tools".to_string()),
                     grouped: false,

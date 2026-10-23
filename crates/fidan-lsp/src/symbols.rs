@@ -17,6 +17,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymKind {
+    Module,
     Action,
     Object,
     Enum,

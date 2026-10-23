@@ -2,7 +2,11 @@
 
 use crate::convert::offset_to_lsp_pos;
 use crate::{
-    analysis, convert, document::Document, semantic, store::DocumentStore, symbols::SymKind,
+    analysis, convert,
+    document::{Document, ReExport},
+    semantic,
+    store::DocumentStore,
+    symbols::SymKind,
     symbols::SymbolEntry,
 };
 use fidan_config::{
@@ -396,6 +400,7 @@ impl FidanLsp {
                 imports: resolved_imports.namespace_imports.clone(),
                 direct_imports: resolved_imports.direct_imports.clone(),
                 wildcard_imports: resolved_imports.wildcard_imports.clone(),
+                re_exports: resolved_imports.re_exports.clone(),
                 stdlib_imports: stdlib_import_map,
                 stdlib_direct_imports: stdlib_direct_import_map,
                 stdlib_call_sites: result.stdlib_call_sites,
@@ -455,6 +460,7 @@ impl FidanLsp {
                         imports: background_imports.namespace_imports,
                         direct_imports: background_imports.direct_imports,
                         wildcard_imports: background_imports.wildcard_imports,
+                        re_exports: background_imports.re_exports,
                         stdlib_imports: background_stdlib_imports,
                         stdlib_direct_imports: background_stdlib_direct_imports,
                         stdlib_call_sites: r.stdlib_call_sites,
@@ -1000,6 +1006,7 @@ fn specialize_builtin_member_entry(
 }
 
 struct ResolvedImports {
+    re_exports: Vec<ReExport>,
     namespace_imports: HashMap<String, Url>,
     direct_imports: HashMap<String, (Url, String)>,
     wildcard_imports: Vec<Url>,
@@ -1013,14 +1020,24 @@ fn resolve_document_imports(
     let mut namespace_imports = HashMap::new();
     let mut direct_imports = HashMap::new();
     let mut wildcard_imports = Vec::new();
+    let mut re_exports = Vec::new();
 
     for import in file_imports {
         let Some(url) = resolve_file_import_url(current_path, &import.path) else {
             continue;
         };
         if let Some(alias) = &import.alias {
+            if import.re_export {
+                re_exports.push(ReExport::Namespace {
+                    source: url.clone(),
+                    binding: alias.clone(),
+                });
+            }
             namespace_imports.insert(alias.clone(), url);
         } else {
+            if import.re_export {
+                re_exports.push(ReExport::Wildcard(url.clone()));
+            }
             wildcard_imports.push(url);
         }
     }
@@ -1034,16 +1051,31 @@ fn resolve_document_imports(
             let Some(target) = import.path.last().cloned() else {
                 continue;
             };
-            direct_imports.insert(target.clone(), (url, target));
+            let binding = import.alias.clone().unwrap_or_else(|| target.clone());
+            if import.re_export {
+                re_exports.push(ReExport::Named {
+                    source: url.clone(),
+                    original: target.clone(),
+                    binding: binding.clone(),
+                });
+            }
+            direct_imports.insert(binding, (url, target));
         } else {
             let Some(binding) = import.alias.clone().or_else(|| import.path.last().cloned()) else {
                 continue;
             };
+            if import.re_export {
+                re_exports.push(ReExport::Namespace {
+                    source: url.clone(),
+                    binding: binding.clone(),
+                });
+            }
             namespace_imports.insert(binding, url);
         }
     }
 
     ResolvedImports {
+        re_exports,
         namespace_imports,
         direct_imports,
         wildcard_imports,
@@ -1142,6 +1174,7 @@ fn load_background_document(store: &DocumentStore, url: &Url) -> Option<()> {
             imports: resolved_imports.namespace_imports,
             direct_imports: resolved_imports.direct_imports,
             wildcard_imports: resolved_imports.wildcard_imports,
+            re_exports: resolved_imports.re_exports,
             stdlib_imports: analysis.stdlib_imports.into_iter().collect(),
             stdlib_direct_imports: analysis
                 .stdlib_direct_imports
@@ -1156,10 +1189,84 @@ fn load_background_document(store: &DocumentStore, url: &Url) -> Option<()> {
     Some(())
 }
 
+fn action_signature(
+    name: &str,
+    param_types: &[String],
+    detail: &str,
+    active_param: u32,
+) -> (String, Vec<ParameterInformation>, u32) {
+    let params = param_types
+        .iter()
+        .enumerate()
+        .map(|(index, ty)| ParameterInformation {
+            label: ParameterLabel::Simple(
+                extract_param_label_from_detail(detail, index)
+                    .unwrap_or_else(|| format!("param{} -> {}", index + 1, ty)),
+            ),
+            documentation: None,
+        })
+        .collect();
+    (build_signature_label(name, detail), params, active_param)
+}
+
+fn namespace_entry(name: &str) -> SymbolEntry {
+    SymbolEntry {
+        kind: SymKind::Module,
+        span: Span::default(),
+        detail: format!("```fidan\nmodule {name}\n```"),
+        ty_name: None,
+        parent_type_name: None,
+        param_types: vec![],
+        param_required: vec![],
+        return_type: None,
+        param_names: vec![],
+        is_param: false,
+    }
+}
+
+fn exported_symbol(store: &DocumentStore, url: &Url, name: &str) -> Option<(Url, SymbolEntry)> {
+    let mut pending = vec![(url.clone(), name.to_owned())];
+    let mut visited = HashSet::new();
+    while let Some((url, name)) = pending.pop() {
+        if !visited.insert((url.clone(), name.clone()))
+            || load_background_document(store, &url).is_none()
+        {
+            continue;
+        }
+        let (entry, forwards) = {
+            let doc = store.get(&url)?;
+            let entry = doc
+                .symbol_table
+                .get(&name)
+                .filter(|entry| !span_starts_import_statement(&doc.text, entry.span))
+                .cloned();
+            (entry, doc.re_exports.clone())
+        };
+        if let Some(entry) = entry {
+            return Some((url, entry));
+        }
+        for forward in forwards.into_iter().rev() {
+            match forward {
+                ReExport::Wildcard(source) => pending.push((source, name.clone())),
+                ReExport::Named {
+                    source,
+                    original,
+                    binding,
+                } if binding == name => pending.push((source, original)),
+                ReExport::Namespace { source, binding } if binding == name => {
+                    // A namespace reference opens the actual exported module.
+                    load_background_document(store, &source)?;
+                    return Some((source, namespace_entry(&binding)));
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 fn import_doc_entry(store: &DocumentStore, url: &Url, name: &str) -> Option<SymbolEntry> {
-    load_background_document(store, url)?;
-    let doc = store.get(url)?;
-    doc.symbol_table.get(name).cloned()
+    exported_symbol(store, url, name).map(|(_, entry)| entry)
 }
 
 enum ImportBindingDefinition {
@@ -1232,11 +1339,67 @@ fn wildcard_import_entry(
     name: &str,
 ) -> Option<(Url, SymbolEntry)> {
     for url in wildcard_imports {
-        if let Some(entry) = import_doc_entry(store, url, name) {
-            return Some((url.clone(), entry));
+        if let Some(found) = exported_symbol(store, url, name) {
+            return Some(found);
         }
     }
     None
+}
+
+fn exported_entries(store: &DocumentStore, root: &Url) -> Vec<(String, SymbolEntry)> {
+    let mut pending = std::collections::VecDeque::from([root.clone()]);
+    let mut visited = HashSet::new();
+    let mut names = HashSet::new();
+    let mut result = Vec::new();
+    while let Some(url) = pending.pop_front() {
+        if !visited.insert(url.clone()) || load_background_document(store, &url).is_none() {
+            continue;
+        }
+        let (entries, forwards) = {
+            let Some(doc) = store.get(&url) else {
+                continue;
+            };
+            let entries = doc
+                .symbol_table
+                .all()
+                .filter(|(name, entry)| {
+                    !name.contains('.')
+                        && !entry.is_param
+                        && !span_starts_import_statement(&doc.text, entry.span)
+                })
+                .map(|(name, entry)| (name.clone(), entry.clone()))
+                .collect::<Vec<_>>();
+            (entries, doc.re_exports.clone())
+        };
+        for (name, entry) in entries {
+            if names.insert(name.clone()) {
+                result.push((name, entry));
+            }
+        }
+        for forward in forwards {
+            match forward {
+                ReExport::Wildcard(source) => pending.push_back(source),
+                ReExport::Named {
+                    source,
+                    original,
+                    binding,
+                } => {
+                    if !names.contains(&binding)
+                        && let Some((_, entry)) = exported_symbol(store, &source, &original)
+                    {
+                        names.insert(binding.clone());
+                        result.push((binding, entry));
+                    }
+                }
+                ReExport::Namespace { binding, .. } => {
+                    if names.insert(binding.clone()) {
+                        result.push((binding.clone(), namespace_entry(&binding)));
+                    }
+                }
+            }
+        }
+    }
+    result
 }
 
 fn wildcard_import_completion_items(
@@ -1246,7 +1409,7 @@ fn wildcard_import_completion_items(
     let mut seen = HashSet::new();
     let mut items = Vec::new();
     for url in wildcard_imports {
-        for (name, entry) in store.get_doc_top_level(url) {
+        for (name, entry) in exported_entries(store, url) {
             if seen.insert(name.clone()) {
                 items.push(completion_item_for_symbol(&name, &entry, "3"));
             }
@@ -2193,13 +2356,14 @@ impl LanguageServer for FidanLsp {
                 }
             }
             HoverLookup::ImportDoc(url, name) => {
-                // Look up the symbol directly in the imported document.
-                match self.store.get(&url) {
-                    Some(d) => match d.symbol_table.get(&name) {
-                        Some(e) => append_doc_comment_to_hover(e.detail.clone(), &d.text, e.span),
-                        None => return Ok(None),
-                    },
-                    None => return Ok(None),
+                let Some((origin, entry)) = exported_symbol(&self.store, &url, &name) else {
+                    return Ok(None);
+                };
+                match self.store.get(&origin) {
+                    Some(doc) => {
+                        append_doc_comment_to_hover(entry.detail.clone(), &doc.text, entry.span)
+                    }
+                    None => entry.detail,
                 }
             }
             HoverLookup::WildcardImport(urls, name) => {
@@ -2391,11 +2555,10 @@ impl LanguageServer for FidanLsp {
                 }
             }
             DefinitionLookup::ImportDoc(url, name) => {
-                let span = match import_doc_entry(&self.store, &url, &name) {
-                    Some(entry) => entry.span,
+                match exported_symbol(&self.store, &url, &name) {
+                    Some((origin, entry)) => (origin, entry.span),
                     None => return Ok(None),
-                };
-                (url, span)
+                }
             }
             DefinitionLookup::WildcardImport(urls, name) => {
                 match wildcard_import_entry(&self.store, &urls, &name) {
@@ -3002,7 +3165,7 @@ impl LanguageServer for FidanLsp {
                     return Ok(Some(CompletionResponse::Array(items)));
                 }
                 DotResolution::ModuleAlias(url) => {
-                    let syms = self.store.get_doc_top_level(&url);
+                    let syms = exported_entries(&self.store, &url);
                     let items: Vec<CompletionItem> = syms
                         .into_iter()
                         .filter(|(name, _)| {
@@ -3014,6 +3177,7 @@ impl LanguageServer for FidanLsp {
                                 SymKind::Object => CompletionItemKind::CLASS,
                                 SymKind::Enum => CompletionItemKind::ENUM,
                                 SymKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
+                                SymKind::Module => CompletionItemKind::MODULE,
                                 SymKind::Variable { .. } => CompletionItemKind::VARIABLE,
                                 SymKind::Field => CompletionItemKind::FIELD,
                             });
@@ -3158,6 +3322,11 @@ impl LanguageServer for FidanLsp {
                 method_name: String,
                 active_param: u32,
             },
+            Imported {
+                fn_name: String,
+                targets: Vec<(Url, String)>,
+                active_param: u32,
+            },
             NotFound,
         }
 
@@ -3271,7 +3440,9 @@ impl LanguageServer for FidanLsp {
                     });
 
                 if let Some(entry) = local_entry {
-                    if entry.param_types.is_empty() {
+                    if entry.param_types.is_empty()
+                        && !matches!(entry.kind, SymKind::Action | SymKind::Method)
+                    {
                         SignatureLookup::NotFound
                     } else {
                         SignatureLookup::Found {
@@ -3282,27 +3453,45 @@ impl LanguageServer for FidanLsp {
                         }
                     }
                 } else if fn_start > 0 && src.get(fn_start.saturating_sub(1)) == Some(&b'.') {
-                    // Cross-doc: identify receiver type.
-                    let recv_ty = doc
+                    let receiver = doc
                         .identifier_spans
                         .iter()
                         .rev()
                         .find(|(span, _)| (span.end as usize) < fn_start)
-                        .and_then(|(_, rn)| {
-                            doc.symbol_table
-                                .get(rn.as_str())
-                                .and_then(|e| e.ty_name.clone())
-                        });
-                    match recv_ty {
-                        Some(ty) => SignatureLookup::CrossDoc {
-                            recv_ty: ty,
-                            method_name: fn_name,
+                        .map(|(_, name)| name);
+                    if let Some(url) = receiver.and_then(|name| doc.imports.get(name)) {
+                        SignatureLookup::Imported {
+                            targets: vec![(url.clone(), fn_name.clone())],
+                            fn_name,
                             active_param,
-                        },
-                        None => SignatureLookup::NotFound,
+                        }
+                    } else {
+                        let recv_ty = receiver
+                            .and_then(|name| doc.symbol_table.get(name))
+                            .and_then(|entry| entry.ty_name.clone());
+                        match recv_ty {
+                            Some(recv_ty) => SignatureLookup::CrossDoc {
+                                recv_ty,
+                                method_name: fn_name,
+                                active_param,
+                            },
+                            None => SignatureLookup::NotFound,
+                        }
                     }
                 } else {
-                    SignatureLookup::NotFound
+                    let targets = if let Some(target) = doc.direct_imports.get(&fn_name) {
+                        vec![target.clone()]
+                    } else {
+                        doc.wildcard_imports
+                            .iter()
+                            .map(|url| (url.clone(), fn_name.clone()))
+                            .collect()
+                    };
+                    SignatureLookup::Imported {
+                        fn_name,
+                        targets,
+                        active_param,
+                    }
                 }
             }
             // doc dropped here
@@ -3315,25 +3504,7 @@ impl LanguageServer for FidanLsp {
                 param_types,
                 detail,
                 active_param,
-            } => {
-                let sig_params: Vec<ParameterInformation> = param_types
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, ty)| {
-                        let label = extract_param_label_from_detail(&detail, idx)
-                            .unwrap_or_else(|| format!("param{} -> {}", idx + 1, ty));
-                        ParameterInformation {
-                            label: ParameterLabel::Simple(label),
-                            documentation: None,
-                        }
-                    })
-                    .collect();
-                (
-                    build_signature_label(&fn_name, &detail),
-                    sig_params,
-                    active_param,
-                )
-            }
+            } => action_signature(&fn_name, &param_types, &detail, active_param),
             SignatureLookup::Stdlib {
                 detail,
                 param_labels,
@@ -3357,28 +3528,37 @@ impl LanguageServer for FidanLsp {
                 method_name,
                 active_param,
             } => match self.resolve_member_cross_doc(&recv_ty, &method_name) {
-                Some((_, entry)) if !entry.param_types.is_empty() => {
-                    let sig_params: Vec<ParameterInformation> = entry
-                        .param_types
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, ty)| {
-                            let label = extract_param_label_from_detail(&entry.detail, idx)
-                                .unwrap_or_else(|| format!("param{} -> {}", idx + 1, ty));
-                            ParameterInformation {
-                                label: ParameterLabel::Simple(label),
-                                documentation: None,
-                            }
-                        })
-                        .collect();
-                    (
-                        build_signature_label(&method_name, &entry.detail),
-                        sig_params,
+                Some((_, entry))
+                    if !entry.param_types.is_empty()
+                        || matches!(entry.kind, SymKind::Action | SymKind::Method) =>
+                {
+                    action_signature(
+                        &method_name,
+                        &entry.param_types,
+                        &entry.detail,
                         active_param,
                     )
                 }
                 _ => return Ok(None),
             },
+            SignatureLookup::Imported {
+                fn_name,
+                targets,
+                active_param,
+            } => {
+                let found = targets
+                    .into_iter()
+                    .find_map(|(url, name)| exported_symbol(&self.store, &url, &name));
+                let Some((_, entry)) = found else {
+                    return Ok(None);
+                };
+                if entry.param_types.is_empty()
+                    && !matches!(entry.kind, SymKind::Action | SymKind::Method)
+                {
+                    return Ok(None);
+                }
+                action_signature(&fn_name, &entry.param_types, &entry.detail, active_param)
+            }
             SignatureLookup::NotFound => return Ok(None),
         };
         Ok(Some(SignatureHelp {
@@ -3787,23 +3967,21 @@ impl LanguageServer for FidanLsp {
     ) -> RpcResult<Option<Vec<TextEdit>>> {
         let uri = &params.text_document.uri;
 
-        let doc = match self.store.get(uri) {
-            Some(d) => d,
-            None => return Ok(None),
-        };
-
-        // Never format while there are errors — the formatter may produce
-        // `<error>` placeholder tokens that corrupt the document.
-        let has_errors = doc
-            .diagnostics
-            .iter()
-            .any(|d| d.severity == Some(DiagnosticSeverity::ERROR));
-        if has_errors {
-            return Ok(None);
-        }
-
-        let text = doc.text.clone();
-        drop(doc);
+        let text = {
+            let doc = match self.store.get(uri) {
+                Some(doc) => doc,
+                None => return Ok(None),
+            };
+            // Never format erroneous syntax into placeholder tokens.
+            if doc
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Some(DiagnosticSeverity::ERROR))
+            {
+                return Ok(None);
+            }
+            doc.text.clone()
+        }; // No document lock crosses the diagnostic log await below.
 
         let editor_defaults = self
             .editor_format_defaults
@@ -4440,6 +4618,7 @@ fn completion_item_for_symbol(name: &str, entry: &SymbolEntry, sort_group: &str)
         SymKind::Object => CompletionItemKind::CLASS,
         SymKind::Enum => CompletionItemKind::ENUM,
         SymKind::EnumVariant => CompletionItemKind::ENUM_MEMBER,
+        SymKind::Module => CompletionItemKind::MODULE,
         SymKind::Variable { .. } => CompletionItemKind::VARIABLE,
         SymKind::Field => CompletionItemKind::FIELD,
     });
@@ -4531,12 +4710,152 @@ mod tests {
             imports: HashMap::new(),
             direct_imports: HashMap::new(),
             wildcard_imports: vec![],
+            re_exports: vec![],
             stdlib_imports: HashMap::new(),
             stdlib_direct_imports: HashMap::new(),
             stdlib_call_sites: analysis.stdlib_call_sites,
             inlay_hint_sites: vec![],
             member_access_sites: analysis.member_access_sites,
         }
+    }
+
+    #[test]
+    fn reexport_lookup_keeps_definition_origin_and_private_imports_hidden() {
+        let directory = temp_test_dir("reexport-origin");
+        std::fs::write(
+            directory.join("leaf.fdn"),
+            "action visible {}\naction secret {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            directory.join("middle.fdn"),
+            "export use leaf.{visible}\nuse leaf.{secret}\n",
+        )
+        .unwrap();
+        std::fs::write(directory.join("init.fdn"), "export use \"./middle.fdn\"\n").unwrap();
+        let root = Url::from_file_path(directory.join("init.fdn")).unwrap();
+        let leaf = Url::from_file_path(directory.join("leaf.fdn")).unwrap();
+        let store = DocumentStore::new();
+        let (origin, entry) = wildcard_import_entry(&store, std::slice::from_ref(&root), "visible")
+            .expect("exported action must resolve through the complete export chain");
+        assert_eq!(origin, leaf);
+        assert!(matches!(entry.kind, SymKind::Action));
+        assert!(wildcard_import_entry(&store, std::slice::from_ref(&root), "secret").is_none());
+        let completions = wildcard_import_completion_items(&store, &[root]);
+        assert!(completions.iter().any(|item| item.label == "visible"));
+        assert!(!completions.iter().any(|item| item.label == "secret"));
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn signature_help_resolves_imports_reexports_and_zero_parameter_actions() {
+        let directory = temp_test_dir("import-signatures");
+        std::fs::write(
+            directory.join("leaf.fdn"),
+            "action work with (certain count oftype integer) returns integer { return count }\n",
+        )
+        .unwrap();
+        std::fs::write(directory.join("init.fdn"), "export use \"./leaf.fdn\"\n").unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (service, _socket) = LspService::new(FidanLsp::new);
+            let backend = service.inner();
+            for (index, source, name, count) in [
+                (0, "use \"./init.fdn\"\nvar value = work(2)\n", "work", 1),
+                (1, "use leaf.{work}\nvar value = work(2)\n", "work", 1),
+                (
+                    2,
+                    "use \"./init.fdn\" as lib\nvar value = lib.work(2)\n",
+                    "work",
+                    1,
+                ),
+                (3, "action empty {}\nempty()\n", "empty", 0),
+            ] {
+                let uri = Url::from_file_path(directory.join(format!("main-{index}.fdn"))).unwrap();
+                backend.refresh(&uri, 1, source).await;
+                let offset = source.rfind(&format!("{name}(")).unwrap() + name.len() + 1;
+                let file = SourceFile::new(FileId(0), uri.as_str(), source);
+                let result = LanguageServer::signature_help(
+                    backend,
+                    SignatureHelpParams {
+                        text_document_position_params: TextDocumentPositionParams {
+                            text_document: TextDocumentIdentifier { uri },
+                            position: convert::offset_to_lsp_pos(&file, offset as u32),
+                        },
+                        work_done_progress_params: Default::default(),
+                        context: None,
+                    },
+                )
+                .await
+                .unwrap()
+                .expect("action signature must resolve");
+                assert!(result.signatures[0].label.contains(name));
+                assert_eq!(
+                    result.signatures[0].parameters.as_ref().unwrap().len(),
+                    count
+                );
+            }
+        });
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn editor_file_uri_aliases_keep_unsaved_dependency_identity() {
+        let directory = temp_test_dir("editor-uri-identity");
+        let dependency = directory.join("dependency.fdn");
+        std::fs::write(&dependency, "action dependency {}\n").unwrap();
+        let disk_uri = Url::from_file_path(&dependency).unwrap();
+        let path = disk_uri.path();
+        let editor_uri = Url::parse(&format!(
+            "file:///{}%3A{}",
+            (path.as_bytes()[1] as char).to_ascii_lowercase(),
+            &path[3..]
+        ))
+        .unwrap();
+        let store = DocumentStore::new();
+        let mut dependency_doc = background_doc(&editor_uri, "action unsaved_dependency {}\n");
+        dependency_doc.version = 1;
+        store.insert(editor_uri.clone(), dependency_doc);
+        let main_uri = Url::from_file_path(directory.join("main.fdn")).unwrap();
+        let mut main_doc = background_doc(&main_uri, "use dependency\n");
+        main_doc.version = 1;
+        main_doc
+            .imports
+            .insert("dependency".into(), disk_uri.clone());
+        store.insert(main_uri.clone(), main_doc);
+        assert_eq!(
+            store
+                .get(&disk_uri)
+                .expect("editor and filesystem URI must identify one document")
+                .version,
+            1
+        );
+        let affected = store.dependent_documents(&editor_uri);
+        assert!(affected.iter().any(|(uri, _, _)| uri == &main_uri));
+        assert!(
+            store
+                .get(&disk_uri)
+                .unwrap()
+                .text
+                .contains("unsaved_dependency")
+        );
+        store.insert(
+            disk_uri.clone(),
+            background_doc(&disk_uri, "action stale_disk {}\n"),
+        );
+        assert!(
+            store
+                .get(&disk_uri)
+                .unwrap()
+                .text
+                .contains("unsaved_dependency")
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -4699,6 +5018,7 @@ action greet with (certain name oftype string) returns string {
             imports: HashMap::new(),
             direct_imports: HashMap::new(),
             wildcard_imports: vec![],
+            re_exports: vec![],
             stdlib_imports: HashMap::new(),
             stdlib_direct_imports: HashMap::new(),
             stdlib_call_sites: analysis.stdlib_call_sites,
@@ -4806,6 +5126,7 @@ action greet with (certain name oftype string) returns string {
                     (import_uri.clone(), "StorageManager".to_string()),
                 )]),
                 wildcard_imports: vec![],
+                re_exports: vec![],
                 stdlib_imports: HashMap::new(),
                 stdlib_direct_imports: HashMap::new(),
                 stdlib_call_sites: analysis.stdlib_call_sites.clone(),
@@ -4872,6 +5193,7 @@ action greet with (certain name oftype string) returns string {
                     imports: HashMap::new(),
                     direct_imports: HashMap::new(),
                     wildcard_imports: vec![],
+                    re_exports: vec![],
                     stdlib_imports: HashMap::new(),
                     stdlib_direct_imports: HashMap::new(),
                     stdlib_call_sites: analysis.stdlib_call_sites,
@@ -4929,6 +5251,7 @@ action greet with (certain name oftype string) returns string {
                     imports: HashMap::new(),
                     direct_imports: HashMap::new(),
                     wildcard_imports: vec![],
+                    re_exports: vec![],
                     stdlib_imports: HashMap::new(),
                     stdlib_direct_imports: HashMap::new(),
                     stdlib_call_sites: analysis.stdlib_call_sites,
@@ -6549,6 +6872,7 @@ Holder.compass.
                 imports: HashMap::from([("storage_mod".to_string(), storage_uri.clone())]),
                 direct_imports: HashMap::new(),
                 wildcard_imports: vec![],
+                re_exports: vec![],
                 stdlib_imports: HashMap::new(),
                 stdlib_direct_imports: HashMap::new(),
                 stdlib_call_sites: analysis.stdlib_call_sites.clone(),
@@ -6715,6 +7039,7 @@ Holder.compass.
                 imports: HashMap::from([("storage_mod".to_string(), storage_uri.clone())]),
                 direct_imports: HashMap::new(),
                 wildcard_imports: vec![],
+                re_exports: vec![],
                 stdlib_imports: HashMap::new(),
                 stdlib_direct_imports: HashMap::new(),
                 stdlib_call_sites: analysis.stdlib_call_sites.clone(),
@@ -6795,6 +7120,7 @@ Holder.compass.
                 imports: HashMap::from([("storage_mod".to_string(), storage_uri.clone())]),
                 direct_imports: HashMap::new(),
                 wildcard_imports: vec![],
+                re_exports: vec![],
                 stdlib_imports: HashMap::new(),
                 stdlib_direct_imports: HashMap::new(),
                 stdlib_call_sites: analysis.stdlib_call_sites.clone(),
@@ -6873,6 +7199,7 @@ Holder.compass.
                 imports: HashMap::from([("storage_mod".to_string(), storage_uri.clone())]),
                 direct_imports: HashMap::new(),
                 wildcard_imports: vec![],
+                re_exports: vec![],
                 stdlib_imports: HashMap::new(),
                 stdlib_direct_imports: HashMap::new(),
                 stdlib_call_sites: analysis.stdlib_call_sites.clone(),
