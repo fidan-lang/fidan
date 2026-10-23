@@ -1,0 +1,38 @@
+var effects = []
+
+action mark with (certain text oftype string) returns string {
+    effects.append(text)
+    return text
+}
+
+action combine with (certain left oftype string, certain right oftype string) returns string {
+    return left + right
+}
+
+assert_eq(combine(right = mark("right"), left = mark("left")), "leftright")
+assert_eq(effects, ["right", "left"])
+effects = []
+
+action fallback returns integer {
+    effects.append("fallback")
+    return 99
+}
+
+assert_eq(7 ?? fallback(), 7)
+assert_eq(effects, [])
+assert_eq(nothing ?? fallback(), 99)
+assert_eq(effects, ["fallback"])
+
+action no_value with (certain enabled oftype boolean) {
+    if enabled {
+        effects.append("true")
+    } else {
+        effects.append("false")
+    }
+}
+
+var result = no_value(true)
+
+assert_eq(result, nothing)
+assert_eq(type(result), "nothing")
+print("evaluation order passed")

@@ -137,8 +137,6 @@ pub struct HirFunction {
     pub precompile: bool,
     /// Built-in foreign-function metadata for `@extern`.
     pub extern_decl: Option<HirExternDecl>,
-    /// User-defined (custom) decorators applied to this function.
-    pub custom_decorators: Vec<CustomDecorator>,
     pub span: Span,
 }
 
@@ -154,27 +152,6 @@ pub struct HirExternDecl {
     pub symbol: String,
     pub link: Option<String>,
     pub abi: HirExternAbi,
-}
-
-/// A compile-time literal argument to a user-defined decorator.
-#[derive(Debug, Clone)]
-pub enum DecoratorArg {
-    Int(i64),
-    Float(f64),
-    Str(String),
-    Bool(bool),
-}
-
-/// A user-defined decorator application on a function.
-///
-/// At program startup the runtime calls `decorator_action(fn_name, arg1, arg2, ...)`
-/// for every `CustomDecorator` entry on a function, in declaration order.
-#[derive(Debug, Clone)]
-pub struct CustomDecorator {
-    /// The name of the decorator action (resolved at HIR-lowering time).
-    pub name: Symbol,
-    /// Compile-time literal arguments beyond the implicit `fn_name: string` first arg.
-    pub args: Vec<DecoratorArg>,
 }
 
 #[derive(Debug)]
@@ -279,6 +256,14 @@ pub enum HirStmt {
         tasks: Vec<HirTask>,
         span: Span,
     },
+    /// Declaration-time transformations of a fixed public callable identity.
+    Decorate {
+        function: Symbol,
+        owner: Option<Symbol>,
+        binding: Symbol,
+        applications: Vec<HirExpr>,
+        span: Span,
+    },
     /// Error-recovery placeholder.
     Error {
         span: Span,
@@ -303,6 +288,7 @@ impl HirStmt {
             | Self::Panic { span, .. }
             | Self::ParallelFor { span, .. }
             | Self::ConcurrentBlock { span, .. }
+            | Self::Decorate { span, .. }
             | Self::Error { span } => *span,
         }
     }
@@ -450,6 +436,7 @@ pub enum HirExprKind {
     // ── Inline lambda ─────────────────────────────────────────────────────────
     /// `action with (params) { body }` — anonymous action used as a value.
     Lambda {
+        name: Option<Symbol>,
         params: Vec<HirParam>,
         body: Vec<HirStmt>,
         return_ty: FidanType,

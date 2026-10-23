@@ -10,6 +10,12 @@ compiler releases.
 
 ## [Unreleased]
 
+- **Semantic change:** logical `and`/`or` (including `&&`/`||`) now short-circuit
+  left-to-right. Both operands remain statically typechecked; only evaluated
+  flexible operands undergo runtime Boolean validation. Skipped RHS callbacks,
+  defaults, side effects and exceptions no longer execute. Explicitly sequence
+  any RHS work that was intended to run unconditionally.
+
 - Bind saved Dal credentials to canonical registry identities and reject authenticated redirects.
 - Preserve working compiler/helper installations on failed refresh; validate install selectors
   and archive members, and serialize release publication using an OS-owned file lock.

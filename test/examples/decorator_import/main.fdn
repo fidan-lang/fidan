@@ -1,0 +1,15 @@
+use "./library.fdn" as library
+
+assert_eq(library.value(2), 13)
+
+var alias oftype action = library.value
+
+assert_eq(alias(3), 14)
+
+@library.wrap
+action qualified with (certain value oftype integer) returns integer {
+    return value * 2
+}
+
+assert_eq(qualified(3), 16)
+print("imported decorator passed")

@@ -195,32 +195,17 @@ fn strength_reduction_preserves_values_and_runtime_types() {
 }
 
 #[test]
-fn strength_reduction_requires_proven_integer_or_boolean_operands() {
+fn strength_reduction_requires_proven_integer_operands() {
     let mut cases = Vec::new();
-    for (ty, expressions) in [
-        (
-            "integer",
-            &[
-                "x + 0", "0 + x", "x - 0", "x * 1", "1 * x", "x * 0", "0 * x", "x / 1", "x ** 0",
-                "x ** 1",
-            ][..],
-        ),
-        (
-            "boolean",
-            &[
-                "x and true",
-                "true and x",
-                "x and false",
-                "false and x",
-                "x or false",
-                "false or x",
-                "x or true",
-                "true or x",
-            ][..],
-        ),
-    ] {
+    for (ty, expressions) in [(
+        "integer",
+        &[
+            "x + 0", "0 + x", "x - 0", "x * 1", "1 * x", "x * 0", "0 * x", "x / 1", "x ** 0",
+            "x ** 1",
+        ][..],
+    )] {
         for expression in expressions {
-            let literal = if ty == "integer" { "3" } else { "true" };
+            let literal = "3";
             cases.push((
                 format!(
                     "action calculate returns flexible {{ var x = {literal}; return {expression} }}"
@@ -306,11 +291,9 @@ fn strength_reduction_preserves_dynamic_type_errors() {
         ("x and true", "\"invalid\""),
         ("true and x", "\"invalid\""),
         ("x and false", "\"invalid\""),
-        ("false and x", "\"invalid\""),
         ("x or false", "\"invalid\""),
         ("false or x", "\"invalid\""),
         ("x or true", "\"invalid\""),
-        ("true or x", "\"invalid\""),
     ] {
         let source = format!(
             "action calculate with (certain x oftype flexible) returns flexible {{ return {expression} }}\n\
@@ -336,7 +319,7 @@ fn strength_reduction_preserves_dynamic_type_errors() {
             "action calculate with (certain x oftype {ty}) returns flexible {{ return {expression} }}\n\
              var functions oftype list oftype flexible = [calculate]\n print(functions[0](\"invalid\"))"
         );
-        // Parameter annotations are not runtime type checks for flexible calls.
+        // Erasing callable identity must retain the normal parameter/type checks.
         let error = run_src_with_threshold(&source, 0)
             .expect_err("annotated parameter must not erase a dynamic runtime type error");
         assert!(
@@ -344,6 +327,127 @@ fn strength_reduction_preserves_dynamic_type_errors() {
             "{expression}: {}",
             error.message
         );
+    }
+}
+
+#[test]
+fn short_circuit_skips_only_runtime_evaluation_not_boolean_validation() {
+    for (expression, expected) in [("false and x", false), ("true or x", true)] {
+        for argument in ["\"invalid\"", "nothing", "[]", "42"] {
+            let source = format!(
+                "action calculate with (x oftype flexible) returns boolean {{ return {expression} }}\nvar erased oftype action = calculate\nassert_eq(erased({argument}), {expected})"
+            );
+            for threshold in [0, 1] {
+                run_src_with_threshold(&source, threshold)
+                    .unwrap_or_else(|error| panic!("{source}: {}", error.message));
+            }
+        }
+    }
+    for expression in [
+        "x and true",
+        "true and x",
+        "x and false",
+        "x or false",
+        "false or x",
+        "x or true",
+    ] {
+        for argument in ["\"invalid\"", "nothing", "[]", "42"] {
+            let source = format!(
+                "action calculate with (x oftype flexible) returns boolean {{ return {expression} }}\nvar erased oftype action = calculate\nprint(erased({argument}))"
+            );
+            for threshold in [0, 1] {
+                let error = run_src_with_threshold(&source, threshold)
+                    .expect_err("evaluated operands remain strictly Boolean");
+                assert!(
+                    error.message.contains("type error"),
+                    "{expression}: {}",
+                    error.message
+                );
+            }
+        }
+    }
+    for (expression, expected_true, expected_false) in [
+        ("x and true", true, false),
+        ("true and x", true, false),
+        ("x and false", false, false),
+        ("false and x", false, false),
+        ("x or false", true, false),
+        ("false or x", true, false),
+        ("x or true", true, true),
+        ("true or x", true, true),
+    ] {
+        for (argument, expected) in [(true, expected_true), (false, expected_false)] {
+            let source = format!(
+                "action calculate with (certain x oftype boolean) returns boolean {{ return {expression} }}\nassert_eq(calculate({argument}), {expected})"
+            );
+            for threshold in [0, 1] {
+                run_src_with_threshold(&source, threshold)
+                    .unwrap_or_else(|error| panic!("{source}: {}", error.message));
+            }
+        }
+    }
+}
+
+#[test]
+fn short_circuit_side_effects_exceptions_and_conditional_evaluation() {
+    let source = include_str!("../../../test/examples/short_circuit_regression.fdn");
+    for threshold in [0, 1] {
+        run_src_with_threshold(source, threshold)
+            .unwrap_or_else(|error| panic!("{}", error.message));
+    }
+}
+
+#[test]
+fn short_circuit_agrees_before_and_after_optimization() {
+    let source = include_str!("../../../test/examples/short_circuit_regression.fdn");
+    for mode in [0, 1, 2] {
+        let (mut program, interner) = build_mir(source);
+        match mode {
+            1 => fidan_passes::run_preserving_call_frames(&mut program),
+            2 => fidan_passes::run_all(&mut program),
+            _ => {}
+        }
+        let sources = Arc::new(SourceMap::new());
+        sources.add_file("<short-circuit>", source);
+        run_mir(program, interner, sources)
+            .unwrap_or_else(|error| panic!("optimization mode {mode}: {}", error.message));
+    }
+}
+
+#[test]
+fn short_circuit_seeded_nested_expressions_preserve_order() {
+    fn expression(seed: &mut u64, depth: u32, next: &mut usize) -> (String, bool, Vec<usize>) {
+        *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        let selected = (*seed >> 63) != 0;
+        if depth == 0 {
+            let label = *next;
+            *next += 1;
+            return (format!("touch({label}, {selected})"), selected, vec![label]);
+        }
+        let (left, lhs, mut order) = expression(seed, depth - 1, next);
+        let (right, rhs, rhs_order) = expression(seed, depth - 1, next);
+        if (selected && lhs) || (!selected && !lhs) {
+            order.extend(rhs_order);
+        }
+        (
+            format!("({left} {} {right})", if selected { "and" } else { "or" }),
+            if selected { lhs && rhs } else { lhs || rhs },
+            order,
+        )
+    }
+    let mut source = String::from(
+        "var observed = []\naction touch with (certain label oftype integer, certain value oftype boolean) returns boolean { observed.append(label); return value }\n",
+    );
+    let mut seed = 0xF1DA_2026_u64;
+    for _ in 0..32 {
+        let (expression, expected, order) = expression(&mut seed, 3, &mut 0);
+        source.push_str(&format!(
+            "observed = []\nassert_eq({expression}, {expected})\nassert_eq(observed, {order:?})\n"
+        ));
+    }
+    for threshold in [0, 1] {
+        run_src_with_threshold(&source, threshold)
+            .unwrap_or_else(|error| panic!("seeded logical tree: {}", error.message));
     }
 }
 

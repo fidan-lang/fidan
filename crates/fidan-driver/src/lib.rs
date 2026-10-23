@@ -5,6 +5,8 @@
 mod ai_analysis;
 pub mod dal;
 mod frontend;
+mod import_graph;
+pub use import_graph::{LoadedImports, load_imported_hirs};
 pub mod install;
 mod llvm_helper;
 mod options;

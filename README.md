@@ -24,6 +24,13 @@ Fidan is designed around the idea that AI development tools should understand pr
 
 Implemented in Rust, the compiler lowers source through typed HIR and MIR optimization to a MIR interpreter with selective Cranelift JIT, Cranelift AOT, or optional LLVM AOT. The workspace also includes a formatter, LSP server, REPL, package tooling, and embedding APIs. See [AI-native tooling](#ai-native-tooling) for the analysis interfaces and provider requirements.
 
+Logical `and` (`&&`) and `or` (`||`) use left-to-right short-circuit evaluation:
+`false and rhs` and `true or rhs` skip `rhs`. Both operands are still statically
+checked. Evaluated operands must be Boolean; flexible non-Booleans, including
+`nothing`, raise R0001. This upcoming candidate intentionally changes the earlier
+eager behavior; see [the semantic decisions](docs/LANGUAGE_SEMANTICS_ADR.md).
+
+
 ```fidan
 object Person {
     var name oftype string

@@ -836,7 +836,8 @@ fn declare_all_functions(
         let mangled = mangle_fn(name.as_ref(), mf.id.0);
         let mut sig = module.make_signature();
         for p in &mf.params {
-            sig.params.push(AbiParam::new(mir_ty_to_cl(p.abi_ty())));
+            sig.params
+                .push(AbiParam::new(mir_ty_to_cl(mf.param_abi_ty(p))));
         }
         // If the declared return type is Nothing/Error but the body contains
         // a `return expr` terminator (e.g. an `action` that returns a value),
@@ -1156,7 +1157,8 @@ fn lower_function(
     // Build the Cranelift function signature.
     let mut sig = module.make_signature();
     for p in &mf.params {
-        sig.params.push(AbiParam::new(mir_ty_to_cl(p.abi_ty())));
+        sig.params
+            .push(AbiParam::new(mir_ty_to_cl(mf.param_abi_ty(p))));
     }
     let eff_ret = effective_return_ty(mf);
     let has_return = !matches!(&eff_ret, MirTy::Nothing | MirTy::Error);
@@ -1322,7 +1324,7 @@ fn box_fidan_abi_params(
             rt,
             builder,
             value,
-            param.abi_ty(),
+            mf.param_abi_ty(param),
         )?);
     }
     Ok(boxed)
@@ -1506,7 +1508,13 @@ fn lower_instr(
                 &call_result_ty,
                 interner,
             )?;
-            if let (Some(d), Some(v)) = (dest, ret) {
+            if let Some(d) = dest {
+                // A void ABI still has a source-level Nothing value when observed.
+                let v = match ret {
+                    Some(value) => value,
+                    None => call_rt(module, builder, rt.box_nothing, &[])?
+                        .context("Nothing call result")?,
+                };
                 let effective_ty = result_ty
                     .clone()
                     .filter(|ty| !matches!(ty, MirTy::Dynamic | MirTy::Error))
@@ -2800,21 +2808,27 @@ fn emit_call(
                         if matches!(arg_op, Operand::Const(_)) {
                             call_rt(module, builder, rt.drop_any, &[raw])?;
                         }
-                        prepared_owned = !is_scalar(param.abi_ty());
-                        coerce_boxed_call_result(module, rt, builder, prepared, param.abi_ty())?
+                        prepared_owned = !is_scalar(mir_fn.param_abi_ty(param));
+                        coerce_boxed_call_result(
+                            module,
+                            rt,
+                            builder,
+                            prepared,
+                            mir_fn.param_abi_ty(param),
+                        )?
                     } else {
                         lower_operand_coerced(
                             builder,
                             cl_vars,
                             local_types,
                             arg_op,
-                            param.abi_ty(),
+                            mir_fn.param_abi_ty(param),
                             rt,
                             module,
                         )?
                     }
                 } else if let Some(default_lit) = &param.default {
-                    let raw = if is_scalar(param.abi_ty()) {
+                    let raw = if is_scalar(mir_fn.param_abi_ty(param)) {
                         lower_lit(module, builder, rt, default_lit, interner)?
                     } else {
                         lower_owned_boxed_operand(
@@ -2826,7 +2840,7 @@ fn emit_call(
                             module,
                         )?
                     };
-                    let expected_cl_ty = mir_ty_to_cl(param.abi_ty());
+                    let expected_cl_ty = mir_ty_to_cl(mir_fn.param_abi_ty(param));
                     let actual_cl_ty = builder.func.dfg.value_type(raw);
                     if actual_cl_ty != expected_cl_ty {
                         coerce_value(builder, module, rt, raw, actual_cl_ty, expected_cl_ty)?
@@ -2844,7 +2858,7 @@ fn emit_call(
                 // ordinary boxed locals are cloned by lower_owned_boxed_operand.
                 let cloned_local = provided.is_some_and(|argument| matches!(argument,
                     Operand::Local(local) if matches!(local_types.get(&local.0), Some(ty) if !matches!(ty, MirTy::Error) && !is_scalar(ty))));
-                if !is_scalar(param.abi_ty())
+                if !is_scalar(mir_fn.param_abi_ty(param))
                     && (prepared_owned || provided.is_none() || cloned_local)
                 {
                     cloned_args.push(v);
@@ -2939,14 +2953,44 @@ fn emit_call(
         }
 
         Callee::Dynamic(fn_op) => {
-            // fdn_call_dynamic(fn_val: *mut FidanValue, args_ptr, args_cnt) -> *mut FidanValue
             let fn_val = lower_operand_boxed(builder, cl_vars, local_types, fn_op, rt, module)?;
             let (arr, cnt) =
                 build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
             let boxed = call_rt(module, builder, rt.call_dynamic, &[fn_val, arr, cnt])?;
-            if let Some(boxed) = boxed {
-                let coerced = coerce_boxed_call_result(module, rt, builder, boxed, result_ty)?;
-                Ok(Some(coerced))
+            // Dynamic dispatch borrows its inputs. Release only boxes created here,
+            // never the caller's borrowed boxed locals.
+            if matches!(fn_op, Operand::Const(_)) || is_scalar(&operand_mir_ty(local_types, fn_op))
+            {
+                call_rt(module, builder, rt.drop_any, &[fn_val])?;
+            }
+            for (index, argument) in args.iter().enumerate() {
+                if matches!(argument, Operand::Const(_))
+                    || is_scalar(&operand_mir_ty(local_types, argument))
+                {
+                    let temporary =
+                        builder
+                            .ins()
+                            .load(PTR_TY, MemFlagsData::new(), arr, (index * 8) as i32);
+                    call_rt(module, builder, rt.drop_any, &[temporary])?;
+                }
+            }
+            if let Some(mut boxed) = boxed {
+                if !matches!(result_ty, MirTy::Dynamic | MirTy::Error) {
+                    let (contract, length) =
+                        str_const(module, builder, &result_ty.runtime_descriptor())?;
+                    let checked = call_rt(
+                        module,
+                        builder,
+                        rt.check_argument,
+                        &[boxed, contract, length],
+                    )?
+                    .context("checked call result")?;
+                    call_rt(module, builder, rt.drop_any, &[boxed])?;
+                    boxed = checked;
+                }
+                Ok(Some(coerce_boxed_call_result(
+                    module, rt, builder, boxed, result_ty,
+                )?))
             } else {
                 Ok(None)
             }
@@ -3709,7 +3753,7 @@ fn emit_trampolines(
             call_rt(module, &mut builder, rt.drop_any, &[prepared])?;
             let prepared = checked;
             owned_args.push(prepared);
-            let value = match param.abi_ty() {
+            let value = match mf.param_abi_ty(param) {
                 MirTy::Integer => {
                     call_rt(module, &mut builder, rt.unbox_int, &[prepared])?.unwrap()
                 }

@@ -366,7 +366,7 @@ impl FidanLsp {
     /// the editor.  Also proactively loads file imports that are not yet in
     /// the store.
     async fn refresh(&self, uri: &Url, version: i32, text: &str) {
-        let result = analysis::analyze_document(text, uri.as_str());
+        let result = analysis::analyze_document(text, uri.as_str(), &self.store.open_sources());
 
         // Compute absolute URLs for every import in this document.
         let current_path = uri.to_file_path().ok();
@@ -536,6 +536,12 @@ impl FidanLsp {
         self.client
             .publish_diagnostics(uri.clone(), all_diags, Some(version))
             .await;
+    }
+
+    async fn refresh_dependents(&self, changed: &Url) {
+        for (uri, version, text) in self.store.dependent_documents(changed) {
+            self.refresh(&uri, version, &text).await;
+        }
     }
 
     /// Walk the type/parent-class chain across all open documents looking
@@ -1853,6 +1859,7 @@ impl LanguageServer for FidanLsp {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let td = params.text_document;
         self.refresh(&td.uri, td.version, &td.text).await;
+        self.refresh_dependents(&td.uri).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -1863,14 +1870,16 @@ impl LanguageServer for FidanLsp {
                 &change.text,
             )
             .await;
+            self.refresh_dependents(&params.text_document.uri).await;
         }
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         self.store.remove(&params.text_document.uri);
         self.client
-            .publish_diagnostics(params.text_document.uri, vec![], None)
+            .publish_diagnostics(params.text_document.uri.clone(), vec![], None)
             .await;
+        self.refresh_dependents(&params.text_document.uri).await;
     }
 
     // ── Hover ──────────────────────────────────────────────────────────────

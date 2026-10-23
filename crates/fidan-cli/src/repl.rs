@@ -616,7 +616,12 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
         exec_tc.check_module(&full_module);
         let typed = exec_tc.finish_typed();
         if !typed.diagnostics.is_empty() {
-            let used_plain = (echo_sym_opt.is_some() || transformed_input)
+            let has_errors = typed
+                .diagnostics
+                .iter()
+                .any(|diag| diag.severity == Severity::Error);
+            let used_plain = has_errors
+                && (echo_sym_opt.is_some() || transformed_input)
                 && render_plain_diagnostics(
                     &plain_source,
                     &interner,
@@ -625,20 +630,27 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
                     &mut error_history,
                 );
             if !used_plain {
-                let _ = render_repl_diagnostics(
+                render_repl_diagnostics(
                     &typed.diagnostics,
                     &exec_smap,
                     &mut diag_budget,
                     Some(&mut error_history),
                 );
             }
-            continue;
+            // A warning must remain visible without discarding valid input.
+            if has_errors {
+                continue;
+            }
         }
 
         // ── HIR → MIR → optimisation passes ───────────────────────────────
         let hir = fidan_hir::lower_module(&full_module, &typed, &interner);
-        let mut mir =
-            fidan_mir::lower_program(&hir, &interner, &mir_repl_state.persistent_global_names);
+        let mut mir = fidan_mir::lower_repl_program(
+            &hir,
+            &interner,
+            &mir_repl_state.persistent_global_names,
+            mir_repl_state.accumulated_source.len(),
+        );
         // Run MIR safety diagnostics (W2006 null-safety, W1004 unawaited, etc.).
         emit_mir_safety_diags(&mir, &interner, false, &[], &mut diag_budget);
         if diag_budget.error_count() > 0 {

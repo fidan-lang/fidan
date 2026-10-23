@@ -26,6 +26,11 @@ impl Pass for NullableRepresentation {
             let mut changed = false;
             for function in &mut program.functions {
                 let known = locals.entry(function.id).or_default();
+                for param in &function.params {
+                    if function.param_abi_ty(param) == &MirTy::Dynamic && scalar(&param.ty) {
+                        changed |= known.insert(param.local);
+                    }
+                }
                 for block in &mut function.blocks {
                     for phi in &mut block.phis {
                         if phi
@@ -49,7 +54,11 @@ impl Pass for NullableRepresentation {
                                         callee: Callee::Fn(id),
                                         ..
                                     } => returns.contains(id),
-                                    _ => false,
+                                    Rvalue::Call {
+                                        callee: Callee::Dynamic(_),
+                                        ..
+                                    } => true,
+                                    _ => *ty == MirTy::Dynamic,
                                 };
                                 if may_be_nothing {
                                     changed |= known.insert(*dest);
@@ -68,6 +77,15 @@ impl Pass for NullableRepresentation {
                                 if result_ty.as_ref().is_some_and(scalar) {
                                     *result_ty = Some(MirTy::Dynamic);
                                 }
+                            }
+                            Instr::Call {
+                                dest: Some(dest),
+                                result_ty: Some(MirTy::Dynamic),
+                                ..
+                            }
+                            | Instr::GetField { dest, .. }
+                            | Instr::GetIndex { dest, .. } => {
+                                changed |= known.insert(*dest);
                             }
                             Instr::StoreGlobal { global, value } if nullable(value, known) => {
                                 changed |= globals.insert(*global);

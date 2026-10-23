@@ -218,6 +218,7 @@ mod tests {
         MirFunction {
             id: FunctionId(1),
             name,
+            source_name: None,
             params: vec![],
             return_ty: MirTy::Nothing,
             local_count,

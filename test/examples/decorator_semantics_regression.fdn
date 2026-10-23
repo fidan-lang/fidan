@@ -1,0 +1,143 @@
+var events = []
+var offset = 6
+
+action computed returns integer {
+    events.append("argument")
+    return offset + 1
+}
+
+action observe with (
+    certain callback oftype action,
+    certain amount oftype integer,
+    optional extra oftype dynamic = nothing,
+) returns action {
+    assert_eq(amount, 7)
+    assert_eq(extra, nothing)
+    events.append("observe")
+    return callback
+}
+
+@observe(computed(), extra = nothing)
+action answer with (certain value oftype integer) returns integer {
+    return value + 1
+}
+
+assert_eq(events, ["argument", "observe"])
+assert_eq(answer(2), 3)
+
+action wrap with (certain callback oftype action) returns action {
+    return action with (certain value oftype integer) returns integer {
+        return callback(value) + 10
+    }
+}
+
+@wrap
+action wrapped with (certain value oftype integer) returns integer {
+    return value + 1
+}
+
+assert_eq(wrapped(2), 13)
+
+var erased oftype action = wrapped
+
+assert_eq(erased(3), 14)
+
+action triple with (certain callback oftype action) returns action {
+    return action with (certain value oftype integer) returns integer {
+        return callback(value) * 3
+    }
+}
+
+@wrap
+@triple
+action ordered with (certain value oftype integer) returns integer {
+    return value + 1
+}
+
+assert_eq(ordered(2), 39)
+
+action nested with (certain increment oftype integer) returns integer {
+    var decorate = action with (certain callback oftype action) returns action {
+        return action with (certain value oftype integer) returns integer {
+            return callback(value) + increment
+        }
+    }
+    @decorate
+    action local with (certain value oftype integer) returns integer {
+        return value * 2
+    }
+
+    return local(4)
+}
+
+assert_eq(nested(3), 11)
+assert_eq(nested(9), 17)
+
+action side_effect with (certain callback oftype action) {
+    events.append(callback.name)
+}
+
+@side_effect
+action unchanged returns integer {
+    return 9
+}
+
+assert_eq(unchanged(), 9)
+
+action method_wrapper with (certain callback oftype action) returns action {
+    return action with (certain receiver oftype dynamic, certain value oftype integer) returns integer {
+        return callback(receiver, value) + 10
+    }
+}
+
+object DecoratedObject {
+    var base oftype integer = 3
+
+    @method_wrapper
+    action calculate with (certain value oftype integer) returns integer {
+        return this.base + value
+    }
+}
+
+var instance = DecoratedObject()
+
+assert_eq(instance.calculate(4), 17)
+
+var defaults = 0
+
+action default_value returns integer {
+    defaults = defaults + 1
+    return 5
+}
+
+@wrap
+action defaulted with (
+    optional value oftype integer = default_value(),
+) returns integer {
+    return value
+}
+
+assert_eq(defaults, 0)
+assert_eq(defaulted(), 15)
+assert_eq(defaults, 1)
+
+action wrong_result with (certain callback oftype action) returns action {
+    return action with (certain value oftype integer) returns string {
+        return "wrong"
+    }
+}
+
+@wrong_result
+action typed_return with (certain value oftype integer) returns integer {
+    return value
+}
+
+var return_error = false
+
+attempt {
+    typed_return(3)
+} catch error {
+    return_error = true
+}
+assert_eq(return_error, true)
+print("decorator semantics passed")

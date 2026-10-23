@@ -2213,11 +2213,12 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                         if let Some(value) = self.lower_native_call(callee, args, &effective_ty)? {
                             self.store_local_native(*dest, value)?;
                         } else {
-                            let value = self.lower_call(callee, args)?;
-                            self.store_local_boxed(*dest, value)?;
+                            let value = self.lower_checked_call(callee, args, &effective_ty)?;
+                            let native = self.unbox_owned_to_native(value, &effective_ty)?;
+                            self.store_local_native(*dest, native)?;
                         }
                     } else {
-                        let value = self.lower_call(callee, args)?;
+                        let value = self.lower_checked_call(callee, args, &effective_ty)?;
                         self.store_local_boxed(*dest, value)?;
                     }
                     self.namespace_locals.remove(dest);
@@ -3106,6 +3107,28 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
         }
     }
 
+    fn lower_checked_call(
+        &mut self,
+        callee: &Callee,
+        args: &[Operand],
+        expected: &MirTy,
+    ) -> Result<PointerValue<'ctx>> {
+        let value = self.lower_call(callee, args)?;
+        if matches!(callee, Callee::Dynamic(_))
+            && !matches!(expected, MirTy::Dynamic | MirTy::Error)
+        {
+            let (contract, length) = self.string_bytes(&expected.runtime_descriptor());
+            let checked = self.call_ptr(
+                "fdn_check_argument",
+                &[value.into(), contract.into(), length.into()],
+            )?;
+            self.call_void("fdn_drop", &[value.into()])?;
+            Ok(checked)
+        } else {
+            Ok(value)
+        }
+    }
+
     fn lower_call(&mut self, callee: &Callee, args: &[Operand]) -> Result<PointerValue<'ctx>> {
         match callee {
             Callee::Fn(function_id) => {
@@ -3228,16 +3251,29 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             }
             Callee::Builtin(symbol) => self.lower_builtin(*symbol, args),
             Callee::Dynamic(function_value) => {
-                let function_value = self.lower_operand(function_value)?;
-                let args = args
+                let function = self.lower_operand(function_value)?;
+                let boxed_args = args
                     .iter()
                     .map(|arg| self.lower_operand(arg))
                     .collect::<Result<Vec<_>>>()?;
-                let (array_ptr, count) = self.build_ptr_array(&args)?;
-                self.call_ptr(
+                let (array_ptr, count) = self.build_ptr_array(&boxed_args)?;
+                let result = self.call_ptr(
                     "fdn_call_dynamic",
-                    &[function_value.into(), array_ptr.into(), count.into()],
-                )
+                    &[function.into(), array_ptr.into(), count.into()],
+                )?;
+                if matches!(function_value, Operand::Const(_))
+                    || is_native_scalar_ty(&self.operand_type(function_value))
+                {
+                    self.call_void("fdn_drop", &[function.into()])?;
+                }
+                for (argument, boxed) in args.iter().zip(boxed_args) {
+                    if matches!(argument, Operand::Const(_))
+                        || is_native_scalar_ty(&self.operand_type(argument))
+                    {
+                        self.call_void("fdn_drop", &[boxed.into()])?;
+                    }
+                }
+                Ok(result)
             }
         }
     }

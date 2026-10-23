@@ -25,34 +25,15 @@ use super::{
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
-/// Persistent state for the MIR-backed REPL.
-///
-/// Each input line recompiles the **entire accumulated source** from scratch
-/// but only executes the **new** instructions (those beyond `init_bb0_cursor`
-/// in the init function's entry block).  Invariants:
-///
-/// - Module-level variables are always stored via `StoreGlobal`/`LoadGlobal`,
-///   so skipping old init instructions is safe — their effects live in `globals`.
-/// - `globals_snapshot` preserves computed values across recompile boundaries.
-/// - `persistent_global_names` is the stable GID registry: the ordered list of
-///   all global symbol names ever registered. Passed to `lower_program` on every
-///   recompilation so every symbol always gets the same `GlobalId` index.
-/// - Appending new source to `accumulated_source` deterministically extends the
-///   init function's `bb0`; new control-flow BBs are reachable only from the
-///   new tail of `bb0`, so the branch-following logic is still correct.
-/// - `ns_cursor` and `body_cursor` together form a split-cursor: both are
-///   relative offsets within their respective sections of bb0, so adding new
-///   `use` imports (which extend the namespace section) never shifts the body
-///   cursor, and previously-executed namespace inits are skipped just like body
-///   instructions — nothing is ever re-executed.
+/// Persistent source, global values and stable slot names for REPL recompilation.
+/// New initializer effects are selected using the previous source length;
+/// declarations are rebuilt without replaying prior effects.
 pub struct MirReplState {
     /// All source text entered so far (grows with each successful input).
     pub accumulated_source: String,
-    /// Number of namespace-init instructions already executed (i.e. the
-    /// already-committed `Assign+StoreGlobal` pairs at the start of bb0).
+    /// Legacy explicit-offset cursor; unused by source-delta execution.
     pub ns_cursor: usize,
-    /// Number of body instructions (past the namespace-init section) already
-    /// executed.
+    /// Legacy explicit-offset cursor; unused by source-delta execution.
     pub body_cursor: usize,
     /// Global values after the last successful execution.
     /// Pre-filled into each new `MirMachine` before running the delta.
@@ -520,15 +501,10 @@ impl MirMachine {
 
 /// Execute one REPL line using the MIR interpreter.
 ///
-/// The caller provides an already-lowered and optimised `MirProgram` built from
-/// the **full** accumulated source (all prior lines + the new one).  This
-/// function:
-///
-/// 1. Creates a fresh `MirMachine` from the program.
-/// 2. Pre-fills globals from `state.globals_snapshot` (preserves prior values).
-/// 3. Runs the init function starting from `state.init_bb0_cursor` (skips
-///    already-executed instructions).
-/// 4. Updates `state.init_bb0_cursor` and `state.globals_snapshot` for the next call.
+/// The caller typechecks the full accumulated source, then lowers it using
+/// `fidan_mir::lower_repl_program` and the prior source length. All declarations
+/// remain available, but initialization contains only the new input's effects.
+/// Globals are restored before execution and committed after successful execution.
 ///
 /// If `echo_sym` is `Some(sym)`, the program is expected to contain a global
 /// with that name (the last declaration with that name, if redeclared multiple
@@ -543,27 +519,17 @@ pub fn run_mir_repl_line(
     jit_threshold: u32,
     echo_sym: Option<fidan_lexer::Symbol>,
 ) -> Result<Option<FidanValue>, RunError> {
-    // Extend the persistent GID registry with any new globals the latest
-    // compilation added (namespace imports and var declarations).
-    for g in &program.globals {
-        let name = interner.resolve(g.name);
+    let mut machine = MirMachine::new(Arc::new(program), interner, source_map);
+    machine.set_jit_threshold(jit_threshold);
+    machine.restore_globals(&state.globals_snapshot);
+    machine.run()?;
+    // Commit metadata only after the new source suffix executes successfully.
+    for global in &machine.program.globals {
+        let name = machine.interner.resolve(global.name);
         if state.persistent_global_set.insert(name.to_string()) {
             state.persistent_global_names.push(name.to_string());
         }
     }
-
-    let ns_instr_count = program.namespace_global_count * 2;
-    let mut machine = MirMachine::new(Arc::new(program), interner, source_map);
-    machine.set_jit_threshold(jit_threshold);
-    // Pre-fill globals from the previous snapshot so all previously-defined
-    // variables have their correct values when the new delta executes.
-    machine.restore_globals(&state.globals_snapshot);
-    // Skip old ns inits, run new ns inits, skip old body, run new body delta.
-    machine.run_init_split(state.ns_cursor, ns_instr_count, state.body_cursor)?;
-    // Commit updated cursors + globals for the next line.
-    let (new_ns, new_body) = machine.count_init_split_instrs(ns_instr_count);
-    state.ns_cursor = new_ns;
-    state.body_cursor = new_body;
     state.globals_snapshot = machine.snapshot_globals();
 
     // If the caller requested an echo, find the global with `echo_sym` (the last

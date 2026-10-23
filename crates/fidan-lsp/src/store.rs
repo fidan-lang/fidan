@@ -27,6 +27,53 @@ impl DocumentStore {
         self.inner.insert(uri, doc);
     }
 
+    /// Snapshot only editor-owned text. Background documents must reload from disk.
+    /// No DashMap guard escapes into import graph resolution.
+    pub fn open_sources(&self) -> std::collections::HashMap<std::path::PathBuf, String> {
+        self.inner
+            .iter()
+            .filter(|entry| entry.value().version >= 0)
+            .filter_map(|entry| {
+                let path = entry.key().to_file_path().ok()?;
+                Some((
+                    path.canonicalize().unwrap_or(path),
+                    entry.value().text.clone(),
+                ))
+            })
+            .collect()
+    }
+
+    pub fn dependent_documents(&self, changed: &Url) -> Vec<(Url, i32, String)> {
+        let documents = self
+            .inner
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        let mut affected = std::collections::HashSet::from([changed.clone()]);
+        loop {
+            let before = affected.len();
+            for (uri, document) in &documents {
+                if document
+                    .imports
+                    .values()
+                    .chain(document.direct_imports.values().map(|(uri, _)| uri))
+                    .chain(document.wildcard_imports.iter())
+                    .any(|uri| affected.contains(uri))
+                {
+                    affected.insert(uri.clone());
+                }
+            }
+            if before == affected.len() {
+                break;
+            }
+        }
+        documents
+            .into_iter()
+            .filter(|(uri, doc)| uri != changed && doc.version >= 0 && affected.contains(uri))
+            .map(|(uri, doc)| (uri, doc.version, doc.text))
+            .collect()
+    }
+
     /// Borrow the document stored under `uri`, if present.
     pub fn get(&self, uri: &Url) -> Option<Ref<'_, Url, Document>> {
         self.inner.get(uri)

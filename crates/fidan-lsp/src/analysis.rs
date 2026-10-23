@@ -139,17 +139,26 @@ pub struct AnalysisResult {
 /// The `uri` string is used as the "file name" inside `SourceFile` so that
 /// diagnostics printed to stderr (if any) show a meaningful path.
 pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
-    analyze_inner(text, uri_str, false)
+    analyze_inner(text, uri_str, None)
 }
 
 /// Editor refreshes also validate imports against the importing file's location.
 /// Non-file buffers retain syntax/type analysis without guessing a filesystem root.
-pub fn analyze_document(text: &str, uri_str: &str) -> AnalysisResult {
-    analyze_inner(text, uri_str, true)
+pub fn analyze_document(
+    text: &str,
+    uri_str: &str,
+    open_sources: &std::collections::HashMap<std::path::PathBuf, String>,
+) -> AnalysisResult {
+    analyze_inner(text, uri_str, Some(open_sources))
 }
 
-fn analyze_inner(text: &str, uri_str: &str, resolve_imports: bool) -> AnalysisResult {
-    let file = SourceFile::new(FileId(0), uri_str, text);
+fn analyze_inner(
+    text: &str,
+    uri_str: &str,
+    open_sources: Option<&std::collections::HashMap<std::path::PathBuf, String>>,
+) -> AnalysisResult {
+    let source_map = Arc::new(fidan_source::SourceMap::new());
+    let file = source_map.add_file(uri_str, text);
     let interner = Arc::new(SymbolInterner::new());
 
     // ── Lex ──────────────────────────────────────────────────────────────────
@@ -174,7 +183,50 @@ fn analyze_inner(text: &str, uri_str: &str, resolve_imports: bool) -> AnalysisRe
     augment_identifier_spans_with_ast(&module, &interner, text, &mut identifier_spans);
 
     // ── Type-check (full — needed to build hover/completion symbol table) ────
-    let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+    let mut checker = fidan_typeck::TypeChecker::new(Arc::clone(&interner), file.id);
+    let mut import_errors = Vec::new();
+    if let Some(open_sources) = open_sources
+        && let Some(path) = lsp::Url::parse(uri_str)
+            .ok()
+            .and_then(|uri| uri.to_file_path().ok())
+        && let Some(base) = path.parent()
+    {
+        let reader = |path: &std::path::Path| {
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+            open_sources
+                .get(&canonical)
+                .cloned()
+                .map(Ok)
+                .unwrap_or_else(|| std::fs::read_to_string(path))
+        };
+        let imported = fidan_driver::load_imported_hirs(
+            &module,
+            &interner,
+            base,
+            &source_map,
+            Some(&path),
+            &reader,
+        );
+        import_errors.extend(
+            imported
+                .diagnostics
+                .into_iter()
+                .filter(|diagnostic| diagnostic.severity == Severity::Error),
+        );
+        for (hir, filter, expose) in &imported.modules {
+            if *expose {
+                fidan_driver::pre_register_hir_into_tc(
+                    &mut checker,
+                    hir,
+                    filter.as_ref(),
+                    &interner,
+                );
+            }
+        }
+    }
+
+    checker.check_module(&module);
+    let typed = checker.finish_typed();
     let symbol_table = symbols::build(&module, &typed, &interner);
 
     // ── File-path import extraction ─────────────────────────────────────
@@ -214,16 +266,21 @@ fn analyze_inner(text: &str, uri_str: &str, resolve_imports: bool) -> AnalysisRe
     let cross_module_call_sites = typed.cross_module_call_sites;
 
     // ── Diagnostics ───────────────────────────────────────────────────────────
-    let import_diags = if resolve_imports {
-        lsp::Url::parse(uri_str)
-            .ok()
-            .and_then(|uri| uri.to_file_path().ok())
-            .and_then(|path| path.parent().map(std::path::Path::to_owned))
-            .map(|base| fidan_driver::import_resolution_diagnostics(&module, &interner, &base))
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let mut import_diags = Vec::new();
+    for mut error in import_errors {
+        if error.span.file != file.id {
+            error.message = format!(
+                "{}: {}",
+                source_map.get(error.span.file).name,
+                error.message
+            );
+            error.span = Span::point(file.id, 0);
+            // Imported spans must not become edits or locations in this document.
+            error.labels.clear();
+            error.suggestions.clear();
+        }
+        import_diags.push(error);
+    }
     let diagnostics = lex_diags
         .into_iter()
         .chain(parse_diags)
@@ -2613,7 +2670,7 @@ mod tests {
             "use dfjksdfkhdfkjhsdkjfh\n",
             "use \"./missing.fdn\" as missing\n",
         ] {
-            let result = analyze_document(source, uri.as_str());
+            let result = analyze_document(source, uri.as_str(), &Default::default());
             assert!(
                 result.diagnostics.iter().any(|d| d.code
                     == Some(lsp::NumberOrString::String("E0106".into()))
@@ -2634,7 +2691,11 @@ mod tests {
         }
         std::fs::create_dir_all(root.join("present")).unwrap();
         std::fs::write(root.join("present/init.fdn"), "var value = 1\n").unwrap();
-        let result = analyze_document("use present\nuse std.math\n", uri.as_str());
+        let result = analyze_document(
+            "use present\nuse std.math\n",
+            uri.as_str(),
+            &Default::default(),
+        );
         assert!(
             !result
                 .diagnostics
@@ -2643,7 +2704,7 @@ mod tests {
             "{:?}",
             result.diagnostics
         );
-        let result = analyze_document("use unresolved\n", "untitled:buffer");
+        let result = analyze_document("use unresolved\n", "untitled:buffer", &Default::default());
         assert!(
             !result
                 .diagnostics
@@ -3052,5 +3113,33 @@ approx_equal(x, x)
         ] {
             assert_file_analyzes_without_errors(rel_path);
         }
+    }
+    #[test]
+    fn short_circuit_keeps_rhs_frontend_diagnostics_in_editor() {
+        let invalid = analyze(
+            "var first = false and 42\nvar second = true or missing_logical_rhs\n",
+            "file:///logical.fdn",
+        );
+        for expected in ["E0203", "E0101"] {
+            assert!(
+                invalid.diagnostics.iter().any(|diag| diag.code
+                    == Some(lsp::NumberOrString::String(expected.into()))
+                    && diag.severity == Some(lsp::DiagnosticSeverity::ERROR)),
+                "{expected}: {:?}",
+                invalid.diagnostics
+            );
+        }
+        let valid = analyze(
+            "var absent oftype flexible = nothing\nvar safe = absent != nothing and len(absent) > 0\nprint(safe)\n",
+            "file:///logical.fdn",
+        );
+        assert!(
+            !valid
+                .diagnostics
+                .iter()
+                .any(|diag| diag.severity == Some(lsp::DiagnosticSeverity::ERROR)),
+            "{:?}",
+            valid.diagnostics
+        );
     }
 }

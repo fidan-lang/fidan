@@ -1,0 +1,56 @@
+object CallableHolder {
+    var callback oftype action
+    var base oftype integer = 5
+
+    new with (certain callback oftype action) {
+        this.callback = callback
+    }
+
+    action call with (certain value oftype integer) returns dynamic {
+        return this.callback(value)
+    }
+
+    action add with (certain value oftype integer) returns integer {
+        return this.base + value
+    }
+}
+
+var holder = CallableHolder(
+        action with (certain value oftype integer) returns integer {
+            return value * 2
+        },
+    )
+
+assert_eq(holder.callback(3), 6)
+assert_eq(holder.call(4), 8)
+
+var erased oftype dynamic = holder
+
+assert_eq(erased.callback(5), 10)
+
+var bound oftype action = holder.add
+
+assert_eq(bound(3), 8)
+assert_eq(bound.invoke([4]), 9)
+assert_eq(bound.name, "add")
+assert_eq(len(bound.parameters), 1)
+
+var caught = 0
+
+attempt {
+    erased.missing()
+} catch error {
+    assert_eq(string(error).contains("R0001"), true)
+    caught = caught + 1
+}
+
+var invalid oftype dynamic = []
+
+attempt {
+    invalid.missing()
+} catch error {
+    assert_eq(string(error).contains("R0001"), true)
+    caught = caught + 1
+}
+assert_eq(caught, 2)
+print("callable members passed")

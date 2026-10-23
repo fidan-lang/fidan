@@ -1,0 +1,4 @@
+use "./middle.fdn"
+
+assert_eq(answer(), 7)
+print("transitive imports passed")

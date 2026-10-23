@@ -445,10 +445,11 @@ pub struct MirParam {
 }
 
 impl MirParam {
-    /// Optional parameters with a Nothing sentinel must stay boxed until their
-    /// prologue resolves it. Scalar unboxing would erase a computed default.
+    /// Non-certain parameters can receive Nothing. Keep that tag boxed unless
+    /// a concrete default replaces it before entering the function. Scalar
+    /// unboxing would erase nullable operands and computed defaults.
     pub fn abi_ty(&self) -> &MirTy {
-        if !self.certain && matches!(self.default, Some(MirLit::Nothing)) {
+        if !self.certain && matches!(self.default, None | Some(MirLit::Nothing)) {
             &MirTy::Dynamic
         } else {
             &self.ty
@@ -460,6 +461,10 @@ impl MirParam {
 pub struct MirFunction {
     pub id: FunctionId,
     pub name: Symbol,
+    /// Source identity is distinct from private codegen/namespace symbols.
+    /// Optional for backward-compatible decoding of existing protocol-8 payloads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_name: Option<Symbol>,
     pub params: Vec<MirParam>,
     pub return_ty: MirTy,
     pub blocks: Vec<BasicBlock>,
@@ -490,10 +495,21 @@ pub struct MirExternDecl {
 }
 
 impl MirFunction {
+    /// Foreign wrappers retain their declared scalar ABI; Fidan's nullable
+    /// parameter representation is an internal language calling convention.
+    pub fn param_abi_ty<'a>(&self, param: &'a MirParam) -> &'a MirTy {
+        if self.extern_decl.is_some() {
+            &param.ty
+        } else {
+            param.abi_ty()
+        }
+    }
+
     pub fn new(id: FunctionId, name: Symbol, return_ty: MirTy) -> Self {
         Self {
             id,
             name,
+            source_name: None,
             params: vec![],
             return_ty,
             blocks: vec![],
@@ -526,7 +542,7 @@ impl MirFunction {
                 "variadic": false,
             })
         }).collect::<Vec<_>>();
-        serde_json::json!({"name": resolve(self.name).rsplit("::").next().unwrap_or(""), "parameters": parameters})
+        serde_json::json!({"name": resolve(self.source_name.unwrap_or(self.name)).rsplit("::").next().unwrap_or(""), "parameters": parameters})
     }
 
     /// Allocate a fresh `LocalId` for this function.

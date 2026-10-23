@@ -423,7 +423,13 @@ unsafe fn jit_call_fn_raw(ctx: *mut c_void, fn_id: u32, args_ptr: *const i64, ar
         .function(func_id)
         .params
         .iter()
-        .map(|param| param.abi_ty().clone())
+        .map(|param| {
+            machine
+                .program
+                .function(func_id)
+                .param_abi_ty(param)
+                .clone()
+        })
         .collect::<Vec<_>>();
     let return_ty = machine.program.function(func_id).return_ty.clone();
     let raw_args = if arg_cnt <= 0 || args_ptr.is_null() {
@@ -512,6 +518,7 @@ impl MirMachine {
             }
             if let FidanValue::String(message) = &exception {
                 for code in [
+                    fidan_diagnostics::diag_code!("R0001"),
                     fidan_diagnostics::diag_code!("R2001"),
                     fidan_diagnostics::diag_code!("R2003"),
                 ] {
@@ -1660,7 +1667,14 @@ impl MirMachine {
                 // `args` is `&Vec<Operand>` — .iter() already used, no Vec clone.
                 let arg_vals: Vec<FidanValue> =
                     args.iter().map(|a| self.eval_operand(a, frame)).collect();
-                let result = self.dispatch_call(callee, arg_vals, frame, result_ty.as_ref())?;
+                let mut result = self.dispatch_call(callee, arg_vals, frame, result_ty.as_ref())?;
+                if matches!(callee, Callee::Dynamic(_))
+                    && let Some(expected) = result_ty
+                {
+                    result =
+                        fidan_runtime::contracts::prepare(result, &expected.runtime_descriptor())
+                            .map_err(MirSignal::from)?;
+                }
                 if let Some(d) = dest {
                     frame.store(*d, result);
                 }
@@ -2517,6 +2531,10 @@ impl MirMachine {
         }
         // Fast path: user-defined object methods — Symbol lookup, no re-intern.
         if let FidanValue::Object(ref obj_ref) = receiver {
+            let field = obj_ref.borrow().get_field(method).cloned();
+            if let Some(callable) = field {
+                return self.call_value(callable, args);
+            }
             let class = obj_ref.borrow().class.clone();
             if let Some(RuntimeFnId(id)) = class.find_method(method) {
                 let mut fn_args = vec![receiver];
@@ -2538,7 +2556,12 @@ impl MirMachine {
         }
         crate::bootstrap::call_bootstrap_method(receiver, &method_name, args)
             .map_err(MirSignal::from)?
-            .ok_or_else(|| MirSignal::Panic(format!("no method `{}` found", method_name)))
+            .ok_or_else(|| {
+                MirSignal::RuntimeError(
+                    fidan_diagnostics::diag_code!("R0001"),
+                    format!("no method `{method_name}` found"),
+                )
+            })
     }
 
     /// Dispatch list receiver methods that require a callback (access to `call_function`).
@@ -2549,67 +2572,9 @@ impl MirMachine {
         method: &str,
         args: Vec<FidanValue>,
     ) -> Result<Option<FidanValue>, MirSignal> {
-        match method {
-            "forEach" => {
-                let callback = args.into_iter().next();
-                let items: Vec<FidanValue> = list_ref.borrow().iter().cloned().collect();
-                match callback {
-                    Some(FidanValue::Function(RuntimeFnId(id))) => {
-                        for item in items {
-                            self.call_function(FunctionId(id), vec![item])?;
-                        }
-                    }
-                    Some(FidanValue::Closure {
-                        fn_id: RuntimeFnId(id),
-                        captured,
-                    }) => {
-                        for item in items {
-                            let mut call_args = captured.clone();
-                            call_args.push(item);
-                            self.call_function(FunctionId(id), call_args)?;
-                        }
-                    }
-                    _ => {}
-                }
-                Ok(Some(FidanValue::Nothing))
-            }
-            "firstWhere" => {
-                let callback = args.into_iter().next();
-                let items: Vec<FidanValue> = list_ref.borrow().iter().cloned().collect();
-                let result = match callback {
-                    Some(FidanValue::Function(RuntimeFnId(id))) => {
-                        let mut found = None;
-                        for item in items {
-                            let r = self.call_function(FunctionId(id), vec![item.clone()])?;
-                            if r.truthy() {
-                                found = Some(item);
-                                break;
-                            }
-                        }
-                        found
-                    }
-                    Some(FidanValue::Closure {
-                        fn_id: RuntimeFnId(id),
-                        captured,
-                    }) => {
-                        let mut found = None;
-                        for item in items {
-                            let mut call_args = captured.clone();
-                            call_args.push(item.clone());
-                            let r = self.call_function(FunctionId(id), call_args)?;
-                            if r.truthy() {
-                                found = Some(item);
-                                break;
-                            }
-                        }
-                        found
-                    }
-                    _ => None,
-                };
-                Ok(Some(result.unwrap_or(FidanValue::Nothing)))
-            }
-            _ => Ok(None),
-        }
+        fidan_runtime::receivers::list_callback(list_ref, method, args, |callback, values| {
+            self.call_value(callback, values)
+        })
     }
 
     // Direct and first-class core builtins share assertions and input replay/capture.
@@ -2951,11 +2916,19 @@ impl MirMachine {
             .unwrap_or(FidanValue::Nothing));
         }
         Ok(match val {
-            FidanValue::Object(obj_ref) => obj_ref
-                .borrow()
-                .get_field(field)
-                .cloned()
-                .unwrap_or(FidanValue::Nothing),
+            FidanValue::Object(obj_ref) => {
+                let object = obj_ref.borrow();
+                if let Some(value) = object.get_field(field) {
+                    value.clone()
+                } else if let Some(fn_id) = object.class.find_method(field) {
+                    FidanValue::Closure {
+                        fn_id,
+                        captured: vec![val.clone()],
+                    }
+                } else {
+                    FidanValue::Nothing
+                }
+            }
             FidanValue::Namespace(module) if self.stdlib_modules.contains(module.as_ref()) => {
                 let field_name = self.sym_str(field);
                 if module_exports(module.as_ref()).contains(&field_name.as_ref()) {
@@ -3407,6 +3380,64 @@ assert_eq(caught, true)
                     .as_ref()
                     .is_some_and(JitFnEntry::is_native),
                 "{name} must execute native JIT code"
+            );
+        }
+    }
+
+    #[test]
+    fn short_circuit_executes_real_native_jit_entries() {
+        use fidan_lexer::Lexer;
+        let source = r#"
+var effects = []
+action probe returns boolean { effects.append("probe"); return true }
+action lazy_and with (certain left oftype boolean) returns boolean { return left and probe() }
+action lazy_or with (certain left oftype boolean) returns boolean { return left or probe() }
+action dynamic_and with (left oftype flexible, right oftype flexible) returns boolean { return left and right }
+action dynamic_or with (left oftype flexible, right oftype flexible) returns boolean { return left or right }
+for index in 0..100 {
+    assert_eq(lazy_and(false), false)
+    assert_eq(lazy_or(true), true)
+    assert_eq(lazy_and(true), true)
+    assert_eq(lazy_or(false), true)
+    assert_eq(dynamic_and(false, "skipped"), false)
+    assert_eq(dynamic_or(true, nothing), true)
+    assert_eq(dynamic_and(true, true), true)
+    assert_eq(dynamic_or(false, false), false)
+}
+assert_eq(len(effects), 200)
+var caught = 0
+attempt { dynamic_and(true, "invalid") } catch error { assert(error.contains("R0001")); caught = caught + 1 }
+attempt { dynamic_or(nothing, false) } catch error { assert(error.contains("R0001")); caught = caught + 1 }
+assert_eq(caught, 2)
+"#;
+        let interner = Arc::new(SymbolInterner::new());
+        let sources = Arc::new(SourceMap::new());
+        let file = sources.add_file("<native-logical>", source);
+        let (tokens, diagnostics) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        assert!(diagnostics.is_empty());
+        let (module, diagnostics) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+        assert!(diagnostics.is_empty());
+        let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+        let hir = fidan_hir::lower_module(&module, &typed, &interner);
+        let mut program = fidan_mir::lower_program(&hir, &interner, &[]);
+        fidan_passes::run_preserving_call_frames(&mut program);
+        let mut machine = MirMachine::new(Arc::new(program), interner, sources);
+        machine.set_jit_threshold(1);
+        machine
+            .run()
+            .unwrap_or_else(|error| panic!("{}", error.message));
+        for name in ["lazy_and", "lazy_or", "dynamic_and", "dynamic_or"] {
+            let function = machine
+                .program
+                .functions
+                .iter()
+                .find(|function| machine.interner.resolve(function.name).as_ref() == name)
+                .unwrap();
+            assert!(
+                machine.jit_fns.read()[function.id.0 as usize]
+                    .as_ref()
+                    .is_some_and(JitFnEntry::is_native),
+                "{name} must be native"
             );
         }
     }

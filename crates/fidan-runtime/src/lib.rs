@@ -14,6 +14,7 @@ mod object;
 mod owned_ref;
 pub mod parallel;
 mod range;
+pub mod receivers;
 mod shared_ref;
 mod slice;
 pub mod stdlib;

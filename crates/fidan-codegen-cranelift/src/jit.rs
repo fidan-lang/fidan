@@ -405,6 +405,17 @@ extern "C" fn fdn_jit_call_fn_raw(fn_id: i64, args_ptr: *const i64, arg_cnt: i64
     unsafe { (hooks.call_fn_raw)(ctx, fn_id as u32, args_ptr, arg_cnt) }
 }
 
+/// Strict boxed Boolean negation using the runtime's existing error channel.
+/// The returned runtime box is owned here and consumed exactly once.
+unsafe extern "C" fn fdn_jit_not_bool(value: i64) -> i8 {
+    let result = unsafe { fidan_runtime::ffi::fdn_dyn_not(value as *mut FidanValue) };
+    let result = unsafe { Box::from_raw(result) };
+    match *result {
+        FidanValue::Boolean(value) => i8::from(value),
+        _ => 0,
+    }
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
 /// Map a `MirTy` to a Cranelift type.
@@ -457,7 +468,11 @@ impl JitFnEntry {
     fn fallback(func: &MirFunction) -> Self {
         Self {
             fn_ptr: None,
-            param_tys: func.params.iter().map(|p| p.abi_ty().clone()).collect(),
+            param_tys: func
+                .params
+                .iter()
+                .map(|p| func.param_abi_ty(p).clone())
+                .collect(),
             return_ty: func.return_ty.clone(),
         }
     }
@@ -499,6 +514,7 @@ pub struct JitCompiler {
     int_abs_id: FuncId,
     float_div_id: FuncId,
     has_exception_id: FuncId,
+    not_bool_id: FuncId,
     truthy_id: FuncId,
     box_int_scoped_id: FuncId,
     box_float_scoped_id: FuncId,
@@ -576,6 +592,7 @@ impl JitCompiler {
             "fdn_has_exception",
             fidan_runtime::ffi::fdn_has_exception as *const u8,
         );
+        builder.symbol("fdn_jit_not_bool", fdn_jit_not_bool as *const u8);
         builder.symbol("fdn_truthy", fidan_runtime::ffi::fdn_truthy as *const u8);
         builder.symbol("fdn_jit_receiver_raw", fdn_jit_receiver_raw as *const u8);
         builder.symbol(
@@ -746,6 +763,7 @@ impl JitCompiler {
         let int_abs_id = declare_import_fn(&mut module, "fdn_int_abs", &[I64], Some(I64));
         let int_neg_id = declare_import_fn(&mut module, "fdn_int_neg", &[I64], Some(I64));
         let float_div_id = declare_import_fn(&mut module, "fdn_float_div", &[F64, F64], Some(F64));
+        let not_bool_id = declare_import_fn(&mut module, "fdn_jit_not_bool", &[I64], Some(I8));
         let has_exception_id = declare_import_fn(&mut module, "fdn_has_exception", &[], Some(I8));
         let truthy_id = declare_import_fn(&mut module, "fdn_truthy", &[I64], Some(I8));
         let box_float_scoped_id =
@@ -888,6 +906,7 @@ impl JitCompiler {
             int_abs_id,
             float_div_id,
             has_exception_id,
+            not_bool_id,
             truthy_id,
             box_int_scoped_id,
             box_float_scoped_id,
@@ -945,7 +964,7 @@ impl JitCompiler {
     ) -> Option<JitFnEntry> {
         // ── Eligibility check ─────────────────────────────────────────────────
         for p in &func.params {
-            if !is_jit_abi_supported(p.abi_ty()) {
+            if !is_jit_abi_supported(func.param_abi_ty(p)) {
                 return None;
             }
         }
@@ -991,7 +1010,8 @@ impl JitCompiler {
                     let target = program.functions.get(id.0 as usize)?;
                     if args.len() != target.params.len()
                         || args.iter().zip(&target.params).any(|(arg, param)| {
-                            jit_operand_type(arg, &local_types).as_ref() != Some(param.abi_ty())
+                            jit_operand_type(arg, &local_types).as_ref()
+                                != Some(target.param_abi_ty(param))
                         })
                     {
                         return None;
@@ -1117,6 +1137,9 @@ impl JitCompiler {
                 int_neg: self
                     .module
                     .declare_func_in_func(self.int_neg_id, builder.func),
+                not_bool: self
+                    .module
+                    .declare_func_in_func(self.not_bool_id, builder.func),
                 has_exception: self
                     .module
                     .declare_func_in_func(self.has_exception_id, builder.func),
@@ -1224,7 +1247,7 @@ impl JitCompiler {
                 let entry_params: Vec<Value> = builder.block_params(cl_blocks[0]).to_vec();
                 for (idx, param) in func.params.iter().enumerate() {
                     let raw_i64 = entry_params[idx];
-                    let actual = abi_i64_to_native(&mut builder, raw_i64, param.abi_ty());
+                    let actual = abi_i64_to_native(&mut builder, raw_i64, func.param_abi_ty(param));
                     builder.def_var(cl_vars[param.local.0 as usize], actual);
                 }
             }
@@ -1560,7 +1583,11 @@ impl JitCompiler {
 
         Some(JitFnEntry {
             fn_ptr: Some(fn_ptr),
-            param_tys: func.params.iter().map(|p| p.abi_ty().clone()).collect(),
+            param_tys: func
+                .params
+                .iter()
+                .map(|p| func.param_abi_ty(p).clone())
+                .collect(),
             return_ty: func.return_ty.clone(),
         })
     }
@@ -1591,6 +1618,7 @@ struct JitRuntimeRefs {
     int_abs: cranelift_codegen::ir::FuncRef,
     float_div: cranelift_codegen::ir::FuncRef,
     has_exception: cranelift_codegen::ir::FuncRef,
+    not_bool: cranelift_codegen::ir::FuncRef,
     box_int_scoped_ref: cranelift_codegen::ir::FuncRef,
     box_float_scoped_ref: cranelift_codegen::ir::FuncRef,
     box_bool_scoped_ref: cranelift_codegen::ir::FuncRef,
@@ -1879,6 +1907,14 @@ fn emit_rvalue(
             emit_binop(builder, *op, lv, rv, dest_ty, ctx.rt)
         }
 
+        Rvalue::Unary {
+            op: fidan_ast::UnOp::Not,
+            operand,
+        } if jit_operand_type(operand, ctx.local_types).is_some_and(|ty| !is_scalar_ty(&ty)) => {
+            let raw = box_operand_for_abi(module, builder, operand, ctx)?;
+            let call = builder.ins().call(ctx.rt.not_bool, &[raw]);
+            Some(builder.inst_results(call)[0])
+        }
         Rvalue::Unary { op, operand } => {
             let kind = operand_scalar_kind(operand, ctx.local_types)?;
             let valid = match op {

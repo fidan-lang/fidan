@@ -17,8 +17,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use fidan_ast::BinOp;
 use fidan_config::{BUILTIN_BINDINGS, BUILTIN_VALUE_MODULE};
 use fidan_hir::{
-    DecoratorArg, HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr,
-    HirExprKind, HirExternAbi, HirExternDecl, HirFunction, HirInterpPart, HirModule, HirStmt,
+    HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr, HirExprKind,
+    HirExternAbi, HirExternDecl, HirFunction, HirInterpPart, HirModule, HirParam, HirStmt,
 };
 use fidan_lexer::{Symbol, SymbolInterner};
 use fidan_source::FileId;
@@ -45,6 +45,9 @@ struct PendingParallelFor {
     binding: Option<(Symbol, MirTy)>,
     /// Outer-scope variables captured by the body: become extra params after the binding.
     env_params: Vec<(Symbol, MirTy)>,
+    /// Optional lambda declaration parameters remain owned by the live HIR.
+    lambda_params: Option<(*const HirParam, usize)>,
+    receiver: Option<(Symbol, Option<Symbol>)>,
     body_ptr: *const HirStmt,
     body_len: usize,
 }
@@ -56,19 +59,25 @@ unsafe impl Send for PendingParallelFor {}
 
 /// Collect every `Var` symbol referenced in `stmts` (not necessarily free:
 /// the caller filters to symbols live in the current scope).
-fn collect_hir_used_vars(stmts: &[HirStmt]) -> FxHashSet<Symbol> {
-    let mut out = FxHashSet::default();
+#[derive(Default)]
+struct HirUses {
+    names: FxHashSet<Symbol>,
+    receiver: bool,
+}
+
+fn collect_hir_used_vars(stmts: &[HirStmt]) -> HirUses {
+    let mut out = HirUses::default();
     hir_walk_stmts(stmts, &mut out);
     out
 }
 
-fn hir_walk_stmts(stmts: &[HirStmt], out: &mut FxHashSet<Symbol>) {
+fn hir_walk_stmts(stmts: &[HirStmt], out: &mut HirUses) {
     for s in stmts {
         hir_walk_stmt(s, out);
     }
 }
 
-fn hir_walk_stmt(s: &HirStmt, out: &mut FxHashSet<Symbol>) {
+fn hir_walk_stmt(s: &HirStmt, out: &mut HirUses) {
     match s {
         HirStmt::VarDecl { init, .. } => {
             if let Some(e) = init {
@@ -145,14 +154,19 @@ fn hir_walk_stmt(s: &HirStmt, out: &mut FxHashSet<Symbol>) {
                 hir_walk_stmts(&t.body, out);
             }
         }
+        HirStmt::Decorate { applications, .. } => {
+            for expression in applications {
+                hir_walk_expr(expression, out);
+            }
+        }
         HirStmt::Break { .. } | HirStmt::Continue { .. } | HirStmt::Error { .. } => {}
     }
 }
 
-fn hir_walk_expr(e: &HirExpr, out: &mut FxHashSet<Symbol>) {
+fn hir_walk_expr(e: &HirExpr, out: &mut HirUses) {
     match &e.kind {
         HirExprKind::Var(sym) => {
-            out.insert(*sym);
+            out.names.insert(*sym);
         }
         HirExprKind::Binary { lhs, rhs, .. } => {
             hir_walk_expr(lhs, out);
@@ -241,8 +255,6 @@ fn hir_walk_expr(e: &HirExpr, out: &mut FxHashSet<Symbol>) {
         | HirExprKind::StrLit(_)
         | HirExprKind::BoolLit(_)
         | HirExprKind::Nothing
-        | HirExprKind::This
-        | HirExprKind::Parent
         | HirExprKind::Error => {}
         HirExprKind::ListComp {
             element,
@@ -270,7 +282,15 @@ fn hir_walk_expr(e: &HirExpr, out: &mut FxHashSet<Symbol>) {
                 hir_walk_expr(f, out);
             }
         }
-        HirExprKind::Lambda { body, .. } => {
+        HirExprKind::This | HirExprKind::Parent => {
+            out.receiver = true;
+        }
+        HirExprKind::Lambda { body, params, .. } => {
+            for param in params {
+                if let Some(default) = &param.default {
+                    hir_walk_expr(default, out);
+                }
+            }
             // Walk the body so outer-scope variables referenced inside it are
             // included in the enclosing scope's used-vars set (needed when the
             // lambda itself appears inside a parallel-for body).
@@ -418,6 +438,7 @@ struct FnCtx<'p> {
     /// Maps FunctionId → explicit-param names in declaration order.  Used at
     /// call sites to reorder named args before emitting `Instr::Call`.
     fn_param_names: FxHashMap<FunctionId, Vec<Symbol>>,
+    nullable_methods: Rc<FxHashSet<Symbol>>,
 }
 
 impl<'p> FnCtx<'p> {
@@ -427,6 +448,98 @@ impl<'p> FnCtx<'p> {
     }
     fn func_mut(&mut self) -> &mut MirFunction {
         self.prog.function_mut(self.fn_id)
+    }
+
+    fn lower_parameters(&mut self, params: &[HirParam]) {
+        // Explicit parameters.
+        for param in params {
+            let local = self.alloc_local();
+            self.define_var(param.name, local);
+            let default = param
+                .default
+                .as_ref()
+                .and_then(hir_lit_to_mir_lit)
+                .or_else(|| param.optional.then_some(MirLit::Nothing));
+            self.func_mut().params.push(MirParam {
+                local,
+                name: param.name,
+                ty: fidan_ty_to_mir(&param.ty),
+                certain: param.certain,
+                default,
+            });
+        }
+
+        // Non-literal defaults cannot ride through `MirParam.default`, so lower
+        // them into the function prologue as `if param == nothing { param = expr }`.
+        for param in params {
+            let Some(default_expr) = param.default.as_ref() else {
+                continue;
+            };
+            if hir_lit_to_mir_lit(default_expr).is_some() {
+                continue;
+            }
+
+            let current_local = self
+                .lookup_var(param.name)
+                .expect("parameter local must exist before lowering defaults");
+            let pre_bb = self.cur_bb;
+            let default_bb = self.alloc_block();
+            let join_bb = self.alloc_block();
+
+            let cond_local = self.alloc_local();
+            self.emit(Instr::Assign {
+                dest: cond_local,
+                ty: MirTy::Boolean,
+                rhs: Rvalue::Binary {
+                    op: fidan_ast::BinOp::Eq,
+                    lhs: Operand::Local(current_local),
+                    rhs: Operand::Const(MirLit::Nothing),
+                },
+            });
+            self.set_terminator(Terminator::Branch {
+                cond: Operand::Local(cond_local),
+                then_bb: default_bb,
+                else_bb: join_bb,
+            });
+
+            self.switch_to(default_bb);
+            let default_value = self.lower_expr(default_expr);
+            let default_local = self.alloc_local();
+            self.emit(Instr::Assign {
+                dest: default_local,
+                ty: fidan_ty_to_mir(&param.ty),
+                rhs: Rvalue::Use(default_value),
+            });
+            let default_end_bb = self.cur_bb;
+            self.goto(join_bb);
+
+            self.switch_to(join_bb);
+            let resolved_local = self.alloc_local();
+            self.add_phi(
+                join_bb,
+                resolved_local,
+                fidan_ty_to_mir(&param.ty),
+                vec![
+                    (pre_bb, Operand::Local(current_local)),
+                    (default_end_bb, Operand::Local(default_local)),
+                ],
+            );
+            self.define_var(param.name, resolved_local);
+        }
+
+        for param in params {
+            let local = self
+                .lookup_var(param.name)
+                .expect("parameter local must exist before emitting certain checks");
+            // Emit a certain-param null guard as a real MIR instruction so it
+            // survives inlining without any special-casing in the inliner.
+            if param.certain {
+                self.emit(Instr::CertainCheck {
+                    operand: Operand::Local(local),
+                    name: param.name,
+                });
+            }
+        }
     }
 
     fn alloc_local(&mut self) -> LocalId {
@@ -565,24 +678,27 @@ impl<'p> FnCtx<'p> {
             return args.iter().map(|a| self.lower_expr(&a.value)).collect();
         }
         let param_names = self.fn_param_names.get(&fid).cloned().unwrap_or_default();
-        // Named args keyed by their label symbol.
-        let named: FxHashMap<Symbol, &HirExpr> = args
+        // Evaluate once in source order; binding reorders values, never effects.
+        let evaluated: Vec<_> = args
             .iter()
-            .filter_map(|a| a.name.map(|n| (n, &a.value)))
+            .map(|arg| (arg.name, self.lower_expr(&arg.value)))
             .collect();
-        // Positional args (no label), in call-site order.
-        let positional: Vec<&HirExpr> = args
+        let named: FxHashMap<Symbol, Operand> = evaluated
             .iter()
-            .filter(|a| a.name.is_none())
-            .map(|a| &a.value)
+            .filter_map(|(name, value)| name.map(|name| (name, value.clone())))
+            .collect();
+        let positional: Vec<_> = evaluated
+            .iter()
+            .filter(|(name, _)| name.is_none())
+            .map(|(_, value)| value.clone())
             .collect();
         let mut result: Vec<Operand> = Vec::with_capacity(param_names.len().max(args.len()));
         let mut pos_idx = 0usize;
         for &psym in &param_names {
             if let Some(expr) = named.get(&psym) {
-                result.push(self.lower_expr(expr));
+                result.push(expr.clone());
             } else if pos_idx < positional.len() {
-                result.push(self.lower_expr(positional[pos_idx]));
+                result.push(positional[pos_idx].clone());
                 pos_idx += 1;
             } else {
                 result.push(Operand::Const(MirLit::Nothing));
@@ -590,10 +706,64 @@ impl<'p> FnCtx<'p> {
         }
         // Extra positional args beyond declared params (defensive).
         while pos_idx < positional.len() {
-            result.push(self.lower_expr(positional[pos_idx]));
+            result.push(positional[pos_idx].clone());
             pos_idx += 1;
         }
         result
+    }
+
+    fn call_result_ty(&self, callee: &HirExpr, ty: MirTy) -> MirTy {
+        if let HirExprKind::Field { object, field } = &callee.kind
+            && matches!(object.ty, FidanType::List(_) | FidanType::Dict(_, _))
+            && self.nullable_methods.contains(field)
+        {
+            MirTy::Dynamic
+        } else {
+            ty
+        }
+    }
+
+    fn capture_receiver(
+        &self,
+        used: bool,
+        params: &mut Vec<(Symbol, MirTy)>,
+        args: &mut Vec<Operand>,
+    ) -> Option<(Symbol, Option<Symbol>)> {
+        let local = self.this_reg.filter(|_| used)?;
+        let name = self
+            .func()
+            .params
+            .iter()
+            .find(|param| param.local == local)?
+            .name;
+        params.push((name, MirTy::Dynamic));
+        args.push(Operand::Local(local));
+        Some((name, self.owner_class))
+    }
+
+    fn sort_call_args(
+        &mut self,
+        callee: &HirExpr,
+        lowered: &Callee,
+        args: &[HirArg],
+    ) -> Vec<Operand> {
+        if let Callee::Fn(fid) = lowered {
+            return self.sort_args_for_fn(*fid, args);
+        }
+        if let HirExprKind::Field { object, field } = &callee.kind
+            && let FidanType::Object(mut owner) = object.ty
+        {
+            loop {
+                if let Some(fid) = self.method_ids.get(&(owner, *field)).copied() {
+                    return self.sort_args_for_fn(fid, args);
+                }
+                let Some(parent) = self.parent_map.get(&owner) else {
+                    break;
+                };
+                owner = *parent;
+            }
+        }
+        args.iter().map(|arg| self.lower_expr(&arg.value)).collect()
     }
 
     // ── Expression lowering ──────────────────────────────────────────────────
@@ -698,6 +868,66 @@ impl<'p> FnCtx<'p> {
                 val
             }
 
+            HirExprKind::Binary {
+                op: op @ (BinOp::And | BinOp::Or),
+                lhs,
+                rhs,
+            } => {
+                let left = self.lower_expr(lhs);
+                // Validate an evaluated flexible operand as Boolean before branching.
+                let condition = self.alloc_local();
+                self.emit(Instr::Assign {
+                    dest: condition,
+                    ty: MirTy::Boolean,
+                    rhs: Rvalue::Unary {
+                        op: fidan_ast::UnOp::Not,
+                        operand: left,
+                    },
+                });
+                let keep = self.cur_bb;
+                let evaluate = self.alloc_block();
+                let join = self.alloc_block();
+                let is_and = *op == BinOp::And;
+                self.set_terminator(Terminator::Branch {
+                    cond: Operand::Local(condition),
+                    then_bb: if is_and { join } else { evaluate },
+                    else_bb: if is_and { evaluate } else { join },
+                });
+                self.switch_to(evaluate);
+                let right = self.lower_expr(rhs);
+                let inverted = self.alloc_local();
+                self.emit(Instr::Assign {
+                    dest: inverted,
+                    ty: MirTy::Boolean,
+                    rhs: Rvalue::Unary {
+                        op: fidan_ast::UnOp::Not,
+                        operand: right,
+                    },
+                });
+                let checked = self.alloc_local();
+                self.emit(Instr::Assign {
+                    dest: checked,
+                    ty: MirTy::Boolean,
+                    rhs: Rvalue::Unary {
+                        op: fidan_ast::UnOp::Not,
+                        operand: Operand::Local(inverted),
+                    },
+                });
+                let evaluated = self.cur_bb;
+                self.goto(join);
+                self.switch_to(join);
+                let dest = self.alloc_local();
+                self.add_phi(
+                    join,
+                    dest,
+                    MirTy::Boolean,
+                    vec![
+                        (keep, Operand::Const(MirLit::Bool(!is_and))),
+                        (evaluated, Operand::Local(checked)),
+                    ],
+                );
+                Operand::Local(dest)
+            }
             HirExprKind::Binary { op, lhs, rhs } => {
                 let l = self.lower_expr(lhs);
                 let r = self.lower_expr(rhs);
@@ -728,14 +958,32 @@ impl<'p> FnCtx<'p> {
             }
 
             HirExprKind::NullCoalesce { lhs, rhs } => {
-                let l = self.lower_expr(lhs);
-                let r = self.lower_expr(rhs);
-                let dest = self.alloc_local();
+                let left = self.lower_expr(lhs);
+                let condition = self.alloc_local();
                 self.emit(Instr::Assign {
-                    dest,
-                    ty: ty.clone(),
-                    rhs: Rvalue::NullCoalesce { lhs: l, rhs: r },
+                    dest: condition,
+                    ty: MirTy::Boolean,
+                    rhs: Rvalue::Binary {
+                        op: BinOp::Eq,
+                        lhs: left.clone(),
+                        rhs: Operand::Const(MirLit::Nothing),
+                    },
                 });
+                let keep = self.cur_bb;
+                let fallback = self.alloc_block();
+                let join = self.alloc_block();
+                self.set_terminator(Terminator::Branch {
+                    cond: Operand::Local(condition),
+                    then_bb: fallback,
+                    else_bb: join,
+                });
+                self.switch_to(fallback);
+                let right = self.lower_expr(rhs);
+                let fallback_end = self.cur_bb;
+                self.goto(join);
+                self.switch_to(join);
+                let dest = self.alloc_local();
+                self.add_phi(join, dest, ty, vec![(keep, left), (fallback_end, right)]);
                 Operand::Local(dest)
             }
 
@@ -787,6 +1035,7 @@ impl<'p> FnCtx<'p> {
 
             // ── Calls ─────────────────────────────────────────────────────────
             HirExprKind::Call { callee, args } => {
+                let ty = self.call_result_ty(callee, ty);
                 // ① parent(args) → call parent's `new` constructor directly.
                 if let HirExprKind::Parent = &callee.kind
                     && let (Some(owner), Some(tr)) = (self.owner_class, self.this_reg)
@@ -923,11 +1172,7 @@ impl<'p> FnCtx<'p> {
                         Callee::Dynamic(op)
                     }
                 };
-                let arg_ops: Vec<Operand> = if let Callee::Fn(fid) = &callee_op {
-                    self.sort_args_for_fn(*fid, args)
-                } else {
-                    args.iter().map(|a| self.lower_expr(&a.value)).collect()
-                };
+                let arg_ops = self.sort_call_args(callee, &callee_op, args);
                 let dest = self.alloc_local();
                 self.emit(Instr::Call {
                     dest: Some(dest),
@@ -1141,6 +1386,7 @@ impl<'p> FnCtx<'p> {
             // emit a `MakeClosure` that bundles the function with any outer-
             // scope variables it references.
             HirExprKind::Lambda {
+                name,
                 params,
                 body,
                 return_ty,
@@ -1154,14 +1400,22 @@ impl<'p> FnCtx<'p> {
                     self.lambda_sym,
                     fidan_ty_to_mir(return_ty),
                 ));
+                self.prog.functions.last_mut().unwrap().source_name = *name;
                 self.prog.functions.last_mut().unwrap().precompile = *precompile;
                 self.prog.functions.last_mut().unwrap().extern_decl =
                     extern_decl.as_ref().map(hir_extern_to_mir);
 
                 // 2. Discover which outer-scope variables the body actually uses.
-                let used_in_body = collect_hir_used_vars(body);
+                let mut used_in_body = collect_hir_used_vars(body);
+                for param in params {
+                    if let Some(default) = &param.default {
+                        hir_walk_expr(default, &mut used_in_body);
+                    }
+                    used_in_body.names.remove(&param.name);
+                }
                 // Captures: symbols used in the body that are live in the current env
-                // AND are NOT module-level globals.
+                // Module-level globals never enter env; a local shadow must still
+                // be captured even if a global happens to have the same name.
                 //
                 // Global-backed variables (top-level `var` declarations) are
                 // intentionally excluded: the lambda body's FnCtx already has
@@ -1173,29 +1427,29 @@ impl<'p> FnCtx<'p> {
                 // bindings, etc.) need value capture, because they live in a
                 // call frame that may be gone by the time the closure is called.
                 let mut capture_syms: Vec<Symbol> = used_in_body
+                    .names
                     .into_iter()
-                    .filter(|sym| self.env.contains_key(sym) && !self.global_map.contains_key(sym))
+                    .filter(|sym| self.env.contains_key(sym))
                     .collect();
                 capture_syms.sort_unstable();
 
                 // 3. Build env_params: captured vars (prepended) then explicit params.
                 //    The lambda's MirFunction will receive them in this order.
-                let capture_params: Vec<(Symbol, MirTy)> = capture_syms
+                let mut capture_params: Vec<(Symbol, MirTy)> = capture_syms
                     .iter()
                     .map(|&sym| (sym, MirTy::Dynamic))
                     .collect();
-                let explicit_params: Vec<(Symbol, MirTy)> = params
-                    .iter()
-                    .map(|p| (p.name, fidan_ty_to_mir(&p.ty)))
-                    .collect();
-                let env_params: Vec<(Symbol, MirTy)> =
-                    capture_params.into_iter().chain(explicit_params).collect();
-
                 // 4. Build capture operands: current SSA locals for each captured symbol.
-                let capture_ops: Vec<Operand> = capture_syms
+                let mut capture_ops: Vec<Operand> = capture_syms
                     .iter()
                     .map(|&sym| Operand::Local(*self.env.get(&sym).unwrap()))
                     .collect();
+
+                let receiver = self.capture_receiver(
+                    used_in_body.receiver,
+                    &mut capture_params,
+                    &mut capture_ops,
+                );
 
                 // 5. Defer lowering the body using the existing PendingParallelFor mechanism.
                 self.par_for_pending
@@ -1204,7 +1458,9 @@ impl<'p> FnCtx<'p> {
                         fn_id: lambda_fn_id,
                         return_ty: fidan_ty_to_mir(return_ty),
                         binding: None,
-                        env_params,
+                        env_params: capture_params,
+                        lambda_params: Some((params.as_ptr(), params.len())),
+                        receiver,
                         body_ptr: body.as_ptr(),
                         body_len: body.len(),
                     });
@@ -1634,11 +1890,7 @@ impl<'p> FnCtx<'p> {
                                 Callee::Dynamic(op)
                             }
                         };
-                        let arg_ops = if let Callee::Fn(fid) = &callee_op {
-                            self.sort_args_for_fn(*fid, args)
-                        } else {
-                            args.iter().map(|a| self.lower_expr(&a.value)).collect()
-                        };
+                        let arg_ops = self.sort_call_args(callee, &callee_op, args);
                         self.emit(Instr::Call {
                             dest: None,
                             result_ty: Some(fidan_ty_to_mir(&expr.ty)),
@@ -1763,7 +2015,7 @@ impl<'p> FnCtx<'p> {
                 for (&sym, &local) in &self.env {
                     // Only include symbols that are actually referenced in the body
                     // and that are NOT the loop binding itself.
-                    if sym != *binding && used.contains(&sym) {
+                    if sym != *binding && used.names.contains(&sym) {
                         env_params.push((sym, MirTy::Dynamic));
                         closure_args.push(Operand::Local(local));
                     }
@@ -1778,6 +2030,8 @@ impl<'p> FnCtx<'p> {
                     .push(MirFunction::new(body_fn_id, par_sym, MirTy::Nothing));
 
                 // 4. Emit the ParallelIter instruction in the current function.
+                let receiver =
+                    self.capture_receiver(used.receiver, &mut env_params, &mut closure_args);
                 self.emit(Instr::ParallelIter {
                     collection,
                     body_fn: body_fn_id,
@@ -1793,6 +2047,8 @@ impl<'p> FnCtx<'p> {
                         return_ty: MirTy::Nothing,
                         binding: Some((*binding, fidan_ty_to_mir(binding_ty))),
                         env_params,
+                        lambda_params: None,
+                        receiver,
                         body_ptr: body.as_ptr(),
                         body_len: body.len(),
                     });
@@ -1812,7 +2068,7 @@ impl<'p> FnCtx<'p> {
                     let mut env_params: Vec<(Symbol, MirTy)> = Vec::new();
                     let mut closure_args: Vec<Operand> = Vec::new();
                     for (&sym, &local) in &self.env {
-                        if used.contains(&sym) {
+                        if used.names.contains(&sym) {
                             env_params.push((sym, MirTy::Dynamic));
                             closure_args.push(Operand::Local(local));
                         }
@@ -1826,6 +2082,8 @@ impl<'p> FnCtx<'p> {
                         MirTy::Nothing,
                     ));
 
+                    let receiver =
+                        self.capture_receiver(used.receiver, &mut env_params, &mut closure_args);
                     // Spawn the task and collect its handle.
                     let handle = self.alloc_local();
                     if *is_parallel {
@@ -1851,6 +2109,8 @@ impl<'p> FnCtx<'p> {
                             return_ty: MirTy::Nothing,
                             binding: None, // no per-iteration binding for tasks
                             env_params,
+                            lambda_params: None,
+                            receiver,
                             body_ptr: task.body.as_ptr(),
                             body_len: task.body.len(),
                         });
@@ -1861,6 +2121,17 @@ impl<'p> FnCtx<'p> {
                 }
             }
 
+            HirStmt::Decorate {
+                binding,
+                applications,
+                ..
+            } => {
+                let global = self.global_map[binding];
+                for expression in applications {
+                    let value = self.lower_expr(expression);
+                    self.emit(Instr::StoreGlobal { global, value });
+                }
+            }
             HirStmt::Error { .. } => {} // skip error placeholders
         }
 
@@ -2961,6 +3232,27 @@ pub fn lower_program(
     interner: &SymbolInterner,
     existing_globals: &[String],
 ) -> MirProgram {
+    lower_program_from(hir, interner, existing_globals, None)
+}
+
+/// Keep all declarations and stable global slots, but emit initializer effects
+/// only for the new REPL source suffix. Source boundaries survive optimization;
+/// instruction offsets within bb0 do not survive branching or inlining.
+pub fn lower_repl_program(
+    hir: &HirModule,
+    interner: &SymbolInterner,
+    existing_globals: &[String],
+    source_start: usize,
+) -> MirProgram {
+    lower_program_from(hir, interner, existing_globals, Some(source_start))
+}
+
+fn lower_program_from(
+    hir: &HirModule,
+    interner: &SymbolInterner,
+    existing_globals: &[String],
+    source_start: Option<usize>,
+) -> MirProgram {
     let mut prog = MirProgram::new();
 
     // `new` is the constructor method name; `this` is the implicit first param.
@@ -3055,6 +3347,29 @@ pub fn lower_program(
 
     let fn_is_extension: FxHashSet<Symbol> = ext_fn_map.keys().copied().collect();
 
+    let nullable_methods = Rc::new(
+        [
+            fidan_config::ReceiverBuiltinKind::List,
+            fidan_config::ReceiverBuiltinKind::Dict,
+        ]
+        .into_iter()
+        .flat_map(|kind| {
+            fidan_config::receiver_member_specs(kind)
+                .iter()
+                .filter(|info| {
+                    matches!(
+                        info.info.method_return,
+                        Some(
+                            fidan_config::ReceiverReturnKind::ReceiverElement
+                                | fidan_config::ReceiverReturnKind::DictValue
+                        )
+                    )
+                })
+                .flat_map(|info| info.names.iter().map(|name| interner.intern(name)))
+        })
+        .collect::<FxHashSet<_>>(),
+    );
+
     // ── Pre-pass ③: object methods + per-class metadata ─────────────────────
     let mut obj_map: FxHashMap<Symbol, FunctionId> = FxHashMap::default();
     let mut method_ids: FxHashMap<(Symbol, Symbol), FunctionId> = FxHashMap::default();
@@ -3066,7 +3381,6 @@ pub fn lower_program(
             parent_map.insert(obj.name, p);
         }
         let has_user_ctor = obj.methods.iter().any(|method| method.name == new_sym);
-        let has_field_defaults = obj.fields.iter().any(|field| field.default.is_some());
         let mut obj_info = MirObjectInfo {
             name: obj.name,
             parent: obj.parent,
@@ -3094,7 +3408,7 @@ pub fn lower_program(
             }
         }
 
-        if !has_user_ctor && has_field_defaults {
+        if !has_user_ctor {
             let id = FunctionId(prog.functions.len() as u32);
             method_ids.insert((obj.name, new_sym), id);
             prog.functions
@@ -3119,30 +3433,30 @@ pub fn lower_program(
     }
 
     // ── Post-pass: resolve custom decorator references now that all FunctionIds are known ──
-    // `fn_map` maps top-level Symbol → FunctionId (built in pre-pass ②).
-    for (hir_func, &decorated_fn_id) in hir.functions.iter().zip(&fn_ids_per_hir_fn) {
-        if hir_func.custom_decorators.is_empty() {
-            continue;
-        }
-        if let Some(scope) = function_scopes.get(&hir_func.span.file) {
-            for custom_dec in &hir_func.custom_decorators {
-                if let Some(&dec_fn_id) = scope.get(&custom_dec.name) {
-                    let lit_args: Vec<MirLit> = custom_dec
-                        .args
-                        .iter()
-                        .map(|a| match a {
-                            DecoratorArg::Int(v) => MirLit::Int(*v),
-                            DecoratorArg::Float(v) => MirLit::Float(*v),
-                            DecoratorArg::Str(v) => MirLit::Str(v.clone()),
-                            DecoratorArg::Bool(v) => MirLit::Bool(*v),
-                        })
-                        .collect();
-                    prog.functions[decorated_fn_id.0 as usize]
-                        .custom_decorators
-                        .push((dec_fn_id, lit_args));
-                }
-                // If decorator fn not found, W2004 already emitted by typeck — skip silently
-            }
+    // Existing direct, erased, namespace and method calls retain their public
+    // function IDs. The original body is reached through a private callable slot.
+    let mut decorated_bodies = FxHashMap::default();
+    for stmt in &hir.init_stmts {
+        if let HirStmt::Decorate {
+            function,
+            owner,
+            binding,
+            span,
+            ..
+        } = stmt
+        {
+            let public = if let Some(owner) = owner {
+                method_ids[&(*owner, *function)]
+            } else {
+                function_scopes[&span.file][function]
+            };
+            let body = FunctionId(prog.functions.len() as u32);
+            prog.functions.push(MirFunction::new(
+                body,
+                interner.intern(&format!("__decorator_body_{}", public.0)),
+                prog.function(public).return_ty.clone(),
+            ));
+            decorated_bodies.insert(public, (body, *binding, *span));
         }
     }
 
@@ -3283,28 +3597,33 @@ pub fn lower_program(
         .entry(hir.file)
         .or_insert_with(|| global_map.clone());
     for stmt in &hir.init_stmts {
-        if let HirStmt::VarDecl { name, ty, span, .. } = stmt {
+        let (name, ty, span) = match stmt {
+            HirStmt::VarDecl { name, ty, span, .. } => (*name, ty.clone(), *span),
+            HirStmt::Decorate { binding, span, .. } => (*binding, FidanType::Function, *span),
+            _ => continue,
+        };
+        {
             let qualified = if span.file == hir.file {
-                *name
+                name
             } else {
                 interner.intern(&format!(
                     "__module_{}::{}",
                     span.file.0,
-                    interner.resolve(*name)
+                    interner.resolve(name)
                 ))
             };
             let gid = *global_map.entry(qualified).or_insert_with(|| {
                 let id = GlobalId(prog.globals.len() as u32);
                 prog.globals.push(MirGlobal {
                     name: qualified,
-                    ty: fidan_ty_to_mir(ty),
+                    ty: fidan_ty_to_mir(&ty),
                 });
                 id
             });
             global_scopes
                 .entry(span.file)
                 .or_default()
-                .insert(*name, gid);
+                .insert(name, gid);
         }
     }
     for decl in &hir.use_decls {
@@ -3389,151 +3708,104 @@ pub fn lower_program(
             }
         };
 
-        let entry_bb = prog.function_mut(fn_id).alloc_block();
-        let mut ctx = FnCtx {
-            prog,
-            fn_id,
-            cur_bb: entry_bb,
-            env: VarEnv::default(),
-            global_map: global_scopes
-                .get(&func.span.file)
-                .unwrap_or(global_map)
-                .clone(),
-            fn_map: fn_map.clone(),
-            function_scopes: Rc::clone(&function_scopes),
-            obj_map: obj_map.clone(),
-            terminated: false,
-            this_reg: None,
-            owner_class,
-            parent_map: parent_map.clone(),
-            method_ids: method_ids.clone(),
-            new_sym,
-            len_sym,
-            append_sym,
-            type_sym,
-            fn_is_extension: fn_is_extension.clone(),
-            loop_stack: vec![],
-            continue_sites: FxHashMap::default(),
-            break_sites: FxHashMap::default(),
-            wildcard_sym,
-            lambda_sym,
-            builtin_value_names: builtin_value_names.clone(),
-            namespace_aliases: namespace_aliases.clone(),
-            par_for_pending: pending,
-            is_init_fn: false,
-            fn_param_names: fn_param_names.clone(),
+        let targets = if let Some((body, binding, span)) = decorated_bodies.get(&fn_id) {
+            vec![
+                (*body, None),
+                (fn_id, Some(global_scopes[&span.file][binding])),
+            ]
+        } else {
+            vec![(fn_id, None)]
         };
-        if owner_class.is_some() {
-            let this_local = ctx.alloc_local();
-            ctx.this_reg = Some(this_local);
-            ctx.func_mut().params.push(MirParam {
-                local: this_local,
-                name: this_name,
-                ty: MirTy::Dynamic,
-                certain: false,
-                default: None,
-            });
-        }
-
-        // Explicit parameters.
-        for param in &func.params {
-            let local = ctx.alloc_local();
-            ctx.define_var(param.name, local);
-            let default = param
-                .default
-                .as_ref()
-                .and_then(hir_lit_to_mir_lit)
-                .or_else(|| param.optional.then_some(MirLit::Nothing));
-            ctx.func_mut().params.push(MirParam {
-                local,
-                name: param.name,
-                ty: fidan_ty_to_mir(&param.ty),
-                certain: param.certain,
-                default,
-            });
-        }
-
-        // Non-literal defaults cannot ride through `MirParam.default`, so lower
-        // them into the function prologue as `if param == nothing { param = expr }`.
-        for param in &func.params {
-            let Some(default_expr) = param.default.as_ref() else {
-                continue;
+        for (fn_id, forward_binding) in targets {
+            prog.function_mut(fn_id).source_name = Some(func.name);
+            prog.function_mut(fn_id).precompile = func.precompile;
+            prog.function_mut(fn_id).extern_decl = if forward_binding.is_none() {
+                func.extern_decl.as_ref().map(hir_extern_to_mir)
+            } else {
+                None
             };
-            if hir_lit_to_mir_lit(default_expr).is_some() {
-                continue;
-            }
-
-            let current_local = ctx
-                .lookup_var(param.name)
-                .expect("parameter local must exist before lowering defaults");
-            let pre_bb = ctx.cur_bb;
-            let default_bb = ctx.alloc_block();
-            let join_bb = ctx.alloc_block();
-
-            let cond_local = ctx.alloc_local();
-            ctx.emit(Instr::Assign {
-                dest: cond_local,
-                ty: MirTy::Boolean,
-                rhs: Rvalue::Binary {
-                    op: fidan_ast::BinOp::Eq,
-                    lhs: Operand::Local(current_local),
-                    rhs: Operand::Const(MirLit::Nothing),
-                },
-            });
-            ctx.set_terminator(Terminator::Branch {
-                cond: Operand::Local(cond_local),
-                then_bb: default_bb,
-                else_bb: join_bb,
-            });
-
-            ctx.switch_to(default_bb);
-            let default_value = ctx.lower_expr(default_expr);
-            let default_local = ctx.alloc_local();
-            ctx.emit(Instr::Assign {
-                dest: default_local,
-                ty: fidan_ty_to_mir(&param.ty),
-                rhs: Rvalue::Use(default_value),
-            });
-            let default_end_bb = ctx.cur_bb;
-            ctx.goto(join_bb);
-
-            ctx.switch_to(join_bb);
-            let resolved_local = ctx.alloc_local();
-            ctx.add_phi(
-                join_bb,
-                resolved_local,
-                fidan_ty_to_mir(&param.ty),
-                vec![
-                    (pre_bb, Operand::Local(current_local)),
-                    (default_end_bb, Operand::Local(default_local)),
-                ],
-            );
-            ctx.define_var(param.name, resolved_local);
-        }
-
-        for param in &func.params {
-            let local = ctx
-                .lookup_var(param.name)
-                .expect("parameter local must exist before emitting certain checks");
-            // Emit a certain-param null guard as a real MIR instruction so it
-            // survives inlining without any special-casing in the inliner.
-            if param.certain {
-                ctx.emit(Instr::CertainCheck {
-                    operand: Operand::Local(local),
-                    name: param.name,
+            let entry_bb = prog.function_mut(fn_id).alloc_block();
+            let mut ctx = FnCtx {
+                prog,
+                fn_id,
+                cur_bb: entry_bb,
+                env: VarEnv::default(),
+                global_map: global_scopes
+                    .get(&func.span.file)
+                    .unwrap_or(global_map)
+                    .clone(),
+                fn_map: fn_map.clone(),
+                function_scopes: Rc::clone(&function_scopes),
+                obj_map: obj_map.clone(),
+                terminated: false,
+                this_reg: None,
+                owner_class,
+                parent_map: parent_map.clone(),
+                method_ids: method_ids.clone(),
+                new_sym,
+                len_sym,
+                append_sym,
+                type_sym,
+                fn_is_extension: fn_is_extension.clone(),
+                loop_stack: vec![],
+                continue_sites: FxHashMap::default(),
+                break_sites: FxHashMap::default(),
+                wildcard_sym,
+                lambda_sym,
+                builtin_value_names: builtin_value_names.clone(),
+                namespace_aliases: namespace_aliases.clone(),
+                par_for_pending: Rc::clone(&pending),
+                is_init_fn: false,
+                fn_param_names: fn_param_names.clone(),
+                nullable_methods: Rc::clone(&nullable_methods),
+            };
+            if owner_class.is_some() {
+                let this_local = ctx.alloc_local();
+                ctx.this_reg = Some(this_local);
+                ctx.func_mut().params.push(MirParam {
+                    local: this_local,
+                    name: this_name,
+                    ty: MirTy::Dynamic,
+                    certain: false,
+                    default: None,
                 });
             }
-        }
 
-        if func.name == new_sym
-            && let Some(owner) = owner_class
-        {
-            emit_object_field_defaults(&mut ctx, owner);
-        }
+            ctx.lower_parameters(&func.params);
 
-        ctx.lower_stmts(&func.body);
-        if !ctx.terminated {
-            ctx.set_terminator(Terminator::Return(None));
+            if let Some(global) = forward_binding {
+                let callable = ctx.alloc_local();
+                ctx.emit(Instr::LoadGlobal {
+                    dest: callable,
+                    global,
+                });
+                let mut args = ctx
+                    .this_reg
+                    .map(|receiver| vec![Operand::Local(receiver)])
+                    .unwrap_or_default();
+                args.extend(func.params.iter().map(|param| {
+                    Operand::Local(ctx.lookup_var(param.name).expect("parameter resolved"))
+                }));
+                let result = ctx.alloc_local();
+                ctx.emit(Instr::Call {
+                    dest: Some(result),
+                    result_ty: Some(fidan_ty_to_mir(&func.return_ty)),
+                    callee: Callee::Dynamic(Operand::Local(callable)),
+                    args,
+                    span: func.span,
+                });
+                ctx.set_terminator(Terminator::Return(Some(Operand::Local(result))));
+            } else {
+                if func.name == new_sym
+                    && let Some(owner) = owner_class
+                {
+                    emit_object_field_defaults(&mut ctx, owner);
+                }
+                ctx.lower_stmts(&func.body);
+                if !ctx.terminated {
+                    ctx.set_terminator(Terminator::Return(None));
+                }
+            }
         }
     };
 
@@ -3598,7 +3870,6 @@ pub fn lower_program(
                 is_parallel: false,
                 precompile: false,
                 extern_decl: None,
-                custom_decorators: vec![],
                 span: obj.span,
             };
             lower_hir_fn(
@@ -3656,6 +3927,7 @@ pub fn lower_program(
             par_for_pending: Rc::clone(&pending_par_fors),
             is_init_fn: true,
             fn_param_names: fn_param_names.clone(),
+            nullable_methods: Rc::clone(&nullable_methods),
         };
 
         // ── Emit namespace variable bindings for `use std.MODULE` / `use usermod` ──
@@ -3773,8 +4045,24 @@ pub fn lower_program(
             }
         }
 
+        // Hoist original callable identities, but apply decorators at the actual
+        // declaration after preceding module initialization has completed.
+        for (body, binding, span) in decorated_bodies.values() {
+            if source_start.is_some_and(|start| (span.start as usize) < start) {
+                continue;
+            }
+            let global = global_scopes[&span.file][binding];
+            ctx.emit(Instr::StoreGlobal {
+                global,
+                value: Operand::Const(MirLit::FunctionRef(body.0)),
+            });
+        }
+
         let mut source = None;
         for stmt in &hir.init_stmts {
+            if source_start.is_some_and(|start| (stmt.span().start as usize) < start) {
+                continue;
+            }
             if source != Some(stmt.span().file) {
                 ctx.env = VarEnv::default();
                 ctx.global_map = global_scopes
@@ -3821,7 +4109,7 @@ pub fn lower_program(
                     obj_map: obj_map.clone(),
                     terminated: false,
                     this_reg: None,
-                    owner_class: None,
+                    owner_class: pf.receiver.and_then(|(_, owner)| owner),
                     parent_map: parent_map.clone(),
                     method_ids: method_ids.clone(),
                     new_sym,
@@ -3839,6 +4127,7 @@ pub fn lower_program(
                     par_for_pending: Rc::clone(&pending_par_fors),
                     is_init_fn: false,
                     fn_param_names: fn_param_names.clone(),
+                    nullable_methods: Rc::clone(&nullable_methods),
                 };
                 // First param (parallel for only): the per-iteration loop binding.
                 if let Some((binding_sym, binding_ty)) = pf.binding {
@@ -3863,6 +4152,14 @@ pub fn lower_program(
                         certain: false,
                         default: None,
                     });
+                }
+                if let Some((name, _)) = pf.receiver {
+                    ctx.this_reg = ctx.lookup_var(name);
+                }
+                if let Some((parameters, count)) = pf.lambda_params {
+                    // SAFETY: like body_ptr, these parameters are owned by the HIR
+                    // for this entire single-threaded lower_program invocation.
+                    ctx.lower_parameters(unsafe { std::slice::from_raw_parts(parameters, count) });
                 }
                 ctx.lower_stmts(body);
                 if !ctx.terminated {
@@ -3919,6 +4216,7 @@ pub fn lower_program(
             par_for_pending: Rc::clone(&pending_par_fors),
             is_init_fn: false,
             fn_param_names: fn_param_names.clone(),
+            nullable_methods: Rc::clone(&nullable_methods),
         };
         ctx.lower_stmts(&test_decl.body);
         if !ctx.terminated {

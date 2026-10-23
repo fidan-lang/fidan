@@ -452,6 +452,18 @@ pub fn pre_register_hir_into_tc(
         tc.pre_register_action(func.name, info);
     }
 
+    for declaration in &hir.enums {
+        if visible(declaration.name) {
+            tc.pre_register_enum(
+                declaration.name,
+                fidan_typeck::EnumInfo {
+                    variants: declaration.variants.clone(),
+                    span: declaration.span,
+                },
+            );
+        }
+    }
+
     for obj in &hir.objects {
         if !visible(obj.name) {
             continue;
@@ -510,21 +522,27 @@ pub fn pre_register_hir_into_tc(
         if decl.module_path.len() >= 2 {
             if let Some(names) = &decl.specific_names {
                 for name in names {
-                    tc.pre_register_namespace(name);
+                    if visible(interner.intern(name)) {
+                        tc.pre_register_namespace(name);
+                    }
                 }
             } else {
                 let alias = decl
                     .alias
                     .as_deref()
                     .unwrap_or(decl.module_path[1].as_str());
-                tc.pre_register_namespace(alias);
+                if visible(interner.intern(alias)) {
+                    tc.pre_register_namespace(alias);
+                }
             }
         } else if decl.module_path.len() == 1 && decl.specific_names.is_none() {
             let alias = decl
                 .alias
                 .as_deref()
                 .unwrap_or(decl.module_path[0].as_str());
-            tc.pre_register_namespace(alias);
+            if visible(interner.intern(alias)) {
+                tc.pre_register_namespace(alias);
+            }
         }
     }
 }
@@ -558,107 +576,6 @@ fn collect_error_messages(diags: &[Diagnostic], errors: &mut Vec<String>) -> usi
     count
 }
 
-fn load_imported_hirs(
-    module: &fidan_ast::Module,
-    interner: &Arc<SymbolInterner>,
-    base_dir: &Path,
-    source_map: &Arc<SourceMap>,
-    root_path: Option<&Path>,
-    errors: &mut Vec<String>,
-) -> Vec<(fidan_hir::HirModule, ImportFilter, bool)> {
-    type QueueItem = (PathBuf, bool, ImportFilter);
-
-    let mut hirs: Vec<(fidan_hir::HirModule, ImportFilter, bool)> = Vec::new();
-    let (main_paths, main_unresolved) = collect_file_import_paths(module, interner, base_dir);
-    for (name, _) in main_unresolved {
-        errors.push(format!(
-            "{}: module `{name}` not found",
-            diag_code!("E0106")
-        ));
-    }
-
-    let mut queue: VecDeque<QueueItem> = main_paths
-        .into_iter()
-        .map(|(path, _, filter)| (path, true, filter))
-        .collect();
-
-    let mut loaded: HashSet<PathBuf> = HashSet::new();
-    if let Some(path) = root_path
-        && let Ok(canon) = path.canonicalize()
-    {
-        loaded.insert(canon);
-    }
-
-    while let Some((import_path, expose, filter)) = queue.pop_front() {
-        let canon = import_path
-            .canonicalize()
-            .unwrap_or_else(|_| import_path.clone());
-        if !loaded.insert(canon) {
-            continue;
-        }
-
-        match std::fs::read_to_string(&import_path) {
-            Ok(import_src) => {
-                let import_name = import_path.display().to_string();
-                let import_file = source_map.add_file(&*import_name, &*import_src);
-                let (import_tokens, import_lex_diags) =
-                    Lexer::new(&import_file, Arc::clone(interner)).tokenise();
-                let lex_errs = collect_error_messages(&import_lex_diags, errors);
-
-                let (import_module, import_parse_diags) =
-                    fidan_parser::parse(&import_tokens, import_file.id, Arc::clone(interner));
-                let parse_errs = collect_error_messages(&import_parse_diags, errors);
-
-                let import_base = import_path
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from("."));
-                let (sub_paths, sub_unresolved) = collect_file_import_paths_with_root(
-                    &import_module,
-                    interner,
-                    &import_base,
-                    base_dir,
-                );
-                for (name, _) in sub_unresolved {
-                    errors.push(format!(
-                        "{}: module `{name}` not found",
-                        diag_code!("E0106")
-                    ));
-                }
-                for (sub_path, sub_re_export, sub_filter) in sub_paths {
-                    queue.push_back((sub_path, expose && sub_re_export, sub_filter));
-                }
-
-                if lex_errs == 0 && parse_errs == 0 {
-                    let import_tm =
-                        fidan_typeck::typecheck_full(&import_module, Arc::clone(interner));
-                    let type_errs = collect_error_messages(&import_tm.diagnostics, errors);
-                    if type_errs == 0 {
-                        let mut import_hir =
-                            fidan_hir::lower_module(&import_module, &import_tm, interner);
-                        bind_hir_file_imports(
-                            &mut import_hir,
-                            &import_module,
-                            interner,
-                            source_map,
-                            &import_base,
-                            base_dir,
-                        );
-                        hirs.push((import_hir, filter, expose));
-                    }
-                }
-            }
-            Err(err) => errors.push(format!(
-                "{}: cannot load import `{}`: {err}",
-                diag_code!("R0001"),
-                import_path.display()
-            )),
-        }
-    }
-
-    hirs
-}
-
 fn join_errors(errors: Vec<String>) -> String {
     let mut deduped: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -688,7 +605,12 @@ pub fn compile_source_to_mir(
     error_count += collect_error_messages(&parse_diags, &mut errors);
 
     let imported_hirs = if error_count == 0 {
-        load_imported_hirs(&module, &interner, base_dir, &source_map, None, &mut errors)
+        let loaded =
+            crate::load_imported_hirs(&module, &interner, base_dir, &source_map, None, &|path| {
+                std::fs::read_to_string(path)
+            });
+        collect_error_messages(&loaded.diagnostics, &mut errors);
+        loaded.modules
     } else {
         Vec::new()
     };

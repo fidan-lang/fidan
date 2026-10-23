@@ -1,7 +1,4 @@
-use crate::imports::{
-    bind_hir_file_imports, collect_file_import_paths, collect_file_import_paths_with_root,
-    pre_register_hir_into_tc,
-};
+use crate::imports::{bind_hir_file_imports, collect_file_import_paths, pre_register_hir_into_tc};
 use crate::last_error;
 use crate::replay::save_replay_bundle;
 use crate::terminal::paint;
@@ -821,7 +818,6 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     }
     // ── Type-check ────────────────────────────────────
     // Only proceed if parse is clean.
-    let mut error_count: usize = budget.error_count();
 
     // ── File-path import loading ───────────────────────────────────────────────
     //
@@ -838,170 +834,26 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     };
 
-    if !is_stdin {
-        for message in fidan_driver::detect_import_cycles(&opts.input) {
-            budget.render_message(Severity::Error, "", &message);
-            error_count = budget.error_count();
-            if budget.would_block_further_errors() {
-                break;
-            }
+    let imported = fidan_driver::load_imported_hirs(
+        &module,
+        &interner,
+        &base_dir,
+        &source_map,
+        if is_stdin {
+            None
+        } else {
+            Some(opts.input.as_path())
+        },
+        &|path| std::fs::read_to_string(path),
+    );
+    for diagnostic in &imported.diagnostics {
+        budget.render_diag(diagnostic, &source_map, &opts.suppress);
+        if budget.would_block_further_errors() {
+            break;
         }
     }
-
-    let imported_hirs: Vec<(
-        fidan_hir::HirModule,
-        Option<std::collections::HashSet<String>>,
-        bool, // expose_to_typeck
-    )> = {
-        use fidan_lexer::Lexer;
-        use std::collections::{HashSet, VecDeque};
-
-        //   expose_to_typeck = true  → symbols visible in the top-level program
-        //   filter = None             → namespace import: call as `mod.fn()` only
-        //   filter = Some(empty)      → wildcard: everything flat
-        //   filter = Some(names)      → flat import: only listed names flat
-        type QueueItem = (std::path::PathBuf, bool, Option<HashSet<String>>);
-
-        let mut hirs: Vec<(
-            fidan_hir::HirModule,
-            Option<HashSet<String>>,
-            bool, // expose_to_typeck
-        )> = Vec::new();
-        let (main_paths, main_unresolved) =
-            collect_file_import_paths(&module, &interner, &base_dir);
-        for (name, span) in main_unresolved {
-            let diag = fidan_diagnostics::Diagnostic::error(
-                fidan_diagnostics::diag_code!("E0106"),
-                format!("module `{name}` not found"),
-                span,
-            );
-            budget.render_diag(&diag, &source_map, &opts.suppress);
-            if budget.would_block_further_errors() {
-                break;
-            }
-        }
-        let mut queue: VecDeque<QueueItem> = main_paths
-            .into_iter()
-            .map(|(p, _, filter)| (p, true, filter)) // direct imports always exposed
-            .collect();
-
-        // Track canonical paths to break import cycles.
-        let mut loaded: HashSet<std::path::PathBuf> = HashSet::new();
-        if !is_stdin && let Ok(canon) = opts.input.canonicalize() {
-            loaded.insert(canon);
-        }
-
-        while let Some((import_path, expose, filter)) = queue.pop_front() {
-            if budget.would_block_further_errors() {
-                break;
-            }
-            let canon = import_path
-                .canonicalize()
-                .unwrap_or_else(|_| import_path.clone());
-            if !loaded.insert(canon) {
-                continue; // already loaded or cycle detected
-            }
-
-            match std::fs::read_to_string(&import_path) {
-                Ok(imp_src) => {
-                    let imp_name = import_path.display().to_string();
-                    let imp_file = source_map.add_file(imp_name.as_str(), imp_src.as_str());
-                    let (imp_tokens, imp_lex_diags) =
-                        Lexer::new(&imp_file, Arc::clone(&interner)).tokenise();
-                    for d in &imp_lex_diags {
-                        budget.render_diag(d, &source_map, &opts.suppress);
-                        if budget.would_block_further_errors() {
-                            break;
-                        }
-                    }
-                    let (imp_module, imp_parse_diags) =
-                        fidan_parser::parse(&imp_tokens, imp_file.id, Arc::clone(&interner));
-                    for d in &imp_parse_diags {
-                        budget.render_diag(d, &source_map, &opts.suppress);
-                        if budget.would_block_further_errors() {
-                            break;
-                        }
-                    }
-                    let imp_lex_err = imp_lex_diags
-                        .iter()
-                        .any(|d| d.severity == fidan_diagnostics::Severity::Error);
-                    let imp_parse_err = imp_parse_diags
-                        .iter()
-                        .any(|d| d.severity == fidan_diagnostics::Severity::Error);
-                    error_count = budget.error_count();
-
-                    // Enqueue transitive imports (they use their own internal resolution,
-                    // no name filter needed — the filter only applies at the call site).
-                    let imp_base = import_path
-                        .parent()
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or_else(|| std::path::PathBuf::from("."));
-                    let (sub_paths, sub_unresolved) = collect_file_import_paths_with_root(
-                        &imp_module,
-                        &interner,
-                        &imp_base,
-                        &base_dir,
-                    );
-                    for (name, span) in sub_unresolved {
-                        let diag = fidan_diagnostics::Diagnostic::error(
-                            fidan_diagnostics::diag_code!("E0106"),
-                            format!("module `{name}` not found"),
-                            span,
-                        );
-                        budget.render_diag(&diag, &source_map, &opts.suppress);
-                        if budget.would_block_further_errors() {
-                            break;
-                        }
-                    }
-                    for (sub, sub_re_export, sub_filter) in sub_paths {
-                        queue.push_back((sub, expose && sub_re_export, sub_filter));
-                    }
-
-                    // Typeck + HIR-lower the imported module (only if lex/parse clean).
-                    if !imp_lex_err && !imp_parse_err && !budget.would_block_further_errors() {
-                        let imp_tm =
-                            fidan_typeck::typecheck_full(&imp_module, Arc::clone(&interner));
-                        for d in &imp_tm.diagnostics {
-                            budget.render_diag(d, &source_map, &opts.suppress);
-                            if budget.would_block_further_errors() {
-                                break;
-                            }
-                        }
-                        let imp_tc_err = imp_tm
-                            .diagnostics
-                            .iter()
-                            .any(|d| d.severity == fidan_diagnostics::Severity::Error);
-                        error_count = budget.error_count();
-                        if !imp_tc_err && !budget.would_block_further_errors() {
-                            let mut imp_hir =
-                                fidan_hir::lower_module(&imp_module, &imp_tm, &interner);
-                            bind_hir_file_imports(
-                                &mut imp_hir,
-                                &imp_module,
-                                &interner,
-                                &source_map,
-                                &imp_base,
-                                &base_dir,
-                            );
-                            // Always push so private transitive deps are compiled into MIR
-                            // (their functions may be called by the importing module).
-                            // `expose` only controls whether names appear in the outer typeck.
-                            hirs.push((imp_hir, filter, expose));
-                        }
-                    }
-                }
-                Err(e) => {
-                    budget.render_message(
-                        Severity::Error,
-                        "",
-                        &format!("cannot load import `{}`: {e}", import_path.display()),
-                    );
-                    error_count = budget.error_count();
-                }
-            }
-        }
-        hirs
-    };
+    let mut error_count = budget.error_count();
+    let imported_hirs = imported.modules;
 
     // Always run the full typed path so HIR/MIR emit has type information.
     // Pre-register imported symbols before checking the main file so the checker

@@ -225,6 +225,10 @@ fn do_inline(
     // Remap the return value.
     let return_op: Option<Operand> = match &callee.terminator {
         Terminator::Return(Some(op)) => Some(remap_op(op, &param_map, offset)),
+        // Calls used as expressions still produce Nothing. Leaving the destination
+        // undefined happened to work in interpreter frames but became a null FFI
+        // pointer in native code (for example a side-effect-only decorator).
+        Terminator::Return(None) => Some(Operand::Const(MirLit::Nothing)),
         _ => None,
     };
 
@@ -483,5 +487,39 @@ fn remap_callee(callee: &Callee, r: &impl Fn(&Operand) -> Operand) -> Callee {
             method: *method,
         },
         Callee::Dynamic(op) => Callee::Dynamic(r(op)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fidan_lexer::SymbolInterner;
+
+    #[test]
+    fn inlined_void_call_defines_its_observable_nothing_result() {
+        let names = SymbolInterner::new();
+        let mut caller = MirFunction::new(FunctionId(0), names.intern("caller"), MirTy::Nothing);
+        let block = caller.alloc_block();
+        let dest = caller.alloc_local();
+        caller.blocks[block.0 as usize]
+            .instructions
+            .push(Instr::Call {
+                dest: Some(dest),
+                result_ty: Some(MirTy::Dynamic),
+                callee: Callee::Fn(FunctionId(1)),
+                args: vec![],
+                span: Default::default(),
+            });
+        let callee = CalleeData {
+            param_locals: vec![],
+            param_defaults: vec![],
+            local_count: 0,
+            return_ty: MirTy::Nothing,
+            instructions: vec![],
+            terminator: Terminator::Return(None),
+        };
+        do_inline(&mut caller, 0, 0, Some(dest), vec![], callee);
+        assert!(matches!(caller.blocks[0].instructions.as_slice(),
+            [Instr::Assign { dest: actual, rhs: Rvalue::Use(Operand::Const(MirLit::Nothing)), .. }] if *actual == dest));
     }
 }

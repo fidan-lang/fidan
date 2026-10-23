@@ -18,80 +18,12 @@ const DECORATOR_PRECOMPILE: &str = "precompile";
 const DECORATOR_EXTERN: &str = "extern";
 
 use crate::hir::{
-    CustomDecorator, DecoratorArg, HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf,
-    HirExpr, HirExprKind, HirExternAbi, HirExternDecl, HirField, HirFunction, HirGlobal,
-    HirInterpPart, HirModule, HirObject, HirParam, HirStmt, HirTask, HirTestDecl, HirUseDecl,
+    HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirExpr, HirExprKind,
+    HirExternAbi, HirExternDecl, HirField, HirFunction, HirGlobal, HirInterpPart, HirModule,
+    HirObject, HirParam, HirStmt, HirTask, HirTestDecl, HirUseDecl,
 };
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
-
-/// Extract user-defined (custom) decorators from an AST decorator list.
-///
-/// Built-in decorator names (`precompile`, `deprecated`) are skipped.
-/// Non-literal args are silently ignored — decorator args must be compile-time
-/// constants (int, float, string, bool).
-fn extract_custom_decorators(
-    arena: &AstArena,
-    decorators: &[fidan_ast::Decorator],
-    interner: &SymbolInterner,
-    actions: &rustc_hash::FxHashMap<Symbol, ActionInfo>,
-) -> Vec<CustomDecorator> {
-    decorators
-        .iter()
-        .filter(|d| {
-            let name = interner.resolve(d.name);
-            !BUILTIN_DECORATORS.contains(&name.as_ref())
-        })
-        .map(|d| {
-            let ordered_args = order_decorator_args(d, actions.get(&d.name));
-            let args: Vec<DecoratorArg> = ordered_args
-                .into_iter()
-                .filter_map(|arg| literal_decorator_arg(arena, arg))
-                .collect();
-            CustomDecorator { name: d.name, args }
-        })
-        .collect()
-}
-
-fn literal_decorator_arg(arena: &AstArena, arg: &Arg) -> Option<DecoratorArg> {
-    match arena.get_expr(arg.value) {
-        Expr::IntLit { value, .. } => Some(DecoratorArg::Int(*value)),
-        Expr::FloatLit { value, .. } => Some(DecoratorArg::Float(*value)),
-        Expr::StrLit { value, .. } => Some(DecoratorArg::Str(value.clone())),
-        Expr::BoolLit { value, .. } => Some(DecoratorArg::Bool(*value)),
-        _ => None,
-    }
-}
-
-fn order_decorator_args<'a>(
-    decorator: &'a fidan_ast::Decorator,
-    info: Option<&'a ActionInfo>,
-) -> Vec<&'a Arg> {
-    let Some(info) = info else {
-        return decorator.args.iter().collect();
-    };
-    if decorator.args.iter().all(|arg| arg.name.is_none()) {
-        return decorator.args.iter().collect();
-    }
-
-    let mut positional = decorator.args.iter().filter(|arg| arg.name.is_none());
-    let named: rustc_hash::FxHashMap<Symbol, &Arg> = decorator
-        .args
-        .iter()
-        .filter_map(|arg| arg.name.map(|name| (name, arg)))
-        .collect();
-
-    info.params
-        .iter()
-        .skip(1)
-        .filter_map(|param| {
-            named
-                .get(&param.name)
-                .copied()
-                .or_else(|| positional.next())
-        })
-        .collect()
-}
 
 fn lower_extern_decl(
     arena: &AstArena,
@@ -165,11 +97,18 @@ struct LowerFunction<'a> {
     is_parallel: bool,
     precompile: bool,
     extern_decl: Option<HirExternDecl>,
-    custom_decorators: Vec<crate::hir::CustomDecorator>,
     span: Span,
 }
 
 impl<'a> Ctx<'a> {
+    fn annotation_type(&self, annotation: &fidan_ast::TypeExpr) -> FidanType {
+        self.typed
+            .annotation_types
+            .get(&annotation.span())
+            .cloned()
+            .unwrap_or(FidanType::Error)
+    }
+
     /// Look up the inferred type of an expression.
     fn ty(&self, id: ExprId) -> FidanType {
         self.typed
@@ -328,12 +267,12 @@ impl<'a> Ctx<'a> {
             Expr::Error { .. } => HirExprKind::Error,
 
             Expr::Lambda { params, body, .. } => {
-                // Lower lambda params using the same simple type resolver as regular params.
+                // Consume the checker's resolved signature, including aliases and enums.
                 let hir_params = params
                     .iter()
                     .map(|p| HirParam {
                         name: p.name,
-                        ty: resolve_type_expr_simple(&p.ty, self.interner),
+                        ty: self.annotation_type(&p.ty),
                         certain: p.certain,
                         optional: p.optional,
                         default: p.default.map(|e| self.lower_expr(e)),
@@ -342,9 +281,15 @@ impl<'a> Ctx<'a> {
                     .collect();
                 let hir_body = self.lower_stmts(&body);
                 HirExprKind::Lambda {
+                    name: None,
                     params: hir_params,
                     body: hir_body,
-                    return_ty: FidanType::Dynamic,
+                    return_ty: self
+                        .typed
+                        .expr_actions
+                        .get(&id)
+                        .map(|info| info.return_ty.clone())
+                        .unwrap_or(FidanType::Error),
                     precompile: false,
                     extern_decl: None,
                 }
@@ -503,11 +448,12 @@ impl<'a> Ctx<'a> {
                         ty: FidanType::Function,
                         span,
                         kind: HirExprKind::Lambda {
+                            name: Some(name),
                             params: self.lower_params(&params, None),
                             body: self.lower_stmts(&body),
                             return_ty: return_ty
                                 .as_ref()
-                                .map(|ty| resolve_type_expr_simple(ty, self.interner))
+                                .map(|ty| self.annotation_type(ty))
                                 .unwrap_or(FidanType::Dynamic),
                             precompile,
                             extern_decl,
@@ -517,34 +463,16 @@ impl<'a> Ctx<'a> {
                     span,
                 });
 
-                for decorator in decorators.iter().filter(|decorator| {
-                    let decorator_name = self.interner.resolve(decorator.name);
-                    !BUILTIN_DECORATORS.contains(&decorator_name.as_ref())
-                }) {
-                    let mut args = Vec::with_capacity(decorator.args.len() + 1);
-                    args.push(HirArg {
-                        name: None,
-                        value: HirExpr {
+                for value in self.decorator_applications(name, &decorators) {
+                    out.push(HirStmt::Assign {
+                        target: HirExpr {
                             ty: FidanType::Function,
                             span,
                             kind: HirExprKind::Var(name),
                         },
+                        value,
                         span,
                     });
-                    args.extend(decorator.args.iter().map(|arg| self.lower_arg(arg)));
-
-                    out.push(HirStmt::Expr(HirExpr {
-                        ty: FidanType::Dynamic,
-                        span: decorator.span,
-                        kind: HirExprKind::Call {
-                            callee: Box::new(HirExpr {
-                                ty: FidanType::Function,
-                                span: decorator.span,
-                                kind: HirExprKind::Var(decorator.name),
-                            }),
-                            args,
-                        },
-                    }));
                 }
             }
 
@@ -639,7 +567,7 @@ impl<'a> Ctx<'a> {
                         ty: c
                             .ty
                             .as_ref()
-                            .map(|te| resolve_type_expr_simple(te, self.interner))
+                            .map(|te| self.annotation_type(te))
                             .unwrap_or(FidanType::Dynamic),
                         body: self.lower_stmts(&c.body),
                         span: c.span,
@@ -696,6 +624,114 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Declaration-time calls share ordinary argument/default evaluation.
+    fn decorator_applications(
+        &self,
+        binding: Symbol,
+        decorators: &[fidan_ast::Decorator],
+    ) -> Vec<HirExpr> {
+        decorators
+            .iter()
+            .filter(|decorator| {
+                !BUILTIN_DECORATORS.contains(&self.interner.resolve(decorator.name).as_ref())
+            })
+            .map(|decorator| {
+                let span = decorator.span;
+                let current = || HirExpr {
+                    ty: FidanType::Function,
+                    span,
+                    kind: HirExprKind::Var(binding),
+                };
+                let mut args = vec![HirArg {
+                    name: None,
+                    value: current(),
+                    span,
+                }];
+                args.extend(decorator.args.iter().map(|arg| self.lower_arg(arg)));
+                let application = HirExpr {
+                    ty: FidanType::Dynamic,
+                    span,
+                    kind: HirExprKind::Call {
+                        callee: Box::new(self.lower_expr(decorator.callee)),
+                        args,
+                    },
+                };
+                let value = HirExpr {
+                    ty: FidanType::Dynamic,
+                    span,
+                    kind: HirExprKind::NullCoalesce {
+                        lhs: Box::new(application),
+                        rhs: Box::new(current()),
+                    },
+                };
+                // Existing dynamic argument validation rejects erased non-action results.
+                // Nothing preserves legacy side-effect-only decorators.
+                let result = self.interner.intern("__decorator_result");
+                let validator = HirExpr {
+                    ty: FidanType::Function,
+                    span,
+                    kind: HirExprKind::Lambda {
+                        name: None,
+                        params: vec![HirParam {
+                            name: result,
+                            ty: FidanType::Function,
+                            certain: true,
+                            optional: false,
+                            default: None,
+                            span,
+                        }],
+                        body: vec![HirStmt::Return {
+                            value: Some(HirExpr {
+                                ty: FidanType::Function,
+                                span,
+                                kind: HirExprKind::Var(result),
+                            }),
+                            span,
+                        }],
+                        return_ty: FidanType::Function,
+                        precompile: false,
+                        extern_decl: None,
+                    },
+                };
+                HirExpr {
+                    ty: FidanType::Function,
+                    span,
+                    kind: HirExprKind::Call {
+                        callee: Box::new(validator),
+                        args: vec![HirArg {
+                            name: None,
+                            value,
+                            span,
+                        }],
+                    },
+                }
+            })
+            .collect()
+    }
+
+    fn lower_decorators(
+        &self,
+        function: Symbol,
+        owner: Option<Symbol>,
+        span: Span,
+        decorators: &[fidan_ast::Decorator],
+        out: &mut Vec<HirStmt>,
+    ) {
+        let binding = self
+            .interner
+            .intern(&format!("__decorated_{}_{}", span.file.0, span.start));
+        let applications = self.decorator_applications(binding, decorators);
+        if !applications.is_empty() {
+            out.push(HirStmt::Decorate {
+                function,
+                owner,
+                binding,
+                applications,
+                span,
+            });
+        }
+    }
+
     // ── Parameter lowering ────────────────────────────────────────────────────
 
     fn lower_params(&self, params: &[Param], info: Option<&ActionInfo>) -> Vec<HirParam> {
@@ -706,7 +742,7 @@ impl<'a> Ctx<'a> {
                 let ty = info
                     .and_then(|action| action.params.get(index))
                     .map(|pi| pi.ty.clone())
-                    .unwrap_or_else(|| resolve_type_expr_simple(&p.ty, self.interner));
+                    .unwrap_or_else(|| self.annotation_type(&p.ty));
                 HirParam {
                     name: p.name,
                     ty,
@@ -730,7 +766,6 @@ impl<'a> Ctx<'a> {
             is_parallel,
             precompile,
             extern_decl,
-            custom_decorators,
             span,
         } = function;
 
@@ -743,57 +778,10 @@ impl<'a> Ctx<'a> {
             is_parallel,
             precompile,
             extern_decl,
-            custom_decorators,
             span,
         }
     }
 }
-
-// ── Utility: shallow type-expr resolver ───────────────────────────────────────
-
-/// Resolve a `TypeExpr` to a `FidanType` using the symbol interner for named types.
-///
-/// Primitive names (`string`, `integer`, `float`, `boolean`, `nothing`, `dynamic`) map to
-/// their corresponding `FidanType` variants.  All other names are treated as user-defined
-/// object types (`FidanType::Object(sym)`).  Parameterised forms `list oftype T`,
-/// `Shared oftype T`, and `Pending oftype T` produce the correct wrapper type.
-fn resolve_type_expr_simple(te: &fidan_ast::TypeExpr, interner: &SymbolInterner) -> FidanType {
-    match te {
-        fidan_ast::TypeExpr::Named { name, .. } => match interner.resolve(*name).as_ref() {
-            "string" => FidanType::String,
-            "integer" => FidanType::Integer,
-            "float" => FidanType::Float,
-            "boolean" => FidanType::Boolean,
-            "handle" => FidanType::Handle,
-            "nothing" => FidanType::Nothing,
-            "dynamic" => FidanType::Dynamic,
-            _ => FidanType::Object(*name),
-        },
-        fidan_ast::TypeExpr::Dynamic { .. } => FidanType::Dynamic,
-        fidan_ast::TypeExpr::Nothing { .. } => FidanType::Nothing,
-        fidan_ast::TypeExpr::Oftype { base, param, .. } => {
-            let p = resolve_type_expr_simple(param, interner);
-            match resolve_type_expr_simple(base, interner) {
-                FidanType::Object(sym) => match interner.resolve(sym).as_ref() {
-                    "list" | "List" => FidanType::List(Box::new(p)),
-                    "Shared" => FidanType::Shared(Box::new(p)),
-                    "WeakShared" => FidanType::WeakShared(Box::new(p)),
-                    "Pending" => FidanType::Pending(Box::new(p)),
-                    _ => FidanType::Dynamic,
-                },
-                _ => FidanType::Dynamic,
-            }
-        }
-        fidan_ast::TypeExpr::Tuple { elements, .. } => FidanType::Tuple(
-            elements
-                .iter()
-                .map(|e| resolve_type_expr_simple(e, interner))
-                .collect(),
-        ),
-    }
-}
-
-// ── Public entry point ────────────────────────────────────────────────────────
 
 /// Lower a parsed `Module` into HIR using the type annotations from `typed`.
 ///
@@ -873,11 +861,12 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                             });
                             let extern_decl =
                                 lower_extern_decl(ctx.arena, &decorators, ctx.interner, mname);
-                            let custom_decs = extract_custom_decorators(
-                                ctx.arena,
+                            ctx.lower_decorators(
+                                mname,
+                                Some(name),
+                                mspan,
                                 &decorators,
-                                ctx.interner,
-                                &typed.actions,
+                                &mut init_stmts,
                             );
                             Some(ctx.lower_function(LowerFunction {
                                 name: mname,
@@ -889,7 +878,6 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                                 is_parallel,
                                 precompile,
                                 extern_decl,
-                                custom_decorators: custom_decs,
                                 span: mspan,
                             }))
                         } else {
@@ -927,8 +915,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     .iter()
                     .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
                 let extern_decl = lower_extern_decl(ctx.arena, &decorators, ctx.interner, name);
-                let custom_decs =
-                    extract_custom_decorators(ctx.arena, &decorators, ctx.interner, &typed.actions);
+                ctx.lower_decorators(name, None, span, &decorators, &mut init_stmts);
                 functions.push(ctx.lower_function(LowerFunction {
                     name,
                     extends: None,
@@ -939,7 +926,6 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     is_parallel,
                     precompile,
                     extern_decl,
-                    custom_decorators: custom_decs,
                     span,
                 }));
             }
@@ -969,8 +955,7 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     .iter()
                     .any(|d| ctx.interner.resolve(d.name).as_ref() == DECORATOR_PRECOMPILE);
                 let extern_decl = lower_extern_decl(ctx.arena, &decorators, ctx.interner, name);
-                let custom_decs =
-                    extract_custom_decorators(ctx.arena, &decorators, ctx.interner, &typed.actions);
+                ctx.lower_decorators(name, Some(extends), span, &decorators, &mut init_stmts);
                 functions.push(ctx.lower_function(LowerFunction {
                     name,
                     extends: Some(extends),
@@ -981,7 +966,6 @@ pub fn lower_module(module: &Module, typed: &TypedModule, interner: &SymbolInter
                     is_parallel,
                     precompile,
                     extern_decl,
-                    custom_decorators: custom_decs,
                     span,
                 }));
             }

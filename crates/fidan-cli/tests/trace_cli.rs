@@ -3444,3 +3444,91 @@ fn toolchain_remove_rejects_path_escaping_selectors() {
     assert!(!output.status.success());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn declaration_and_expression_semantics_with_and_without_jit() {
+    for (fixture, expected) in [
+        (
+            "decorator_semantics_regression.fdn",
+            "decorator semantics passed",
+        ),
+        ("lambda_contract_regression.fdn", "lambda contracts passed"),
+        ("evaluation_order_regression.fdn", "evaluation order passed"),
+        ("decorator_import/main.fdn", "imported decorator passed"),
+        ("import_graph/main.fdn", "transitive imports passed"),
+        ("callable_member_regression.fdn", "callable members passed"),
+        ("named_method_regression.fdn", "named method binding passed"),
+        ("short_circuit_regression.fdn", "short circuit passed"),
+        ("receiver_pure_regression.fdn", "pure receivers passed"),
+        (
+            "receiver_callbacks_regression.fdn",
+            "receiver callbacks passed",
+        ),
+        (
+            "object_signature_regression.fdn",
+            "object signatures and identity passed",
+        ),
+    ] {
+        for threshold in ["0", "1"] {
+            let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+                .args(["run", "--jit-threshold", threshold])
+                .arg(workspace_root().join("test/examples").join(fixture))
+                .current_dir(workspace_root())
+                .output()
+                .expect("run semantic fixture");
+            assert!(
+                output.status.success(),
+                "{fixture} threshold {threshold}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains(expected));
+        }
+    }
+}
+
+#[test]
+fn repl_short_circuit_preserves_effects_and_static_diagnostics() {
+    let output = run_repl_session(
+        &["--trace", "none"],
+        br#"var effects = []
+action touched returns boolean { effects.append("touched"); return true }
+print(false and touched())
+print(true or touched())
+print("skipped=" + string(len(effects)))
+print(true and touched())
+print(false or touched())
+print("evaluated=" + string(len(effects)))
+if false and touched() { print("must be skipped") }; print("warning input executed")
+print("after-warning=" + string(len(effects)))
+print(false and missing_repl_operand)
+print(true or 42)
+print("logical repl finished")
+:quit
+"#,
+    );
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stdout.contains("logical repl finished"), "{stdout}");
+    assert!(stdout.contains("skipped=0"), "skipped callbacks: {stdout}");
+    assert!(
+        stdout.contains("evaluated=2"),
+        "evaluated callbacks: {stdout}"
+    );
+    assert!(
+        stdout.contains("warning input executed"),
+        "valid input with warning was discarded: {stdout}"
+    );
+    assert!(
+        stdout.contains("after-warning=2"),
+        "effects changed after warning: {stdout}"
+    );
+    assert!(
+        stderr.contains("W1006"),
+        "warning must remain visible: {stderr}"
+    );
+    assert!(
+        stderr.contains("E0101") && stderr.contains("E0203"),
+        "{stderr}"
+    );
+}

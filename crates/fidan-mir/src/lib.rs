@@ -7,7 +7,7 @@ mod mir;
 
 pub use analysis::{collect_effective_local_types, collect_may_throw_functions};
 pub use display::print_program;
-pub use lower::lower_program;
+pub use lower::{lower_program, lower_repl_program};
 pub use mir::{
     BasicBlock, BlockId, Callee, FunctionId, GlobalId, Instr, LocalId, MirEnumInfo, MirExternAbi,
     MirExternDecl, MirFunction, MirGlobal, MirLit, MirObjectInfo, MirParam, MirProgram,
@@ -32,6 +32,30 @@ mod tests {
         let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
         let hir = fidan_hir::lower_module(&module, &typed, &interner);
         lower_program(&hir, &interner, &[])
+    }
+
+    #[test]
+    fn nullable_parameter_abi_preserves_foreign_scalar_signatures() {
+        let interner = SymbolInterner::new();
+        let param = MirParam {
+            local: LocalId(0),
+            name: interner.intern("value"),
+            ty: MirTy::Boolean,
+            certain: false,
+            default: None,
+        };
+        let mut function =
+            MirFunction::new(FunctionId(1), interner.intern("check"), MirTy::Boolean);
+        assert_eq!(function.param_abi_ty(&param), &MirTy::Dynamic);
+        function.extern_decl = Some(MirExternDecl {
+            lib: "fixture".into(),
+            symbol: "check".into(),
+            link: None,
+            abi: MirExternAbi::Native,
+        });
+        assert_eq!(function.param_abi_ty(&param), &MirTy::Boolean);
+        function.extern_decl.as_mut().unwrap().abi = MirExternAbi::Fidan;
+        assert_eq!(function.param_abi_ty(&param), &MirTy::Boolean);
     }
 
     // ── 1. Empty program has only the init function ───────────────────────────

@@ -195,6 +195,7 @@ mod tests {
                 functions: vec![MirFunction {
                     id: FunctionId(0),
                     name: Symbol(0),
+                    source_name: None,
                     params: vec![],
                     return_ty: MirTy::Nothing,
                     blocks: vec![BasicBlock {
@@ -268,6 +269,7 @@ mod tests {
         MirFunction {
             id: FunctionId(0),
             name: Symbol(0),
+            source_name: None,
             params: vec![],
             return_ty: MirTy::Nothing,
             blocks: vec![BasicBlock {
@@ -287,6 +289,7 @@ mod tests {
         MirFunction {
             id: FunctionId(0),
             name: Symbol(0),
+            source_name: None,
             params: vec![],
             return_ty: MirTy::Nothing,
             blocks: vec![BasicBlock {

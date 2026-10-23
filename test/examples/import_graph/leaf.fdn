@@ -1,0 +1,5 @@
+var state = ["leaf"]
+
+action leaf_value returns integer {
+    return 7
+}

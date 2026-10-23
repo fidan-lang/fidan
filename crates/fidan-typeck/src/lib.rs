@@ -58,6 +58,10 @@ pub struct TypedModule {
     pub diagnostics: Vec<Diagnostic>,
     /// Type of every expression, keyed by `ExprId`.
     pub expr_types: FxHashMap<ExprId, FidanType>,
+    /// Resolved annotation types keyed by source span; HIR must not resolve names again.
+    pub annotation_types: FxHashMap<Span, FidanType>,
+    /// Existing callable signatures for lambda expressions (including inferred returns).
+    pub expr_actions: FxHashMap<ExprId, ActionInfo>,
     /// Class/object registry: layout (fields, methods, parent) per class name.
     pub objects: FxHashMap<Symbol, ObjectInfo>,
     /// Enum registry: variants per enum name.
@@ -1263,6 +1267,48 @@ var result = choose(true)
     }
 
     #[test]
+    fn dynamic_returning_object_methods_exist_and_keep_argument_checks() {
+        let source = r#"object Store {
+            action value with (certain index oftype integer) returns flexible { return index }
+            action call returns flexible { return this.value(3) }
+        }
+        var store = Store()
+        print(store.value(1))"#;
+        assert!(
+            check_errors(source).is_empty(),
+            "{:?}",
+            check_errors(source)
+        );
+        for call in ["store.value()", "store.value(\"bad\")", "store.missing()"] {
+            assert!(
+                !check_errors(&format!("{source}\n{call}")).is_empty(),
+                "{call}"
+            );
+        }
+    }
+
+    #[test]
+    fn decorator_contract_checks_defaults_types_and_results() {
+        let valid = r#"action decorate with (callback oftype action, optional value oftype integer = 7) returns action { return callback }
+            @decorate
+            action target {}"#;
+        assert!(check_errors(valid).is_empty(), "{:?}", check_errors(valid));
+        for source in [
+            "action decorate {} @decorate action target {}",
+            "action decorate with (callback oftype action) returns string { return \"bad\" } @decorate action target {}",
+            "action decorate with (callback oftype action, amount oftype integer) {} @decorate(\"wrong\") action target {}",
+            "action decorate with (callback oftype action, optional amount oftype integer = 1) {} @decorate(unknown = 2) action target {}",
+            "action decorate with (callback oftype action, optional amount oftype integer = 1) {} @decorate(amount = 2, amount = 3) action target {}",
+            "action gpu with (callback oftype action) {} @gpu action target {}",
+        ] {
+            assert!(
+                !check_errors(source).is_empty(),
+                "accepted invalid decorator: {source}"
+            );
+        }
+    }
+
+    #[test]
     fn nested_action_decorators_are_clean() {
         assert!(
             check_errors(
@@ -1587,5 +1633,30 @@ var result = choose(true)
             assert_eq!(errors[0].code, expected, "{expression}");
         }
         assert!(check_errors("var empty = hashset()\nvar one = hashset([1])\nvar shared = Shared(1)\nvar weak = WeakShared(shared)").is_empty());
+    }
+    #[test]
+    fn short_circuit_still_typechecks_both_operands() {
+        for (expression, expected) in [
+            ("false and 1", "E0203"),
+            ("true or 1", "E0203"),
+            ("false and \"text\"", "E0203"),
+            ("true or []", "E0203"),
+            ("false and nothing", "E0203"),
+            ("true or missing_logical_operand", "E0101"),
+        ] {
+            let source = format!("var result = {expression}");
+            let interner = Arc::new(SymbolInterner::new());
+            let file = SourceFile::new(FileId(0), "<short-circuit>", source.as_str());
+            let (tokens, lexical) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, parsed) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+            assert!(lexical.is_empty() && parsed.is_empty());
+            let diagnostics = typecheck(&module, interner);
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diag| diag.severity == Severity::Error && diag.code == expected),
+                "{expression}: {diagnostics:?}"
+            );
+        }
     }
 }

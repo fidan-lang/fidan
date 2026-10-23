@@ -508,7 +508,26 @@ impl<'t> Parser<'t> {
         while matches!(self.peek(), TokenKind::At) {
             let start = self.current_span().start;
             self.advance(); // eat `@`
-            let name = self.expect_ident_sym("expected decorator name");
+            let name_span = self.current_span();
+            let first = self.expect_ident_sym("expected decorator name");
+            let mut callee = self.module.arena.alloc_expr(fidan_ast::Expr::Ident {
+                name: first,
+                span: name_span,
+            });
+            let mut spelling = self.interner.resolve(first).to_string();
+            while matches!(self.peek(), TokenKind::Dot) {
+                self.advance();
+                let field_span = self.current_span();
+                let field = self.expect_ident_sym("expected decorator member name");
+                spelling.push('.');
+                spelling.push_str(self.interner.resolve(field).as_ref());
+                callee = self.module.arena.alloc_expr(fidan_ast::Expr::Field {
+                    object: callee,
+                    field,
+                    span: Span::new(self.module.file, name_span.start, field_span.end),
+                });
+            }
+            let name = self.interner.intern(&spelling);
             let args = if matches!(self.peek(), TokenKind::LParen) {
                 self.advance();
                 let args = self.parse_arg_list();
@@ -520,6 +539,7 @@ impl<'t> Parser<'t> {
             let end = self.current_span().end;
             decs.push(Decorator {
                 name,
+                callee,
                 args,
                 span: Span::new(self.module.file, start, end),
             });

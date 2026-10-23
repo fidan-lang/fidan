@@ -592,6 +592,7 @@ print("ok")
 
 #[derive(Debug, Clone)]
 struct AotTestSettings {
+    opt_level: OptLevel,
     emit_obj: bool,
     lto: LtoMode,
     strip: StripMode,
@@ -601,6 +602,7 @@ struct AotTestSettings {
 impl Default for AotTestSettings {
     fn default() -> Self {
         Self {
+            opt_level: OptLevel::O2,
             emit_obj: false,
             lto: LtoMode::Off,
             strip: StripMode::Off,
@@ -640,7 +642,7 @@ fn compile_program_with_settings(
         program_args: vec![],
         suppress: vec![],
         sandbox: None,
-        opt_level: OptLevel::O2,
+        opt_level: settings.opt_level,
         extra_lib_dirs: vec![],
         link_dynamic: false,
         lto: settings.lto,
@@ -682,7 +684,7 @@ fn expect_compile_program_error(
         program_args: vec![],
         suppress: vec![],
         sandbox: None,
-        opt_level: OptLevel::O2,
+        opt_level: settings.opt_level,
         extra_lib_dirs: vec![],
         link_dynamic: false,
         lto: settings.lto,
@@ -2583,4 +2585,125 @@ fn cooperative_pending_boundaries_across_aot_backends() {
         );
         run_compiled_binary_clean(&binary, "cooperative pending boundary passed");
     }
+}
+
+#[test]
+fn declaration_and_expression_semantics_across_aot_backends() {
+    let directory = temp_dir("fidan_declaration_semantics");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("SKIP LLVM declaration semantics: no compatible local helper");
+            continue;
+        }
+        for (name, source, expected) in [
+            (
+                "decorators",
+                include_str!("../../../test/examples/decorator_semantics_regression.fdn"),
+                "decorator semantics passed",
+            ),
+            (
+                "lambda",
+                include_str!("../../../test/examples/lambda_contract_regression.fdn"),
+                "lambda contracts passed",
+            ),
+            (
+                "order",
+                include_str!("../../../test/examples/evaluation_order_regression.fdn"),
+                "evaluation order passed",
+            ),
+            (
+                "imports",
+                include_str!("../../../test/examples/decorator_import/main.fdn"),
+                "imported decorator passed",
+            ),
+            (
+                "object_signature",
+                include_str!("../../../test/examples/object_signature_regression.fdn"),
+                "object signatures and identity passed",
+            ),
+            (
+                "callable_member",
+                include_str!("../../../test/examples/callable_member_regression.fdn"),
+                "callable members passed",
+            ),
+            (
+                "named_method",
+                include_str!("../../../test/examples/named_method_regression.fdn"),
+                "named method binding passed",
+            ),
+            (
+                "short_circuit",
+                include_str!("../../../test/examples/short_circuit_regression.fdn"),
+                "short circuit passed",
+            ),
+            (
+                "receiver_pure",
+                include_str!("../../../test/examples/receiver_pure_regression.fdn"),
+                "pure receivers passed",
+            ),
+            (
+                "receiver_callbacks",
+                include_str!("../../../test/examples/receiver_callbacks_regression.fdn"),
+                "receiver callbacks passed",
+            ),
+        ] {
+            fs::write(
+                directory.join("library.fdn"),
+                include_str!("../../../test/examples/decorator_import/library.fdn"),
+            )
+            .unwrap();
+            let output = directory.join(format!(
+                "{name}-{backend:?}{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+            compile_program_with_settings(
+                source,
+                backend,
+                &output,
+                &AotTestSettings {
+                    lto: if backend == Backend::Llvm {
+                        LtoMode::Full
+                    } else {
+                        LtoMode::Off
+                    },
+                    ..AotTestSettings::default()
+                },
+            );
+            run_compiled_binary_clean(&output, expected);
+        }
+    }
+    fs::remove_dir_all(directory).expect("remove generated semantic fixtures");
+}
+
+#[test]
+fn short_circuit_preserves_runtime_effects_at_native_optimization_levels() {
+    let directory = temp_dir("fidan_short_circuit_optimization");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("SKIP LLVM short-circuit optimization: no compatible local helper");
+            continue;
+        }
+        for opt_level in [OptLevel::O0, OptLevel::O2] {
+            let output = directory.join(format!(
+                "logical-{backend:?}-{opt_level:?}{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+            compile_program_with_settings(
+                include_str!("../../../test/examples/short_circuit_regression.fdn"),
+                backend,
+                &output,
+                &AotTestSettings {
+                    opt_level,
+                    lto: if backend == Backend::Llvm {
+                        LtoMode::Full
+                    } else {
+                        LtoMode::Off
+                    },
+                    ..AotTestSettings::default()
+                },
+            );
+            run_compiled_binary_clean(&output, "short circuit passed");
+        }
+    }
+    fs::remove_dir_all(directory).expect("remove generated logical optimization fixtures");
 }

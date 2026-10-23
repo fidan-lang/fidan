@@ -1,0 +1,7 @@
+use "./leaf.fdn"
+
+state.append("middle")
+
+action answer returns integer {
+    return leaf_value()
+}

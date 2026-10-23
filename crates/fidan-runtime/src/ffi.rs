@@ -162,14 +162,13 @@ fn into_raw(v: FidanValue) -> *mut FidanValue {
     Box::into_raw(Box::new(v))
 }
 
-fn panic_missing_method(receiver: &FidanValue, method_name: &str) -> ! {
-    let msg = format!(
-        "no method `{}` found for `{}`",
-        method_name,
-        receiver.type_name()
-    );
-    let msg_val = into_raw(FidanValue::String(FidanString::new(&msg)));
-    unsafe { fdn_panic(msg_val) }
+fn missing_method(receiver: &FidanValue, method_name: &str) -> *mut FidanValue {
+    unsafe {
+        runtime_call_error(format!(
+            "no method `{method_name}` found for `{}`",
+            receiver.type_name()
+        ))
+    }
 }
 
 fn integer_display_len(value: i64) -> usize {
@@ -744,6 +743,13 @@ macro_rules! cmp_binop {
                     if stringify!($name) == "fdn_dyn_ne" =>
                 {
                     a != b
+                }
+                (FidanValue::Dict(a), FidanValue::Dict(b))
+                    if a.borrow().aot_class_name().is_some()
+                        && b.borrow().aot_class_name().is_some()
+                        && matches!(stringify!($name), "fdn_dyn_eq" | "fdn_dyn_ne") =>
+                {
+                    (a.identity() == b.identity()) == (stringify!($name) == "fdn_dyn_eq")
                 }
                 (FidanValue::Object(a), FidanValue::Object(b))
                     if stringify!($name) == "fdn_dyn_eq" =>
@@ -1324,13 +1330,28 @@ pub unsafe extern "C" fn fdn_obj_get_field(
 ) -> *mut FidanValue {
     let field_name = str_from_raw(field_bytes, field_len);
     let result = match borrow(obj) {
-        FidanValue::Dict(d) => d
-            .borrow()
-            .get(&FidanValue::String(FidanString::new(&field_name)))
-            .ok()
-            .flatten()
-            .cloned()
-            .unwrap_or(FidanValue::Nothing),
+        FidanValue::Dict(d) => {
+            let fields = d.borrow();
+            if let Some(value) = fields
+                .get(&FidanValue::String(FidanString::new(&field_name)))
+                .ok()
+                .flatten()
+            {
+                value.clone()
+            } else if fields.aot_class_name().is_some() {
+                let key = FidanValue::String(FidanString::new(&format!("__method__{field_name}")));
+                if let Some(FidanValue::Function(fn_id)) = fields.get(&key).ok().flatten() {
+                    FidanValue::Closure {
+                        fn_id: *fn_id,
+                        captured: vec![borrow(obj).clone()],
+                    }
+                } else {
+                    FidanValue::Nothing
+                }
+            } else {
+                FidanValue::Nothing
+            }
+        }
         value @ (FidanValue::Function(_)
         | FidanValue::Closure { .. }
         | FidanValue::StdlibFn(..)) => {
@@ -1469,11 +1490,27 @@ pub unsafe extern "C" fn fdn_obj_invoke(
         FidanValue::String(s) => dispatch_string_method(s.clone(), &method_name, extra),
         FidanValue::List(l) => dispatch_list_method(l, &method_name, extra),
         FidanValue::Dict(d) => {
+            let branded = d.borrow().aot_class_name().is_some();
+            if branded {
+                let field = d
+                    .borrow()
+                    .get(&FidanValue::String(FidanString::new(&method_name)))
+                    .ok()
+                    .flatten()
+                    .cloned();
+                if let Some(callable) = field {
+                    return into_raw(call_dynamic_owned(callable, extra));
+                }
+            }
             // Check for a user-defined method stored as `__method__<name>` in the dict.
             let method_key =
                 FidanValue::String(FidanString::new(&format!("__method__{}", method_name)));
             // Release the field borrow before calling a method that may mutate self.
-            let method_fn = d.borrow().get(&method_key).ok().flatten().cloned();
+            let method_fn = if branded {
+                d.borrow().get(&method_key).ok().flatten().cloned()
+            } else {
+                None
+            };
             if let Some(method_fn) = method_fn {
                 // Build call-arg list: self (obj ptr, borrowed) + original arg ptrs.
                 let mut call_ptrs: Vec<*mut FidanValue> =
@@ -1488,7 +1525,11 @@ pub unsafe extern "C" fn fdn_obj_invoke(
                 drop(Box::from_raw(method_fn_ptr));
                 return result;
             }
-            dispatch_dict_method(d, &method_name, extra)
+            if branded {
+                missing_method(recv, &method_name)
+            } else {
+                dispatch_dict_method(d, &method_name, extra)
+            }
         }
         FidanValue::HashSet(s) => dispatch_hashset_method(s, &method_name, extra),
         FidanValue::Range {
@@ -1518,7 +1559,7 @@ pub unsafe extern "C" fn fdn_obj_invoke(
                     shared_update(sr, extra.into_iter().next().unwrap(), None)
                 }
                 Some("weak") => into_raw(FidanValue::WeakShared(sr.downgrade())),
-                _ => panic_missing_method(recv, &method_name),
+                _ => missing_method(recv, &method_name),
             }
         }
         FidanValue::WeakShared(ws) => {
@@ -1531,31 +1572,14 @@ pub unsafe extern "C" fn fdn_obj_invoke(
                         .unwrap_or(FidanValue::Nothing),
                 ),
                 Some("isAlive") => into_raw(FidanValue::Boolean(ws.is_alive())),
-                _ => panic_missing_method(recv, &method_name),
+                _ => missing_method(recv, &method_name),
             }
         }
-        _ => panic_missing_method(recv, &method_name),
+        _ => missing_method(recv, &method_name),
     }
 }
 
 // ── String method dispatch ─────────────────────────────────────────────────────
-
-fn as_str_val(v: &FidanValue) -> String {
-    match v {
-        FidanValue::String(s) => s.as_str().to_owned(),
-        FidanValue::Integer(n) => n.to_string(),
-        FidanValue::Float(f) => {
-            if f.fract() == 0.0 {
-                format!("{:.1}", f)
-            } else {
-                f.to_string()
-            }
-        }
-        FidanValue::Boolean(b) => b.to_string(),
-        FidanValue::Nothing => "nothing".to_owned(),
-        other => display(other),
-    }
-}
 
 fn async_wait_any_result(index: i64, value: FidanValue) -> FidanValue {
     stdlib::async_std::wait_any_result(index, value)
@@ -1637,238 +1661,7 @@ pub unsafe extern "C" fn fdn_check_argument(
 }
 
 fn dispatch_string_method(s: FidanString, method: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    let str_val = s.as_str().to_owned();
-    let Some(method) =
-        infer_receiver_member(ReceiverBuiltinKind::String, method).map(|info| info.canonical_name)
-    else {
-        eprintln!("AOT: string method not found: .{}()", method);
-        return into_raw(FidanValue::Nothing);
-    };
-    match method {
-        // ── Case ──────────────────────────────────────────────────────────────
-        "lower" => into_raw(FidanValue::String(FidanString::new(
-            &str_val.to_lowercase(),
-        ))),
-        "upper" => into_raw(FidanValue::String(FidanString::new(
-            &str_val.to_uppercase(),
-        ))),
-        "capitalize" => {
-            let mut chars = str_val.chars();
-            let capitalized = match chars.next() {
-                None => String::new(),
-                Some(c) => c.to_uppercase().to_string() + chars.as_str(),
-            };
-            into_raw(FidanValue::String(FidanString::new(&capitalized)))
-        }
-
-        // ── Trim ──────────────────────────────────────────────────────────────
-        "trim" => into_raw(FidanValue::String(FidanString::new(str_val.trim()))),
-        "trimStart" => into_raw(FidanValue::String(FidanString::new(str_val.trim_start()))),
-        "trimEnd" => into_raw(FidanValue::String(FidanString::new(str_val.trim_end()))),
-
-        // ── Length ────────────────────────────────────────────────────────────
-        "len" => into_raw(FidanValue::Integer(str_val.chars().count() as i64)),
-        "byteLen" => into_raw(FidanValue::Integer(str_val.len() as i64)),
-        "isEmpty" => into_raw(FidanValue::Boolean(str_val.is_empty())),
-
-        // ── Split / lines ─────────────────────────────────────────────────────
-        "split" => {
-            let sep = args
-                .first()
-                .map(as_str_val)
-                .unwrap_or_else(|| " ".to_owned());
-            let parts = str_val.split(sep.as_str());
-            let (lower, upper) = parts.size_hint();
-            let mut list = FidanList::with_capacity(upper.unwrap_or(lower));
-            for part in parts {
-                list.append(FidanValue::String(FidanString::new(part)));
-            }
-            into_raw(FidanValue::List(OwnedRef::new(list)))
-        }
-        "lines" => {
-            let lines = str_val.lines();
-            let (lower, upper) = lines.size_hint();
-            let mut list = FidanList::with_capacity(upper.unwrap_or(lower));
-            for line in lines {
-                list.append(FidanValue::String(FidanString::new(line)));
-            }
-            into_raw(FidanValue::List(OwnedRef::new(list)))
-        }
-        "chars" => {
-            let mut list = FidanList::with_capacity(str_val.chars().count());
-            for c in str_val.chars() {
-                list.append(FidanValue::String(FidanString::new(&c.to_string())));
-            }
-            into_raw(FidanValue::List(OwnedRef::new(list)))
-        }
-
-        // ── Join (receiver is separator) ──────────────────────────────────────
-        "join" => {
-            let collection = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            match collection {
-                FidanValue::List(l) => {
-                    let borrow = l.borrow();
-                    let mut joined =
-                        String::with_capacity(str_val.len().saturating_mul(borrow.len()));
-                    for (index, value) in borrow.iter().enumerate() {
-                        if index > 0 {
-                            joined.push_str(&str_val);
-                        }
-                        joined.push_str(&as_str_val(value));
-                    }
-                    into_raw(FidanValue::String(FidanString::new(&joined)))
-                }
-                _ => into_raw(FidanValue::String(FidanString::new(""))),
-            }
-        }
-
-        // ── Search ────────────────────────────────────────────────────────────
-        "contains" => {
-            let pat = args.first().map(as_str_val).unwrap_or_default();
-            into_raw(FidanValue::Boolean(str_val.contains(pat.as_str())))
-        }
-        "startsWith" => {
-            let pat = args.first().map(as_str_val).unwrap_or_default();
-            into_raw(FidanValue::Boolean(str_val.starts_with(pat.as_str())))
-        }
-        "endsWith" => {
-            let pat = args.first().map(as_str_val).unwrap_or_default();
-            into_raw(FidanValue::Boolean(str_val.ends_with(pat.as_str())))
-        }
-        "indexOf" | "lastIndexOf" => {
-            let mut values = Vec::with_capacity(args.len() + 1);
-            values.push(FidanValue::String(s));
-            values.extend(args);
-            into_raw(stdlib::string::dispatch(method, values).unwrap_or(FidanValue::Nothing))
-        }
-
-        // ── Mutation / transformation ─────────────────────────────────────────
-        "replace" => {
-            let from = args.first().map(as_str_val).unwrap_or_default();
-            let to = args.get(1).map(as_str_val).unwrap_or_default();
-            into_raw(FidanValue::String(FidanString::new(
-                &str_val.replace(from.as_str(), to.as_str()),
-            )))
-        }
-        "replaceAll" => {
-            let from = args.first().map(as_str_val).unwrap_or_default();
-            let to = args.get(1).map(as_str_val).unwrap_or_default();
-            into_raw(FidanValue::String(FidanString::new(
-                &str_val.replace(from.as_str(), to.as_str()),
-            )))
-        }
-        "replaceFirst" => {
-            let from = args.first().map(as_str_val).unwrap_or_default();
-            let to = args.get(1).map(as_str_val).unwrap_or_default();
-            into_raw(FidanValue::String(FidanString::new(&str_val.replacen(
-                from.as_str(),
-                to.as_str(),
-                1,
-            ))))
-        }
-        "repeat" => {
-            let n = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0)
-                .max(0) as usize;
-            into_raw(FidanValue::String(FidanString::new(&str_val.repeat(n))))
-        }
-        "reverse" => {
-            let rev: String = str_val.chars().rev().collect();
-            into_raw(FidanValue::String(FidanString::new(&rev)))
-        }
-
-        // ── Indexing / slicing ────────────────────────────────────────────────
-        "charAt" | "substring" => {
-            let mut values = Vec::with_capacity(args.len() + 1);
-            values.push(FidanValue::String(s));
-            values.extend(args);
-            into_raw(stdlib::string::dispatch(method, values).unwrap_or(FidanValue::Nothing))
-        }
-
-        // ── Padding ───────────────────────────────────────────────────────────
-        "padStart" => {
-            let total = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n as usize)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-            let pad_char = args
-                .get(1)
-                .map(as_str_val)
-                .unwrap_or_else(|| " ".to_owned());
-            let pad_ch = pad_char.chars().next().unwrap_or(' ');
-            let len = str_val.chars().count();
-            let padded = if total > len {
-                let padding: String = std::iter::repeat_n(pad_ch, total - len).collect();
-                padding + &str_val
-            } else {
-                str_val
-            };
-            into_raw(FidanValue::String(FidanString::new(&padded)))
-        }
-        "padEnd" => {
-            let total = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n as usize)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-            let pad_char = args
-                .get(1)
-                .map(as_str_val)
-                .unwrap_or_else(|| " ".to_owned());
-            let pad_ch = pad_char.chars().next().unwrap_or(' ');
-            let len = str_val.chars().count();
-            let padded = if total > len {
-                let padding: String = std::iter::repeat_n(pad_ch, total - len).collect();
-                str_val + &padding
-            } else {
-                str_val
-            };
-            into_raw(FidanValue::String(FidanString::new(&padded)))
-        }
-
-        // ── Bytes / char codes ────────────────────────────────────────────────
-        "bytes" => {
-            let mut list = FidanList::with_capacity(str_val.len());
-            for b in str_val.bytes() {
-                list.append(FidanValue::Integer(b as i64));
-            }
-            into_raw(FidanValue::List(OwnedRef::new(list)))
-        }
-        "charCode" => {
-            let code = str_val.chars().next().map(|c| c as i64).unwrap_or(0);
-            into_raw(FidanValue::Integer(code))
-        }
-        // ── format (string.format with {} placeholders) ────────────────────
-        "format" => {
-            let mut result = str_val.clone();
-            for arg in &args {
-                if let Some(pos) = result.find("{}") {
-                    result.replace_range(pos..pos + 2, &as_str_val(arg));
-                }
-            }
-            into_raw(FidanValue::String(FidanString::new(&result)))
-        }
-        _ => into_raw(FidanValue::Nothing),
-    }
+    builtin_value_result(crate::receivers::string_method(s, method, args))
 }
 
 // ── List method dispatch ───────────────────────────────────────────────────────
@@ -1878,364 +1671,35 @@ fn dispatch_list_method(
     method: &str,
     args: Vec<FidanValue>,
 ) -> *mut FidanValue {
-    let Some(method) =
-        infer_receiver_member(ReceiverBuiltinKind::List, method).map(|info| info.canonical_name)
-    else {
-        eprintln!("AOT: list method not found: .{}()", method);
+    let result = crate::receivers::list_method(list, method, args.clone()).and_then(|value| {
+        if value.is_some() {
+            return Ok(value);
+        }
+        crate::receivers::list_callback(list, method, args, |callback, values| {
+            // Native entry initialization owns the registered trampoline table;
+            // this helper borrows arguments and consumes each owned return once.
+            let result = unsafe { call_dynamic_owned(callback, values) };
+            if fdn_has_exception() != 0 {
+                return Err(stdlib::StdlibRuntimeError::new(
+                    fidan_diagnostics::diag_code!("R0001"),
+                    "list callback failed",
+                ));
+            }
+            Ok(result)
+        })
+    });
+    // Do not overwrite the callback's original typed exception.
+    if fdn_has_exception() != 0 {
         return into_raw(FidanValue::Nothing);
-    };
-    match method {
-        "len" => into_raw(FidanValue::Integer(list.borrow().len() as i64)),
-        "isEmpty" => into_raw(FidanValue::Boolean(list.borrow().is_empty())),
-        "append" => {
-            let val = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            list.borrow_mut().append(val);
-            into_raw(FidanValue::Nothing)
-        }
-        "pop" => {
-            let mut b = list.borrow_mut();
-            into_raw(b.pop().unwrap_or(FidanValue::Nothing))
-        }
-        "first" => into_raw(list.borrow().get(0).cloned().unwrap_or(FidanValue::Nothing)),
-        "last" => {
-            let b = list.borrow();
-            let len = b.len();
-            into_raw(
-                b.get(len.saturating_sub(1))
-                    .cloned()
-                    .unwrap_or(FidanValue::Nothing),
-            )
-        }
-        "get" => {
-            let idx = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-            let b = list.borrow();
-            let i = if idx < 0 {
-                (b.len() as i64 + idx).max(0) as usize
-            } else {
-                idx as usize
-            };
-            into_raw(b.get(i).cloned().unwrap_or(FidanValue::Nothing))
-        }
-        "contains" => {
-            let target = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let b = list.borrow();
-            let found = b.iter().any(|v| values_equal(v, &target));
-            into_raw(FidanValue::Boolean(found))
-        }
-        "indexOf" => {
-            let target = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let b = list.borrow();
-            let idx = b
-                .iter()
-                .position(|v| values_equal(v, &target))
-                .map(|i| i as i64)
-                .unwrap_or(-1);
-            into_raw(FidanValue::Integer(idx))
-        }
-        "reverse" => {
-            list.borrow_mut().reverse();
-            into_raw(FidanValue::Nothing)
-        }
-        "reversed" => {
-            let b = list.borrow();
-            let mut items: Vec<FidanValue> = b.iter().cloned().collect();
-            items.reverse();
-            into_raw(FidanValue::List(OwnedRef::new(FidanList::from_vec(items))))
-        }
-        "sort" => {
-            list.borrow_mut().sort_by(compare_values);
-            into_raw(FidanValue::Nothing)
-        }
-        "join" => {
-            let sep = args.first().map(as_str_val).unwrap_or_default();
-            let b = list.borrow();
-            let mut joined = String::with_capacity(sep.len().saturating_mul(b.len()));
-            for (index, value) in b.iter().enumerate() {
-                if index > 0 {
-                    joined.push_str(&sep);
-                }
-                joined.push_str(&as_str_val(value));
-            }
-            into_raw(FidanValue::String(FidanString::new(&joined)))
-        }
-        "slice" => {
-            let start = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0)
-                .max(0) as usize;
-            let b = list.borrow();
-            let end = args
-                .get(1)
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .map(|e| (e.max(0) as usize).min(b.len()))
-                .unwrap_or(b.len());
-            let start = start.min(b.len());
-            let mut new_list = FidanList::with_capacity(end.saturating_sub(start));
-            for i in start..end {
-                if let Some(v) = b.get(i) {
-                    new_list.append(v.clone());
-                }
-            }
-            into_raw(FidanValue::List(OwnedRef::new(new_list)))
-        }
-        "flatten" => {
-            let b = list.borrow();
-            let capacity = b
-                .iter()
-                .map(|v| match v {
-                    FidanValue::List(inner) => inner.borrow().len(),
-                    _ => 1,
-                })
-                .sum();
-            let mut new_list = FidanList::with_capacity(capacity);
-            for v in b.iter() {
-                match v {
-                    FidanValue::List(inner) => {
-                        for item in inner.borrow().iter() {
-                            new_list.append(item.clone());
-                        }
-                    }
-                    other => new_list.append(other.clone()),
-                }
-            }
-            into_raw(FidanValue::List(OwnedRef::new(new_list)))
-        }
-        "extend" => {
-            let other = args.into_iter().next().unwrap_or(FidanValue::Nothing);
-            match other {
-                FidanValue::List(other_l) => {
-                    let mut b = list.borrow_mut();
-                    for v in other_l.borrow().iter() {
-                        b.append(v.clone());
-                    }
-                    into_raw(FidanValue::Nothing)
-                }
-                _ => into_raw(FidanValue::Nothing),
-            }
-        }
-        "toString" => {
-            let b = list.borrow();
-            let items: Vec<String> = b.iter().map(display).collect();
-            into_raw(FidanValue::String(FidanString::new(&format!(
-                "[{}]",
-                items.join(", ")
-            ))))
-        }
-        "forEach" => {
-            // forEach(callback) — calls callback(item) for every element.
-            if let Some(callback) = args.into_iter().next() {
-                let cb_ptr = into_raw(callback);
-                let items: Vec<FidanValue> = list.borrow().iter().cloned().collect();
-                for item in items {
-                    let item_ptr = into_raw(item);
-                    let call_args = [item_ptr];
-                    unsafe {
-                        let result = fdn_call_dynamic(cb_ptr, call_args.as_ptr(), 1);
-                        if !result.is_null() {
-                            drop(Box::from_raw(result));
-                        }
-                        drop(Box::from_raw(item_ptr));
-                    }
-                }
-                unsafe { drop(Box::from_raw(cb_ptr)) };
-            }
-            into_raw(FidanValue::Nothing)
-        }
-
-        "map" => {
-            // map(fn) — returns a new list with fn applied to each element.
-            if let Some(callback) = args.into_iter().next() {
-                let cb_ptr = into_raw(callback);
-                let items: Vec<FidanValue> = list.borrow().iter().cloned().collect();
-                let mut new_list = FidanList::with_capacity(items.len());
-                for item in items {
-                    let item_ptr = into_raw(item);
-                    let call_args = [item_ptr];
-                    let result_ptr = unsafe { fdn_call_dynamic(cb_ptr, call_args.as_ptr(), 1) };
-                    let mapped = if result_ptr.is_null() {
-                        FidanValue::Nothing
-                    } else {
-                        unsafe {
-                            let v = borrow(result_ptr).clone();
-                            drop(Box::from_raw(result_ptr));
-                            v
-                        }
-                    };
-                    new_list.append(mapped);
-                    unsafe { drop(Box::from_raw(item_ptr)) };
-                }
-                unsafe { drop(Box::from_raw(cb_ptr)) };
-                into_raw(FidanValue::List(OwnedRef::new(new_list)))
-            } else {
-                into_raw(FidanValue::List(OwnedRef::new(FidanList::new())))
-            }
-        }
-
-        "filter" => {
-            // filter(predicate) — returns elements for which predicate is truthy.
-            if let Some(predicate) = args.into_iter().next() {
-                let pred_ptr = into_raw(predicate);
-                let items: Vec<FidanValue> = list.borrow().iter().cloned().collect();
-                let mut new_list = FidanList::with_capacity(items.len());
-                for item in items {
-                    let item_ptr = into_raw(item.clone());
-                    let call_args = [item_ptr];
-                    let result_ptr = unsafe { fdn_call_dynamic(pred_ptr, call_args.as_ptr(), 1) };
-                    let keep = if result_ptr.is_null() {
-                        false
-                    } else {
-                        unsafe {
-                            let v = is_truthy(borrow(result_ptr));
-                            drop(Box::from_raw(result_ptr));
-                            v
-                        }
-                    };
-                    unsafe { drop(Box::from_raw(item_ptr)) };
-                    if keep {
-                        new_list.append(item);
-                    }
-                }
-                unsafe { drop(Box::from_raw(pred_ptr)) };
-                into_raw(FidanValue::List(OwnedRef::new(new_list)))
-            } else {
-                into_raw(FidanValue::List(OwnedRef::new(FidanList::new())))
-            }
-        }
-
-        "find" => {
-            // find(value) — returns the index of the first element equal to value.
-            let target = args.first().cloned().unwrap_or(FidanValue::Nothing);
-            let b = list.borrow();
-            let idx = b
-                .iter()
-                .position(|v| values_equal(v, &target))
-                .map(|i| i as i64)
-                .unwrap_or(-1);
-            into_raw(FidanValue::Integer(idx))
-        }
-
-        "firstWhere" => {
-            // firstWhere(predicate) — returns the first element for which predicate is truthy.
-            let result = if let Some(predicate) = args.into_iter().next() {
-                let pred_ptr = into_raw(predicate);
-                let items: Vec<FidanValue> = list.borrow().iter().cloned().collect();
-                let mut found = None;
-                for item in items {
-                    let item_ptr = into_raw(item.clone());
-                    let call_args = [item_ptr];
-                    let result_ptr = unsafe { fdn_call_dynamic(pred_ptr, call_args.as_ptr(), 1) };
-                    let matched = if result_ptr.is_null() {
-                        false
-                    } else {
-                        unsafe {
-                            let v = is_truthy(borrow(result_ptr));
-                            drop(Box::from_raw(result_ptr));
-                            v
-                        }
-                    };
-                    unsafe { drop(Box::from_raw(item_ptr)) };
-                    if matched {
-                        found = Some(item);
-                        break;
-                    }
-                }
-                unsafe { drop(Box::from_raw(pred_ptr)) };
-                found.unwrap_or(FidanValue::Nothing)
-            } else {
-                FidanValue::Nothing
-            };
-            into_raw(result)
-        }
-
-        "remove" => {
-            // remove(index) — removes the element at the given index, returns it.
-            let idx_val = args
-                .first()
-                .and_then(|v| {
-                    if let FidanValue::Integer(n) = v {
-                        Some(*n)
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-            let mut b = list.borrow_mut();
-            let len = b.len() as i64;
-            let i = if idx_val < 0 {
-                (len + idx_val).max(0) as usize
-            } else {
-                idx_val as usize
-            };
-            if i < b.len() {
-                into_raw(b.remove(i).unwrap_or(FidanValue::Nothing))
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-
-        "reduce" => {
-            // reduce(fn) or reduce(fn, initial) — fold left over the list.
-            let mut iter = args.into_iter();
-            let callback_val = iter.next();
-            let initial = iter.next();
-            if let Some(callback) = callback_val {
-                let cb_ptr = into_raw(callback);
-                let items: Vec<FidanValue> = list.borrow().iter().cloned().collect();
-                let has_initial = initial.is_some();
-                let mut acc = initial
-                    .unwrap_or_else(|| items.first().cloned().unwrap_or(FidanValue::Nothing));
-                let start = if !has_initial { 1 } else { 0 };
-                for item in items.into_iter().skip(start) {
-                    let acc_ptr = into_raw(acc);
-                    let item_ptr = into_raw(item);
-                    let call_args = [acc_ptr, item_ptr];
-                    let result_ptr = unsafe { fdn_call_dynamic(cb_ptr, call_args.as_ptr(), 2) };
-                    let new_acc = if result_ptr.is_null() {
-                        FidanValue::Nothing
-                    } else {
-                        unsafe {
-                            let v = borrow(result_ptr).clone();
-                            drop(Box::from_raw(result_ptr));
-                            v
-                        }
-                    };
-                    unsafe {
-                        drop(Box::from_raw(acc_ptr));
-                        drop(Box::from_raw(item_ptr));
-                    }
-                    acc = new_acc;
-                }
-                unsafe { drop(Box::from_raw(cb_ptr)) };
-                into_raw(acc)
-            } else {
-                into_raw(FidanValue::Nothing)
-            }
-        }
-
-        _ => into_raw(FidanValue::Nothing),
     }
+    builtin_value_result(result.and_then(|value| {
+        value.ok_or_else(|| {
+            stdlib::StdlibRuntimeError::new(
+                fidan_diagnostics::diag_code!("R0001"),
+                format!("no method `{method}` found for `list`"),
+            )
+        })
+    }))
 }
 
 // ── Dict method dispatch ───────────────────────────────────────────────────────
@@ -2248,8 +1712,7 @@ fn dispatch_dict_method(
     let Some(operation) =
         infer_receiver_member(ReceiverBuiltinKind::Dict, method).and_then(|info| info.operation)
     else {
-        eprintln!("AOT: dict method not found: .{}()", method);
-        return into_raw(FidanValue::Nothing);
+        return unsafe { runtime_call_error(format!("no method `{method}` found for `dict`")) };
     };
     match operation {
         ReceiverMethodOp::Len => into_raw(FidanValue::Integer(dict.borrow().len() as i64)),
@@ -2331,8 +1794,7 @@ fn dispatch_hashset_method(
     let Some(operation) =
         infer_receiver_member(ReceiverBuiltinKind::HashSet, method).and_then(|info| info.operation)
     else {
-        eprintln!("AOT: hashset method not found: .{}()", method);
-        return into_raw(FidanValue::Nothing);
+        return unsafe { runtime_call_error(format!("no method `{method}` found for `hashset`")) };
     };
 
     match operation {
@@ -2533,6 +1995,9 @@ pub fn values_equal_with(
                     .all(|(left, right)| values_equal_with(left, right, float_equal))
         }
         (FidanValue::Dict(lhs), FidanValue::Dict(rhs)) => {
+            if lhs.borrow().aot_class_name().is_some() || rhs.borrow().aot_class_name().is_some() {
+                return lhs.identity() == rhs.identity();
+            }
             let lhs = lhs.borrow();
             let rhs = rhs.borrow();
             lhs.len() == rhs.len()
@@ -2612,7 +2077,7 @@ pub fn values_equal_with(
     }
 }
 
-fn compare_values(a: &FidanValue, b: &FidanValue) -> std::cmp::Ordering {
+pub(crate) fn compare_values(a: &FidanValue, b: &FidanValue) -> std::cmp::Ordering {
     match (a, b) {
         (FidanValue::Integer(x), FidanValue::Integer(y)) => x.cmp(y),
         (FidanValue::Float(x), FidanValue::Float(y)) => {
