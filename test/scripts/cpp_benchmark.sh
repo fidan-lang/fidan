@@ -26,7 +26,7 @@ mkdir -p "$OUT"
 # ── Build Fidan release binary ────────────────────────────────
 echo "[1/3] Building Fidan release binary..."
 cd "$ROOT"
-cargo build --release -p fidan-cli 2>/dev/null
+cargo build --release --locked -p fidan-cli
 echo "      done."
 
 # ── Build Fidan parallel_benchmark ───────────────────────────
@@ -34,14 +34,16 @@ echo ""
 echo "[2/3] Compiling Fidan benchmark: $FDN_SRC"
 FDN_OK=0
 if [ -f "$FDN_SRC" ]; then
-    if "$ROOT/target/release/fidan" build "$FDN_SRC" -o "$FDN_BIN" 2>/dev/null; then
+    if "$ROOT/target/release/fidan" build "$FDN_SRC" -o "$FDN_BIN"; then
         echo "      Compiled to $FDN_BIN"
         FDN_OK=1
     else
-        echo "FAIL: fidan build returned error"
+        echo "FAIL: fidan build returned error" >&2
+        exit 1
     fi
 else
-    echo "SKIP: $FDN_SRC not found"
+    echo "FAIL: $FDN_SRC not found" >&2
+    exit 1
 fi
 
 # ── Build C++ benchmark ───────────────────────────────────────
@@ -49,14 +51,20 @@ echo ""
 echo "[3/3] Compiling C++ benchmark: $CPP_SRC"
 CPP_OK=0
 if command -v g++ &>/dev/null; then
-    if g++ -O2 -std=c++17 -pthread -o "$CPP_BIN" "$CPP_SRC" 2>/dev/null; then
+    if g++ -O2 -std=c++17 -pthread -o "$CPP_BIN" "$CPP_SRC"; then
         echo "      Compiled with g++ -O2"
         CPP_OK=1
+    else
+        echo "FAIL: C++ benchmark compilation failed" >&2
+        exit 1
     fi
 elif command -v clang++ &>/dev/null; then
-    if clang++ -O2 -std=c++17 -pthread -o "$CPP_BIN" "$CPP_SRC" 2>/dev/null; then
+    if clang++ -O2 -std=c++17 -pthread -o "$CPP_BIN" "$CPP_SRC"; then
         echo "      Compiled with clang++ -O2"
         CPP_OK=1
+    else
+        echo "FAIL: C++ benchmark compilation failed" >&2
+        exit 1
     fi
 else
     echo "SKIP: no C++ compiler found (g++ or clang++)"

@@ -73,6 +73,11 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked
 
+      - name: Windows benchmark runner failure regressions
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./test/scripts/test-benchmark-runners.ps1
+
       - name: Toolchain packaging environment regression
         shell: pwsh
         run: |

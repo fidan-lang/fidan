@@ -4,6 +4,7 @@ setlocal EnableExtensions EnableDelayedExpansion
 rem ============================================================
 rem  cpp_benchmark_suite.bat - Multi-case Fidan vs C++ comparison
 rem  Usage: test\scripts\cpp_benchmark_suite.bat [int_n] [call_n] [float_n]
+rem  Requires a compatible LLVM helper. Build/run failures are fatal.
 rem ============================================================
 
 set "ROOT=%~dp0..\.."
@@ -35,7 +36,7 @@ pushd "%ROOT%" >nul || (
 )
 
 echo [1/4] Building Fidan release binary...
-cargo build --release -p fidan-cli
+cargo build --release --locked -p fidan-cli
 if errorlevel 1 (
     echo FAIL: cargo build failed
     popd >nul
@@ -49,6 +50,8 @@ set "FDN_CR_OK=0"
 "%ROOT%\target\release\fidan.exe" build --backend cranelift --target-cpu native "%FDN_SRC%" -o "%FDN_CR%"
 if errorlevel 1 (
     echo FAIL: fidan build --backend cranelift returned error
+    popd >nul
+    exit /b 1
 ) else (
     echo       Compiled to %FDN_CR%
     set "FDN_CR_OK=1"
@@ -59,7 +62,9 @@ echo [3/4] Compiling Fidan suite ^(LLVM^): %FDN_SRC%
 set "FDN_LL_OK=0"
 "%ROOT%\target\release\fidan.exe" build --backend llvm --target-cpu native "%FDN_SRC%" -o "%FDN_LL%"
 if errorlevel 1 (
-    echo SKIP: LLVM backend unavailable or build failed
+    echo FAIL: LLVM benchmark compilation failed; install a compatible LLVM helper
+    popd >nul
+    exit /b 1
 ) else (
     echo       Compiled to %FDN_LL%
     set "FDN_LL_OK=1"
@@ -68,11 +73,13 @@ if errorlevel 1 (
 echo.
 echo [4/4] Compiling C++ suite: %CPP_SRC%
 set "CPP_OK=0"
+set "CPP_FOUND=0"
 set "GXX_PATH="
 set "CLANGXX_PATH="
 
 where g++ >nul 2>&1
 if not errorlevel 1 (
+    set "CPP_FOUND=1"
     g++ -O2 -march=native -std=c++17 -pthread -o "%CPP_BIN%" "%CPP_SRC%"
     if not errorlevel 1 (
         echo       Compiled with g++ -O2
@@ -85,6 +92,7 @@ if "!CPP_OK!"=="0" (
     if defined GXX_PATH (
         for %%I in ("!GXX_PATH!") do set "GXX_DIR=%%~dpI"
         set "PATH=!GXX_DIR!;!PATH!"
+        set "CPP_FOUND=1"
         "!GXX_PATH!" -O2 -march=native -std=c++17 -pthread -o "%CPP_BIN%" "%CPP_SRC%"
         if not errorlevel 1 (
             echo       Compiled with g++ -O2 via PowerShell-discovered toolchain
@@ -96,6 +104,7 @@ if "!CPP_OK!"=="0" (
 if "!CPP_OK!"=="0" (
     where clang++ >nul 2>&1
     if not errorlevel 1 (
+        set "CPP_FOUND=1"
         clang++ -O2 -march=native -std=c++17 -pthread -o "%CPP_BIN%" "%CPP_SRC%"
         if not errorlevel 1 (
             echo       Compiled with clang++ -O2
@@ -109,6 +118,7 @@ if "!CPP_OK!"=="0" (
     if defined CLANGXX_PATH (
         for %%I in ("!CLANGXX_PATH!") do set "CLANGXX_DIR=%%~dpI"
         set "PATH=!CLANGXX_DIR!;!PATH!"
+        set "CPP_FOUND=1"
         "!CLANGXX_PATH!" -O2 -march=native -std=c++17 -pthread -o "%CPP_BIN%" "%CPP_SRC%"
         if not errorlevel 1 (
             echo       Compiled with clang++ -O2 via PowerShell-discovered toolchain
@@ -120,12 +130,19 @@ if "!CPP_OK!"=="0" (
 if "!CPP_OK!"=="0" (
     where cl >nul 2>&1
     if not errorlevel 1 (
-        cl /nologo /O2 /std:c++17 /EHsc "%CPP_SRC%" /Fe:"%CPP_BIN%"
+        set "CPP_FOUND=1"
+        cl /nologo /O2 /std:c++17 /EHsc "%CPP_SRC%" /Fe:"%CPP_BIN%" /Fo:"%OUT%\cpp_perf_suite_%RUN_ID%.obj"
         if not errorlevel 1 (
             echo       Compiled with cl /O2
             set "CPP_OK=1"
         )
     )
+)
+
+if "!CPP_OK!"=="0" if "!CPP_FOUND!"=="1" (
+    echo FAIL: C++ benchmark compilation failed
+    popd >nul
+    exit /b 1
 )
 
 if "!CPP_OK!"=="0" (
@@ -142,18 +159,30 @@ if "!FDN_CR_OK!"=="1" (
     echo.
     echo [Fidan AOT - Cranelift]
     "%FDN_CR%" %RUN_ARGS%
+    if errorlevel 1 (
+        popd >nul
+        exit /b 1
+    )
 )
 
 if "!FDN_LL_OK!"=="1" (
     echo.
     echo [Fidan AOT - LLVM]
     "%FDN_LL%" %RUN_ARGS%
+    if errorlevel 1 (
+        popd >nul
+        exit /b 1
+    )
 )
 
 if "!CPP_OK!"=="1" (
     echo.
     echo [C++ -O2]
     "%CPP_BIN%" %RUN_ARGS%
+    if errorlevel 1 (
+        popd >nul
+        exit /b 1
+    )
 )
 
 echo.
