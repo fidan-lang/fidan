@@ -1,4 +1,5 @@
 param(
+  [ValidateSet("llvm", "ai-analysis")]
   [string]$Kind = "llvm",
   [string]$ToolchainVersion = "",
   [Parameter(Mandatory = $true)]
@@ -17,6 +18,8 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "shared/release-inputs.ps1")
 
 . (Join-Path $PSScriptRoot "shared/cargo-artifacts.ps1")
 
@@ -762,6 +765,9 @@ function Invoke-HelperBuild {
   }
 }
 
+Assert-ReleaseVersion -Value $ToolVersion -Name "ToolVersion"
+if ($ToolchainVersion) { Assert-ReleaseVersion -Value $ToolchainVersion -Name "ToolchainVersion" }
+
 $hasUpstreamArchive = ($UpstreamArchivePath -ne "") -or ($UpstreamArchiveUrl -ne "")
 if (($Kind -eq "llvm") -and (-not $hasUpstreamArchive)) {
   throw "Either -UpstreamArchivePath or -UpstreamArchiveUrl is required for LLVM toolchain packaging"
@@ -770,6 +776,7 @@ if (($Kind -eq "llvm") -and (-not $hasUpstreamArchive)) {
 if (-not $ToolchainVersion) {
   $ToolchainVersion = Get-HelperVersion -Kind $Kind
 }
+Assert-ReleaseVersion -Value $ToolchainVersion -Name "ToolchainVersion"
 if (-not $SupportedFidanVersions) {
   $SupportedFidanVersions = "^$(Get-WorkspaceVersion)"
 }

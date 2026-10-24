@@ -23,6 +23,9 @@ env:
   VCPKG_COMMIT: b472291f295551b7127359ea38fdd2ca092f6f1b
   VCPKG_WINDOWS_TRIPLET: x64-windows-static-md
 
+permissions:
+  contents: read
+
 jobs:
   build-llvm-toolchain:
     name: Build LLVM toolchain (${{ matrix.name }})
@@ -46,6 +49,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -119,10 +124,15 @@ jobs:
       - name: Resolve LLVM source metadata
         id: source
         shell: pwsh
+        env:
+          WF_INPUTS_LLVM_TOOL_VERSION: ${{ inputs.llvm_tool_version }}
+          WF_MATRIX_SOURCE_KEY: ${{ matrix.source_key }}
         run: |
+          . ./scripts/shared/release-inputs.ps1
+          Assert-ReleaseVersion -Value $env:WF_INPUTS_LLVM_TOOL_VERSION -Name "LLVM version"
           $sources = Get-Content "config/llvm-toolchain-sources.json" -Raw | ConvertFrom-Json -AsHashtable
-          $version = "${{ inputs.llvm_tool_version }}"
-          $platform = "${{ matrix.source_key }}"
+          $version = "$env:WF_INPUTS_LLVM_TOOL_VERSION"
+          $platform = "$env:WF_MATRIX_SOURCE_KEY"
           if (-not $sources.ContainsKey($version)) {
             throw "Unsupported LLVM version '$version' in config/llvm-toolchain-sources.json"
           }
@@ -139,6 +149,7 @@ jobs:
           if (-not $llvmSysPrefixEnv) {
             throw "Missing llvm_sys_prefix_env for version '$version' in config/llvm-toolchain-sources.json"
           }
+          Assert-LlvmSourceMetadata -Url $platformInfo.url -Sha256 $platformInfo.sha256 -Feature $backendFeature -PrefixEnv $llvmSysPrefixEnv
           "archive_url=$($platformInfo.url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "archive_sha256=$($platformInfo.sha256)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "backend_feature=$backendFeature" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -146,16 +157,23 @@ jobs:
 
       - name: Package LLVM toolchain artifact
         shell: pwsh
+        env:
+          WF_INPUTS_TOOLCHAIN_VERSION: ${{ inputs.toolchain_version }}
+          WF_INPUTS_LLVM_TOOL_VERSION: ${{ inputs.llvm_tool_version }}
+          WF_STEPS_SOURCE_OUTPUTS_BACKEND_FEATURE: ${{ steps.source.outputs.backend_feature }}
+          WF_STEPS_SOURCE_OUTPUTS_LLVM_SYS_PREFIX_ENV: ${{ steps.source.outputs.llvm_sys_prefix_env }}
+          WF_STEPS_SOURCE_OUTPUTS_ARCHIVE_URL: ${{ steps.source.outputs.archive_url }}
+          WF_STEPS_SOURCE_OUTPUTS_ARCHIVE_SHA256: ${{ steps.source.outputs.archive_sha256 }}
         run: |
           ./scripts/package-toolchain.ps1 `
             -Kind "llvm" `
-            -ToolchainVersion "${{ inputs.toolchain_version }}" `
-            -ToolVersion "${{ inputs.llvm_tool_version }}" `
-            -HelperCargoFeatures "${{ steps.source.outputs.backend_feature }}" `
-            -LlvmSysPrefixEnvVar "${{ steps.source.outputs.llvm_sys_prefix_env }}" `
+            -ToolchainVersion "$env:WF_INPUTS_TOOLCHAIN_VERSION" `
+            -ToolVersion "$env:WF_INPUTS_LLVM_TOOL_VERSION" `
+            -HelperCargoFeatures "$env:WF_STEPS_SOURCE_OUTPUTS_BACKEND_FEATURE" `
+            -LlvmSysPrefixEnvVar "$env:WF_STEPS_SOURCE_OUTPUTS_LLVM_SYS_PREFIX_ENV" `
             -HelperAdditionalLibPaths @($env:VCPKG_LIBXML2_LIB_DIR) `
-            -UpstreamArchiveUrl "${{ steps.source.outputs.archive_url }}" `
-            -UpstreamArchiveSha256 "${{ steps.source.outputs.archive_sha256 }}"
+            -UpstreamArchiveUrl "$env:WF_STEPS_SOURCE_OUTPUTS_ARCHIVE_URL" `
+            -UpstreamArchiveSha256 "$env:WF_STEPS_SOURCE_OUTPUTS_ARCHIVE_SHA256"
 
       - name: Install packaged LLVM toolchain into validation FIDAN_HOME
         if: inputs.validate

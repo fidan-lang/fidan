@@ -31,6 +31,9 @@ on:
         default: ""
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   build-llvm-toolchain:
     name: Build LLVM toolchains

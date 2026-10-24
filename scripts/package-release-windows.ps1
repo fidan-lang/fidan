@@ -14,6 +14,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "shared/release-inputs.ps1")
+Assert-ReleaseVersion -Value $Version
+
 $hostPlatformHelperPath = Join-Path $PSScriptRoot "shared/host-platform.ps1"
 if (-not (Test-Path -LiteralPath $hostPlatformHelperPath)) {
   throw "Missing host platform helper: '$hostPlatformHelperPath'"

@@ -16,6 +16,9 @@ on:
         required: true
         type: boolean
 
+permissions:
+  contents: read
+
 jobs:
   bundle:
     name: Merge manifest
@@ -24,6 +27,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate artifact identifiers before download
+        shell: pwsh
+        env:
+          ARTIFACT_PATTERN: ${{ inputs.artifact_pattern }}
+          BUNDLE_ARTIFACT_NAME: ${{ inputs.bundle_artifact_name }}
+        run: |
+          . ./scripts/shared/release-inputs.ps1
+          Assert-ReleaseArtifactName -Value $env:ARTIFACT_PATTERN -AllowPattern
+          Assert-ReleaseArtifactName -Value $env:BUNDLE_ARTIFACT_NAME
 
       - name: Download toolchain artifacts
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8

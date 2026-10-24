@@ -11,6 +11,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "shared/release-inputs.ps1")
+
 . (Join-Path $PSScriptRoot "shared/cargo-artifacts.ps1")
 
 $hostPlatformHelperPath = Join-Path $PSScriptRoot "shared/host-platform.ps1"
@@ -177,6 +179,8 @@ if (-not $Version) {
   $Version = Get-WorkspaceVersion
 }
 
+Assert-ReleaseVersion -Value $Version
+
 if ($PrepareWinget -and $SubmitWinget) {
   throw "Use either -PrepareWinget or -SubmitWinget, not both."
 }
@@ -200,6 +204,7 @@ $shouldBuildWindowsInstaller = $script:IsWindowsHost -and (
 
 if (-not $SkipBuild) {
   cargo build -p fidan-cli -p fidan-runtime -p libfidan --release
+  if ($LASTEXITCODE -ne 0) { throw "Release build failed; refusing to package an older binary." }
 }
 
 $releaseDirectory = Get-CargoReleaseDirectory
