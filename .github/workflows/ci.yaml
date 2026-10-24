@@ -118,3 +118,4 @@ jobs:
       - run: python -m pip install PyYAML==6.0.3
       - run: python .ci-actions/scripts/test-workflows.py
       - run: python .ci-actions/scripts/check-workflows.py . .ci-actions
+      - run: python test/scripts/test-workflow-inputs.py
