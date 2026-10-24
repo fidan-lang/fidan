@@ -1,0 +1,25 @@
+var text = "é🙂"
+assert_eq(text.len, 2)
+assert_eq(text.length, text.len())
+assert_eq(text.byteLen, 6)
+assert_eq(text.byte_len, text.byteLen())
+var values = [1, 2]
+assert_eq(values.len, 2)
+assert_eq(values.length, values.len())
+assert_eq(values.size, 2)
+var dictionary = {"len": 99, "x": 2}
+assert_eq(dictionary.len, 2)
+assert_eq(dictionary.length, dictionary.len())
+assert_eq(dictionary.size, 2)
+assert_eq(dictionary["len"], 99)
+var unique = hashset([1, 1, 2])
+assert_eq(unique.len, 2)
+assert_eq(unique.length, unique.len())
+assert_eq(unique.size, 2)
+var erased oftype flexible = text
+assert_eq(erased.len, 2)
+object Box {
+    var len oftype integer = 42
+}
+var box = Box()
+assert_eq(box.len, 42)

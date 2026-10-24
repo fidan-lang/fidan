@@ -1840,12 +1840,69 @@ impl TypeChecker {
             } => {
                 self.infer_expr(scrutinee, module);
                 for arm in &arms {
-                    self.infer_expr(arm.pattern, module);
+                    self.push_scope(ScopeKind::Block);
+                    self.check_pattern(arm.pattern, module);
                     self.check_arm_body(&arm.body, module);
+                    self.pop_scope();
                 }
             }
 
             Stmt::Error { .. } => {}
+        }
+    }
+
+    /// Identifier arguments in enum patterns declare arm-local payload bindings;
+    /// they are not expressions to resolve in the surrounding scope.
+    fn check_pattern(&mut self, pattern: ExprId, module: &Module) {
+        if let Expr::Call { callee, args, span } = module.arena.get_expr(pattern).clone()
+            && args.iter().all(|arg| {
+                arg.name.is_none() && matches!(module.arena.get_expr(arg.value), Expr::Ident { .. })
+            })
+            && let Expr::Field { object, field, .. } = module.arena.get_expr(callee).clone()
+            && let FidanType::Enum(enum_name) = self.infer_expr(object, module)
+            && let Some(arity) = self.enum_variant_arity(enum_name, field)
+        {
+            self.expr_types.insert(callee, FidanType::Function);
+            self.expr_types.insert(pattern, FidanType::Enum(enum_name));
+            if arity != args.len() {
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0305"),
+                    format!("expected {arity} payload bindings, got {}", args.len()),
+                    span,
+                );
+            }
+            for arg in args {
+                if let Expr::Ident { name, span } = module.arena.get_expr(arg.value).clone() {
+                    self.expr_types.insert(arg.value, FidanType::Dynamic);
+                    if self.interner.resolve(name).as_ref() == "_"
+                        || self.reject_reserved_builtin_binding(name, span)
+                    {
+                        continue;
+                    }
+                    if self.table.lookup_current_scope(name).is_some() {
+                        self.emit_error(
+                            fidan_diagnostics::diag_code!("E0109"),
+                            "duplicate enum payload binding",
+                            span,
+                        );
+                        continue;
+                    }
+                    // Enum IR stores payloads as boxed values; no scalar ABI is inferred.
+                    self.table.define(
+                        name,
+                        SymbolInfo {
+                            kind: SymbolKind::Var,
+                            ty: FidanType::Dynamic,
+                            span,
+                            is_mutable: false,
+                            initialized: Initialized::Yes,
+                            const_value: None,
+                        },
+                    );
+                }
+            }
+        } else {
+            self.infer_expr(pattern, module);
         }
     }
 
@@ -2730,8 +2787,10 @@ impl TypeChecker {
                 self.infer_expr(scrutinee, module);
                 let mut arm_types = Vec::with_capacity(arms.len());
                 for arm in arms {
-                    self.infer_expr(arm.pattern, module);
+                    self.push_scope(ScopeKind::Block);
+                    self.check_pattern(arm.pattern, module);
                     arm_types.push(self.infer_check_arm_body_type(&arm.body, module));
+                    self.pop_scope();
                 }
                 self.merge_possible_types(arm_types)
             }
@@ -2938,6 +2997,10 @@ impl TypeChecker {
             ReceiverReturnKind::ListOfReceiverElement => match receiver_ty {
                 FidanType::List(inner) => FidanType::List(inner.clone()),
                 FidanType::HashSet(inner) => FidanType::List(inner.clone()),
+                _ => FidanType::List(Box::new(FidanType::Dynamic)),
+            },
+            ReceiverReturnKind::ListOfDictKey => match receiver_ty {
+                FidanType::Dict(key, _) => FidanType::List(key.clone()),
                 _ => FidanType::List(Box::new(FidanType::Dynamic)),
             },
             ReceiverReturnKind::ListOfDictValue => match receiver_ty {
@@ -5689,5 +5752,46 @@ mod const_regressions {
             checker.eval_const_binary(BinOp::Pow, ConstValue::Int(2), ConstValue::Int(-3)),
             Some(ConstValue::Float(0.125))
         );
+    }
+    #[test]
+    fn dictionary_keys_preserve_the_receiver_key_type() {
+        let interner = Arc::new(SymbolInterner::new());
+        let checker = TypeChecker::new(interner.clone(), FileId(0));
+        for key in [FidanType::Integer, FidanType::String, FidanType::Dynamic] {
+            let receiver = FidanType::Dict(Box::new(key.clone()), Box::new(FidanType::Boolean));
+            assert_eq!(
+                checker.builtin_method_return(&receiver, interner.intern("keys")),
+                Some(FidanType::List(Box::new(key)))
+            );
+        }
+    }
+    #[test]
+    fn enum_payload_patterns_bind_only_inside_the_arm() {
+        for (tail, expected_error) in [("", None), ("print(value)", Some("E0101"))] {
+            let interner = Arc::new(SymbolInterner::new());
+            let source = format!(
+                "enum Result {{ Ok(integer) }}\nvar result = Result.Ok(3)\ncheck result {{ Result.Ok(value) => print(value) }}\n{tail}"
+            );
+            let file = fidan_source::SourceFile::new(FileId(0), "<enum-pattern>", source.as_str());
+            let (tokens, lexical) = fidan_lexer::Lexer::new(&file, interner.clone()).tokenise();
+            let (module, parsed) = fidan_parser::parse(&tokens, file.id, interner.clone());
+            assert!(lexical.is_empty() && parsed.is_empty());
+            let mut checker = TypeChecker::new(interner, file.id);
+            checker.check_module(&module);
+            let typed = checker.finish_typed();
+            let errors = typed
+                .diagnostics
+                .iter()
+                .filter(|diag| diag.severity == fidan_diagnostics::Severity::Error)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                errors.len(),
+                usize::from(expected_error.is_some()),
+                "{errors:?}"
+            );
+            if let Some(code) = expected_error {
+                assert_eq!(errors[0].code, code);
+            }
+        }
     }
 }

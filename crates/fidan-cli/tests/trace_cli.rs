@@ -3594,3 +3594,29 @@ fn exec_preserves_program_verbosity_arguments() {
     std::fs::remove_dir_all(&home).unwrap();
     std::fs::remove_dir_all(&helper_src).unwrap();
 }
+
+#[test]
+fn repl_preserves_dictionary_keys_and_scoped_enum_payloads() {
+    let output = run_repl_session(
+        &["--trace", "none"],
+        br#"var table = {1: "one", 2: "two"}
+var keys oftype list oftype integer = table.keys()
+assert_eq(keys[0] + keys[1], 3)
+assert_eq(keys.len, 2)
+enum Result { Ok(integer) }
+var item = Result.Ok(3)
+var answer = check item { Result.Ok(payload) => payload; otherwise => 0 }
+assert_eq(answer, 3)
+print("documented repl contracts passed")
+:quit
+"#,
+    );
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("documented repl contracts passed"),
+        "{stdout}"
+    );
+    assert!(stderr.trim().is_empty(), "{stderr}");
+}

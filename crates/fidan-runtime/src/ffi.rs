@@ -1329,7 +1329,7 @@ pub unsafe extern "C" fn fdn_obj_get_field(
     field_len: i64,
 ) -> *mut FidanValue {
     let field_name = str_from_raw(field_bytes, field_len);
-    if let Some(value) = crate::receivers::shared_field(borrow(obj), &field_name) {
+    if let Some(value) = crate::receivers::receiver_field(borrow(obj), &field_name) {
         return into_raw(value);
     }
     let result = match borrow(obj) {
@@ -1445,6 +1445,10 @@ pub unsafe extern "C" fn fdn_obj_invoke(
         return builtin_value_result(result);
     }
     match recv {
+        FidanValue::EnumType(_) => into_raw(FidanValue::EnumVariant {
+            tag: Arc::from(method_name.as_str()),
+            payload: extra,
+        }),
         FidanValue::Namespace(ns_name) => {
             // Try stdlib first. dispatch_stdlib_inline returns None for unrecognised
             // module names, so adding a new stdlib module only requires updating that
@@ -3265,6 +3269,32 @@ pub unsafe extern "C" fn fdn_call_dynamic(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn enum_payload_constructor_uses_native_method_dispatch() {
+        for name in ["Ok", "toString"] {
+            let result = unsafe {
+                call_method_owned(
+                    FidanValue::EnumType(Arc::from("Result")),
+                    name,
+                    vec![FidanValue::Integer(3)],
+                )
+            };
+            let failed = fdn_has_exception() != 0;
+            if failed {
+                unsafe {
+                    fdn_drop(fdn_catch_exception());
+                }
+            }
+            assert!(
+                !failed,
+                "enum construction must not raise a missing-method error"
+            );
+            assert!(
+                matches!(result, FidanValue::EnumVariant { tag, payload } if tag.as_ref() == name && matches!(payload.as_slice(), [FidanValue::Integer(3)])),
+                "variant {name} must take precedence over conversion methods"
+            );
+        }
+    }
     #[test]
     fn native_workers_capture_global_and_argument_aliases_as_one_graph() {
         let mut slot = FidanValue::Nothing;

@@ -6,18 +6,31 @@ fn error(message: impl Into<String>) -> StdlibRuntimeError {
     StdlibRuntimeError::new(fidan_diagnostics::diag_code!("R0001"), message)
 }
 
-/// Pure fields of shared handles describe the handle, never its locked payload.
-pub fn shared_field(receiver: &FidanValue, field: &str) -> Option<FidanValue> {
+/// Pure builtin properties share the method metadata and semantics. Branded AOT
+/// objects keep their own fields, even when a field is named `len` or `type`.
+pub fn receiver_field(receiver: &FidanValue, field: &str) -> Option<FidanValue> {
     let kind = match receiver {
+        FidanValue::String(_) => ReceiverBuiltinKind::String,
+        FidanValue::List(_) => ReceiverBuiltinKind::List,
+        FidanValue::Dict(dict) if dict.borrow().aot_class_name().is_none() => {
+            ReceiverBuiltinKind::Dict
+        }
+        FidanValue::HashSet(_) => ReceiverBuiltinKind::HashSet,
         FidanValue::Shared(_) => ReceiverBuiltinKind::Shared,
         FidanValue::WeakShared(_) => ReceiverBuiltinKind::WeakShared,
         _ => return None,
     };
     let member = infer_receiver_member(kind, field)?;
-    if member.canonical_name != "type" || member.field_return.is_none() {
-        return None;
+    member.field_return?;
+    match member.canonical_name {
+        "type" => Some(FidanValue::String(FidanString::new(receiver.type_name()))),
+        "len" => crate::builtins::len(receiver).ok().map(FidanValue::Integer),
+        "byteLen" => match receiver {
+            FidanValue::String(text) => Some(FidanValue::Integer(text.len() as i64)),
+            _ => None,
+        },
+        _ => None,
     }
-    Some(FidanValue::String(FidanString::new(receiver.type_name())))
 }
 
 /// Numeric receivers use the existing checked std.math implementation, not a
@@ -491,4 +504,28 @@ pub fn list_callback<E: From<StdlibRuntimeError>>(
         "reduce" => accumulator.unwrap_or(FidanValue::Nothing),
         _ => FidanValue::Nothing,
     }))
+}
+
+#[cfg(test)]
+mod field_tests {
+    use super::*;
+
+    #[test]
+    fn collection_and_unicode_length_fields_follow_receiver_metadata() {
+        let text = FidanValue::String(FidanString::new("é"));
+        let list = FidanValue::List(OwnedRef::new(FidanList::from_vec(vec![
+            FidanValue::Integer(1),
+        ])));
+        for (receiver, names, expected) in [
+            (&text, &["len", "length"][..], 1),
+            (&text, &["byteLen", "byte_len"][..], 2),
+            (&list, &["len", "length", "size"][..], 1),
+        ] {
+            for name in names {
+                assert!(
+                    matches!(receiver_field(receiver, name), Some(FidanValue::Integer(n)) if n == expected)
+                );
+            }
+        }
+    }
 }

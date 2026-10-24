@@ -333,7 +333,12 @@ impl<'a> Ctx<'a> {
             } = callee_expr
             {
                 let obj_ty = self.ty(obj_id);
-                if let FidanType::Enum(enum_sym) = obj_ty {
+                if let FidanType::Enum(enum_sym) = obj_ty
+                    && args.iter().all(|arg| {
+                        arg.name.is_none()
+                            && matches!(self.arena.get_expr(arg.value), Expr::Ident { .. })
+                    })
+                {
                     let bindings: Vec<Symbol> = args
                         .iter()
                         .filter_map(|arg| {

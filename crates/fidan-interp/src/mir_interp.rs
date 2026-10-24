@@ -2898,7 +2898,7 @@ impl MirMachine {
     // ── Field access ──────────────────────────────────────────────────────────
 
     fn get_field(&self, val: &FidanValue, field: Symbol) -> MirResult {
-        if let Some(value) = fidan_runtime::receivers::shared_field(val, &self.sym_str(field)) {
+        if let Some(value) = fidan_runtime::receivers::receiver_field(val, &self.sym_str(field)) {
             return Ok(value);
         }
         let callable = match val {

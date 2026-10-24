@@ -142,6 +142,23 @@ class ArgsLspTests(unittest.TestCase):
                 else:
                     self.assertNotIn("INFO fidan", logs)
 
+    def test_documented_dictionary_keys_and_enum_payloads(self):
+        rpc = Rpc(("-vvv",))
+        try:
+            rpc.initialize()
+            for name in ("receiver_properties_regression.fdn", "dictionary_keys_regression.fdn", "enum_pattern_regression.fdn"):
+                path = ROOT / "test/examples" / name
+                source = path.read_text(encoding="utf-8")
+                diagnostics = rpc.open(path, source)
+                self.assertFalse([item for item in diagnostics if item.get("severity", 1) == 1], diagnostics)
+            invalid = rpc.change(path, source + "\nprint(text)\n", 2)
+            self.assertTrue(any(item.get("code") == "E0101" for item in invalid), invalid)
+            corrected = rpc.change(path, source, 3)
+            self.assertFalse([item for item in corrected if item.get("severity", 1) == 1], corrected)
+        finally:
+            rpc.close()
+        self.assertEqual(rpc.process.returncode, 0)
+
     def test_actual_args_documents_and_negative_controls(self):
         rpc = Rpc()
         try:

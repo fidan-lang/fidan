@@ -1553,9 +1553,11 @@ impl<'p> FnCtx<'p> {
 
             // Arm body — lower all stmts, capturing the last expression value.
             self.switch_to(arm_bb);
+            let mut shadowed_bindings = Vec::new();
             // If this arm is an enum destructure, bind payload elements before running the body.
             if let HirExprKind::EnumDestructure { bindings, .. } = &arm.pattern.kind {
                 for (i, &sym) in bindings.iter().enumerate() {
+                    shadowed_bindings.push((sym, self.env.get(&sym).copied()));
                     let local = self.alloc_local();
                     self.emit(Instr::Assign {
                         dest: local,
@@ -1584,6 +1586,13 @@ impl<'p> FnCtx<'p> {
             } else {
                 Operand::Const(MirLit::Nothing)
             };
+            for (name, previous) in shadowed_bindings {
+                if let Some(local) = previous {
+                    self.env.insert(name, local);
+                } else {
+                    self.env.remove(&name);
+                }
+            }
             let arm_end = self.cur_bb;
             if !self.terminated {
                 pending_exits.push(arm_end); // backpatched below
@@ -2314,9 +2323,11 @@ impl<'p> FnCtx<'p> {
 
             self.env = env_before.clone();
             self.switch_to(arm_bb);
+            let mut shadowed_bindings = Vec::new();
             // If this arm is an enum destructure, bind payload elements before running the body.
             if let HirExprKind::EnumDestructure { bindings, .. } = &arm.pattern.kind {
                 for (i, &sym) in bindings.iter().enumerate() {
+                    shadowed_bindings.push((sym, self.env.get(&sym).copied()));
                     let local = self.alloc_local();
                     self.emit(Instr::Assign {
                         dest: local,
@@ -2330,6 +2341,13 @@ impl<'p> FnCtx<'p> {
                 }
             }
             self.lower_stmts(&arm.body);
+            for (name, previous) in shadowed_bindings {
+                if let Some(local) = previous {
+                    self.env.insert(name, local);
+                } else {
+                    self.env.remove(&name);
+                }
+            }
             let arm_end = self.cur_bb;
             arm_end_envs.push((arm_end, self.env.clone()));
             if !self.terminated {

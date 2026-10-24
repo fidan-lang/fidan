@@ -567,6 +567,7 @@ fn receiver_return_to_stdlib_kind(
         | ReceiverReturnKind::ListOfInteger
         | ReceiverReturnKind::ListOfDynamic
         | ReceiverReturnKind::ListOfReceiverElement
+        | ReceiverReturnKind::ListOfDictKey
         | ReceiverReturnKind::ListOfDictValue
         | ReceiverReturnKind::ListOfDynamicPairs => StdlibValueKind::List,
     }

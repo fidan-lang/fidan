@@ -36,6 +36,12 @@ compiler releases.
 - Require matching LLVM backend protocol8 for thread-local native globals. Existing
   public1.0.16/helper1.0.6 assets are unchanged; a coordinated future patch pair is required.
 
+### Fixed
+- Honor advertised Unicode string and collection length properties through shared receiver dispatch.
+- Preserve the receiver key type in `Dict.keys()` type inference, signatures and editor metadata.
+- Complete arm-local enum payload bindings in both `check` forms, retain literal payload comparisons,
+  and preserve shadowed outer bindings. Native enum payload construction now matches interpreter dispatch.
+
 ---
 
 ## Unreleased — Dal relaunch integration candidate

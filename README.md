@@ -1366,3 +1366,26 @@ Made with ❤️ by [Kaan Gönüldinc (AppSolves)](https://github.com/AppSolves)
 [⭐ Star this repo](https://github.com/fidan-lang/fidan) if you find Fidan interesting!
 
 </div>
+
+## Upcoming source candidate versus released 1.0.16
+
+The public 1.0.16 release remains available through the stable installer. The
+reviewed upcoming source additionally provides callable `.name`/`.parameters`
+metadata and `.invoke(list)`, custom decorator replacement, Boolean short-circuit
+execution, recursive source-tool directory handling and global `-v` diagnostics.
+Do not infer support from a version string alone while source package metadata
+still reports 1.0.16. Candidate CI pins full source commits and probes behavior.
+
+Use `callback(a, b)` normally; `callback.invoke(arguments)` is for a positional
+argument list computed at runtime. It reuses normal arity/default/type/error
+handling. Reflection never executes computed defaults or exposes closure captures.
+Both operands of `and`/`or` are statically checked; only the necessary RHS executes.
+The new args framework depends on these candidate contracts, not the old binary.
+LLVM candidate execution requires the matching backend-protocol-8 helper; do not
+mix it with the older published helper or overwrite stable artifacts.
+
+The website source contains implementation-verified guides for operators,
+collections/enums, callable reflection, args, complete generated API/CLI catalogs
+and migration. Its exact-source CI is a coordinated PR dependency, not proof that
+the new website/compiler/package has already been published. Production release
+approval remains separate from local engineering validation.

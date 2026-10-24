@@ -218,6 +218,7 @@ fn receiver_return_summary(
         ReceiverReturnKind::ListOfInteger => ("list oftype integer", Some("list")),
         ReceiverReturnKind::ListOfDynamic => ("list oftype dynamic", Some("list")),
         ReceiverReturnKind::ListOfReceiverElement => ("list", Some("list")),
+        ReceiverReturnKind::ListOfDictKey => ("list oftype K", Some("list")),
         ReceiverReturnKind::ListOfDictValue => ("list", Some("list")),
         ReceiverReturnKind::ListOfDynamicPairs => ("list", Some("list")),
         ReceiverReturnKind::SharedInnerValue => ("Shared inner value", None),
