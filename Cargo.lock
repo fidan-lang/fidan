@@ -1182,6 +1182,7 @@ dependencies = [
  "fidan-config",
  "fidan-diagnostics",
  "fidan-runtime",
+ "serde_json",
 ]
 
 [[package]]

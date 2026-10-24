@@ -10,3 +10,6 @@ repository.workspace = true
 fidan-config = { workspace = true }
 fidan-diagnostics = { workspace = true }
 fidan-runtime = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
