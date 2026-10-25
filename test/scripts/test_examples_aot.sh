@@ -231,16 +231,16 @@ while IFS= read -r file; do
     fi
 
     timeout_secs="$DEFAULT_TIMEOUT_SECONDS"
-    run_args=()
+    # Positional parameters avoid Bash 3.2 nounset errors for empty arrays.
+    set -- "$bin"
     expected_failure_message=""
-    stdin_flag=()
     case "$base_name" in
         parallel_benchmark.fdn)
             timeout_secs="$BENCHMARK_PROBE_SECONDS"
-            run_args=("${FIDAN_BENCHMARK_WORK_ITEMS:-10000}")
+            set -- "$@" "${FIDAN_BENCHMARK_WORK_ITEMS:-10000}"
             ;;
         replay_demo.fdn)
-            stdin_flag=(--stdin-lines "6\\n3")
+            set -- --stdin-lines "6\\n3" "$@"
             ;;
         release_mega_1_0.fdn)
             if [ "$timeout_secs" -lt 30 ]; then timeout_secs=30; fi
@@ -251,11 +251,7 @@ while IFS= read -r file; do
     esac
 
     set +e
-    if [ "${#stdin_flag[@]}" -gt 0 ]; then
-        run_with_timeout "$timeout_secs" "$stdout" "$stderr" "${stdin_flag[@]}" "$bin" "${run_args[@]}"
-    else
-        run_with_timeout "$timeout_secs" "$stdout" "$stderr" "$bin" "${run_args[@]}"
-    fi
+    run_with_timeout "$timeout_secs" "$stdout" "$stderr" "$@"
     exit_code=$?
     set -e
 
