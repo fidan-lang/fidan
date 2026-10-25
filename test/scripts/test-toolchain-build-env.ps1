@@ -51,6 +51,34 @@ foreach ($invalid in @(' libicui18n.so.70 => not found', ' libicu.so => unexpect
     if (-not $rejected) { throw 'Invalid linker dependency was silently ignored' }
 }
 
+# Package attribution must resolve usrmerge aliases without trusting a basename.
+function readlink {
+    $global:LASTEXITCODE = 0
+    $path = $args[-1]
+    if ($path -like '*i386-linux-gnu*') { return $path }
+    return '/usr/lib/x86_64-linux-gnu/libicui18n.so.70.1'
+}
+function dpkg-query {
+    $global:LASTEXITCODE = 0
+    return $script:packageRecords
+}
+try {
+    $script:packageRecords = @(
+        'libicu70:i386: /usr/lib/i386-linux-gnu/libicui18n.so.70',
+        'libicu70:amd64: /usr/lib/x86_64-linux-gnu/libicui18n.so.70'
+    )
+    if ((Get-DebianLibraryPackage -LibraryPath '/lib/x86_64-linux-gnu/libicui18n.so.70' -LibraryName 'libicui18n.so.70') -ne 'libicu70:amd64') {
+        throw 'usrmerge or multi-architecture library ownership was lost'
+    }
+    $script:packageRecords = @('unrelated: /usr/lib/i386-linux-gnu/libicui18n.so.70')
+    $rejected = $false
+    try { Get-DebianLibraryPackage -LibraryPath '/lib/x86_64-linux-gnu/libicui18n.so.70' -LibraryName 'libicui18n.so.70' | Out-Null }
+    catch { $rejected = $true }
+    if (-not $rejected) { throw 'A different library file was accepted as package ownership' }
+} finally {
+    Remove-Item Function:readlink, Function:dpkg-query
+}
+
 # Stub only external Cargo: verify the environment passed to every command,
 # including cleanup when that command fails, without rebuilding LLVM four times.
 function cargo {

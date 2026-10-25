@@ -335,7 +335,7 @@ function Get-LinuxLinkerDependencies {
 
   foreach ($line in $Lines) {
     if ($line -notmatch '=>') { continue } # vDSO and the host ELF loader.
-    if ($line -notmatch '^\s*(?<name>lib[^\s/]+)\s+=>\s+(?<path>/\S+)\s+\(0x[0-9a-fA-F]+\)\s*$') {
+    if ($line -notmatch '^\s*(?<name>lib[A-Za-z0-9_+.-]+)\s+=>\s+(?<path>/\S+)\s+\(0x[0-9a-fA-F]+\)\s*$') {
       throw "Unresolved or unsupported linker dependency: $line"
     }
     $name = $Matches.name
@@ -345,6 +345,28 @@ function Get-LinuxLinkerDependencies {
         $name -match '^lib(gcc_s|stdc\+\+)\.so\.') { continue }
     [PSCustomObject]@{ Name = $name; Path = $path }
   }
+}
+
+function Get-DebianLibraryPackage {
+  param([string]$LibraryPath, [string]$LibraryName)
+
+  $resolved = & readlink -f -- $LibraryPath
+  if ($LASTEXITCODE -ne 0 -or -not $resolved) { throw "Cannot resolve dependency $LibraryPath" }
+  # ldd and dpkg can spell the same file as /lib or /usr/lib on usrmerged hosts.
+  # Match a registered SONAME, then verify its real file rather than guessing aliases.
+  $records = & dpkg-query --search "*/$LibraryName"
+  if ($LASTEXITCODE -ne 0) { throw "Cannot find package records for $LibraryName" }
+  $owners = @()
+  foreach ($record in $records) {
+    if ($record -notmatch '^(?<package>[a-z0-9][a-z0-9+.-]*(?::[a-z0-9]+)?): (?<path>/.*)$') { continue }
+    $package = $Matches.package
+    $registeredPath = $Matches.path
+    $registered = & readlink -f -- $registeredPath
+    if ($LASTEXITCODE -eq 0 -and $registered -eq $resolved) { $owners += $package }
+  }
+  $owners = @($owners | Select-Object -Unique)
+  if ($owners.Count -ne 1) { throw "Cannot establish unique package ownership for $LibraryPath" }
+  return $owners[0]
 }
 
 function Copy-LinuxLinkerDependencies {
@@ -371,12 +393,7 @@ function Copy-LinuxLinkerDependencies {
     if ($dependency.Path -notmatch '^/(usr/)?lib/') {
       throw "Linker dependency is outside system library directories: $($dependency.Path)"
     }
-    $ownership = & dpkg-query --search $dependency.Path
-    if ($LASTEXITCODE -ne 0 -or $ownership.Count -gt 1 -or
-        $ownership -notmatch '^(?<package>[a-z0-9][a-z0-9+.-]*(?::[a-z0-9]+)?): /') {
-      throw "Cannot establish package ownership for $($dependency.Path)"
-    }
-    $package = $Matches.package
+    $package = Get-DebianLibraryPackage -LibraryPath $dependency.Path -LibraryName $dependency.Name
     $packageName = ($package -split ':')[0]
     $copyright = "/usr/share/doc/$packageName/copyright"
     if (-not (Test-Path -LiteralPath $copyright -PathType Leaf)) {
