@@ -148,8 +148,7 @@ compiler releases.
 - README and contributor guidance describe actual backend coverage, build and
   test commands, optional LLVM requirements, and current limitations, while
   retaining Fidan's AI-native identity through structured compiler analysis,
-  first-party AI workflows, and MCP tooling. Detailed
-  verification and findings are recorded in `docs/ENGINEERING_AUDIT.md`.
+  first-party AI workflows, and MCP tooling.
 
 ### Tests
 - Added final semantic fixtures for receiver generic/callback contracts, dynamic

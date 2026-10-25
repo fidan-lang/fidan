@@ -28,7 +28,7 @@ Logical `and` (`&&`) and `or` (`||`) use left-to-right short-circuit evaluation:
 `false and rhs` and `true or rhs` skip `rhs`. Both operands are still statically
 checked. Evaluated operands must be Boolean; flexible non-Booleans, including
 `nothing`, raise R0001. This upcoming candidate intentionally changes the earlier
-eager behavior; see [the semantic decisions](docs/LANGUAGE_SEMANTICS_ADR.md).
+eager behavior.
 
 
 ```fidan
@@ -86,8 +86,6 @@ Fidan is an actively developed language implementation. Examples and regression 
 - `fidan build --backend llvm` uses a separately installed LLVM helper. `--backend auto` prefers a compatible installed LLVM toolchain and otherwise uses Cranelift. `--release` selects optimization defaults, not a backend.
 - AI explain/fix/improve requires the optional AI helper and a configured provider. Compiler analysis, diagnostics, formatting, and deterministic fixes do not require a model.
 - Backend regression tests cover specific programs; general backend parity is not guaranteed. The interpreter's file/environment policy is not an OS security boundary for arbitrary native interop.
-
-See [the engineering audit](docs/ENGINEERING_AUDIT.md) for verified configurations, dependency decisions, and remaining limitations.
 
 ---
 ## Getting Started
@@ -973,7 +971,7 @@ fidan dal add my-package[json,cli] --version "^1.2"
 fidan dal add my-tool --global
 ```
 
-Dal resolves dependencies into `dal.lock`, supports optional dependencies through feature wiring, and can install package-provided CLI entries declared in `[cli]` metadata. The local relaunch branch adds verified archive integrity, explicit compiler constraints and bounded backtracking; see the [source-branch package contract](docs/DAL_PACKAGE_CONTRACT.md) for compatibility and release-order gates.
+Dal resolves dependencies into `dal.lock`, supports optional dependencies through feature wiring, and can install package-provided CLI entries declared in `[cli]` metadata. The local relaunch branch adds verified archive integrity, explicit compiler constraints and bounded backtracking; see the [package contract](docs/DAL_PACKAGE_CONTRACT.md) for archive integrity, resolution and credential handling.
 
 Dal login verifies the token supplied with `--token` (or a masked interactive
 prompt) and saves it for the selected registry. Authenticated commands use
@@ -1319,7 +1317,7 @@ cargo run -- run test/examples/test.fdn --emit mir
 
 ```
 
-The default workspace builds do not link LLVM. To use LLVM AOT, install a compatible packaged toolchain with `fidan toolchain add llvm`, then build with `fidan build --backend llvm file.fdn`. The 1.0.15 release toolchain targets LLVM 23.1.2, `llvm-sys` 231 and Inkwell pinned to upstream revision `c8234a0ee4171e946f94f6b3b5da0ea8d6ef5f3b` for LLVM 23 support. Contributors building the helper need matching LLVM libraries and headers, `LLVM_SYS_231_PREFIX`, and `cargo build -p fidan-llvm-helper --features llvm-toolchain-23`. Windows links the official LLVM-C DLL; source executions need the LLVM `bin` directory on PATH, and packaged builds include the DLL beside the helper. Use [scripts/package-toolchain.ps1](scripts/package-toolchain.ps1) for distributable builds: it disables Rust release LTO only while building/testing the helper, while Fidan's `--backend llvm --lto full` remains supported and validated. The [engineering audit](docs/ENGINEERING_AUDIT.md) records the tested configuration and registry-publishing limitations.
+The default workspace builds do not link LLVM. To use LLVM AOT, install a compatible packaged toolchain with `fidan toolchain add llvm`, then build with `fidan build --backend llvm file.fdn`. The 1.0.15 release toolchain targets LLVM 23.1.2, `llvm-sys` 231 and Inkwell pinned to upstream revision `c8234a0ee4171e946f94f6b3b5da0ea8d6ef5f3b` for LLVM 23 support. Contributors building the helper need matching LLVM libraries and headers, `LLVM_SYS_231_PREFIX`, and `cargo build -p fidan-llvm-helper --features llvm-toolchain-23`. Windows links the official LLVM-C DLL; source executions need the LLVM `bin` directory on PATH, and packaged builds include the DLL beside the helper. Use [scripts/package-toolchain.ps1](scripts/package-toolchain.ps1) for distributable builds: it disables Rust release LTO only while building/testing the helper, while Fidan's `--backend llvm --lto full` remains supported and validated.
 
 Benchmark programs and runners live under `test/`. Their timings depend on the host, backend, build profile, and workload; they are not general performance guarantees.
 

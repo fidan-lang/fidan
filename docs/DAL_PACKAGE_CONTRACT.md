@@ -1,7 +1,7 @@
-# Dal package contract — local relaunch candidate
+# DAL package contract
 
-This describes source on the relaunch audit branch, not capabilities retroactively
-added to published Fidan 1.0.16 binaries. Release versions remain unchanged locally.
+This describes the upcoming compiler candidate, not capabilities retroactively
+added to published Fidan 1.0.16 binaries.
 
 ```toml
 [package]
@@ -58,21 +58,13 @@ Run compiler options **before** the source path, e.g. `fidan run --sandbox main.
 Options after the source are program arguments. Environment token overrides allow
 isolated automation without writing OS keychain state. Never put real tokens in logs.
 
-## Necessary compiler integration fixes and release order
+## LLVM helper compatibility
 
-Real package execution exposed file-scoped action/global/re-export collisions and
-nullable/Dynamic native representation defects. The fixes retain source-language
-contracts. Boxed if/while conditions execute natively in the JIT using the same
-fdn_truthy helper as AOT. Functions using other unsupported instructions still use
-the established selective-JIT fallback; no coverage percentage is claimed.
 LLVM helper protocol is now **8**. Protocol 6 covered module/export identity;
 protocol 7 added callable metadata and optional scalar parameter ABI support.
 Protocol 8 requires runtime-owned thread-local native globals and complete worker
 argument/global snapshots. Helpers using protocols 5/6/7 cannot satisfy this ABI
-and are rejected before compilation. Select a new compiler/helper patch pair
-before publishing the unpublished `args` candidate and tighten its minimum first.
-Do not replace immutable Fidan 1.0.16 or helper 1.0.6 artifacts. Private helper
-`1.0.6-reaudit.4` is local test evidence, not a public release.
+and are rejected before compilation.
 
 AI helper protocol is unchanged. LLVM 23.1.2/llvm-sys 231 and Cranelift 0.136 are unchanged.
 
@@ -80,7 +72,7 @@ Cross-repository manifest/lock fixtures live under `test/fixtures/dal/`; actual 
 loopback regressions are in `crates/fidan-cli/tests/dal_registry.rs`. Full local
 API/auth/storage/worker/browser lifecycle is maintained in the sibling Dal repository.
 
-## Owner-approved signature-driven args support
+## Callable metadata
 
 `action.parameters` returns an independent list of parameter descriptors: `name`,
 source `type`, `certain`, `required`, `default_known`, `default`, `variadic`.
@@ -95,20 +87,8 @@ call dispatch, arity/default checks, closures, stdlib aliases and exception hand
 The interpreter projects current MIR metadata; AOT registers metadata beside the
 existing trampoline table. JIT receiver hooks reuse the active MirMachine rather
 than a second registry; a regression requires actual native entries and execution.
-Top-level custom decorators execute in declaration order before module init on both
-AOT backends, matching established interpreter startup. They validate/observe the
-original callable; their return does not replace its binding.
 
-The unpublished args candidate uses `@command` and `run(callback)`, with typed
-`ArgumentError` throws, required positionals, optional typed options, Boolean flags,
-computed defaults, help/version and a final string-list rest parameter. No public
-handwritten parameter schema or error-result dictionary remains. Real usage exposed
-and corrected statement named-argument sorting, loop break/continue edge values,
-computed scalar-default sentinel boxing, constructor decorator loss, and native
-object type tags used by existing typed catches. Object representation remains
-Dict-backed in AOT; this does not claim complete class-system parity.
-
-## Registry credential boundary (2026-10-20 local remediation)
+## Registry credential boundary
 
 Saved CLI tokens are scoped by SHA-256 of the canonical registry URL (scheme,
 normalized host/effective port and case-sensitive path prefix). URL parsing rejects
