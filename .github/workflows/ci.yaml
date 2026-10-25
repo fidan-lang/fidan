@@ -94,9 +94,8 @@ jobs:
         run: |
           ./test/scripts/test-toolchain-build-env.ps1
 
-      - name: Unix AOT sweep argument portability
-        if: runner.os != 'Windows'
-        run: python3 test/scripts/test-aot-sweep-invocation.py
+      - name: AOT sweep argument portability
+        run: python test/scripts/test-aot-sweep-invocation.py
 
       - name: Formatting
         run: cargo fmt --all --check

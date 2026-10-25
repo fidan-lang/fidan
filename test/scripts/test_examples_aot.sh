@@ -231,13 +231,18 @@ while IFS= read -r file; do
     fi
 
     timeout_secs="$DEFAULT_TIMEOUT_SECONDS"
+    benchmark_work_items="${FIDAN_BENCHMARK_WORK_ITEMS:-10000}"
     # Positional parameters avoid Bash 3.2 nounset errors for empty arrays.
     set -- "$bin"
     expected_failure_message=""
     case "$base_name" in
         parallel_benchmark.fdn)
             timeout_secs="$BENCHMARK_PROBE_SECONDS"
-            set -- "$@" "${FIDAN_BENCHMARK_WORK_ITEMS:-10000}"
+            set -- "$@" "$benchmark_work_items"
+            ;;
+        performance_suite.fdn)
+            timeout_secs="$BENCHMARK_PROBE_SECONDS"
+            set -- "$@" "$benchmark_work_items" "$benchmark_work_items" "$benchmark_work_items"
             ;;
         replay_demo.fdn)
             set -- --stdin-lines "6\\n3" "$@"
@@ -256,7 +261,7 @@ while IFS= read -r file; do
     set -e
 
     if [ "$exit_code" -eq 124 ]; then
-        echo "[FAIL] $rel - timed out after ${DEFAULT_TIMEOUT_SECONDS}s"
+        echo "[FAIL] $rel - timed out after ${timeout_secs}s"
         FAIL=$((FAIL + 1))
         continue
     fi

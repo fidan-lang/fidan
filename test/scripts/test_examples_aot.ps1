@@ -251,11 +251,16 @@ try {
         $runArguments = @()
         $expectFailure = $false
         $expectedFailureMessage = ""
+        $workItems = [string]$BenchmarkWorkItems
 
         switch ($baseName) {
             "parallel_benchmark.fdn" {
                 $timeoutMs = $BenchmarkProbeSeconds * 1000
-                $runArguments = @([string]$BenchmarkWorkItems)
+                $runArguments = @($workItems)
+            }
+            "performance_suite.fdn" {
+                $timeoutMs = $BenchmarkProbeSeconds * 1000
+                $runArguments = @($workItems, $workItems, $workItems)
             }
             "release_mega_1_0.fdn" {
                 $timeoutMs = [Math]::Max($timeoutMs, 30000)
@@ -281,7 +286,7 @@ try {
 
 
         if ($exitCode -eq 124) {
-            Write-Host "[FAIL] $rel - timed out after $DefaultTimeoutSeconds s"
+            Write-Host "[FAIL] $rel - timed out after $($timeoutMs / 1000) s"
             $fail += 1
             continue
         }
