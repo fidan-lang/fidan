@@ -252,7 +252,8 @@ pub fn compile_and_link_module(
             cpu.as_ptr(),
             features.as_ptr(),
             map_opt_level(request.opt_level).into(),
-            RelocMode::Default.into(),
+            // Match Cranelift and support host linkers that default to PIE.
+            RelocMode::PIC.into(),
             CodeModel::Default.into(),
         )
     };

@@ -2196,6 +2196,17 @@ fn llvm_aot_emit_obj_keeps_object_sidecar() {
         "expected object sidecar at `{}`",
         sidecar_object_path(&output).display()
     );
+    #[cfg(target_os = "linux")]
+    {
+        // The official Linux driver defaults to PIE: ELF e_type must be ET_DYN.
+        let image = fs::read(&output).expect("read linked ELF executable");
+        assert_eq!(image.get(..4), Some(b"\x7fELF".as_slice()));
+        assert_eq!(
+            image.get(16..18),
+            Some([3, 0].as_slice()),
+            "Linux LLVM output must preserve PIE"
+        );
+    }
     remove_native_fixtures(&sandbox);
 }
 
