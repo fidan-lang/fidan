@@ -512,24 +512,11 @@ impl MirMachine {
     ) -> MirResult {
         let result = with_jit_runtime_context(ctx, || call_jit_fn(entry, args));
         if fidan_runtime::ffi::fdn_has_exception() != 0 {
-            let exception = unsafe { *Box::from_raw(fidan_runtime::ffi::fdn_catch_exception()) };
+            let exception = fidan_runtime::ffi::take_exception().expect("pending JIT exception");
             if let Some(signal) = self.jit_signal.take() {
                 return Err(signal);
             }
-            if let FidanValue::String(message) = &exception {
-                for code in [
-                    fidan_diagnostics::diag_code!("R0001"),
-                    fidan_diagnostics::diag_code!("R2001"),
-                    fidan_diagnostics::diag_code!("R2003"),
-                ] {
-                    if let Some(message) =
-                        message.as_str().strip_prefix(&format!("error [{code}]: "))
-                    {
-                        return Err(MirSignal::RuntimeError(code, message.to_owned()));
-                    }
-                }
-            }
-            return Err(MirSignal::Throw(exception));
+            return Err(MirSignal::from_runtime_exception(exception));
         }
         Ok(result)
     }
@@ -1045,8 +1032,10 @@ impl MirMachine {
                 if let Err(error) = pending.validate_await_thread() {
                     return Some(Err(DeferredTaskError::Signal(error.into())));
                 }
-                pending.try_take_ready().map(|result| {
-                    result.map_err(|message| DeferredTaskError::Signal(MirSignal::Panic(message)))
+                pending.try_take_ready_diagnostic().map(|result| {
+                    result.map_err(|error| {
+                        DeferredTaskError::Signal(MirSignal::from_runtime_exception(error))
+                    })
                 })
             }
             other => Some(Ok(other.clone())),
@@ -1061,9 +1050,10 @@ impl MirMachine {
             .validate_await_thread()
             .map_err(|error| DeferredTaskError::Signal(error.into()))?;
         loop {
-            if let Some(result) = pending.try_take_ready() {
-                return result
-                    .map_err(|message| DeferredTaskError::Signal(MirSignal::Panic(message)));
+            if let Some(result) = pending.try_take_ready_diagnostic() {
+                return result.map_err(|error| {
+                    DeferredTaskError::Signal(MirSignal::from_runtime_exception(error))
+                });
             }
             if self.run_next_same_thread_task() {
                 continue;
@@ -1348,7 +1338,23 @@ impl MirMachine {
 
     // ── Function call ─────────────────────────────────────────────────────────
 
-    fn call_function(&mut self, fn_id: FunctionId, mut args: Vec<FidanValue>) -> MirResult {
+    fn call_function(&mut self, fn_id: FunctionId, args: Vec<FidanValue>) -> MirResult {
+        stacker::maybe_grow(
+            fidan_runtime::exception::INTERPRETER_STACK_RED_ZONE,
+            fidan_runtime::exception::INTERPRETER_STACK_SEGMENT,
+            || {
+                let _depth =
+                    fidan_runtime::exception::CallDepthGuard::enter().map_err(MirSignal::from)?;
+                self.call_function_on_stack(fn_id, args)
+            },
+        )
+    }
+
+    fn call_function_on_stack(
+        &mut self,
+        fn_id: FunctionId,
+        mut args: Vec<FidanValue>,
+    ) -> MirResult {
         let func = self.program.function(fn_id);
         self.prepare_call_args(func, &mut args)?;
 
@@ -1743,9 +1749,10 @@ impl MirMachine {
             Instr::CertainCheck { operand, name } => {
                 if matches!(self.eval_operand(operand, frame), FidanValue::Nothing) {
                     let pname = self.sym_str(*name);
-                    return Err(MirSignal::Panic(format!(
-                        "certain parameter `{pname}` cannot be nothing"
-                    )));
+                    return Err(MirSignal::RuntimeError(
+                        fidan_diagnostics::diag_code!("R0001"),
+                        format!("certain parameter `{pname}` cannot be nothing"),
+                    ));
                 }
             }
             Instr::Nop => {}
@@ -1969,8 +1976,9 @@ impl MirMachine {
                     // Collect the first error from any iteration.
                     // All threads are joined when the scope exits, so it is safe
                     // to read this slot immediately after the scope.
-                    let first_err: std::sync::Arc<std::sync::Mutex<Option<String>>> =
-                        std::sync::Arc::new(std::sync::Mutex::new(None));
+                    let first_err: std::sync::Arc<
+                        std::sync::Mutex<Option<fidan_runtime::exception::CapturedException>>,
+                    > = std::sync::Arc::new(std::sync::Mutex::new(None));
 
                     std::thread::scope(|s| {
                         for item in &items {
@@ -1984,25 +1992,10 @@ impl MirMachine {
                                 let args = child.install_thread_payload(bundle);
                                 if let Err(sig) = child.call_function(body_fn, args) {
                                     // body_fn is Copy
-                                    let msg = match sig {
-                                        MirSignal::Panic(m) => m,
-                                        MirSignal::Throw(v) => {
-                                            format!(
-                                                "uncaught throw in parallel iteration: {}",
-                                                child.display_exception(&v)
-                                            )
-                                        }
-                                        MirSignal::ParallelFail(m) => m,
-                                        MirSignal::RuntimeError(code, m) => {
-                                            format!("error [{code}]: {m}")
-                                        }
-                                        MirSignal::SandboxViolation(code, m) => {
-                                            format!("sandbox violation [{code}]: {m}")
-                                        }
-                                    };
+                                    let error = sig.into_runtime_exception().capture();
                                     let mut slot = err_slot.lock().unwrap();
                                     if slot.is_none() {
-                                        *slot = Some(msg);
+                                        *slot = Some(error);
                                     }
                                 }
                             });
@@ -2011,8 +2004,8 @@ impl MirMachine {
                     });
 
                     // Propagate the first iteration error (if any).
-                    if let Some(msg) = first_err.lock().unwrap().take() {
-                        return Err(MirSignal::Panic(msg));
+                    if let Some(error) = first_err.lock().unwrap().take() {
+                        return Err(MirSignal::from_runtime_exception(error.restore()));
                     }
                 }
             }
@@ -2748,15 +2741,9 @@ impl MirMachine {
             }
         }
         match fidan_stdlib::dispatch_stdlib(module, name, args) {
-            Some(Ok(StdlibResult::Value(v))) => {
-                // Check for test assertion failures encoded as `__test_fail__: msg`.
-                if let FidanValue::String(ref s) = v {
-                    let s_str = s.as_str();
-                    if let Some(msg) = s_str.strip_prefix("__test_fail__: ") {
-                        return Err(MirSignal::Panic(format!("assertion failed: {}", msg)));
-                    }
-                }
-                Ok(v)
+            Some(Ok(StdlibResult::Value(value))) => Ok(value),
+            Some(Ok(StdlibResult::AssertionFailure(message))) => {
+                Err(MirSignal::Panic(format!("assertion failed: {message}")))
             }
             Some(Ok(StdlibResult::NeedsAsyncDispatch(op))) => self.exec_async_op(op),
             Some(Ok(StdlibResult::NeedsCallbackDispatch(op))) => self.exec_parallel_op(op),
@@ -2772,39 +2759,9 @@ impl MirMachine {
     /// interpreter is single-threaded; true parallelism requires the Cranelift
     /// or LLVM backend).
     fn exec_parallel_op(&mut self, op: ParallelOp) -> Result<FidanValue, MirSignal> {
-        match op {
-            ParallelOp::Map { list, fn_id } => {
-                let mut out = fidan_runtime::FidanList::new();
-                for elem in list {
-                    let v = self.call_function(FunctionId(fn_id.0), vec![elem])?;
-                    out.append(v);
-                }
-                Ok(FidanValue::List(OwnedRef::new(out)))
-            }
-            ParallelOp::Filter { list, fn_id } => {
-                let mut out = fidan_runtime::FidanList::new();
-                for elem in list {
-                    let keep = self.call_function(FunctionId(fn_id.0), vec![elem.clone()])?;
-                    if keep.truthy() {
-                        out.append(elem);
-                    }
-                }
-                Ok(FidanValue::List(OwnedRef::new(out)))
-            }
-            ParallelOp::ForEach { list, fn_id } => {
-                for elem in list {
-                    self.call_function(FunctionId(fn_id.0), vec![elem])?;
-                }
-                Ok(FidanValue::Nothing)
-            }
-            ParallelOp::Reduce { list, init, fn_id } => {
-                let mut acc = init;
-                for elem in list {
-                    acc = self.call_function(FunctionId(fn_id.0), vec![acc, elem])?;
-                }
-                Ok(acc)
-            }
-        }
+        fidan_runtime::stdlib::parallel::execute(op, |callback, args| {
+            self.call_value(callback, args)
+        })
     }
 
     fn exec_async_op(&mut self, op: AsyncOp) -> Result<FidanValue, MirSignal> {
@@ -3475,3 +3432,42 @@ assert_eq(caught, 2)
         ));
     }
 }
+
+impl MirSignal {
+    fn into_runtime_exception(self) -> fidan_runtime::exception::RuntimeException {
+        use fidan_runtime::exception::{ExceptionOrigin, RuntimeException};
+        match self {
+            Self::Throw(value) => RuntimeException {
+                value,
+                origin: ExceptionOrigin::UserPanic,
+            },
+            Self::Panic(message) => {
+                RuntimeException::internal(FidanValue::String(FidanString::new(&message)))
+            }
+            Self::RuntimeError(code, message) | Self::SandboxViolation(code, message) => {
+                RuntimeException::runtime(code, message)
+            }
+            Self::ParallelFail(message) => {
+                RuntimeException::runtime(fidan_diagnostics::diag_code!("R9001"), message)
+            }
+        }
+    }
+
+    fn from_runtime_exception(exception: fidan_runtime::exception::RuntimeException) -> Self {
+        use fidan_runtime::exception::ExceptionOrigin;
+        match exception.origin {
+            ExceptionOrigin::UserPanic => Self::Throw(exception.value),
+            ExceptionOrigin::Runtime { code, message } => match code.0 {
+                "R9001" => Self::ParallelFail(message),
+                "R4001" | "R4002" | "R4003" => Self::SandboxViolation(code, message),
+                _ => Self::RuntimeError(code, message),
+            },
+            ExceptionOrigin::Internal => {
+                Self::Panic(fidan_runtime::display_exception(&exception.value, None))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_tests;

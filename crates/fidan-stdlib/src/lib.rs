@@ -603,6 +603,8 @@ pub fn member_return_type(module: &str, name: &str) -> Option<&'static str> {
 pub enum StdlibResult {
     /// Synchronous result value.
     Value(fidan_runtime::FidanValue),
+    /// Explicit test assertion failure; ordinary String values cannot forge it.
+    AssertionFailure(String),
     /// The call requires async/pending orchestration in the host runtime.
     NeedsAsyncDispatch(async_std::AsyncOp),
     /// The call requires callback dispatch (e.g. parallelMap needs MIR fn dispatch).
@@ -636,27 +638,18 @@ pub fn dispatch_stdlib(
                 async_std::AsyncDispatch::Op(op) => StdlibResult::NeedsAsyncDispatch(op),
             })
         }),
-        "test" => {
-            test_runner::dispatch(name, args).map(|res| {
-                Ok(match res {
-                    Ok(v) => StdlibResult::Value(v),
-                    // Assertion failures are converted to Nothing here; the MIR
-                    // interpreter should check for assertion failure panics via
-                    // the dedicated dispatch path.
-                    Err(msg) => StdlibResult::Value(fidan_runtime::FidanValue::String(
-                        fidan_runtime::FidanString::new(&format!("__test_fail__: {msg}")),
-                    )),
-                })
-            })
-        }
-        "parallel" => parallel::dispatch_op(name, args).map(|res| {
+        "test" => test_runner::dispatch(name, args).map(|res| {
             Ok(match res {
-                Ok(Some(op)) => StdlibResult::NeedsCallbackDispatch(op),
-                Ok(None) => StdlibResult::Value(fidan_runtime::FidanValue::Nothing),
-                Err(msg) => StdlibResult::Value(fidan_runtime::FidanValue::String(
-                    fidan_runtime::FidanString::new(&format!("__error__: {msg}")),
-                )),
+                Ok(v) => StdlibResult::Value(v),
+                Err(message) => StdlibResult::AssertionFailure(message),
             })
+        }),
+        "parallel" => parallel::dispatch_op(name, args).map(|res| {
+            res.map(StdlibResult::NeedsCallbackDispatch)
+                .map_err(|error| StdlibError {
+                    code: error.code,
+                    message: error.message,
+                })
         }),
         "io" => fidan_runtime::stdlib::dispatch_io_module(name, args).map(|res| {
             res.map(StdlibResult::Value).map_err(|err| StdlibError {

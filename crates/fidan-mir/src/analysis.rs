@@ -197,7 +197,8 @@ pub fn collect_may_throw_functions(program: &MirProgram) -> HashMap<FunctionId, 
     loop {
         let mut changed = false;
         for function in &program.functions {
-            let may_throw = function_may_throw(function, &map);
+            // Every native language entry enforces the shared R1001 call budget.
+            let may_throw = function.extern_decl.is_none() || function_may_throw(function, &map);
             if map.insert(function.id, may_throw) != Some(may_throw) {
                 changed = true;
             }

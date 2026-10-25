@@ -723,8 +723,7 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                     .build_conditional_branch(pending, failed, next)
                     .map_err(|err| anyhow!("{err}"))?;
                 self.builder.position_at_end(failed);
-                let exception = self.call_runtime_ptr("fdn_catch_exception", &[])?;
-                self.call_runtime_void("fdn_throw_unhandled", &[exception.into()])?;
+                self.call_runtime_void("fdn_report_unhandled_exception", &[])?;
                 self.builder
                     .build_return(Some(&self.i32_type.const_int(1, false)))
                     .map_err(|err| anyhow!("{err}"))?;
@@ -766,8 +765,7 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 .map_err(|err| anyhow!("{err}"))?;
 
             self.builder.position_at_end(throw_block);
-            let exception = self.call_runtime_ptr("fdn_catch_exception", &[])?;
-            self.call_runtime_void("fdn_throw_unhandled", &[exception.into()])?;
+            self.call_runtime_void("fdn_report_unhandled_exception", &[])?;
             self.builder
                 .build_return(Some(&self.i32_type.const_int(1, false)))
                 .map_err(|err| anyhow!("{err}"))?;
@@ -1401,16 +1399,29 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 .fn_type(&[self.i64_type.into(), self.i64_type.into()], false),
         );
         self.declare_runtime_fn(
-            "fdn_store_exception",
+            "fdn_join_all",
+            self.context
+                .void_type()
+                .fn_type(&[self.ptr_type.into(), self.i64_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_exception_is_catchable",
+            self.i8_type.fn_type(&[], false),
+        );
+        self.declare_runtime_fn("fdn_enter_call", self.i8_type.fn_type(&[], false));
+        self.declare_runtime_fn(
+            "fdn_leave_call",
+            self.context.void_type().fn_type(&[], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_store_panic",
             self.context
                 .void_type()
                 .fn_type(&[self.ptr_type.into()], false),
         );
         self.declare_runtime_fn(
-            "fdn_throw_unhandled",
-            self.context
-                .void_type()
-                .fn_type(&[self.ptr_type.into()], false),
+            "fdn_report_unhandled_exception",
+            self.context.void_type().fn_type(&[], false),
         );
         self.declare_runtime_fn(
             "fdn_float_div",
@@ -2100,6 +2111,36 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
     }
 
     fn initialize_entry(&mut self) -> Result<()> {
+        let entered = self.call_i8("fdn_enter_call", &[])?;
+        let can_enter = self
+            .module
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                entered,
+                self.module.i8_type.const_zero(),
+                "call.entered",
+            )
+            .map_err(|err| anyhow!("{err}"))?;
+        let body = self
+            .module
+            .context
+            .append_basic_block(self.llvm_function, "call.body");
+        let overflow = self
+            .module
+            .context
+            .append_basic_block(self.llvm_function, "call.overflow");
+        self.module
+            .builder
+            .build_conditional_branch(can_enter, body, overflow)
+            .map_err(|err| anyhow!("{err}"))?;
+        self.module.builder.position_at_end(overflow);
+        let nothing = self.call_ptr("fdn_box_nothing", &[])?;
+        self.module
+            .builder
+            .build_return(Some(&nothing))
+            .map_err(|err| anyhow!("{err}"))?;
+        self.module.builder.position_at_end(body);
         for local in 0..self.mir_function.local_count {
             let local_id = LocalId(local);
             let slot_ty = self.local_storage_type(local_id);
@@ -2129,6 +2170,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 .build_unconditional_branch(block)
                 .map_err(|err| anyhow!("{err}"))?;
         } else {
+            self.call_void("fdn_leave_call", &[])?;
             let nothing = self.call_ptr("fdn_box_nothing", &[])?;
             self.module
                 .builder
@@ -2340,7 +2382,8 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 self.call_void(
                     "fdn_certain_check",
                     &[operand.into(), name_ptr.into(), name_len.into()],
-                )
+                )?;
+                self.emit_pending_exception_check(current_catch_stack)
             }
             Instr::LoadGlobal { dest, global } => {
                 let global_id = *global;
@@ -2454,12 +2497,32 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 Ok(())
             }
             Instr::JoinAll { handles } => {
-                for handle in handles {
-                    let handle_value = self.lower_operand(&Operand::Local(*handle))?;
-                    let resolved = self.call_ptr("fdn_pending_join", &[handle_value.into()])?;
-                    self.store_local_boxed(*handle, resolved)?;
-                    self.emit_pending_exception_check(current_catch_stack)?;
+                let values = handles
+                    .iter()
+                    .map(|handle| self.lower_operand(&Operand::Local(*handle)))
+                    .collect::<Result<Vec<_>>>()?;
+                let (array, count) = self.build_ptr_array(&values)?;
+                self.call_void("fdn_join_all", &[array.into(), count.into()])?;
+                for (index, handle) in handles.iter().enumerate() {
+                    let offset = self.module.i64_type.const_int(index as u64, false);
+                    let slot = unsafe {
+                        self.module.builder.build_gep(
+                            self.module.ptr_type,
+                            array,
+                            &[offset],
+                            "joined.slot",
+                        )
+                    }
+                    .map_err(|err| anyhow!("{err}"))?;
+                    let result = self
+                        .module
+                        .builder
+                        .build_load(self.module.ptr_type, slot, "joined.value")
+                        .map_err(|err| anyhow!("{err}"))?
+                        .into_pointer_value();
+                    self.store_local_boxed(*handle, result)?;
                 }
+                self.emit_pending_exception_check(current_catch_stack)?;
                 Ok(())
             }
             Instr::AwaitPending { dest, handle } => {
@@ -2536,6 +2599,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
     ) -> Result<()> {
         match terminator {
             Terminator::Return(None) => {
+                self.call_void("fdn_leave_call", &[])?;
                 let nothing = self.call_ptr("fdn_box_nothing", &[])?;
                 self.module
                     .builder
@@ -2544,6 +2608,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 Ok(())
             }
             Terminator::Return(Some(operand)) => {
+                self.call_void("fdn_leave_call", &[])?;
                 let value = self.lower_owned_operand(operand)?;
                 self.module
                     .builder
@@ -2582,7 +2647,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             }
             Terminator::Throw { value } => {
                 let value = self.lower_operand(value)?;
-                self.call_void("fdn_store_exception", &[value.into()])?;
+                self.call_void("fdn_store_panic", &[value.into()])?;
                 if let Some(catch_block) = current_catch_stack.last() {
                     let target = self.prepare_edge_to(*catch_block)?;
                     self.module
@@ -2626,6 +2691,32 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
 
         self.module.builder.position_at_end(pending_block);
         if let Some(catch_block) = current_catch_stack.last() {
+            let catchable = self.call_i8("fdn_exception_is_catchable", &[])?;
+            let condition = self
+                .module
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    catchable,
+                    self.module.i8_type.const_zero(),
+                    "exception.catchable",
+                )
+                .map_err(|err| anyhow!("{err}"))?;
+            let catch_edge = self
+                .module
+                .context
+                .append_basic_block(self.llvm_function, "exception.catch");
+            let propagate = self
+                .module
+                .context
+                .append_basic_block(self.llvm_function, "exception.propagate");
+            self.module
+                .builder
+                .build_conditional_branch(condition, catch_edge, propagate)
+                .map_err(|err| anyhow!("{err}"))?;
+            self.module.builder.position_at_end(propagate);
+            self.emit_exceptional_return()?;
+            self.module.builder.position_at_end(catch_edge);
             let target = self.prepare_edge_to(*catch_block)?;
             self.module
                 .builder
@@ -2640,6 +2731,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
     }
 
     fn emit_exceptional_return(&mut self) -> Result<()> {
+        self.call_void("fdn_leave_call", &[])?;
         let nothing = self.call_ptr("fdn_box_nothing", &[])?;
         self.module
             .builder

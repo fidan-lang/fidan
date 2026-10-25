@@ -194,13 +194,18 @@ jobs:
           tar -xzf $archive.FullName -C $installRoot
           "FIDAN_HOME=$fidanHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-      - name: Verbosity and native helper contracts
+      - name: Verbosity, diagnostic and native helper contracts
         if: inputs.validate
+        shell: pwsh
         env:
           FIDAN_REQUIRE_LLVM: "1"
         run: |
           cargo build --workspace --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace build failed' }
           cargo test -p fidan-cli --test verbosity_cli --locked -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Verbosity contracts failed' }
+          cargo test -p fidan-driver --test concurrent_e2e --test extern_e2e --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Native backend and diagnostic contracts failed' }
 
       - name: Validate packaged LLVM toolchain (Windows)
         if: inputs.validate && runner.os == 'Windows'

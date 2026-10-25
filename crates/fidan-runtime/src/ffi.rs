@@ -48,7 +48,7 @@
 
 use crate::{
     FidanDict, FidanHashSet, FidanList, FidanString, OwnedRef, SharedRef,
-    parallel::{FidanPending, ParallelArgs, ParallelCapture},
+    parallel::{FidanPending, ParallelArgs},
     stdlib,
     value::{FidanValue, FunctionId, display},
 };
@@ -431,11 +431,7 @@ fn checked_integer_result(result: Result<i64, stdlib::StdlibRuntimeError>) -> i6
     match result {
         Ok(value) => value,
         Err(error) => {
-            let exception = runtime_error_to_exception_ptr("error", error.code, error.message);
-            unsafe {
-                fdn_store_exception(exception);
-                drop(Box::from_raw(exception));
-            }
+            store_runtime_error(error.code, error.message);
             0 // The caller checks the exception slot before using this value.
         }
     }
@@ -620,9 +616,7 @@ pub unsafe extern "C" fn fdn_dyn_pow(a: *mut FidanValue, b: *mut FidanValue) -> 
             Ok(crate::integer::Power::Integer(value)) => FidanValue::Integer(value),
             Ok(crate::integer::Power::Float(value)) => FidanValue::Float(value),
             Err(error) => {
-                let exception = runtime_error_to_exception_ptr("error", error.code, error.message);
-                fdn_store_exception(exception);
-                drop(Box::from_raw(exception));
+                store_runtime_error(error.code, error.message);
                 return into_raw(FidanValue::Nothing);
             }
         },
@@ -958,16 +952,15 @@ pub unsafe extern "C" fn fdn_len(ptr: *mut FidanValue) -> i64 {
 /// Panic with a message.  Borrows `ptr`.  Does not return.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_panic(ptr: *mut FidanValue) -> ! {
-    eprintln!("panic: {}", display(borrow(ptr)));
-    std::process::exit(1);
+    fdn_store_panic(ptr);
+    fdn_report_unhandled_exception();
 }
 
 /// Assert `cond != 0`; panic with `msg` on failure.  Borrows `msg`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_assert(cond: i64, msg: *mut FidanValue) {
     if cond == 0 {
-        eprintln!("assertion failed: {}", display(borrow(msg)));
-        std::process::exit(1);
+        fdn_throw_unhandled(msg);
     }
 }
 
@@ -1070,11 +1063,9 @@ pub unsafe extern "C" fn fdn_certain_check(
 ) {
     if matches!(borrow(val), FidanValue::Nothing) {
         let name = str_from_raw(name_bytes, name_len);
-        eprintln!(
-            "type error: parameter `{}` is `certain` but received `nothing`",
-            name
-        );
-        std::process::exit(1);
+        drop(Box::from_raw(runtime_call_error(format!(
+            "certain parameter `{name}` cannot be nothing"
+        ))));
     }
 }
 
@@ -1104,8 +1095,7 @@ pub unsafe extern "C" fn fdn_slice(
     ) {
         Ok(value) => into_raw(value),
         Err(message) => {
-            eprintln!("panic: {message}");
-            std::process::exit(1);
+            fdn_throw_unhandled(into_raw(FidanValue::String(FidanString::new(&message))));
         }
     }
 }
@@ -1148,9 +1138,7 @@ pub unsafe extern "C" fn fdn_list_get(
     match crate::index::get(borrow(list), borrow(idx)) {
         Ok(value) => into_raw(value),
         Err(error) => {
-            let exception = runtime_error_to_exception_ptr("error", error.code, error.message);
-            fdn_store_exception(exception);
-            drop(Box::from_raw(exception));
+            store_runtime_error(error.code, error.message);
             into_raw(FidanValue::Nothing)
         }
     }
@@ -1164,9 +1152,7 @@ pub unsafe extern "C" fn fdn_list_set(
     val: *mut FidanValue,
 ) {
     if let Err(error) = crate::index::set(borrow(list), borrow(idx), borrow(val).clone()) {
-        let exception = runtime_error_to_exception_ptr("error", error.code, error.message);
-        fdn_store_exception(exception);
-        drop(Box::from_raw(exception));
+        store_runtime_error(error.code, error.message);
     }
 }
 
@@ -1595,16 +1581,20 @@ fn async_timeout_result(completed: bool, value: FidanValue) -> FidanValue {
     stdlib::async_std::timeout_result(completed, value)
 }
 
-fn resolve_async_value_owned(value: FidanValue) -> Result<FidanValue, String> {
+fn resolve_async_value_owned(
+    value: FidanValue,
+) -> Result<FidanValue, crate::exception::CapturedException> {
     match value {
-        FidanValue::Pending(pending) => pending.try_join(),
+        FidanValue::Pending(pending) => pending.try_join_exception(),
         other => Ok(other),
     }
 }
 
-fn try_take_async_value_ready(value: &FidanValue) -> Option<Result<FidanValue, String>> {
+fn try_take_async_value_ready(
+    value: &FidanValue,
+) -> Option<Result<FidanValue, crate::exception::CapturedException>> {
     match value {
-        FidanValue::Pending(pending) => pending.try_take_ready(),
+        FidanValue::Pending(pending) => pending.try_take_ready_exception(),
         other => Some(Ok(other.clone())),
     }
 }
@@ -2356,16 +2346,6 @@ fn dispatch_string_fn(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
         .unwrap_or_else(|| into_raw(FidanValue::Nothing))
 }
 
-fn runtime_error_to_exception_ptr(
-    prefix: &str,
-    code: fidan_diagnostics::DiagCode,
-    message: String,
-) -> *mut FidanValue {
-    into_raw(FidanValue::String(FidanString::new(&format!(
-        "{prefix} [{code}]: {message}"
-    ))))
-}
-
 fn builtin_value_result(result: Result<FidanValue, stdlib::StdlibRuntimeError>) -> *mut FidanValue {
     match result {
         Ok(value) => into_raw(value),
@@ -2376,14 +2356,15 @@ fn builtin_value_result(result: Result<FidanValue, stdlib::StdlibRuntimeError>) 
     }
 }
 
+fn runtime_internal_error(message: String) -> *mut FidanValue {
+    store_exception(crate::exception::RuntimeException::internal(
+        FidanValue::String(FidanString::new(&message)),
+    ));
+    into_raw(FidanValue::Nothing)
+}
+
 unsafe fn runtime_call_error(message: impl Into<String>) -> *mut FidanValue {
-    let exception = runtime_error_to_exception_ptr(
-        "error",
-        fidan_diagnostics::diag_code!("R0001"),
-        message.into(),
-    );
-    fdn_store_exception(exception);
-    drop(Box::from_raw(exception));
+    store_runtime_error(fidan_diagnostics::diag_code!("R0001"), message.into());
     into_raw(FidanValue::Nothing)
 }
 
@@ -2421,12 +2402,10 @@ pub unsafe extern "C" fn fdn_prepare_argument(
 fn dispatch_io(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
     match stdlib::io::dispatch_result(func, args) {
         Some(Ok(value)) => into_raw(value),
-        Some(Err(err)) => unsafe {
-            let exn = runtime_error_to_exception_ptr("error", err.code, err.message);
-            fdn_store_exception(exn);
-            drop(Box::from_raw(exn));
+        Some(Err(err)) => {
+            store_runtime_error(err.code, err.message);
             into_raw(FidanValue::Nothing)
-        },
+        }
         None => into_raw(FidanValue::Nothing),
     }
 }
@@ -2435,12 +2414,10 @@ fn dispatch_io(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
 fn dispatch_json(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
     match stdlib::json::dispatch_result(func, args) {
         Some(Ok(value)) => into_raw(value),
-        Some(Err(err)) => unsafe {
-            let exn = runtime_error_to_exception_ptr("error", err.code, err.message);
-            fdn_store_exception(exn);
-            drop(Box::from_raw(exn));
+        Some(Err(err)) => {
+            store_runtime_error(err.code, err.message);
             into_raw(FidanValue::Nothing)
-        },
+        }
         None => into_raw(FidanValue::Nothing),
     }
 }
@@ -2469,107 +2446,25 @@ fn dispatch_regex(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
 // ── parallel module ───────────────────────────────────────────────────────────
 // These run sequentially in AOT. Behaviour matches the interpreter contract.
 fn dispatch_parallel(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
-    match func {
-        "parallelMap" | "parallel_map" => {
-            let list = match args.first() {
-                Some(FidanValue::List(l)) => l.borrow().iter().cloned().collect::<Vec<_>>(),
-                _ => return into_raw(FidanValue::Nothing),
-            };
-            let fn_val = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
-            let fn_ptr = into_raw(fn_val);
-            let mut result = FidanList::new();
-            for item in list {
-                let item_ptr = into_raw(item);
-                let mapped =
-                    unsafe { fdn_call_dynamic(fn_ptr, &item_ptr as *const *mut FidanValue, 1) };
-                if !mapped.is_null() {
-                    result.append(unsafe { (*mapped).clone() });
-                    unsafe { drop(Box::from_raw(mapped)) };
-                } else {
-                    result.append(FidanValue::Nothing);
-                }
-                unsafe { drop(Box::from_raw(item_ptr)) };
-            }
-            unsafe { drop(Box::from_raw(fn_ptr)) };
-            into_raw(FidanValue::List(OwnedRef::new(result)))
+    let op = match stdlib::parallel::dispatch_op(func, args) {
+        Some(Ok(op)) => op,
+        Some(Err(error)) => return builtin_value_result(Err(error)),
+        None => {
+            return runtime_internal_error(format!(
+                "unknown native std.parallel callable `{func}`"
+            ));
         }
-        "parallelFilter" | "parallel_filter" => {
-            let list = match args.first() {
-                Some(FidanValue::List(l)) => l.borrow().iter().cloned().collect::<Vec<_>>(),
-                _ => return into_raw(FidanValue::Nothing),
-            };
-            let fn_val = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
-            let fn_ptr = into_raw(fn_val);
-            let mut result = FidanList::new();
-            for item in list {
-                let item_ptr = into_raw(item.clone());
-                let test =
-                    unsafe { fdn_call_dynamic(fn_ptr, &item_ptr as *const *mut FidanValue, 1) };
-                let keep = if !test.is_null() {
-                    let keep = matches!(unsafe { &*test }, FidanValue::Boolean(true));
-                    unsafe { drop(Box::from_raw(test)) };
-                    keep
-                } else {
-                    false
-                };
-                if keep {
-                    result.append(item);
-                }
-                unsafe { drop(Box::from_raw(item_ptr)) };
-            }
-            unsafe { drop(Box::from_raw(fn_ptr)) };
-            into_raw(FidanValue::List(OwnedRef::new(result)))
+    };
+    match stdlib::parallel::execute(op, |callback, args| {
+        let value = unsafe { call_dynamic_owned(callback, args) };
+        if fdn_has_exception() != 0 {
+            Err(())
+        } else {
+            Ok(value)
         }
-        "parallelForEach" | "parallel_for_each" | "parallelEach" => {
-            let list = match args.first() {
-                Some(FidanValue::List(l)) => l.borrow().iter().cloned().collect::<Vec<_>>(),
-                _ => return into_raw(FidanValue::Nothing),
-            };
-            let fn_val = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
-            let fn_ptr = into_raw(fn_val);
-            for item in list {
-                let item_ptr = into_raw(item);
-                let result =
-                    unsafe { fdn_call_dynamic(fn_ptr, &item_ptr as *const *mut FidanValue, 1) };
-                if !result.is_null() {
-                    unsafe { drop(Box::from_raw(result)) };
-                }
-                unsafe { drop(Box::from_raw(item_ptr)) };
-            }
-            unsafe { drop(Box::from_raw(fn_ptr)) };
-            into_raw(FidanValue::Nothing)
-        }
-        "parallelReduce" | "parallel_reduce" => {
-            let list = match args.first() {
-                Some(FidanValue::List(l)) => l.borrow().iter().cloned().collect::<Vec<_>>(),
-                _ => return into_raw(FidanValue::Nothing),
-            };
-            let initial = args.get(1).cloned().unwrap_or(FidanValue::Nothing);
-            let fn_val = args.get(2).cloned().unwrap_or(FidanValue::Nothing);
-            let fn_ptr = into_raw(fn_val);
-            let mut acc = initial;
-            for item in list {
-                let acc_ptr = into_raw(acc);
-                let item_ptr = into_raw(item);
-                let call_args = [acc_ptr, item_ptr];
-                let result = unsafe { fdn_call_dynamic(fn_ptr, call_args.as_ptr(), 2) };
-                acc = if !result.is_null() {
-                    let value = unsafe { (*result).clone() };
-                    unsafe { drop(Box::from_raw(result)) };
-                    value
-                } else {
-                    FidanValue::Nothing
-                };
-                unsafe { drop(Box::from_raw(acc_ptr)) };
-                unsafe { drop(Box::from_raw(item_ptr)) };
-            }
-            unsafe { drop(Box::from_raw(fn_ptr)) };
-            into_raw(acc)
-        }
-        _ => {
-            eprintln!("AOT stdlib parallel: unknown function '{}'", func);
-            into_raw(FidanValue::Nothing)
-        }
+    }) {
+        Ok(value) => into_raw(value),
+        Err(()) => into_raw(FidanValue::Nothing), // Original exception stays pending.
     }
 }
 
@@ -2578,8 +2473,9 @@ fn dispatch_test(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
     match stdlib::test_runner::dispatch(func, args) {
         Some(Ok(value)) => into_raw(value),
         Some(Err(msg)) => {
-            eprintln!("Test failed: {}", msg);
-            let msg_val = into_raw(FidanValue::String(FidanString::new(&msg)));
+            let msg_val = into_raw(FidanValue::String(FidanString::new(&format!(
+                "assertion failed: {msg}"
+            ))));
             unsafe { fdn_throw_unhandled(msg_val) }
         }
         None => into_raw(FidanValue::Nothing),
@@ -2605,7 +2501,7 @@ fn dispatch_async(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
             }
             stdlib::async_std::AsyncOp::Gather { values } => {
                 let captures = ParallelArgs::new(&values);
-                let pending = FidanPending::defer_fallible(captures, |bundle| {
+                let pending = FidanPending::defer_exception(captures, |bundle| {
                     let mut out = FidanList::new();
                     for value in bundle.into_vec() {
                         out.append(resolve_async_value_owned(value)?);
@@ -2616,7 +2512,7 @@ fn dispatch_async(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
             }
             stdlib::async_std::AsyncOp::WaitAny { values } => {
                 let captures = ParallelArgs::new(&values);
-                let pending = FidanPending::defer_fallible(captures, |bundle| {
+                let pending = FidanPending::defer_exception(captures, |bundle| {
                     let values = bundle.into_vec();
                     if values.is_empty() {
                         return Ok(async_wait_any_result(-1, FidanValue::Nothing));
@@ -2635,7 +2531,7 @@ fn dispatch_async(func: &str, args: Vec<FidanValue>) -> *mut FidanValue {
             }
             stdlib::async_std::AsyncOp::Timeout { handle, ms } => {
                 let pending =
-                    FidanPending::defer_fallible(ParallelArgs::new(&[handle]), move |bundle| {
+                    FidanPending::defer_exception(ParallelArgs::new(&[handle]), move |bundle| {
                         let handle = bundle
                             .into_vec()
                             .into_iter()
@@ -2707,8 +2603,9 @@ pub unsafe extern "C" fn fdn_parallel_iter_seq(
     if let Some(items) = items {
         let environment: Vec<FidanValue> =
             env_slice.iter().map(|ptr| borrow(*ptr).clone()).collect();
-        let first_exception: std::sync::Arc<std::sync::Mutex<Option<ParallelCapture>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(None));
+        let first_exception: std::sync::Arc<
+            std::sync::Mutex<Option<crate::exception::CapturedException>>,
+        > = std::sync::Arc::new(std::sync::Mutex::new(None));
 
         std::thread::scope(|scope| {
             for item in items {
@@ -2720,9 +2617,9 @@ pub unsafe extern "C" fn fdn_parallel_iter_seq(
                     let result =
                         call_trampoline_owned(fn_idx as usize, worker_globals.install(payload));
                     if fdn_has_exception() != 0 {
-                        let exn_ptr = fdn_catch_exception();
-                        let exn_cap = ParallelCapture::new(borrow(exn_ptr));
-                        drop(Box::from_raw(exn_ptr));
+                        let exn_cap = take_exception()
+                            .expect("worker pending exception")
+                            .capture();
                         let mut slot = err_slot.lock().unwrap();
                         if slot.is_none() {
                             *slot = Some(exn_cap);
@@ -2734,9 +2631,7 @@ pub unsafe extern "C" fn fdn_parallel_iter_seq(
         });
 
         if let Some(exn_cap) = first_exception.lock().unwrap().take() {
-            let exn_ptr = into_raw(exn_cap.into_inner());
-            fdn_store_exception(exn_ptr);
-            drop(Box::from_raw(exn_ptr));
+            store_exception(exn_cap.restore());
         }
     }
 }
@@ -2834,13 +2729,10 @@ pub unsafe extern "C" fn fdn_spawn_expr(
     args_cnt: i64,
 ) -> *mut FidanValue {
     let args = build_parallel_args_from_ptrs(args_ptr, args_cnt);
-    let pending = FidanPending::defer_fallible(args, move |bundle: ParallelArgs| {
+    let pending = FidanPending::defer_exception(args, move |bundle: ParallelArgs| {
         let result = call_trampoline_owned(fn_idx as usize, bundle.into_vec());
         if fdn_has_exception() != 0 {
-            let exn_ptr = fdn_catch_exception();
-            let message = crate::display_exception(borrow(exn_ptr), None);
-            drop(Box::from_raw(exn_ptr));
-            Err(message)
+            Err(take_exception().expect("task pending exception").capture())
         } else {
             Ok(result)
         }
@@ -2858,13 +2750,13 @@ pub unsafe extern "C" fn fdn_spawn_task(
 ) -> *mut FidanValue {
     let task_name = str_from_raw(name_bytes, name_len);
     let (worker_globals, args) = build_aot_worker_payload_from_ptrs(args_ptr, args_cnt);
-    let pending = FidanPending::spawn_fallible(args, move |bundle: ParallelArgs| {
+    let pending = FidanPending::spawn_exception(args, move |bundle: ParallelArgs| {
         let result = call_trampoline_owned(fn_idx as usize, worker_globals.install(bundle));
         if fdn_has_exception() != 0 {
-            let exn_ptr = fdn_catch_exception();
-            let message = crate::display_exception(borrow(exn_ptr), None);
-            drop(Box::from_raw(exn_ptr));
-            Err(format!("task `{task_name}` failed: {message}"))
+            Err(take_exception()
+                .expect("task pending exception")
+                .capture()
+                .with_context(&format!("task `{task_name}` failed")))
         } else {
             Ok(result)
         }
@@ -2875,19 +2767,20 @@ pub unsafe extern "C" fn fdn_spawn_task(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_spawn_concurrent(
     fn_idx: i64,
-    _name_bytes: *const u8,
-    _name_len: i64,
+    name_bytes: *const u8,
+    name_len: i64,
     args_ptr: *const *mut FidanValue,
     args_cnt: i64,
 ) -> *mut FidanValue {
+    let task_name = str_from_raw(name_bytes, name_len);
     let args = build_parallel_args_from_ptrs(args_ptr, args_cnt);
-    let pending = FidanPending::defer_fallible(args, move |bundle: ParallelArgs| {
+    let pending = FidanPending::defer_exception(args, move |bundle: ParallelArgs| {
         let result = call_trampoline_owned(fn_idx as usize, bundle.into_vec());
         if fdn_has_exception() != 0 {
-            let exn_ptr = fdn_catch_exception();
-            let message = crate::display_exception(borrow(exn_ptr), None);
-            drop(Box::from_raw(exn_ptr));
-            Err(message)
+            Err(take_exception()
+                .expect("task pending exception")
+                .capture()
+                .with_context(&format!("task `{task_name}` failed")))
         } else {
             Ok(result)
         }
@@ -2908,7 +2801,7 @@ pub unsafe extern "C" fn fdn_spawn_dynamic(
     let args = ParallelArgs::new(&values);
     let method_name =
         (!method_bytes.is_null() && method_len > 0).then(|| str_from_raw(method_bytes, method_len));
-    let pending = FidanPending::defer_fallible(args, move |bundle: ParallelArgs| {
+    let pending = FidanPending::defer_exception(args, move |bundle: ParallelArgs| {
         let mut values = bundle.into_vec();
         let first = values.remove(0);
         let result = if let Some(ref method_name) = method_name {
@@ -2917,10 +2810,7 @@ pub unsafe extern "C" fn fdn_spawn_dynamic(
             call_dynamic_owned(first, values)
         };
         if fdn_has_exception() != 0 {
-            let exn_ptr = fdn_catch_exception();
-            let message = crate::display_exception(borrow(exn_ptr), None);
-            drop(Box::from_raw(exn_ptr));
-            Err(message)
+            Err(take_exception().expect("task pending exception").capture())
         } else {
             Ok(result)
         }
@@ -2931,12 +2821,10 @@ pub unsafe extern "C" fn fdn_spawn_dynamic(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_pending_join(handle: *mut FidanValue) -> *mut FidanValue {
     match borrow(handle) {
-        FidanValue::Pending(pending) => match pending.try_join() {
+        FidanValue::Pending(pending) => match pending.try_join_exception() {
             Ok(value) => into_raw(value),
-            Err(message) => {
-                let exception = into_raw(FidanValue::String(FidanString::new(&message)));
-                fdn_store_exception(exception);
-                drop(Box::from_raw(exception));
+            Err(exception) => {
+                store_exception(exception.restore());
                 into_raw(FidanValue::Nothing)
             }
         },
@@ -2972,58 +2860,84 @@ pub unsafe extern "C" fn fdn_str_interp(
 // ── Exception handling ─────────────────────────────────────────────────────────
 
 thread_local! {
-    static EXCEPTION_VALUE: std::cell::RefCell<Option<*mut FidanValue>> =
+    static EXCEPTION_VALUE: std::cell::RefCell<Option<crate::exception::RuntimeException>> =
         const { std::cell::RefCell::new(None) };
+}
+
+pub fn take_exception() -> Option<crate::exception::RuntimeException> {
+    EXCEPTION_VALUE.with(|slot| slot.borrow_mut().take())
+}
+
+fn store_exception(exception: crate::exception::RuntimeException) {
+    // Replacing a pending exception drops its previous owned payload.
+    EXCEPTION_VALUE.with(|slot| *slot.borrow_mut() = Some(exception));
+}
+
+fn store_runtime_error(code: fidan_diagnostics::DiagCode, message: String) {
+    store_exception(crate::exception::RuntimeException::runtime(code, message));
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fdn_push_catch(_catch_id: i64) {}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn fdn_pop_catch() {}
-
 #[unsafe(no_mangle)]
 pub extern "C" fn fdn_has_exception() -> i8 {
-    EXCEPTION_VALUE.with(|e| if e.borrow().is_some() { 1 } else { 0 })
+    EXCEPTION_VALUE.with(|slot| i8::from(slot.borrow().is_some()))
 }
 
-/// Store a thrown exception value in thread-local storage so the catch block
-/// can retrieve it via `fdn_catch_exception`.  Called by the AOT throw path.
+/// Store an internal failure. Language `panic` uses fdn_store_panic instead.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_store_exception(val: *mut FidanValue) {
-    let cloned = into_raw(borrow(val).clone());
-    EXCEPTION_VALUE.with(|e| {
-        *e.borrow_mut() = Some(cloned);
+    store_exception(crate::exception::RuntimeException::internal(
+        borrow(val).clone(),
+    ));
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_store_panic(val: *mut FidanValue) {
+    store_exception(crate::exception::RuntimeException {
+        value: borrow(val).clone(),
+        origin: crate::exception::ExceptionOrigin::UserPanic,
     });
 }
 
-/// Legacy throw stub — used when there is no enclosing catch handler.
+/// The executable's uncaught boundary retains origin instead of inspecting text.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fdn_throw(val: *mut FidanValue) -> ! {
-    eprintln!(
-        "unhandled exception: {}",
-        crate::display_exception(borrow(val), None)
-    );
+pub extern "C" fn fdn_report_unhandled_exception() -> ! {
+    let exception = take_exception().unwrap_or_else(|| {
+        crate::exception::RuntimeException::internal(FidanValue::String(FidanString::new(
+            "missing pending exception at uncaught boundary",
+        )))
+    });
+    let (code, message) = exception.diagnostic();
+    fidan_diagnostics::render_message_to_stderr(fidan_diagnostics::Severity::Error, code, &message);
     std::process::exit(1);
 }
 
-/// Called when `throw` has no enclosing catch in the current function.
+/// Legacy user-throw ABI.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_throw(val: *mut FidanValue) -> ! {
+    fdn_store_panic(val);
+    fdn_report_unhandled_exception();
+}
+
+/// Fatal assertion ABI; assertions remain non-catchable and are not user panics.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn fdn_throw_unhandled(val: *mut FidanValue) -> ! {
-    eprintln!(
-        "unhandled exception: {}",
-        crate::display_exception(borrow(val), None)
-    );
+    let exception = crate::exception::RuntimeException::internal(borrow(val).clone());
+    let (code, message) = exception.diagnostic();
+    fidan_diagnostics::render_message_to_stderr(fidan_diagnostics::Severity::Error, code, &message);
     std::process::exit(1);
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn fdn_catch_exception() -> *mut FidanValue {
-    EXCEPTION_VALUE.with(|e| {
-        e.borrow_mut()
-            .take()
-            .unwrap_or_else(|| into_raw(FidanValue::Nothing))
-    })
+    into_raw(
+        take_exception()
+            .map(|exception| exception.value)
+            .unwrap_or(FidanValue::Nothing),
+    )
 }
 
 // ── Closures ───────────────────────────────────────────────────────────────────
@@ -3194,10 +3108,9 @@ unsafe fn call_trampoline_by_idx(idx: usize, arg_ptrs: &[*mut FidanValue]) -> *m
         .and_then(|g| g.get(idx).and_then(|function| function.trampoline));
     match trampoline {
         Some(t) => t(arg_ptrs.as_ptr(), arg_ptrs.len() as i64),
-        None => {
-            eprintln!("AOT: call_trampoline_by_idx: no trampoline for idx {}", idx);
-            into_raw(FidanValue::Nothing)
-        }
+        None => runtime_internal_error(format!(
+            "native function table has no trampoline for index {idx}"
+        )),
     }
 }
 
@@ -3219,8 +3132,9 @@ pub unsafe extern "C" fn fdn_call_dynamic(
             .map(|i| borrow(*args_ptr.add(i)).clone())
             .collect();
         return dispatch_stdlib_inline(module, name, args).unwrap_or_else(|| {
-            eprintln!("AOT: fdn_call_dynamic: unknown stdlib module '{}'", module);
-            into_raw(FidanValue::Nothing)
+            runtime_internal_error(format!(
+                "native dynamic call references unknown stdlib module `{module}`"
+            ))
         });
     }
 
@@ -3601,5 +3515,130 @@ mod tests {
                 drop(Box::from_raw(result));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod exception_origin_tests {
+    use super::*;
+
+    #[test]
+    fn caught_user_panic_returns_raw_payload_and_clears_slot() {
+        unsafe {
+            let value = into_raw(FidanValue::Integer(42));
+            fdn_store_panic(value);
+            fdn_drop(value);
+            assert_eq!(fdn_has_exception(), 1);
+            let caught = *Box::from_raw(fdn_catch_exception());
+            assert!(matches!(caught, FidanValue::Integer(42)));
+            assert_eq!(fdn_has_exception(), 0);
+        }
+    }
+
+    #[test]
+    fn native_await_preserves_panic_payload_and_runtime_error_codes() {
+        for origin in [
+            crate::exception::ExceptionOrigin::UserPanic,
+            crate::exception::ExceptionOrigin::Internal,
+        ] {
+            let pending = FidanPending::defer_exception(ParallelArgs::new(&[]), move |_| {
+                Err(crate::exception::RuntimeException {
+                    value: FidanValue::Integer(7),
+                    origin,
+                }
+                .capture())
+            });
+            unsafe {
+                let handle = into_raw(FidanValue::Pending(pending));
+                fdn_drop(fdn_pending_join(handle));
+                fdn_drop(handle);
+                let exception = take_exception().expect("await must propagate failure");
+                assert!(matches!(exception.value, FidanValue::Integer(7)));
+            }
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_enter_call() -> i8 {
+    match crate::exception::enter_call() {
+        Ok(()) => 1,
+        Err(error) => {
+            store_runtime_error(error.code, error.message);
+            0
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_leave_call() {
+    crate::exception::leave_call();
+}
+
+/// Join a structured group completely. Input array entries are borrowed handles;
+/// each output entry is replaced by an owned result for generated local storage.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fdn_join_all(handles: *mut *mut FidanValue, count: i64) {
+    let mut failures = Vec::new();
+    for index in 0..count as usize {
+        let slot = handles.add(index);
+        let result = match borrow(*slot) {
+            FidanValue::Pending(pending) => pending.try_join_exception(),
+            value => Ok(value.clone()),
+        };
+        *slot = into_raw(match result {
+            Ok(value) => value,
+            Err(exception) => {
+                failures.push(exception.to_string());
+                FidanValue::Nothing
+            }
+        });
+    }
+    if !failures.is_empty() {
+        let count = failures.len();
+        store_runtime_error(
+            fidan_diagnostics::diag_code!("R9001"),
+            format!(
+                "{count} task{} failed in task block:\n{}",
+                if count == 1 { "" } else { "s" },
+                failures.join("\n")
+            ),
+        );
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn fdn_exception_is_catchable() -> i8 {
+    EXCEPTION_VALUE.with(|slot| {
+        i8::from(
+            slot.borrow()
+                .as_ref()
+                .is_some_and(crate::exception::RuntimeException::is_catchable),
+        )
+    })
+}
+
+#[cfg(test)]
+mod internal_failure_tests {
+    use super::*;
+
+    #[test]
+    fn missing_native_entry_is_an_internal_error_not_a_user_panic() {
+        unsafe {
+            fdn_drop(call_trampoline_by_idx(usize::MAX, &[]));
+        }
+        let error = take_exception().expect("missing entry must not silently return nothing");
+        assert_eq!(error.diagnostic().0, fidan_diagnostics::diag_code!("R0001"));
+        assert!(!error.is_catchable());
+    }
+
+    #[test]
+    fn host_task_panic_is_not_misclassified_as_a_language_panic() {
+        let pending = FidanPending::spawn_fallible(ParallelArgs::new(&[]), |_| {
+            panic!("synthetic host failure")
+        });
+        let error = pending.try_join_diagnostic().unwrap_err();
+        assert_eq!(error.diagnostic().0, fidan_diagnostics::diag_code!("R0001"));
+        assert!(!error.is_catchable());
     }
 }

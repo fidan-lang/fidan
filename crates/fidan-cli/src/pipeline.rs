@@ -719,7 +719,7 @@ pub(crate) fn emit_mir_safety_diags(
                 sev,
                 fidan_diagnostics::diag_code!("W2006"),
                 &format!(
-                    "in `{}`: {} — this will panic at runtime",
+                    "in `{}`: {} — this will fail at runtime",
                     diag.fn_name, diag.context
                 ),
             );
@@ -1121,8 +1121,19 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             }
         }
         ExecutionMode::Check => {
-            // Diagnostics were emitted above; return failures below so directory
-            // checks can continue without executing any source code.
+            if error_count == 0
+                && let Some(ref hir) = merged_hir
+            {
+                let mir = phase("mir", || fidan_mir::lower_program(hir, &interner, &[]));
+                emit_mir_safety_diags(
+                    &mir,
+                    &interner,
+                    opts.strict_mode,
+                    &opts.suppress,
+                    &mut budget,
+                );
+                error_count = budget.error_count();
+            }
         }
         ExecutionMode::Build => {
             if error_count == 0
@@ -1138,6 +1149,11 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                 );
                 error_count = budget.error_count();
                 if error_count == 0 {
+                    // Invalid source must report frontend diagnostics before any
+                    // optional backend installation or network operation.
+                    if opts.backend == fidan_driver::Backend::Llvm {
+                        let _ = crate::toolchain::ensure_llvm_toolchain_installed()?;
+                    }
                     phase("optimize", || fidan_passes::run_all(&mut mir));
                     let session = fidan_driver::Session::new();
                     if let Err(e) =

@@ -3159,3 +3159,35 @@ approx_equal(x, x)
         );
     }
 }
+
+#[cfg(test)]
+mod diagnostic_transport_tests {
+    use super::*;
+
+    #[test]
+    fn all_registered_codes_preserve_identity_and_explicit_severity() {
+        let file = fidan_source::SourceFile::new(FileId(0), "diagnostics.fdn", "x");
+        for entry in fidan_diagnostics::CODES {
+            for (severity, expected) in [
+                (Severity::Error, DiagnosticSeverity::ERROR),
+                (Severity::Warning, DiagnosticSeverity::WARNING),
+                (Severity::Note, DiagnosticSeverity::INFORMATION),
+            ] {
+                let mut diagnostic = FidanDiag::error(
+                    fidan_diagnostics::DiagCode::new(entry.code),
+                    "diagnostic contract",
+                    Span::new(file.id, 0, 1),
+                );
+                diagnostic.severity = severity;
+                let result = fidan_to_lsp(&diagnostic, &file);
+                assert_eq!(
+                    result.code,
+                    Some(lsp::NumberOrString::String(entry.code.into()))
+                );
+                assert_eq!(result.severity, Some(expected));
+                assert_eq!(result.message, "diagnostic contract");
+                assert_eq!(result.range.end.character, 1);
+            }
+        }
+    }
+}

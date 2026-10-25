@@ -10,6 +10,15 @@ compiler releases.
 
 ## [Unreleased]
 
+### Fixed
+- Preserve runtime diagnostic identity and original caught values through native,
+  JIT, callback and async boundaries; uncaught user panics consistently report R1002.
+- Enforce R1001 call-depth/stack-reserve checks, aggregate task-group failures as
+  R9001, and stop callback/certain-argument execution after failure.
+- Preserve informational diagnostic codes, reject known non-callable values and
+  run MIR safety checks before backend provisioning; correct async/hot-loop warnings.
+
+
 ### Added
 - Global `-v`/`-vv`/`-vvv` operational diagnostics on stderr, with compiler,
   package/toolchain, native helper and LSP instrumentation, bounded redaction,

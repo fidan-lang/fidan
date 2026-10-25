@@ -745,9 +745,6 @@ fn dispatch(command: Command) -> Result<()> {
                 target_cpu: effective_target_cpu,
                 ..Default::default()
             };
-            if matches!(backend, fidan_driver::Backend::Llvm) {
-                let _ = toolchain::ensure_llvm_toolchain_installed()?;
-            }
             pipeline::run_pipeline(opts)
         }
         Command::Profile {

@@ -3785,6 +3785,18 @@ impl TypeChecker {
                                 callee_span,
                             );
                         }
+                        let callee_ty = self.infer_expr(callee_id, module);
+                        if !matches!(
+                            callee_ty,
+                            FidanType::Function
+                                | FidanType::Dynamic
+                                | FidanType::Unknown
+                                | FidanType::Error
+                                | FidanType::ClassType(_)
+                        ) {
+                            self.emit_not_callable_error(&callee_ty, span);
+                            return FidanType::Error;
+                        }
                         FidanType::Dynamic
                     }
                     None => {

@@ -87,12 +87,11 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<SlowHintDiag> 
                         hot_dynamic.insert(*dest);
                     }
                     Instr::Call {
-                        dest: Some(dest), ..
+                        dest: Some(dest),
+                        result_ty: Some(MirTy::Dynamic),
+                        ..
                     } => {
-                        // Mark result if the callee returns Dynamic.
-                        // (We don't know the return type here, so we track all
-                        // call results and cross-check in step 3.)
-                        let _ = dest; // handled below via Assign path
+                        hot_dynamic.insert(*dest);
                     }
                     _ => {}
                 }

@@ -57,7 +57,19 @@ fn make_temp_program(name: &str, source: &str) -> PathBuf {
 }
 
 fn run_repl_session(args: &[&str], input: &[u8]) -> std::process::Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_fidan"))
+    run_repl_session_in_home(args, input, None)
+}
+
+fn run_repl_session_in_home(
+    args: &[&str],
+    input: &[u8],
+    home: Option<&Path>,
+) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_fidan"));
+    if let Some(home) = home {
+        command.env("FIDAN_HOME", home);
+    }
+    let mut child = command
         .arg("repl")
         .args(args)
         .current_dir(workspace_root())
@@ -3619,4 +3631,344 @@ print("documented repl contracts passed")
         "{stdout}"
     );
     assert!(stderr.trim().is_empty(), "{stderr}");
+}
+
+#[path = "../../../test/diagnostics/runtime_cases.rs"]
+mod runtime_diagnostic_cases;
+
+#[test]
+fn runtime_diagnostic_identity_in_interpreter_jit_and_repl() {
+    let directory = workspace_root()
+        .join("target/runtime-diagnostic-cli")
+        .join(format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    let fixtures = directory.join("fixtures");
+    let cases = runtime_diagnostic_cases::cases(&fixtures);
+    for case in &cases {
+        let file = directory.join(format!("{}.fdn", case.name));
+        std::fs::write(&file, &case.source).unwrap();
+        for threshold in ["0", "1", "2"] {
+            let result = Command::new(env!("CARGO_BIN_EXE_fidan"))
+                .env("FIDAN_HOME", directory.join("home"))
+                .env(
+                    "FIDAN_DIST_MANIFEST",
+                    "file:///definitely-missing-diagnostic-manifest.json",
+                )
+                .args(["run", "--trace", "none", "--jit-threshold", threshold])
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert_eq!(
+                result.status.code(),
+                Some(1),
+                "{}/JIT {threshold}",
+                case.name
+            );
+            runtime_diagnostic_cases::assert_code(
+                &String::from_utf8_lossy(&result.stderr),
+                case.code,
+            );
+            if case.name == "direct" {
+                assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "before");
+            }
+            let caught = case.caught_source();
+            std::fs::write(&file, &caught).unwrap();
+            let result = Command::new(env!("CARGO_BIN_EXE_fidan"))
+                .env("FIDAN_HOME", directory.join("home"))
+                .env(
+                    "FIDAN_DIST_MANIFEST",
+                    "file:///definitely-missing-diagnostic-manifest.json",
+                )
+                .args(["run", "--trace", "none", "--jit-threshold", threshold])
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert_eq!(
+                result.status.success(),
+                case.catchable,
+                "{}/JIT {threshold}: {}",
+                case.name,
+                String::from_utf8_lossy(&result.stderr)
+            );
+            assert_eq!(
+                result.status.code(),
+                Some(if case.catchable { 0 } else { 1 })
+            );
+            if case.catchable {
+                assert_eq!(
+                    String::from_utf8_lossy(&result.stdout).trim(),
+                    case.caught_stdout(),
+                    "{}/JIT {threshold}",
+                    case.name
+                );
+            }
+            std::fs::write(&file, &case.source).unwrap();
+        }
+        let input = case.repl_source();
+        let result = run_repl_session_in_home(
+            &["--trace", "none"],
+            input.as_bytes(),
+            Some(&directory.join("home")),
+        );
+        assert!(
+            result.status.success(),
+            "REPL must recover after {}",
+            case.name
+        );
+        runtime_diagnostic_cases::assert_code(&String::from_utf8_lossy(&result.stderr), case.code);
+        assert!(String::from_utf8_lossy(&result.stdout).contains("REPL recovered"));
+    }
+    runtime_diagnostic_cases::cleanup(&fixtures);
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[path = "../../../test/diagnostics/frontend_cases.rs"]
+mod frontend_diagnostic_cases;
+
+#[test]
+fn frontend_diagnostic_codes_do_not_depend_on_backend_selection() {
+    let directory = workspace_root()
+        .join("target/frontend-diagnostic-cli")
+        .join(format!(
+            "{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+    std::fs::create_dir_all(&directory).unwrap();
+    for &(code, source) in frontend_diagnostic_cases::ERRORS {
+        let file = directory.join(format!("{code}.fdn"));
+        std::fs::write(&file, source).unwrap();
+        for args in [
+            vec!["check"],
+            vec!["run", "--jit-threshold", "1"],
+            vec!["build", "--backend", "cranelift"],
+            vec!["build", "--backend", "llvm"],
+        ] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_fidan"));
+            command
+                .env("FIDAN_HOME", directory.join("home"))
+                .env(
+                    "FIDAN_DIST_MANIFEST",
+                    "file:///definitely-missing-diagnostic-manifest.json",
+                )
+                .args(&args)
+                .arg(&file);
+            if args[0] == "build" {
+                command
+                    .arg("--output")
+                    .arg(directory.join("unexpected-native-output"));
+            }
+            let result = command.output().unwrap();
+            assert!(
+                !result.status.success(),
+                "{code}/{args:?} unexpectedly succeeded"
+            );
+            runtime_diagnostic_cases::assert_code(&String::from_utf8_lossy(&result.stderr), code);
+            assert!(
+                result.stdout.is_empty(),
+                "frontend diagnostic contaminated stdout: {}",
+                String::from_utf8_lossy(&result.stdout)
+            );
+        }
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn runtime_diagnostic_payloads_remain_values_and_callbacks_stop_on_failure() {
+    for threshold in ["0", "1"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .env(
+                "FIDAN_HOME",
+                workspace_root().join("target/diagnostic-value-home"),
+            )
+            .args(["run", "--trace", "none", "--jit-threshold", threshold])
+            .arg(workspace_root().join("test/examples/runtime_diagnostics_regression.fdn"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "runtime diagnostics passed"
+        );
+    }
+}
+
+#[test]
+fn awaited_async_consumers_do_not_emit_unawaited_warnings() {
+    let result = Command::new(env!("CARGO_BIN_EXE_fidan"))
+        .env(
+            "FIDAN_HOME",
+            workspace_root().join("target/diagnostic-warning-home"),
+        )
+        .arg("check")
+        .arg(workspace_root().join("test/examples/runtime_diagnostics_regression.fdn"))
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        !stderr.contains("W1004"),
+        "awaited async combinators must consume their inputs: {stderr}"
+    );
+}
+
+#[test]
+fn unawaited_async_results_and_plain_containers_still_warn() {
+    let directory = workspace_root()
+        .join("target/diagnostic-unawaited")
+        .join(std::process::id().to_string());
+    std::fs::create_dir_all(&directory).unwrap();
+    for (name, tail) in [
+        ("gather", "var collected = async.gather([pending])"),
+        ("container", "var collected = [pending]; await collected"),
+    ] {
+        let source = format!(
+            "use std.async\naction work returns integer {{ return 1 }}\nvar pending = spawn work()\n{tail}\n"
+        );
+        let file = directory.join(format!("{name}.fdn"));
+        std::fs::write(&file, source).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_fidan"))
+            .env("FIDAN_HOME", directory.join("home"))
+            .arg("check")
+            .arg(file)
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&result.stderr).contains("warning  W1004"),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+impl runtime_diagnostic_cases::RuntimeCase {
+    fn repl_source(&self) -> String {
+        let (declarations, body): (Vec<_>, Vec<_>) = self.source.lines().partition(|line| {
+            line.trim_start().starts_with("use ") || line.trim_start().starts_with("action ")
+        });
+        // A complete program is one REPL input, with declarations retained in
+        // their normal module scope. Separate inputs are separate executions.
+        format!(
+            "{}\nif true {{ {} }}\nprint(\"REPL recovered\")\n:quit\n",
+            declarations.join("\n"),
+            body.join("; ")
+        )
+    }
+}
+
+#[test]
+fn all_active_warning_codes_keep_their_severity_before_backend_selection() {
+    let directory = make_temp_dir("diagnostic_warnings");
+    for (code, severity, source) in frontend_diagnostic_cases::WARNINGS {
+        let file = directory.join(if *code == "W2001" {
+            "warning.txt".to_string()
+        } else {
+            format!("{code}.fdn")
+        });
+        std::fs::write(&file, source).unwrap();
+        for command in ["check", "run"] {
+            let result = Command::new(env!("CARGO_BIN_EXE_fidan"))
+                .env("FIDAN_HOME", directory.join("home"))
+                .arg(command)
+                .arg(&file)
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(result.status.success(), "{code}/{command}: {stderr}");
+            let headers = stderr
+                .lines()
+                .filter(|line| {
+                    let normalized = line.replace(['[', ']', ':'], " ");
+                    let mut words = normalized.split_whitespace();
+                    words.next() == Some(*severity) && words.next() == Some(*code)
+                })
+                .count();
+            assert_eq!(headers, 1, "{code}/{command}: {stderr}");
+        }
+        if matches!(*code, "W2004" | "W2005" | "W2006" | "W5001") {
+            let result = Command::new(env!("CARGO_BIN_EXE_fidan"))
+                .env("FIDAN_HOME", directory.join("home"))
+                .args(["check", "--strict"])
+                .arg(&file)
+                .output()
+                .unwrap();
+            assert_eq!(result.status.code(), Some(1), "{code}/strict");
+            runtime_diagnostic_cases::assert_code(&String::from_utf8_lossy(&result.stderr), code);
+        }
+    }
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn sandbox_diagnostic_codes_are_catchable_at_each_jit_threshold() {
+    let directory = make_temp_dir("sandbox_diagnostic_codes");
+    for (code, expression) in [
+        ("R4001", "io.readFile(\"denied\")"),
+        ("R4002", "io.writeFile(\"denied\", \"x\")"),
+        ("R4003", "io.getEnv(\"FIDAN_DIAGNOSTIC_SECRET\")"),
+    ] {
+        let file = directory.join(format!("{code}.fdn"));
+        for threshold in ["0", "1", "2"] {
+            for caught in [false, true] {
+                let body = if caught {
+                    format!("attempt {{ {expression} }} catch failure {{ print(\"caught\") }}")
+                } else {
+                    expression.to_owned()
+                };
+                std::fs::write(&file, format!("use std.io\n{body}")).unwrap();
+                let result = Command::new(env!("CARGO_BIN_EXE_fidan"))
+                    .env("FIDAN_HOME", directory.join("home"))
+                    .args([
+                        "run",
+                        "--sandbox",
+                        "--trace",
+                        "none",
+                        "--jit-threshold",
+                        threshold,
+                    ])
+                    .arg(&file)
+                    .output()
+                    .unwrap();
+                assert_eq!(
+                    result.status.code(),
+                    Some(if caught { 0 } else { 1 }),
+                    "{code}/JIT {threshold}: {}",
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                if caught {
+                    assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "caught");
+                } else {
+                    runtime_diagnostic_cases::assert_code(
+                        &String::from_utf8_lossy(&result.stderr),
+                        code,
+                    );
+                }
+            }
+        }
+    }
+    std::fs::remove_dir_all(directory).unwrap();
 }

@@ -5,6 +5,7 @@ use std::sync::{OnceLock, RwLock};
 pub mod builtins;
 pub mod callable;
 mod dict;
+pub mod exception;
 pub mod ffi;
 mod hashset;
 pub mod index;

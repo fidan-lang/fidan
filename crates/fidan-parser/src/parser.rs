@@ -1373,17 +1373,18 @@ impl<'t> Parser<'t> {
                 if matches!(self.peek(), TokenKind::Action) {
                     self.parse_local_action_decl_stmt(true, vec![])
                 } else if matches!(self.peek(), TokenKind::For) {
-                    self.parse_parallel_for()
+                    self.parse_parallel_for(span.start)
                 } else if matches!(self.peek(), TokenKind::LBrace) {
-                    self.parse_task_block(true)
+                    self.parse_task_block(true, span.start)
                 } else {
                     self.error("expected `for` or `{` after `parallel`", span);
                     return Some(self.error_stmt(span));
                 }
             }
             TokenKind::Concurrent => {
+                let start = self.current_span().start;
                 self.advance();
-                self.parse_task_block(false)
+                self.parse_task_block(false, start)
             }
             TokenKind::RBrace | TokenKind::Eof => return None,
             _ => self.parse_assign_or_expr_stmt(),
@@ -1714,8 +1715,7 @@ impl<'t> Parser<'t> {
         })
     }
 
-    fn parse_parallel_for(&mut self) -> StmtId {
-        let start = self.current_span().start;
+    fn parse_parallel_for(&mut self, start: u32) -> StmtId {
         self.advance(); // eat `for`
         let binding = self.expect_ident_sym("expected loop variable");
         self.expect_tok(&TokenKind::In);
@@ -1731,8 +1731,7 @@ impl<'t> Parser<'t> {
         })
     }
 
-    fn parse_task_block(&mut self, is_parallel: bool) -> StmtId {
-        let start = self.current_span().start;
+    fn parse_task_block(&mut self, is_parallel: bool, start: u32) -> StmtId {
         self.expect_tok(&TokenKind::LBrace);
         let mut tasks = vec![];
         loop {

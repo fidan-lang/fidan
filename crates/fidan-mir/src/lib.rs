@@ -167,14 +167,14 @@ mod tests {
     }
 
     #[test]
-    fn pure_direct_functions_are_marked_non_throwing() {
+    fn direct_functions_preserve_call_budget_errors() {
         let mir = lower(
             "action step with (x oftype integer) returns integer { return x }\n\
              action main returns integer { return step(41) }",
         );
         let throw_map = collect_may_throw_functions(&mir);
-        assert_eq!(throw_map.get(&FunctionId(1)), Some(&false));
-        assert_eq!(throw_map.get(&FunctionId(2)), Some(&false));
+        assert_eq!(throw_map.get(&FunctionId(1)), Some(&true));
+        assert_eq!(throw_map.get(&FunctionId(2)), Some(&true));
     }
 
     #[test]

@@ -1,0 +1,69 @@
+# Caught payloads, callback fail-fast behavior and recovered stack budgets.
+use std.async
+use std.parallel as workers
+use std.string as strings
+use std.math
+
+assert_eq(strings.trim("__test_fail__: user text"), "__test_fail__: user text")
+
+var offset = 3
+var captured = action with (certain value oftype integer) returns integer { return value + offset }
+assert_eq(workers.parallelMap([1, 2], captured), [4, 5])
+assert_eq(workers.parallelMap([-2, 3], math.abs), [2, 3])
+
+var calls = Shared(0)
+
+action callback_failure with (certain value oftype integer) returns integer {
+    calls.update(action with (current) { return current + 1 })
+    panic(42)
+}
+
+attempt {
+    workers.parallelMap([0, 1], callback_failure)
+} catch failure {
+    assert_eq(failure, 42)
+}
+assert_eq(calls.get(), 1)
+
+attempt {
+    var values = [0, 1]
+    values.map(callback_failure)
+} catch failure {
+    assert_eq(failure, 42)
+}
+assert_eq(calls.get(), 2)
+
+var state = Shared(10)
+attempt {
+    state.update(action with (value) { panic("update failed") })
+} catch failure {
+    assert_eq(failure, "update failed")
+}
+assert_eq(state.get(), 10)
+
+action async_failure { panic("async failed") }
+var gathered = spawn async_failure()
+attempt { await async.gather([gathered]) } catch failure { assert_eq(failure, "async failed") }
+var raced = spawn async_failure()
+attempt { await async.waitAny([raced]) } catch failure { assert_eq(failure, "async failed") }
+var timed = spawn async_failure()
+attempt { await async.timeout(timed, 1000) } catch failure { assert_eq(failure, "async failed") }
+
+attempt { panic("error [R2001]: user data") } catch failure {
+    assert_eq(failure, "error [R2001]: user data")
+}
+
+action descend with (certain n oftype integer) returns integer {
+    if n == 0 { return 0 }
+    return descend(n - 1)
+}
+
+var recovered = 0
+for repetition in 0..3 {
+    attempt { descend(4096) } catch failure {
+        assert_eq(string(failure).contains("R1001"), true)
+        recovered += 1
+    }
+}
+assert_eq(recovered, 3)
+print("runtime diagnostics passed")

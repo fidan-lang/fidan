@@ -329,7 +329,7 @@ Fix: make sure both operands have compatible types:
 
     # Or convert explicitly:
     var flag = true
-    print((flag if flag else 0) + 1)
+    print(integer(flag) + 1)
 "#,
         ),
 
@@ -564,7 +564,12 @@ Fix: wrap the shared variable in `Shared oftype T`:
         ),
 
         "E0402" => Some(
-            r#"A `Pending oftype T` value produced by `spawn` was dropped without
+            r#"This code is registered for compatibility but has no active emitter in the
+current compiler candidate. Unawaited pending values currently emit W1004.
+
+Reserved diagnostic meaning:
+
+A `Pending oftype T` value produced by `spawn` was dropped without
 being `await`-ed.  The task may never be driven to completion, so its
 side effects and return value can be silently lost when the enclosing
 scope exits.
@@ -584,7 +589,10 @@ Fix: either await the value or store it and await later:
 
         // ── Warnings: lifecycle ───────────────────────────────────────────────
         "W1001" => Some(
-            r#"A variable was declared with `var` but was given no initial value and
+            r#"This code is registered but has no active emitter in the current compiler
+candidate. The following describes its reserved meaning, not an enabled check.
+
+A variable was declared with `var` but was given no initial value and
 no type annotation.  Its value will be `nothing` until assigned, which
 may cause surprising behaviour.
 
@@ -600,7 +608,10 @@ Consider providing an initial value or a type annotation:
         ),
 
         "W1002" => Some(
-            r#"A variable was declared and assigned but its value was never read.
+            r#"This code is registered but has no active emitter in the current compiler
+candidate. The following describes its reserved meaning, not an enabled check.
+
+A variable was declared and assigned but its value was never read.
 This often indicates dead code, a misspelling in a later reference, or
 an unnecessary computation.
 
@@ -616,7 +627,10 @@ Fix: either use the variable or remove the declaration.
         ),
 
         "W1003" => Some(
-            r#"An action parameter was declared but never referenced inside the
+            r#"This code is registered but has no active emitter in the current compiler
+candidate. The following describes its reserved meaning, not an enabled check.
+
+An action parameter was declared but never referenced inside the
 action body.  This may indicate a forgotten use or a parameter that
 is no longer needed.
 
@@ -883,39 +897,37 @@ hard errors in safety-critical code.
 
         // ── Runtime ───────────────────────────────────────────────────────────
         "R0001" => Some(
-            r#"An unhandled runtime error propagated to the top level.  This
-typically means a `panic(...)` statement was executed and no enclosing
-`attempt / catch` block caught the error.
+            r#"A runtime operation failed without a more specific registered diagnostic.
+Examples include invalid dynamic operands, conversions and callable contracts.
+Catchable operation errors travel through `attempt / catch`; their caught value
+is a string containing the diagnostic code and message. An uncaught error is
+reported once on stderr and exits with status 1.
 
-Use `attempt / catch` to handle errors gracefully:
+Explicit core/std.test assertion failures and internal execution failures also
+use R0001, but remain fatal: an enclosing `attempt` does not intercept them.
+User `panic(value)` is a separate condition, R1002. Rust panics, foreign faults
+and operating-system crashes must not be relabelled as user panics.
 
-    attempt {
-        risky_operation()
-    } catch err {
-        print("caught: {err}")
-    }
-
-Run with `--trace full` to see the full call stack at the point of the
-panic:
-
-    fidan run myfile.fdn --trace full
+Interpreter/JIT execution supports `--trace full` for its available Fidan stack
+information. Native diagnostics do not promise the same source-stack detail.
 "#,
         ),
 
         "R1001" => Some(
-            r#"The interpreter exceeded the maximum call-stack depth.  This almost
-always means an action is calling itself (directly or indirectly)
-without a base case that terminates the recursion.
+            r#"A Fidan call exceeded the per-thread language call budget (1024 active calls)
+or the native stack reserve. This usually indicates recursion without a
+terminating base case. Interpreter calls grow their host stack in bounded
+segments; native function entries check the shared budget and stack reserve.
 
-Erroneous example:
+R1001 is catchable with `attempt / catch`. Uncaught execution reports the code
+once on stderr and exits with status 1. REPL execution reports the error and
+returns to its prompt.
 
-    action forever {
-        forever()       # runtime error: stack overflow
-    }
+The exact depth at which the stack reserve is reached depends on frame size
+and the host. This is protection for Fidan call boundaries, not a guarantee of
+recovering arbitrary foreign-code stack overflows, host panics or OS faults.
 
-Fix: add a termination condition:
-
-    action countdown with (certain n -> integer) {
+    action countdown with (certain n oftype integer) {
         if n <= 0 { return }
         countdown(n - 1)
     }
@@ -923,25 +935,22 @@ Fix: add a termination condition:
         ),
 
         "R1002" => Some(
-            r#"A `panic(...)` expression was executed in user code and the panic value
-propagated to the top level without being caught.
+            r#"A user `panic(value)` reached an uncaught program boundary. The interpreter,
+selective JIT, Cranelift AOT and LLVM AOT preserve this identity through calls,
+callbacks, await and parallel-for execution. Uncaught panics report R1002 once
+on stderr and exit with status 1. The REPL reports the diagnostic and recovers.
 
-Example:
-
-    action divide with (certain a -> integer, certain b -> integer) returns integer {
-        if b == 0 {
-            panic("cannot divide by zero")
-        }
-        return a / b
-    }
-
-Wrap the call in `attempt / catch` to handle it:
+`attempt / catch` receives the original panic value, not a diagnostic wrapper:
 
     attempt {
-        var result = divide(10, 0)
-    } catch err {
-        print("error: {err}")
+        panic(42)
+    } catch value {
+        assert_eq(value, 42)
     }
+
+A user string that happens to contain another diagnostic code remains a user
+panic. Internal errors, explicit assertion failures and foreign/OS crashes are
+not R1002. Task-group failures are aggregated as R9001 instead.
 "#,
         ),
 
@@ -1186,33 +1195,20 @@ is not required.
 
         // ── Runtime: parallel / concurrency ──────────────────────────────────
         "R9001" => Some(
-            r#"One or more tasks inside a `parallel` block panicked or threw an
-uncaught error before the block could complete.  The block waits for
-ALL tasks to finish before reporting the combined failure.
-
-Example:
+            r#"One or more tasks in a `parallel` or `concurrent` task group failed. The group
+waits for every task and reports all failed tasks together, in declaration order.
+This aggregate failure is fatal and is not intercepted by an outer `attempt`.
+Handle recoverable failures inside each task instead:
 
     parallel {
-        task compute { panic("something went wrong") }
-        task store   { var x = 42 }
-    }
-    # runtime error[R9001]: 1 task failed in `parallel` block
-    #   task `compute`: runtime panic: something went wrong
-
-The block itself propagates the first failure as a panic.  Use
-`attempt / catch` around the whole `parallel` block to handle it:
-
-    attempt {
-        parallel {
-            task compute { panic("something went wrong") }
-            task store   { var x = 42 }
-        }
-    } catch err {
-        print("parallel block failed: {err}")
+        task first { attempt { panic("recoverable") } catch value { print(value) } }
+        task second { print("still runs") }
     }
 
-If multiple tasks fail, all failures are listed in the error message
-so you can diagnose them together.
+Uncaught group failure reports R9001 once on stderr and exits with status 1.
+The REPL reports the group failure and returns to the prompt. Parallel-for and
+individual spawned/awaited actions preserve the underlying error identity;
+they are not task-group aggregates merely because work runs in parallel.
 "#,
         ),
 
@@ -1263,7 +1259,10 @@ Use `--strict` to treat performance hints as hard errors.
         ),
 
         "W5002" => Some(
-            r#"A closure defined inside a loop body captures a mutable variable
+            r#"This code is registered but has no active emitter in the current compiler
+candidate. The following describes its reserved meaning, not an enabled check.
+
+A closure defined inside a loop body captures a mutable variable
 from the enclosing scope.  This prevents the JIT from hoisting the
 closure's code out of the loop and may inhibit optimization.
 
@@ -1302,7 +1301,10 @@ program starts executing, so there is no per-call compilation overhead.
         ),
 
         "W5004" => Some(
-            r#"`@precompile` is a hint to the Cranelift JIT to eagerly compile an
+            r#"This code is registered but has no active emitter in the current compiler
+candidate. The following describes its reserved meaning, not an enabled check.
+
+`@precompile` is a hint to the Cranelift JIT to eagerly compile an
 action before execution begins.  In AOT (ahead-of-time) build mode all
 actions are already fully compiled before the program runs, so the
 annotation has no additional effect and can be removed.
@@ -1343,49 +1345,15 @@ Fix: change the first parameter's type annotation to `action`:
         ),
 
         "E0304" => Some(
-            r#"A decorator was used with an invalid configuration.
+            r#"A decorator has invalid configuration, option values or an unsupported ABI
+signature. For example, @extern requires a library string and a supported ABI:
 
-For user-defined decorators, this usually means the number of extra arguments
-supplied to `@decorator(...)` does not match the number of extra parameters
-the decorator action expects. The first parameter of a decorator receives the
-decorated action implicitly; all remaining parameters must be provided
-explicitly inside the decorator call.
+    @extern(123)                # invalid: library must be a string
+    action invalid {}
 
-This code is also used for invalid built-in decorator usage, especially
-`@extern`, for example:
-
-    @extern()                       # missing library string
-    @extern("lib", abi = "weird")  # invalid ABI name
-    @extern("lib")
-    action bad with (text oftype string) returns integer
-    # error: native @extern only supports integer/float/boolean/handle params
-
-Erroneous example:
-
-    action log with (certain fn -> action, certain prefix -> string) {
-        print(prefix + fn.name)
-    }
-
-    @log                # error E0304: expected 1 extra arg, got 0
-    action greet {  }
-
-Fix: pass the required extra arguments:
-
-    @log(">> ")
-    action greet {  }
-
-Alternatively, if no extra arguments are needed, remove the extra parameters
-from the decorator's declaration:
-
-    action log with (certain fn -> action) {
-        print(fn.name)
-    }
-
-    @log
-    action greet {  }
-
-For `@extern`, fix the decorator metadata or change the action signature to
-match the supported ABI surface.
+Fix the decorator metadata and use the supported native scalar ABI types.
+Missing or surplus ordinary decorator arguments use the generic E0301/E0305
+arity diagnostics; they do not all map to E0304.
 "#,
         ),
 

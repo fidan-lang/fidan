@@ -613,6 +613,7 @@ print("ok")
 #[derive(Debug, Clone)]
 struct AotTestSettings {
     opt_level: OptLevel,
+    mir_transform: Option<fn(&mut fidan_mir::MirProgram)>,
     emit_obj: bool,
     lto: LtoMode,
     strip: StripMode,
@@ -623,6 +624,7 @@ impl Default for AotTestSettings {
     fn default() -> Self {
         Self {
             opt_level: OptLevel::O2,
+            mir_transform: None,
             emit_obj: false,
             lto: LtoMode::Off,
             strip: StripMode::Off,
@@ -643,8 +645,12 @@ fn compile_program_with_settings(
 ) {
     let src_path = output_path.with_extension("fdn");
     fs::write(&src_path, source).expect("write concurrent smoke source");
-    let FrontendOutput { interner, mir, .. } =
-        compile_file_to_mir(&src_path).expect("compile source to MIR");
+    let FrontendOutput {
+        interner, mut mir, ..
+    } = compile_file_to_mir(&src_path).expect("compile source to MIR");
+    if let Some(transform) = settings.mir_transform {
+        transform(&mut mir);
+    }
     let opts = CompileOptions {
         input: src_path,
         output: Some(output_path.to_path_buf()),
@@ -2797,4 +2803,166 @@ print("selective object methods passed")
         run_compiled_binary_clean(&output, "selective object methods passed");
     }
     remove_native_fixtures(&sandbox);
+}
+
+#[path = "../../../test/diagnostics/runtime_cases.rs"]
+mod runtime_diagnostic_cases;
+
+#[test]
+fn runtime_diagnostic_identity_across_aot_boundaries() {
+    let directory = temp_dir("fidan_runtime_diagnostics");
+    let fixtures = directory.join("fixtures");
+    let cases = runtime_diagnostic_cases::cases(&fixtures);
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        for opt_level in [OptLevel::O0, OptLevel::O3] {
+            for case in &cases {
+                let binary = directory.join(format!(
+                    "{}-{backend:?}-{opt_level:?}{}",
+                    case.name,
+                    std::env::consts::EXE_SUFFIX
+                ));
+                compile_program_with_settings(
+                    &case.source,
+                    backend,
+                    &binary,
+                    &AotTestSettings {
+                        opt_level,
+                        lto: if backend == Backend::Llvm {
+                            LtoMode::Full
+                        } else {
+                            LtoMode::Off
+                        },
+                        ..AotTestSettings::default()
+                    },
+                );
+                let result = Command::new(&binary)
+                    .output()
+                    .expect("execute diagnostic fixture");
+                let stderr = String::from_utf8_lossy(&result.stderr);
+                assert!(
+                    !result.status.success(),
+                    "{}/{backend:?} unexpectedly succeeded",
+                    case.name
+                );
+                assert_eq!(
+                    result.status.code(),
+                    Some(1),
+                    "{}/{backend:?}: {stderr}",
+                    case.name
+                );
+                runtime_diagnostic_cases::assert_code(&stderr, case.code);
+                if case.name.ends_with("group") {
+                    assert!(
+                        stderr.contains("task one") && stderr.contains("task two"),
+                        "{stderr}"
+                    );
+                }
+                if case.name == "direct" {
+                    assert_eq!(String::from_utf8_lossy(&result.stdout).trim(), "before");
+                }
+                // Wrapping the same failure verifies catchability, not only formatting.
+                let caught = case.caught_source();
+                let caught_binary = binary.with_file_name(format!(
+                    "caught-{}",
+                    binary.file_name().unwrap().to_string_lossy()
+                ));
+                compile_program_with_settings(
+                    &caught,
+                    backend,
+                    &caught_binary,
+                    &AotTestSettings {
+                        opt_level,
+                        lto: if backend == Backend::Llvm {
+                            LtoMode::Full
+                        } else {
+                            LtoMode::Off
+                        },
+                        ..AotTestSettings::default()
+                    },
+                );
+                let result = Command::new(&caught_binary)
+                    .output()
+                    .expect("execute caught fixture");
+                assert_eq!(
+                    result.status.success(),
+                    case.catchable,
+                    "{}/{backend:?}: {}",
+                    case.name,
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                if case.catchable {
+                    assert_eq!(
+                        String::from_utf8_lossy(&result.stdout)
+                            .replace("\r\n", "\n")
+                            .trim(),
+                        case.caught_stdout(),
+                        "{}/{backend:?}",
+                        case.name
+                    );
+                    assert!(
+                        result.stderr.is_empty(),
+                        "{}",
+                        String::from_utf8_lossy(&result.stderr)
+                    );
+                } else {
+                    runtime_diagnostic_cases::assert_code(
+                        &String::from_utf8_lossy(&result.stderr),
+                        case.code,
+                    );
+                }
+            }
+        }
+    }
+    runtime_diagnostic_cases::cleanup(&fixtures);
+    remove_native_fixtures(&directory);
+}
+
+#[test]
+fn function_entry_guards_are_not_reentered_by_mir_backedges() {
+    fn tail_loop(program: &mut fidan_mir::MirProgram) {
+        let mut rewritten = 0;
+        for function in &mut program.functions {
+            for block in &mut function.blocks {
+                let before = block.instructions.len();
+                block.instructions.retain(|instruction| !matches!(instruction, fidan_mir::Instr::Call { callee: fidan_mir::Callee::Fn(id), .. } if *id == function.id));
+                if block.instructions.len() != before {
+                    rewritten += 1;
+                    block.terminator = fidan_mir::Terminator::Goto(fidan_mir::BlockId(0));
+                }
+            }
+        }
+        assert_eq!(
+            rewritten, 1,
+            "fixture must retain a self-tail-call before the MIR loop rewrite"
+        );
+    }
+    let directory = temp_dir("fidan_entry_guard_backedge");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            continue;
+        }
+        let binary = directory.join(format!(
+            "backedge-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program_with_settings(
+            "var counter = 0\naction spin { counter += 1; if counter < 2048 { spin() } }\nspin()\nassert_eq(counter, 2048)\nprint(\"entry guard passed\")",
+            backend,
+            &binary,
+            &AotTestSettings {
+                mir_transform: Some(tail_loop),
+                lto: if backend == Backend::Llvm {
+                    LtoMode::Full
+                } else {
+                    LtoMode::Off
+                },
+                ..AotTestSettings::default()
+            },
+        );
+        run_compiled_binary_clean(&binary, "entry guard passed");
+    }
+    remove_native_fixtures(&directory);
 }

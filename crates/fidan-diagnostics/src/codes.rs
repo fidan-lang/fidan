@@ -7,10 +7,10 @@
 //! | Prefix | Category                          |
 //! |--------|-----------------------------------|
 //! | E0xxx  | Syntax / parse errors             |
-//! | E1xxx  | Name-resolution errors (reserved) |
-//! | E2xxx  | Type errors (reserved)            |
-//! | E3xxx  | Argument / call errors (reserved) |
-//! | E4xxx  | Concurrency / safety errors       |
+//! | E01xx  | Name-resolution errors            |
+//! | E02xx  | Type errors                       |
+//! | E03xx  | Argument / call errors            |
+//! | E04xx  | Concurrency / safety errors       |
 //! | W1xxx  | Warnings — lifecycle              |
 //! | W2xxx  | Warnings — style / lint           |
 //! | W5xxx  | Warnings — performance hints      |
@@ -20,7 +20,7 @@
 //! | R4xxx  | Runtime — sandbox / security      |
 //! | R9xxx  | Runtime — parallel / concurrency  |
 //!
-//! Use `fidan explain --diagnostic <code>` (Phase 10) for the full HTML/text description of
+//! Use `fidan explain --diagnostic <code>` for the explanation of
 //! any code.
 
 /// Metadata for one Fidan diagnostic code.
@@ -142,7 +142,7 @@ pub static CODES: &[DiagnosticCode] = &[
     },
     DiagnosticCode {
         code: "E0304",
-        title: "wrong number of extra arguments for decorator",
+        title: "invalid decorator configuration",
         category: "decorators",
     },
     DiagnosticCode {
@@ -246,7 +246,7 @@ pub static CODES: &[DiagnosticCode] = &[
     // ── Runtime: control flow ─────────────────────────────────────────────────
     DiagnosticCode {
         code: "R0001",
-        title: "unhandled interpreter error",
+        title: "unhandled runtime error",
         category: "runtime",
     },
     DiagnosticCode {
