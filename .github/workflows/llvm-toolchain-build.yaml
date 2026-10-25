@@ -210,6 +210,15 @@ jobs:
           cargo test -p fidan-driver --test concurrent_e2e --test extern_e2e --locked
           if ($LASTEXITCODE -ne 0) { throw 'Native backend and diagnostic contracts failed' }
 
+      - name: Helper-dependent CLI LLVM integration cases
+        if: inputs.validate
+        shell: pwsh
+        env:
+          FIDAN_REQUIRE_LLVM: "1"
+        run: |
+          cargo test -p fidan-cli --test dal_registry --locked -- --ignored
+          if ($LASTEXITCODE -ne 0) { throw 'Helper-dependent CLI LLVM integrations failed' }
+
       - name: Validate packaged LLVM toolchain (Windows)
         if: inputs.validate && runner.os == 'Windows'
         shell: pwsh

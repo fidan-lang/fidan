@@ -15,6 +15,16 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 
 class ExecutableInputTests(unittest.TestCase):
+    def test_installed_helper_job_executes_opt_in_cli_llvm_integrations(self):
+        document = yaml.safe_load((REPO / ".github/workflows/llvm-toolchain-build.yaml").read_text(encoding="utf-8"))
+        steps = document["jobs"]["build-llvm-toolchain"]["steps"]
+        case = next(step for step in steps if step.get("name") == "Helper-dependent CLI LLVM integration cases")
+        self.assertEqual(case["env"]["FIDAN_REQUIRE_LLVM"], "1")
+        self.assertIn("--test dal_registry --locked -- --ignored", case["run"])
+        install = next(step for step in steps if step.get("name") == "Install packaged LLVM toolchain into validation FIDAN_HOME")
+        self.assertLess(steps.index(install), steps.index(case))
+        self.assertEqual(case["if"], "inputs.validate")
+
     def test_large_toolchain_uses_runner_scratch_instead_of_os_tmpfs(self):
         document = yaml.safe_load((REPO / ".github/workflows/llvm-toolchain-build.yaml").read_text(encoding="utf-8"))
         step = next(step for job in document["jobs"].values() for step in job.get("steps", []) if step.get("name") == "Package LLVM toolchain artifact")
