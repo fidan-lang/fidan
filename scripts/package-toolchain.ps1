@@ -330,6 +330,82 @@ function Get-UnixSharedLibraryNames {
     Select-Object -ExpandProperty Name
 }
 
+function Get-LinuxLinkerDependencies {
+  param([string[]]$Lines)
+
+  foreach ($line in $Lines) {
+    if ($line -notmatch '=>') { continue } # vDSO and the host ELF loader.
+    if ($line -notmatch '^\s*(?<name>lib[^\s/]+)\s+=>\s+(?<path>/\S+)\s+\(0x[0-9a-fA-F]+\)\s*$') {
+      throw "Unresolved or unsupported linker dependency: $line"
+    }
+    $name = $Matches.name
+    $path = $Matches.path
+    # Keep glibc, its loader and the standard C++ runtime on the host ABI.
+    if ($name -match '^lib(c|m|pthread|dl|rt|util|resolv)\.so\.' -or
+        $name -match '^lib(gcc_s|stdc\+\+)\.so\.') { continue }
+    [PSCustomObject]@{ Name = $name; Path = $path }
+  }
+}
+
+function Copy-LinuxLinkerDependencies {
+  param([string]$LlvmRoot, [string]$StageDir)
+
+  $libDir = Join-Path $LlvmRoot 'lib'
+  $previousLibraryPath = $env:LD_LIBRARY_PATH
+  $previousLocale = $env:LC_ALL
+  try {
+    $env:LD_LIBRARY_PATH = $libDir
+    $env:LC_ALL = 'C'
+    $lines = & ldd (Join-Path $LlvmRoot 'bin/ld.lld') 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Cannot inspect packaged linker dependencies: $lines" }
+    $dependencies = @(Get-LinuxLinkerDependencies -Lines $lines)
+  } finally {
+    $env:LD_LIBRARY_PATH = $previousLibraryPath
+    $env:LC_ALL = $previousLocale
+  }
+
+  $licensesDir = Join-Path $StageDir 'licenses/linux-runtime'
+  $provenance = @()
+  foreach ($dependency in $dependencies) {
+    if ($dependency.Path.StartsWith($libDir + '/', [StringComparison]::Ordinal)) { continue }
+    if ($dependency.Path -notmatch '^/(usr/)?lib/') {
+      throw "Linker dependency is outside system library directories: $($dependency.Path)"
+    }
+    $ownership = & dpkg-query --search $dependency.Path
+    if ($LASTEXITCODE -ne 0 -or $ownership.Count -gt 1 -or
+        $ownership -notmatch '^(?<package>[a-z0-9][a-z0-9+.-]*(?::[a-z0-9]+)?): /') {
+      throw "Cannot establish package ownership for $($dependency.Path)"
+    }
+    $package = $Matches.package
+    $packageName = ($package -split ':')[0]
+    $copyright = "/usr/share/doc/$packageName/copyright"
+    if (-not (Test-Path -LiteralPath $copyright -PathType Leaf)) {
+      throw "Missing redistribution notices for dependency package $package"
+    }
+    $version = & dpkg-query --show '--showformat=${Version}' $package
+    if ($LASTEXITCODE -ne 0 -or -not $version) { throw "Cannot determine version for $package" }
+    New-Item -ItemType Directory -Force -Path $licensesDir | Out-Null
+    Copy-Item -LiteralPath $copyright -Destination (Join-Path $licensesDir "$packageName-copyright") -Force
+    # Debian copyright records can refer to a complete license in common-licenses.
+    $notice = Get-Content -LiteralPath $copyright -Raw
+    foreach ($reference in [regex]::Matches($notice, '/usr/share/common-licenses/[A-Za-z0-9.+-]+')) {
+      $licensePath = $reference.Value.TrimEnd('.')
+      if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) {
+        throw "Missing referenced license $licensePath for $package"
+      }
+      $licenseName = Split-Path -Leaf $licensePath
+      Copy-Item -LiteralPath $licensePath -Destination (Join-Path $licensesDir $licenseName) -Force
+    }
+    # Copy the content under the required SONAME, rather than a host-absolute symlink.
+    [IO.File]::Copy($dependency.Path, (Join-Path $libDir $dependency.Name), $false)
+    $provenance += [PSCustomObject]@{ library = $dependency.Name; package = $package; version = "$version" }
+  }
+  if ($provenance.Count) {
+    ConvertTo-Json -InputObject $provenance -Depth 3 |
+      Set-Content -LiteralPath (Join-Path $licensesDir 'packages.json') -Encoding utf8
+  }
+}
+
 function Remove-LlvmPayload {
   param([string]$LlvmRoot)
 
@@ -875,6 +951,9 @@ try {
   }
 
   if (($Kind -eq "llvm") -and $payloadRoot) {
+    if ($IsLinux) {
+      Copy-LinuxLinkerDependencies -LlvmRoot $payloadRoot -StageDir $stageDir
+    }
     Remove-LlvmPayload -LlvmRoot $payloadRoot
   }
 

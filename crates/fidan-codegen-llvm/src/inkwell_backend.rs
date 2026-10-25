@@ -88,6 +88,9 @@ fn native_target_cpu(target_triple: &str) -> Result<TargetCpuSpec> {
     }
     let raw_cpu = unsafe { LLVMGetHostCPUName() };
     let cpu = llvm_host_string(raw_cpu, "host CPU name")?;
+    if cpu.is_empty() {
+        bail!("LLVM returned an empty host CPU name");
+    }
     let raw_features = unsafe { LLVMGetHostCPUFeatures() };
     let features = llvm_host_string(raw_features, "host CPU features")?;
     Ok(TargetCpuSpec { cpu, features })
@@ -166,9 +169,8 @@ fn llvm_host_string(raw: *mut core::ffi::c_char, label: &str) -> Result<String> 
             LLVMDisposeMessage(raw);
         }
     }
-    if value.is_empty() {
-        bail!("LLVM returned an empty {label}");
-    }
+    // Empty feature overrides are valid: the named CPU supplies its defaults
+    // on hosts where LLVM does not expose an additional feature map (Darwin ARM).
     Ok(value)
 }
 
@@ -5160,6 +5162,19 @@ mod tests {
         };
         let spec = super::resolve_target_cpu(&request, "x86_64-pc-windows-msvc").unwrap();
         assert_eq!(spec.cpu, "aaaaaaé");
+    }
+
+    #[test]
+    fn empty_host_features_are_valid_but_null_is_not() {
+        let raw = unsafe { llvm_sys::core::LLVMCreateMessage(c"".as_ptr()) };
+        assert_eq!(
+            super::llvm_host_string(raw, "host CPU features").unwrap(),
+            ""
+        );
+        assert!(super::llvm_host_string(std::ptr::null_mut(), "host CPU features").is_err());
+        let host = super::current_host_triple().unwrap();
+        let spec = super::native_target_cpu(&host).unwrap();
+        assert!(!spec.cpu.is_empty());
     }
 
     #[test]

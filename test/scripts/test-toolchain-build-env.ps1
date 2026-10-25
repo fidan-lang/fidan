@@ -31,6 +31,26 @@ try {
 }
 
 
+# ldd output is data: missing/ambiguous dependencies must never produce a bundle.
+$external = @(Get-LinuxLinkerDependencies -Lines @(
+    ' linux-vdso.so.1 (0x00007fff00000000)',
+    ' libicui18n.so.70 => /lib/x86_64-linux-gnu/libicui18n.so.70 (0x00007fff00000000)',
+    ' libxml2.so.2 => /lib/x86_64-linux-gnu/libxml2.so.2 (0x00007fff00000000)',
+    ' libc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x00007fff00000000)',
+    ' libstdc++.so.6 => /lib/x86_64-linux-gnu/libstdc++.so.6 (0x00007fff00000000)',
+    ' /lib64/ld-linux-x86-64.so.2 (0x00007fff00000000)'
+))
+if ($external.Count -ne 2 -or $external[0].Name -ne 'libicui18n.so.70' -or
+    $external[1].Path -ne '/lib/x86_64-linux-gnu/libxml2.so.2') {
+    throw 'Linker dependencies must retain non-base libraries without bundling the host C/C++ runtime'
+}
+foreach ($invalid in @(' libicui18n.so.70 => not found', ' libicu.so => unexpected')) {
+    $rejected = $false
+    try { Get-LinuxLinkerDependencies -Lines @($invalid) | Out-Null }
+    catch { $rejected = $true }
+    if (-not $rejected) { throw 'Invalid linker dependency was silently ignored' }
+}
+
 # Stub only external Cargo: verify the environment passed to every command,
 # including cleanup when that command fails, without rebuilding LLVM four times.
 function cargo {
