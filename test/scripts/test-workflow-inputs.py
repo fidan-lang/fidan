@@ -15,6 +15,16 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 
 class ExecutableInputTests(unittest.TestCase):
+    def test_regular_ci_runs_the_actual_cranelift_sweep_on_intel_macos(self):
+        document = yaml.safe_load((REPO / ".github/workflows/ci.yaml").read_text(encoding="utf-8"))
+        job = document["jobs"]["test"]
+        self.assertIn("macos-15-intel", job["strategy"]["matrix"]["os"])
+        steps = job["steps"]
+        sweep = next(step for step in steps if step.get("name") == "Cranelift AOT example regressions")
+        self.assertIn("test_examples_aot.ps1 -Backend cranelift", sweep["run"])
+        self.assertNotIn("continue-on-error", sweep)
+        self.assertLess(next(i for i,s in enumerate(steps) if s.get("name") == "Build"), steps.index(sweep))
+
     def test_installed_helper_job_executes_opt_in_cli_llvm_integrations(self):
         document = yaml.safe_load((REPO / ".github/workflows/llvm-toolchain-build.yaml").read_text(encoding="utf-8"))
         steps = document["jobs"]["build-llvm-toolchain"]["steps"]

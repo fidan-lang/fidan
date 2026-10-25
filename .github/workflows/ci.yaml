@@ -23,6 +23,7 @@ jobs:
           - ubuntu-latest
           - windows-latest
           - macos-latest
+          - macos-15-intel
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -76,6 +77,12 @@ jobs:
 
       - name: Build
         run: cargo build --workspace --locked
+
+      - name: Cranelift AOT example regressions
+        shell: pwsh
+        run: |
+          ./test/scripts/test_examples_aot.ps1 -Backend cranelift
+          if ($LASTEXITCODE -ne 0) { throw 'Cranelift example sweep failed' }
 
       - name: Windows benchmark runner failure regressions
         if: runner.os == 'Windows'
