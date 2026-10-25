@@ -895,6 +895,8 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        let dir = std::fs::canonicalize(dir).expect("canonical temporary fixture");
         dir
     }
 

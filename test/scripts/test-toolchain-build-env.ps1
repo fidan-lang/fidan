@@ -14,6 +14,23 @@ foreach ($function in $ast.FindAll({ param($node) $node -is [System.Management.A
 
 . (Join-Path $repoRoot "scripts/shared/cargo-artifacts.ps1")
 
+# Pruning must preserve non-LLVM shared dependencies of official tool binaries.
+$sharedProbe = Join-Path $probeRoot ("shared-" + [Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $sharedProbe | Out-Null
+try {
+    $expectedShared = @('libLLVM.so.23.1', 'libicui18n.so.70', 'libicuuc.so.70', 'libxml2.so.2', 'libsupport.dylib')
+    foreach ($name in $expectedShared + @('libUnused.a', 'CMakeLists.txt')) {
+        New-Item -ItemType File -Path (Join-Path $sharedProbe $name) | Out-Null
+    }
+    $actualShared = @(Get-UnixSharedLibraryNames -LibDir $sharedProbe)
+    if (@(Compare-Object ($expectedShared | Sort-Object) ($actualShared | Sort-Object)).Count -ne 0) {
+        throw 'Unix pruning discarded a shared dependency or retained non-runtime files'
+    }
+} finally {
+    Remove-Item -LiteralPath $sharedProbe -Force -Recurse
+}
+
+
 # Stub only external Cargo: verify the environment passed to every command,
 # including cleanup when that command fails, without rebuilding LLVM four times.
 function cargo {

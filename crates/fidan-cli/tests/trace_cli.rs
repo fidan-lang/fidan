@@ -99,6 +99,8 @@ fn make_temp_dir(name: &str) -> PathBuf {
         .as_nanos();
     let path = std::env::temp_dir().join(format!("fidan_{name}_{}_{}", std::process::id(), nonce));
     std::fs::create_dir_all(&path).expect("create temp dir");
+    #[cfg(unix)]
+    let path = std::fs::canonicalize(path).expect("canonical temporary fixture");
     path
 }
 

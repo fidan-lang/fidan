@@ -1283,6 +1283,8 @@ version = "0.1.0"
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), nonce));
         fs::create_dir_all(&dir).expect("failed to create temp test dir");
+        #[cfg(unix)]
+        let dir = std::fs::canonicalize(dir).expect("canonical temporary fixture");
         dir
     }
 }

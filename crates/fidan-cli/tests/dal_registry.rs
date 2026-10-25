@@ -29,6 +29,8 @@ impl Sandbox {
             NEXT_SANDBOX.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir(&path).unwrap();
+        #[cfg(unix)]
+        let path = std::fs::canonicalize(path).expect("canonical temporary fixture");
         fs::write(
             path.join("dal.toml"),
             "[package]\nname = \"consumer\"\nversion = \"0.1.0\"\n",

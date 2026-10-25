@@ -323,6 +323,13 @@ function Add-UnixSymlinkClosure {
   return @($keep)
 }
 
+function Get-UnixSharedLibraryNames {
+  param([string]$LibDir)
+  Get-ChildItem -LiteralPath $LibDir -File -Force |
+    Where-Object { $_.Name -match '\.(so(?:\..+)?|dylib(?:\..+)?)$' } |
+    Select-Object -ExpandProperty Name
+}
+
 function Remove-LlvmPayload {
   param([string]$LlvmRoot)
 
@@ -375,30 +382,8 @@ function Remove-LlvmPayload {
     if ($IsLinux) {
       [void]$keepLibTopLevel.Add("x86_64-unknown-linux-gnu")
     }
-    $libKeepCandidates = @(
-      Get-ChildItem -LiteralPath $libDir -Force |
-      Where-Object {
-        if ($_.PSIsContainer) {
-          return $false
-        }
-
-        return (
-          $_.Name -like "libclang.so" -or
-          $_.Name -like "libclang.so.*" -or
-          $_.Name -like "libclang-cpp.so" -or
-          $_.Name -like "libclang-cpp.so.*" -or
-          $_.Name -like "libLTO.so" -or
-          $_.Name -like "libLTO.so.*" -or
-          $_.Name -like "libclang.dylib" -or
-          $_.Name -like "libclang.dylib.*" -or
-          $_.Name -like "libclang-cpp.dylib" -or
-          $_.Name -like "libclang-cpp.dylib.*" -or
-          $_.Name -like "libLTO.dylib" -or
-          $_.Name -like "libLTO.dylib.*"
-        )
-      } |
-      Select-Object -ExpandProperty Name
-    )
+    # Keep upstream runtime dependencies as well as LLVM-branded libraries.
+    $libKeepCandidates = @(Get-UnixSharedLibraryNames -LibDir $libDir)
     $libKeep = Add-UnixSymlinkClosure -DirectoryPath $libDir -InitialNames $libKeepCandidates
     $keepLibNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($name in $libKeep) {
