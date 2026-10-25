@@ -158,6 +158,8 @@ jobs:
       - name: Package LLVM toolchain artifact
         shell: pwsh
         env:
+          # Ubuntu runners mount /tmp as a small tmpfs; SDK extraction needs disk.
+          TMPDIR: ${{ runner.temp }}
           WF_INPUTS_TOOLCHAIN_VERSION: ${{ inputs.toolchain_version }}
           WF_INPUTS_LLVM_TOOL_VERSION: ${{ inputs.llvm_tool_version }}
           WF_STEPS_SOURCE_OUTPUTS_BACKEND_FEATURE: ${{ steps.source.outputs.backend_feature }}

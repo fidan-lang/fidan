@@ -15,6 +15,11 @@ import yaml
 REPO = Path(__file__).resolve().parents[2]
 
 class ExecutableInputTests(unittest.TestCase):
+    def test_large_toolchain_uses_runner_scratch_instead_of_os_tmpfs(self):
+        document = yaml.safe_load((REPO / ".github/workflows/llvm-toolchain-build.yaml").read_text(encoding="utf-8"))
+        step = next(step for job in document["jobs"].values() for step in job.get("steps", []) if step.get("name") == "Package LLVM toolchain artifact")
+        self.assertEqual(step["env"]["TMPDIR"], "${{ runner.temp }}")
+
     def test_real_release_run_bodies_treat_inputs_as_data(self):
         pwsh = shutil.which("pwsh")
         self.assertIsNotNone(pwsh, "PowerShell 7 required")
@@ -25,6 +30,7 @@ class ExecutableInputTests(unittest.TestCase):
             ("ai-analysis-toolchain-build.yaml", "Resolve helper version", "WF_INPUTS_TOOL_VERSION", "SemVer", {}),
             ("toolchain-bundle-publish.yaml", "Validate artifact identifiers before download", "ARTIFACT_PATTERN", "Unsafe release artifact", {"BUNDLE_ARTIFACT_NAME": "valid-bundle"}),
         )
+        (REPO / "target").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="workflow-inputs-", dir=REPO / "target") as tmp:
             scratch = Path(tmp)
             marker = scratch / "INJECTED"
