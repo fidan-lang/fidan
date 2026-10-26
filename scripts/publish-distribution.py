@@ -84,7 +84,7 @@ def publish(bundle):
         if heading not in changelog:
             raise ValueError("Missing versioned release notes")
         notes = heading + changelog.split(heading, 1)[1].split("\n## ", 1)[0]
-        notes += "\nInstallation and optional toolchains: https://github.com/fidan-lang/fidan#installation\n"
+        notes += "\nInstallation and optional toolchains: https://github.com/fidan-lang/fidan#install-from-a-published-release\n"
         (bundle / "release-notes.md").write_text(notes, encoding="utf-8")
     # Read and compare immediately before upload; the final conditional write also
     # rejects publishers racing after this check. Never retry a stale manifest.
@@ -96,7 +96,7 @@ def publish(bundle):
     for path in files:
         key = path.relative_to(payload).as_posix()
         aws("put-object", "--key", key, "--body", str(path), "--if-none-match", "*",
-            "--cache-control", "no-cache")
+            "--cache-control", "public,max-age=31536000,immutable")
         print(f"Published immutable artifact: {key}")
     aws("put-object", "--key", "manifest.json", "--body", str(bundle / "manifest.json"),
         "--if-match", metadata["ETag"], "--content-type", "application/json", "--cache-control", "no-cache")
