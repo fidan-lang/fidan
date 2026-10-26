@@ -1173,8 +1173,9 @@ fidan explain --diagnostic E0401    # print a full page of documentation for thi
 
 The source candidate preserves diagnostic identity across execution backends:
 uncaught user panics use R1002, guarded call-stack exhaustion uses R1001, and
-task-group failures use R9001. See [diagnostic applicability and regression
-coverage](docs/DIAGNOSTIC_PARITY.md) for catchability and backend limits.
+task-group failures use R9001. Use `fidan explain --diagnostic CODE` for each
+documented error contract. [Native regression tests](crates/fidan-driver/tests/concurrent_e2e.rs)
+exercise catchability, callback propagation and backend-specific limits.
 
 ---
 
