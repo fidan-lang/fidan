@@ -96,7 +96,7 @@ def publish(bundle):
     for path in files:
         key = path.relative_to(payload).as_posix()
         aws("put-object", "--key", key, "--body", str(path), "--if-none-match", "*",
-            "--cache-control", "no-cache")
+            "--cache-control", "public,max-age=31536000,immutable")
         print(f"Published immutable artifact: {key}")
     aws("put-object", "--key", "manifest.json", "--body", str(bundle / "manifest.json"),
         "--if-match", metadata["ETag"], "--content-type", "application/json", "--cache-control", "no-cache")

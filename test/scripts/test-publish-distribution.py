@@ -44,6 +44,8 @@ class PublicationTests(unittest.TestCase):
             self.assertIn("#install-from-a-published-release", (bundle / "release-notes.md").read_text())
             puts = [args for operation, args in calls if operation == "put-object"]
             self.assertEqual(len(puts), 2)
+            self.assertIn("public,max-age=31536000,immutable", puts[0])
+            self.assertIn("no-cache", puts[1])
             self.assertIn("--if-none-match", puts[0])
             self.assertIn("*", puts[0])
             self.assertIn("--if-match", puts[1])
