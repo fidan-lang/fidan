@@ -29,7 +29,7 @@ fs.copyFileSync(compiler,path.join(stage,binary));
 for(const name of ['LICENSE','NOTICE'])fs.copyFileSync(path.join(root,name),path.join(stage,name));
 // Include the matching source ABI runtime required for native link tests.
 for(const name of fs.readdirSync(path.dirname(compiler)).filter(n=>/^(?:lib)?fidan_runtime\.(?:lib|dll|dll.lib|a|so|dylib)$/.test(n)))
- fs.copyFileSync(path.join(root,'target/debug',name),path.join(stage,name));
+ fs.copyFileSync(path.join(path.dirname(compiler),name),path.join(stage,name));
 const compilerArchive=path.join(output,'compiler.tar.gz');
 assert.equal(spawnSync('tar',['-czf',compilerArchive,'-C',stage,'.'],{windowsHide:true}).status,0);
 const entry={version:candidate.compiler_version,host_triple:helper.host_triple,binary_relpath:binary,sha256:digest(compilerArchive),url:`https://candidate.invalid/fidan/${candidate.compiler_version}/${helper.host_triple}/compiler.tar.gz`};
