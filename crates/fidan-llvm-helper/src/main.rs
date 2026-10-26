@@ -11,6 +11,7 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(
     name = "fidan-llvm-helper",
+    version,
     about = "LLVM helper process for Fidan toolchains"
 )]
 struct Cli {

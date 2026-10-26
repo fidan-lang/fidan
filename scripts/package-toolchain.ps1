@@ -742,10 +742,10 @@ function Invoke-HelperBuild {
     }
 
     if ($HelperCargoFeatures) {
-      cargo build -p $HelperPackage --release --features $HelperCargoFeatures
+      cargo build -p $HelperPackage --release --locked --features $HelperCargoFeatures
     }
     else {
-      cargo build -p $HelperPackage --release
+      cargo build -p $HelperPackage --release --locked
     }
     if ($LASTEXITCODE -ne 0) {
       throw "Failed to build $HelperPackage"

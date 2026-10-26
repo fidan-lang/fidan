@@ -1371,39 +1371,30 @@ Made with ❤️ by [Kaan Gönüldinc (AppSolves)](https://github.com/AppSolves)
 
 </div>
 
-## Upcoming source candidate versus released 1.0.16
+## Fidan 1.1.0 compatibility
 
-The public 1.0.16 release remains available through the stable installer. The
-reviewed upcoming source additionally provides callable `.name`/`.parameters`
+This source tree reports **Fidan 1.1.0**. It adds callable `.name`/`.parameters`
 metadata and `.invoke(list)`, custom decorator replacement, Boolean short-circuit
-execution, recursive source-tool directory handling and global `-v` diagnostics.
-Do not infer support from a version string alone while source package metadata
-still reports 1.0.16. Candidate CI pins full source commits and probes behavior.
+execution, recursive source-tool directory handling and global `-v` diagnostics
+compared with the published 1.0.16 binary. Publication is verified separately;
+committed version metadata alone does not mean release artifacts are available.
 
 Use `callback(a, b)` normally; `callback.invoke(arguments)` is for a positional
 argument list computed at runtime. It reuses normal arity/default/type/error
 handling. Reflection never executes computed defaults or exposes closure captures.
 Both operands of `and`/`or` are statically checked; only the necessary RHS executes.
-The new args framework depends on these candidate contracts, not the old binary.
-LLVM candidate execution requires the matching backend-protocol-8 helper; do not
-mix it with the older published helper or overwrite stable artifacts.
+Sequence RHS work explicitly if an older program relied on eager evaluation.
 
-The website source contains implementation-verified guides for operators,
-collections/enums, callable reflection, args, complete generated API/CLI catalogs
-and migration. Its exact-source CI is a coordinated PR dependency, not proof that
-the new website/compiler/package has already been published. Production release
-approval remains separate from local engineering validation.
+LLVM AOT requires **LLVM toolchain/helper 1.1.0**, backend protocol **8**, built
+against LLVM **23.1.2**. The older published 1.0.6 helper uses protocol 5 and is
+not compatible with this compiler. **AI Analysis toolchain/helper 1.0.5** retains
+helper protocol **2**; it refreshes packaging and integration without adding AI
+features. Existing 1.0.16 and older toolchain artifacts remain immutable.
 
-## Planned stable release sequence
+## Coordinated release order
 
-The next coordinated release is **Fidan 1.1.0 stable** with **LLVM helper 1.1.0**
-(protocol 8), followed by **args 0.1.0**. No public RC is planned.
-The source checkout still reports 1.0.16 until isolated release preparation applies
-`config/release-candidate.json`; source-candidate CI identifies it by exact commit.
-Published 1.0.16 and older helper artifacts remain immutable.
-
-Release order: engineering/merge gates → Fidan 1.1.0 stable artifacts → DAL
-production readiness and launch → args 0.1.0 publication → approved editor,
-website and distribution updates. The args source manifest remains blocked until
-both its compatible compiler release and production registry are operational.
-Preparation and CI do not authorize tags, publication or deployment.
+Engineering/merge gates → Fidan 1.1.0 stable compiler and optional toolchains →
+DAL production readiness and launch → args 0.1.0 publication → separately approved
+editor and website updates. No public RC is planned. DAL production and args
+publication are separate gates; the checked-in args manifest intentionally retains
+its unpublished compiler sentinel until both prerequisites are operational.

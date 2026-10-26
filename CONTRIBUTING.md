@@ -293,3 +293,26 @@ Get-ChildItem crates -Directory | ForEach-Object { Copy-Item LICENSE, NOTICE $_.
 CI checks the copies against the root. Do not edit crate legal copies independently or
 apply this operation to third-party dependencies. Workspace license metadata uses
 SPDX `Apache-2.0`; the standard license file remains included in package archives.
+
+### Coordinated stable release references
+
+`config/release-candidate.json` owns the compiler/helper release versions and protocols.
+`config/ecosystem-sources.json` owns the immutable external Setup Action, args and
+DAL source commits; it deliberately does not pin its own compiler commit.
+After the compiler release-source commit is final, run from this checkout:
+
+```sh
+python scripts/sync-ecosystem-references.py --compiler-sha <40-character-final-compiler-SHA> --write
+python scripts/sync-ecosystem-references.py --compiler-sha <40-character-final-compiler-SHA>
+```
+
+The first command updates only sibling candidate contracts and their verifier
+checkouts. The second fails on drift and is idempotent. Commit the consumer
+updates without repinning the already-final compiler; keep args' unpublished
+manifest sentinel until the production registry and compatible compiler are ready.
+
+Release workflows serialize distribution-manifest publication. The shared
+publisher checks archive hashes, retains existing release entries, creates payload
+objects with `If-None-Match: *`, and publishes the manifest with its original ETag.
+A collision, stale bundle or failed upload stops publication. Investigate partial
+uploads before retrying; do not overwrite immutable artifacts or bypass conditions.

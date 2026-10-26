@@ -1,9 +1,11 @@
 {
   "schema_version": 1,
-  "status": "PROPOSED_NOT_RELEASED",
+  "status": "PREPARED_NOT_RELEASED",
   "compiler_version": "1.1.0",
   "llvm_helper_version": "1.1.0",
   "llvm_backend_protocol": 8,
   "args_version": "0.1.0",
-  "args_compiler_requirement": "=1.1.0"
+  "args_compiler_requirement": "=1.1.0",
+  "ai_analysis_helper_version": "1.0.5",
+  "ai_analysis_helper_protocol": 2
 }

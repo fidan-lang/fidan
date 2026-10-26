@@ -203,7 +203,7 @@ $shouldBuildWindowsInstaller = $script:IsWindowsHost -and (
 )
 
 if (-not $SkipBuild) {
-  cargo build -p fidan-cli -p fidan-runtime -p libfidan --release
+  cargo build -p fidan-cli -p fidan-runtime -p libfidan --release --locked
   if ($LASTEXITCODE -ne 0) { throw "Release build failed; refusing to package an older binary." }
 }
 

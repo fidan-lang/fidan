@@ -863,7 +863,7 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
 name = "fidan-ai-analysis-helper"
-version = "1.0.4"
+version = "1.0.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -877,7 +877,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-ast"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-lexer",
  "fidan-source",
@@ -886,7 +886,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-cli"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-codegen-cranelift"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "cranelift-codegen",
@@ -951,7 +951,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-codegen-llvm"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "fidan-ast",
@@ -968,11 +968,11 @@ dependencies = [
 
 [[package]]
 name = "fidan-config"
-version = "1.0.16"
+version = "1.1.0"
 
 [[package]]
 name = "fidan-diagnostics"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-source",
  "regex",
@@ -984,7 +984,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-driver"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "fidan-ast",
@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-embed"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "libfidan",
  "thiserror",
@@ -1016,14 +1016,14 @@ dependencies = [
 
 [[package]]
 name = "fidan-extern-fixture"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-runtime",
 ]
 
 [[package]]
 name = "fidan-fmt"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-ast",
  "fidan-diagnostics",
@@ -1036,7 +1036,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-hir"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-ast",
  "fidan-config",
@@ -1049,7 +1049,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-interp"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-ast",
  "fidan-codegen-cranelift",
@@ -1072,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-lexer"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-diagnostics",
  "fidan-source",
@@ -1082,7 +1082,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-llvm-helper"
-version = "1.0.6"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1094,7 +1094,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-lsp"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "dashmap 6.2.1",
  "fidan-ast",
@@ -1115,7 +1115,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-mir"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-ast",
  "fidan-config",
@@ -1132,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-parser"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-ast",
  "fidan-diagnostics",
@@ -1142,7 +1142,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-passes"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-ast",
  "fidan-lexer",
@@ -1154,7 +1154,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-runtime"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "dashmap 6.2.1",
  "fidan-config",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-secrets"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -1181,14 +1181,14 @@ dependencies = [
 
 [[package]]
 name = "fidan-source"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "fidan-stdlib"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-config",
  "fidan-diagnostics",
@@ -1198,7 +1198,7 @@ dependencies = [
 
 [[package]]
 name = "fidan-typeck"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-ast",
  "fidan-config",
@@ -1910,7 +1910,7 @@ dependencies = [
 
 [[package]]
 name = "libfidan"
-version = "1.0.16"
+version = "1.1.0"
 dependencies = [
  "fidan-driver",
  "fidan-interp",

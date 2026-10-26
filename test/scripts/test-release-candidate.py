@@ -15,6 +15,14 @@ spec.loader.exec_module(candidate)
 
 
 class CandidateTests(unittest.TestCase):
+    def test_committed_release_versions_and_protocols_match(self):
+        value = candidate.configuration()
+        self.assertEqual(tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"], value["compiler_version"])
+        for kind, version in (("llvm", "1.1.0"), ("ai-analysis", "1.0.5")):
+            self.assertEqual(tomllib.loads((ROOT / f"crates/fidan-{kind}-helper/Cargo.toml").read_text())["package"]["version"], version)
+        self.assertEqual(value["ai_analysis_helper_version"], "1.0.5")
+        self.assertEqual(value["ai_analysis_helper_protocol"], 2)
+
     def test_protocol_and_exact_args_version_are_one_contract(self):
         value = candidate.configuration()
         self.assertEqual(value["llvm_backend_protocol"], 8)
@@ -52,10 +60,10 @@ class CandidateTests(unittest.TestCase):
             self.assertEqual(tomllib.loads((output / "fidan/Cargo.toml").read_text())["workspace"]["package"]["version"], value["compiler_version"])
             self.assertEqual(tomllib.loads((output / "fidan/crates/fidan-llvm-helper/Cargo.toml").read_text())["package"]["version"], value["llvm_helper_version"])
             self.assertEqual(tomllib.loads((output / "args/dal.toml").read_text())["package"]["fidan"], value["args_compiler_requirement"])
-            self.assertEqual(json.loads((output / "release-preparation.json").read_text())["status"], "PROPOSED_NOT_RELEASED")
+            self.assertEqual(json.loads((output / "release-preparation.json").read_text())["status"], "PREPARED_NOT_RELEASED")
             for package in lock["package"]:
                 if package["name"].startswith("fidan-") and "source" not in package:
-                    expected = "1.0.4" if package["name"] == "fidan-ai-analysis-helper" else value["compiler_version"]
+                    expected = value["ai_analysis_helper_version"] if package["name"] == "fidan-ai-analysis-helper" else value["compiler_version"]
                     self.assertEqual(package["version"], expected, package["name"])
             self.assertEqual((output / "fidan/NOTICE").read_bytes(), (ROOT / "NOTICE").read_bytes())
         self.assertEqual(before, [p.read_bytes() for p in names])

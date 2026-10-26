@@ -10,65 +10,43 @@ compiler releases.
 
 ## [Unreleased]
 
-### Fixed
-- Preserve runtime diagnostic identity and original caught values through native,
-  JIT, callback and async boundaries; uncaught user panics consistently report R1002.
-- Enforce R1001 call-depth/stack-reserve checks, aggregate task-group failures as
-  R9001, and stop callback/certain-argument execution after failure.
-- Preserve informational diagnostic codes, reject known non-callable values and
-  run MIR safety checks before backend provisioning; correct async/hot-loop warnings.
-
+## [1.1.0] — 2026-10-27
 
 ### Added
-- Global `-v`/`-vv`/`-vvv` operational diagnostics on stderr, with compiler,
-  package/toolchain, native helper and LSP instrumentation, bounded redaction,
-  and documented first-party RUST_LOG filters. Program argument forwarding,
-  application stdout and existing language diagnostics are preserved.
+- Global `-v`, `-vv`, and `-vvv` operational diagnostics on stderr, with bounded
+  secret redaction and preserved program stdout, argument forwarding and LSP transport.
+- Callable signature reflection (`.name`, `.parameters`, `.invoke(list)`), custom
+  decorator replacement and consistent named/default callback argument handling.
+- Recursive directory support in source-tool commands, retaining file validation.
 
-- **Semantic change:** logical `and`/`or` (including `&&`/`||`) now short-circuit
-  left-to-right. Both operands remain statically typechecked; only evaluated
-  flexible operands undergo runtime Boolean validation. Skipped RHS callbacks,
-  defaults, side effects and exceptions no longer execute. Explicitly sequence
-  any RHS work that was intended to run unconditionally.
-
-- Enforce compiler-attribute arguments and retain constant deprecation reasons.
-- Complete native numeric receiver methods and Shared/WeakShared type fields;
-  correct Cranelift Dict/HashSet emptiness lowering.
-- Reject empty interpolation before in-place formatting can replace invalid source.
-
-- Bind saved Dal credentials to canonical registry identities and reject authenticated redirects.
-- Preserve working compiler/helper installations on failed refresh; validate install selectors
-  and archive members, and serialize release publication using an OS-owned file lock.
-- Correct native named/default argument preparation and object/dict provenance.
-- Isolate mutable parallel capture/global graphs and Shared snapshots; failed updates
-  roll back callback mutations. Reject foreign cooperative scheduler handles cleanly.
-- Require matching LLVM backend protocol8 for thread-local native globals. Existing
-  public 1.0.16/helper 1.0.6 assets are unchanged. The selected next release is Fidan 1.1.0 stable
-  with LLVM helper 1.1.0; publication remains a separate approval gate.
+### Changed
+- **Migration:** Boolean `and`/`or` and `&&`/`||` now short-circuit left-to-right.
+  Both operands are still statically checked. Skipped right-hand side effects,
+  callbacks and exceptions do not execute; explicitly sequence unconditional work.
+- LLVM AOT now requires LLVM toolchain/helper **1.1.0**, backend protocol **8**,
+  using upstream LLVM **23.1.2**. Published protocol-5 helpers cannot serve 1.1.0.
+- AI Analysis toolchain/helper **1.0.5** refreshes packaging and integration while
+  retaining helper protocol **2** and the existing AI feature set.
 
 ### Fixed
-- Honor advertised Unicode string and collection length properties through shared receiver dispatch.
-- Preserve the receiver key type in `Dict.keys()` type inference, signatures and editor metadata.
-- Complete arm-local enum payload bindings in both `check` forms, retain literal payload comparisons,
-  and preserve shadowed outer bindings. Native enum payload construction now matches interpreter dispatch.
+- Preserve runtime diagnostic identity and caught values through native, JIT,
+  callback, async and parallel boundaries; report user panics as R1002, enforce
+  R1001 call-depth/stack-reserve checks and aggregate task-group failures as R9001.
+- Correct native nullable values, enum payload bindings, collection properties,
+  module/private-state identity, and flexible conditions across supported backends.
+- Tighten action/receiver type checking and preserve compiler, warning and LSP
+  diagnostic codes, including UTF-16 editor coordinates and imported action metadata.
+- Verify registry checksums and portable archive paths; bound resolver/download
+  work, preserve checksum locks, and make install/cache/metadata replacement atomic.
+- Bind saved Dal credentials to canonical registry identities, reject authenticated
+  redirects, and enforce interpreter sandbox and canonical filesystem boundaries.
+- Preserve installed compiler/helper pairs after failed refresh and explicitly
+  release publication locks even when a child retains a duplicated file handle.
+- Retain unmodified Windows release executables during bootstrap packaging and
+  support standalone WinGetCreate submission without App Installer provisioning.
 
----
-
-## Unreleased — Dal relaunch integration candidate
-
-- Verify registry archive checksums before install; bound and validate archives,
-  responses, cache contents and portable paths; use staging/rollback for replacement.
-- Preserve manifest metadata, support optional compiler SemVer requirements and
-  resolve transitive constraints/features with bounded deterministic backtracking.
-- Preserve exact checksum locks for yanked artifacts; serialize concurrent CLI updates
-  and atomically replace metadata with rollback on a second-file failure.
-- Fix package/module action, private state and re-export identity, nullable scalar
-  representation and Dynamic native conditions exposed by real package execution.
-- Enforce existing interpreter sandbox policy for std.env and canonical filesystem
-  boundaries. Update the compatible rustls security patch.
-- Require LLVM backend protocol 8 for the current module/callable/thread-local-global ABI. This needs a
-  coordinated Fidan 1.1.0 stable / LLVM helper 1.1.0 release; existing published assets and
-  package versions are unchanged by this local preparation.
+DAL production launch and args 0.1.0 publication are separate approvals; this
+compiler release does not publish either. Existing release artifacts are retained.
 
 ## [1.0.16] — 2026-10-07
 
@@ -637,7 +615,8 @@ compiler releases.
 - **Enum types**, slices, decorator system, `check`/`case` pattern matching,
   `loop from … to`, `for … in`, `while`, `concurrent { … }`, `parallel { … }`.
 
-[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.0.16...HEAD
+[Unreleased]: https://github.com/fidan-lang/fidan/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/fidan-lang/fidan/compare/v1.0.16...v1.1.0
 [1.0.16]: https://github.com/fidan-lang/fidan/compare/v1.0.15...v1.0.16
 [1.0.15]: https://github.com/fidan-lang/fidan/compare/v1.0.14...v1.0.15
 [1.0.14]: https://github.com/fidan-lang/fidan/compare/v1.0.13...v1.0.14

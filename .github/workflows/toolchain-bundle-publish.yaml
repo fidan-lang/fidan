@@ -108,16 +108,23 @@ jobs:
     name: Publish to R2
     runs-on: ubuntu-latest
     needs: bundle
+    concurrency:
+      group: distribution-manifest-publication
+      cancel-in-progress: false
     if: ${{ inputs.publish }}
     environment: releases
 
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ${{ inputs.bundle_artifact_name }}
           path: dist/release
 
-      - name: Upload payload to R2
+      - name: Publish immutable payload and conditional manifest
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
@@ -126,26 +133,4 @@ jobs:
           AWS_DEFAULT_REGION: auto
           R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
           R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          aws s3 sync dist/release/payload "s3://$R2_BUCKET/" \
-            --endpoint-url "$R2_ENDPOINT" \
-            --checksum-algorithm SHA256 \
-            --cache-control "no-cache" \
-            --no-progress
-
-      - name: Upload manifest to R2
-        shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
-          AWS_REGION: auto
-          AWS_DEFAULT_REGION: auto
-          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          aws s3 cp dist/release/manifest.json "s3://$R2_BUCKET/manifest.json" \
-            --endpoint-url "$R2_ENDPOINT" \
-            --content-type "application/json" \
-            --cache-control "no-cache"
+        run: python3 scripts/publish-distribution.py dist/release

@@ -1,4 +1,4 @@
-"""Prepare isolated proposed sources; never edit a release, tag or live checkout."""
+"""Prepare isolated release sources; never edit a release, tag or live checkout."""
 import argparse
 import json
 from pathlib import Path
@@ -12,9 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def configuration(root=ROOT):
     candidate = json.loads((root / "config/release-candidate.json").read_text())
-    if candidate["status"] != "PROPOSED_NOT_RELEASED":
-        raise ValueError("Only explicitly proposed candidates may be staged")
-    for key in ("compiler_version", "llvm_helper_version"):
+    if candidate["status"] != "PREPARED_NOT_RELEASED":
+        raise ValueError("Only explicitly prepared, unpublished releases may be staged")
+    for key in ("compiler_version", "llvm_helper_version", "ai_analysis_helper_version"):
         if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", candidate[key]):
             raise ValueError("Release preparation requires stable SemVer versions")
     if candidate["llvm_helper_version"] != candidate["compiler_version"]:
@@ -23,6 +23,10 @@ def configuration(root=ROOT):
     protocol = int(re.search(r"LLVM_BACKEND_PROTOCOL_VERSION: u32 = (\d+)", source)[1])
     if candidate["llvm_backend_protocol"] != protocol:
         raise ValueError("Candidate protocol differs from compiler source")
+    ai_source = (root / "crates/fidan-driver/src/ai_analysis.rs").read_text()
+    ai_protocol = int(re.search(r"AI_ANALYSIS_HELPER_PROTOCOL_VERSION: u32 = (\d+)", ai_source)[1])
+    if candidate["ai_analysis_helper_protocol"] != ai_protocol:
+        raise ValueError("AI helper protocol differs from compiler source")
     if candidate["args_compiler_requirement"] != "=" + candidate["compiler_version"]:
         raise ValueError("args must select the exact rehearsed candidate")
     return candidate
@@ -62,6 +66,9 @@ def prepare(output, args_root, root=ROOT):
     helper = compiler / "crates/fidan-llvm-helper/Cargo.toml"
     old_helper = tomllib.loads(helper.read_text())["package"]["version"]
     helper.write_text(helper.read_text().replace('version = "' + old_helper + '"', 'version = "' + candidate["llvm_helper_version"] + '"', 1))
+    ai_helper = compiler / "crates/fidan-ai-analysis-helper/Cargo.toml"
+    old_ai = tomllib.loads(ai_helper.read_text())["package"]["version"]
+    ai_helper.write_text(ai_helper.read_text().replace('version = "' + old_ai + '"', 'version = "' + candidate["ai_analysis_helper_version"] + '"', 1))
     package = output / "args/dal.toml"
     sentinel = 'fidan = "=0.0.0-args-unreleased"'
     if sentinel not in package.read_text():

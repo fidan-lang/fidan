@@ -159,16 +159,23 @@ jobs:
     name: Publish to R2
     runs-on: ubuntu-latest
     needs: bundle
+    concurrency:
+      group: distribution-manifest-publication
+      cancel-in-progress: false
     if: ${{ github.event_name == 'push' || inputs.publish }}
     environment: releases
 
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: distribution-bundle
           path: dist/release
 
-      - name: Upload payload to R2
+      - name: Publish immutable payload and conditional manifest
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
@@ -177,29 +184,7 @@ jobs:
           AWS_DEFAULT_REGION: auto
           R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
           R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          aws s3 sync dist/release/payload "s3://$R2_BUCKET/" \
-            --endpoint-url "$R2_ENDPOINT" \
-            --checksum-algorithm SHA256 \
-            --cache-control "no-cache" \
-            --no-progress
-
-      - name: Upload manifest to R2
-        shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.CLOUDFLARE_R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.CLOUDFLARE_R2_SECRET_ACCESS_KEY }}
-          AWS_REGION: auto
-          AWS_DEFAULT_REGION: auto
-          R2_ENDPOINT: https://${{ secrets.CLOUDFLARE_R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          R2_BUCKET: ${{ secrets.CLOUDFLARE_R2_BUCKET }}
-        run: |
-          set -euo pipefail
-          aws s3 cp dist/release/manifest.json "s3://$R2_BUCKET/manifest.json" \
-            --endpoint-url "$R2_ENDPOINT" \
-            --content-type "application/json" \
-            --cache-control "no-cache"
+        run: python3 scripts/publish-distribution.py dist/release
 
       - name: Publish GitHub release assets
         if: ${{ github.event_name == 'push' }}
@@ -208,27 +193,10 @@ jobs:
           files: |
             dist/release/payload/fidan/**/*.tar.gz
             dist/release/payload/fidan/**/*.exe
-          generate_release_notes: true
+          body_path: dist/release/release-notes.md
+          generate_release_notes: false
           make_latest: true
           append_body: true
-          body: |
-            ## Installation
-
-            Bootstrap installers:
-            - Windows installer: download [`fidan_windows_bootstrap_${{ github.ref_name }}.exe`](https://github.com/fidan-lang/fidan/releases/download/${{ github.ref_name }}/fidan_windows_bootstrap_${{ github.ref_name }}.exe) from this Release and run it.
-            - WinGet: install via `winget install --id=Fidan.Fidan --source=winget`
-            - Windows PowerShell: `iwr https://fidan.dev/install.ps1 -UseBasicParsing | iex`
-            - POSIX shell: `curl -fsSL https://fidan.dev/install.sh | sh`
-
-            Direct downloads:
-            - Release tarballs are attached to this GitHub Release.
-            - The machine-readable manifest is published at `https://releases.fidan.dev/manifest.json`.
-
-            ## Notes
-
-            - The `fidan` binaries published here are self-managed installs.
-            - Optional toolchains such as LLVM are distributed separately via `releases.fidan.dev`.
-            - By installing Fidan or any separately distributed toolchain component, you agree to the license and terms of the respective component.
 
   winget:
     name: Submit winget manifest
