@@ -22,9 +22,9 @@ impl crate::Pass for ConstantFolding {
                     _ => None,
                 })
                 .collect();
-            // Parameter annotations (even certain) do not validate runtime types
-            // for flexible calls. Only literal values and their SSA copies prove
-            // types here; globals, phis and other definitions remain unknown.
+            // Declarations alone do not prove a value's non-nullable representation
+            // at this point. Retain runtime validation unless literal values and
+            // SSA copies prove the identity safe; globals/phis remain unknown.
             let mut known_types = FxHashMap::default();
             for bb in &mut func.blocks {
                 for instr in &mut bb.instructions {

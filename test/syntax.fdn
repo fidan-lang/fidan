@@ -152,7 +152,7 @@ var gt2  = 5 greaterthan 3
 var lte  = 3 <= 3
 var gte  = 5 >= 5
 
-# Logical
+# Logical: Boolean-only, left-to-right short-circuit (both sides typechecked).
 var and1 = true and false
 var and2 = true && false          # `&&` alias
 var or1  = true or false

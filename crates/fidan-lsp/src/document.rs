@@ -8,6 +8,21 @@ use fidan_source::Span;
 use std::collections::HashMap;
 use tower_lsp::lsp_types::{Diagnostic, SemanticToken, Url};
 
+/// Explicit module forwarding; ordinary imports remain private to their module.
+#[derive(Debug, Clone)]
+pub enum ReExport {
+    Wildcard(Url),
+    Named {
+        source: Url,
+        original: String,
+        binding: String,
+    },
+    Namespace {
+        source: Url,
+        binding: String,
+    },
+}
+
 /// A single open document tracked by the language server.
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // version and diagnostics used by future hover/refactor handlers
@@ -30,6 +45,7 @@ pub struct Document {
     pub direct_imports: HashMap<String, (Url, String)>,
     /// Ordered wildcard file imports from `use "file.fdn"` declarations.
     pub wildcard_imports: Vec<Url>,
+    pub re_exports: Vec<ReExport>,
     /// Stdlib module alias → canonical module name. E.g. `use std.io` → `"io" → "io"`;
     /// `use std.math as m` → `"m" → "math"`.
     pub stdlib_imports: HashMap<String, String>,

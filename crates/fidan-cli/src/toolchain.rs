@@ -1,6 +1,6 @@
 use crate::distribution::{
     extract_tar_gz, fetch_cached_bytes, fetch_manifest, materialize_release_root,
-    select_toolchain_release, stage_dir, write_bytes,
+    select_toolchain_release, stage_dir, validate_release_member,
 };
 use crate::prompts::prompt_yes_no;
 use anyhow::{Context, Result, bail};
@@ -55,6 +55,7 @@ pub(crate) fn install_toolchain(name: &str, version: Option<&str>) -> Result<()>
 
 pub(crate) fn ensure_ai_toolchain_installed() -> Result<ResolvedToolchain> {
     let home = resolve_fidan_home()?;
+    fidan_diagnostics::tracing::debug!(home = %home.display(), "toolchain installation scope resolved");
     let installed = fidan_driver::install::installed_toolchains(&home, Some("ai-analysis"))?;
     if let Some(toolchain) = installed.iter().find(|toolchain| {
         toolchain.metadata.backend_protocol_version
@@ -137,6 +138,7 @@ where
     F: Fn(&std::path::Path) -> Result<Option<ResolvedToolchain>>,
 {
     let home = resolve_fidan_home()?;
+    fidan_diagnostics::tracing::debug!(home = %home.display(), "toolchain installation scope resolved");
     if let Some(toolchain) = find_toolchain(&home)? {
         return validate_toolchain(kind, toolchain);
     }
@@ -222,6 +224,7 @@ fn run_available() -> Result<()> {
 
 fn run_list() -> Result<()> {
     let home = resolve_fidan_home()?;
+    fidan_diagnostics::tracing::debug!(home = %home.display(), "toolchain installation scope resolved");
     let toolchains = fidan_driver::install::installed_toolchains(&home, None)?;
     if toolchains.is_empty() {
         render_message_to_stderr(
@@ -267,11 +270,24 @@ fn run_list() -> Result<()> {
     Ok(())
 }
 
+fn validate_selector(name: &str, version: Option<&str>) -> Result<()> {
+    validate_release_member(name)?;
+    if name.contains('/') {
+        bail!("toolchain name must be a single path component");
+    }
+    if let Some(version) = version.filter(|version| *version != "latest") {
+        semver::Version::parse(version).context("invalid toolchain version")?;
+    }
+    Ok(())
+}
+
 fn run_add(name: &str, version: Option<&str>) -> Result<()> {
+    validate_selector(name, version)?;
     let manifest = fetch_manifest(None)?;
     let host = fidan_driver::install::host_triple();
     let release = select_toolchain_release(&manifest, name, version, &host)?;
     let home = resolve_fidan_home()?;
+    fidan_diagnostics::tracing::debug!(home = %home.display(), "toolchain installation scope resolved");
     let parent = home.join("toolchains").join(name).join(&host);
     fs::create_dir_all(&parent)
         .with_context(|| format!("failed to create `{}`", parent.display()))?;
@@ -293,12 +309,6 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
             );
         }
 
-        fs::remove_dir_all(&final_dir).with_context(|| {
-            format!(
-                "failed to replace existing toolchain directory `{}`",
-                final_dir.display()
-            )
-        })?;
         refreshed = true;
     }
 
@@ -319,12 +329,6 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
     let extract_result = extract_tar_gz(&bytes, &staging);
     progress.finish_and_clear();
     extract_result?;
-    materialize_release_root(
-        &staging,
-        &PathBuf::from(&release.helper_relpath),
-        &final_dir,
-    )?;
-
     let metadata = ToolchainMetadata {
         schema_version: 1,
         kind: release.kind.clone(),
@@ -339,7 +343,12 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
     };
     let metadata_bytes =
         serde_json::to_vec_pretty(&metadata).context("failed to serialize toolchain metadata")?;
-    write_bytes(&final_dir.join("metadata.json"), &metadata_bytes)?;
+    materialize_release_root(
+        &staging,
+        &PathBuf::from(&release.helper_relpath),
+        &final_dir,
+        Some(&metadata_bytes),
+    )?;
 
     render_message_to_stderr(
         Severity::Note,
@@ -356,7 +365,9 @@ fn run_add(name: &str, version: Option<&str>) -> Result<()> {
 }
 
 fn run_remove(name: &str, version: Option<&str>, confirm: bool) -> Result<()> {
+    validate_selector(name, version)?;
     let home = resolve_fidan_home()?;
+    fidan_diagnostics::tracing::debug!(home = %home.display(), "toolchain installation scope resolved");
     let host = fidan_driver::install::host_triple();
     let toolchains_root = home.join("toolchains");
     let kind_root = toolchains_root.join(name);

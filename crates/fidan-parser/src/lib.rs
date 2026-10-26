@@ -558,6 +558,17 @@ mod tests {
     }
 
     #[test]
+    fn empty_interpolation_reports_a_syntax_error() {
+        for source in [r#"var message = "{}""#, r#"var message = "{   }""#] {
+            let (_, diagnostics) = parse_src(source);
+            assert!(
+                !errors(&diagnostics).is_empty(),
+                "silently accepted {source}"
+            );
+        }
+    }
+
+    #[test]
     fn string_interpolation_escaped_braces() {
         let (_, diags) = parse_src(r#"var msg = "literal \{name\} and {value}""#);
         assert!(

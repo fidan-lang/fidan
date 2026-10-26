@@ -1,0 +1,115 @@
+use std.math
+use std.string as strings
+
+action sample with (certain name oftype string, optional count oftype integer = 3) returns string {
+    return name + string(count)
+}
+
+var parameters = sample.parameters
+
+assert_eq(len(parameters), 2)
+assert_eq(parameters[0]["name"], "name")
+assert_eq(parameters[0]["type"], "string")
+assert_eq(parameters[0]["required"], true)
+assert_eq(parameters[1]["default"], 3)
+assert_eq(sample.invoke(["hello"]), "hello3")
+assert_eq(sample.invoke(["hello", 8]), "hello8")
+assert_eq(math.abs.invoke([-3]), 3)
+# Metadata is copied; callers cannot edit the callable contract.
+parameters[0]["name"] = "changed"
+assert_eq(sample.parameters[0]["name"], "name")
+
+action make_closure with (certain prefix oftype string) returns action {
+    return action with (certain text oftype string) returns string {
+        return prefix + text
+    }
+}
+
+var closure = make_closure("prefix:")
+
+assert_eq(len(closure.parameters), 1)
+assert_eq(closure.parameters[0]["name"], "text")
+assert_eq(closure.invoke(["ok"]), "prefix:ok")
+
+var erased oftype dynamic = closure
+
+assert_eq(erased.invoke(["dynamic"]), "prefix:dynamic")
+assert_eq(math.pow.parameters[0]["required"], true)
+assert_eq(strings.parseInt.parameters, strings.parse_int.parameters)
+
+var failures = 0
+
+for arguments in [[], ["a", 1, 2]] {
+    attempt {
+        sample.invoke(arguments)
+    } catch error {
+        failures = failures + 1
+    }
+}
+
+var erasedSample oftype dynamic = sample
+
+attempt {
+    erasedSample.invoke(42)
+} catch error {
+    failures = failures + 1
+}
+attempt {
+    erasedSample.invoke()
+} catch error {
+    failures = failures + 1
+}
+attempt {
+    erasedSample.invoke([], [])
+} catch error {
+    failures = failures + 1
+}
+assert_eq(failures, 5)
+
+# Decorators run before top-level init on every backend.
+action validate with (certain callback oftype action, certain label oftype string) returns action {
+    assert_eq(label, "sample")
+    assert_eq(len(callback.parameters), 1)
+    print("decorator validated")
+    return callback
+}
+
+@validate("sample")
+action decorated with (certain value oftype integer) returns integer {
+    return value
+}
+
+assert_eq(decorated.invoke([3]), 3)
+
+var defaults = Shared(0)
+
+action default_value returns integer {
+    defaults.update(action with (value oftype dynamic) {
+        return value + 1
+    })
+    return 7
+}
+
+action with_default with (
+    optional value oftype integer = default_value(),
+) returns integer {
+    return value
+}
+
+assert_eq(with_default.parameters[0]["default_known"], false)
+assert_eq(defaults.get(), 0)
+assert_eq(with_default.invoke([]), 7)
+assert_eq(with_default(), 7)
+assert_eq(defaults.get(), 2)
+assert_eq(with_default.invoke([9]), 9)
+assert_eq(defaults.get(), 2)
+with_default(value = 11)
+assert_eq(defaults.get(), 2)
+print("callable parameters passed")
+
+action plain with (value oftype integer) returns integer {
+    return value
+}
+
+assert_eq(plain.parameters[0]["certain"], false)
+assert_eq(plain.parameters[0]["required"], true)

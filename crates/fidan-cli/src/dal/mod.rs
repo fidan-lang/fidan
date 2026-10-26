@@ -1,6 +1,10 @@
 mod api;
 mod archive;
 mod config;
+#[cfg(test)]
+mod credential_tests;
+mod resolver;
+use resolver::PackageResolver;
 
 use crate::prompts::prompt_yes_no;
 use anyhow::{Context, Result, bail};
@@ -9,13 +13,17 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, read};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
 use fidan_diagnostics::{Severity, render_message_to_stderr};
 use fidan_driver::dal::{
-    DalCliMeta, DalDependencySpec, DalLock, DalLockedPackage, DalManifest, cli_binary_stem,
-    global_bin_dir, global_dal_dir, global_lock_path, global_package_store, global_roots_path,
-    local_bin_dir, local_package_store, lock_path, module_dir_name, package_install_dir,
-    parse_dependency_req, project_root_or_fallback, prune_lock_to_dependencies,
-    read_dependency_roots_if_exists, read_lock_from_path, read_lock_if_exists, read_manifest,
-    read_manifest_if_exists, resolve_manifest_dependencies, validate_feature_name,
-    validate_package_name, write_dependency_roots, write_lock, write_lock_to_path, write_manifest,
+    DalCliMeta, DalDependencySpec, DalLock, DalManifest, cli_binary_stem, global_bin_dir,
+    global_dal_dir, global_lock_path, global_package_store, global_roots_path, local_bin_dir,
+    local_package_store, lock_dal_operation, module_dir_name, package_install_dir,
+    project_root_or_fallback, prune_lock_to_dependencies, read_dependency_roots_if_exists,
+    read_lock_from_path, read_lock_if_exists, read_manifest, read_manifest_if_exists,
+    validate_feature_name, validate_package_name, write_global_state, write_project_state,
+};
+#[cfg(test)]
+use fidan_driver::dal::{
+    DalLockedPackage, lock_path, write_dependency_roots, write_lock, write_lock_to_path,
+    write_manifest,
 };
 use fidan_driver::install::ensure_persistent_path_entry;
 use fidan_driver::{
@@ -27,9 +35,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use self::api::DalClient;
-use self::archive::{
-    build_package_archive, install_downloaded_package, read_manifest_from_archive,
-};
+use self::archive::{build_package_archive, install_downloaded_package};
 
 #[derive(Subcommand)]
 pub(crate) enum DalCommand {
@@ -43,7 +49,11 @@ pub(crate) enum DalCommand {
         registry: Option<String>,
     },
     /// Remove the stored Dal API token from the OS keychain
-    Logout,
+    Logout {
+        /// Override the Dal registry whose saved token is removed
+        #[arg(long)]
+        registry: Option<String>,
+    },
     /// Show the currently authenticated Dal account
     Whoami {
         /// Override the Dal registry base URL
@@ -135,7 +145,7 @@ pub(crate) enum DalCommand {
 pub(crate) fn run(command: DalCommand) -> Result<()> {
     match command {
         DalCommand::Login { token, registry } => run_login(token, registry),
-        DalCommand::Logout => run_logout(),
+        DalCommand::Logout { registry } => run_logout(registry),
         DalCommand::Whoami { registry } => run_whoami(registry),
         DalCommand::Search {
             query,
@@ -186,8 +196,7 @@ fn run_login(token: Option<String>, registry: Option<String>) -> Result<()> {
         "Dal token verification failed — make sure you pasted a valid API token from the dashboard",
     )?;
 
-    config::store_token(&token)?;
-    config::verify_stored_token(&token)?;
+    config::store_token(&registry, &token)?;
 
     println!(
         "Logged in to {} as {}{}",
@@ -202,9 +211,10 @@ fn run_login(token: Option<String>, registry: Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn run_logout() -> Result<()> {
-    config::clear_token()?;
-    println!("Dal API token removed from the OS keychain.");
+fn run_logout(registry: Option<String>) -> Result<()> {
+    let registry = config::resolve_registry(registry.as_deref())?;
+    config::clear_token(&registry)?;
+    println!("Dal API token for {registry} removed from the OS keychain.");
     Ok(())
 }
 
@@ -354,6 +364,14 @@ fn run_add(
     } else {
         None
     };
+    let operation_root = if let Some(path) = &into {
+        path.clone()
+    } else if let Some(home) = &global_home {
+        global_dal_dir(home)
+    } else {
+        project_root.join(".dal")
+    };
+    let _operation = lock_dal_operation(&operation_root)?;
     let existing_manifest = if into.is_none() && !global {
         read_manifest_if_exists(&project_root)?
     } else {
@@ -369,7 +387,7 @@ fn run_add(
 
     let mut requested_requirements: BTreeMap<String, DalDependencySpec> = BTreeMap::new();
     if let Some(manifest) = &existing_manifest {
-        for (name, req) in &manifest.dependencies {
+        for (name, req) in fidan_driver::dal::resolve_manifest_dependencies(manifest, &[])? {
             requested_requirements.insert(name.clone(), req.clone());
         }
     }
@@ -401,7 +419,19 @@ fn run_add(
         DalDependencySpec::detailed(top_requirement, top_features),
     );
 
-    let resolver = PackageResolver::new(&client);
+    let existing_lock = if global {
+        let path = global_lock_path(global_home.as_ref().expect("global home is set"));
+        if path.exists() {
+            Some(read_lock_from_path(&path)?)
+        } else {
+            None
+        }
+    } else if into.is_none() {
+        read_lock_if_exists(&project_root)?
+    } else {
+        None
+    };
+    let resolver = PackageResolver::new(&client, existing_lock.as_ref());
     let resolved = resolver.resolve_all(&package, &requested_requirements)?;
 
     let install_root = if let Some(into_dir) = &into {
@@ -452,9 +482,12 @@ fn run_add(
                     .to_string(),
                 version: "0.1.0".to_string(),
                 readme: Some("README.md".to_string()),
+                fidan: None,
+                additional_metadata: BTreeMap::new(),
             },
             dependencies: BTreeMap::new(),
             optional_dependencies: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
             features: BTreeMap::new(),
             cli: None,
         });
@@ -466,8 +499,7 @@ fn run_add(
             package.clone(),
             DalDependencySpec::detailed(manifest_requirement, features),
         );
-        write_manifest(&project_root, &manifest)?;
-        write_lock(&project_root, &resolved.to_lock())?;
+        write_project_state(&project_root, &manifest, &resolved.to_lock())?;
     } else if into.is_none() && global {
         let mut roots = existing_global_roots.unwrap_or_default();
         let features = requested_requirements
@@ -478,12 +510,9 @@ fn run_add(
             package.clone(),
             DalDependencySpec::detailed(manifest_requirement, features),
         );
-        write_dependency_roots(
-            &global_roots_path(global_home.as_ref().expect("global home is set")),
+        write_global_state(
+            global_home.as_ref().expect("global home is set"),
             &roots,
-        )?;
-        write_lock_to_path(
-            &global_lock_path(global_home.as_ref().expect("global home is set")),
             &resolved.to_lock(),
         )?;
     }
@@ -551,6 +580,7 @@ fn run_remove(package: &str, into: Option<PathBuf>, global: bool, confirm: bool)
     }
 
     if let Some(into_dir) = into {
+        let _operation = lock_dal_operation(&into_dir)?;
         let target_dir = into_dir.join(module_dir_name(package));
         if !target_dir.exists() {
             bail!(
@@ -580,6 +610,7 @@ struct RemovedInstalledPackage {
 }
 
 fn remove_local_package(package: &str, project_root: &Path) -> Result<()> {
+    let _operation = lock_dal_operation(&project_root.join(".dal"))?;
     let mut manifest = read_manifest(project_root)
         .with_context(|| format!("cannot remove `{package}` without a local `dal.toml`"))?;
     let Some(_) = manifest.dependencies.remove(package) else {
@@ -590,19 +621,14 @@ fn remove_local_package(package: &str, project_root: &Path) -> Result<()> {
     let next_lock = prune_lock_to_dependencies(&existing_lock, &manifest.dependencies)?;
     let install_root = local_package_store(project_root);
     let removed_packages = removed_installed_packages(&existing_lock, &next_lock, &install_root);
+
+    write_project_state(project_root, &manifest, &next_lock)?;
     let removed_cli = remove_package_cli_binary(
         package,
         &existing_lock,
         &install_root,
         &local_bin_dir(project_root),
     )?;
-
-    write_manifest(project_root, &manifest)?;
-    if next_lock.packages.is_empty() {
-        remove_file_if_exists(&lock_path(project_root))?;
-    } else {
-        write_lock(project_root, &next_lock)?;
-    }
 
     remove_installed_packages(&removed_packages)?;
     cleanup_empty_local_layout(project_root)?;
@@ -621,13 +647,18 @@ fn remove_local_package(package: &str, project_root: &Path) -> Result<()> {
 }
 
 fn remove_global_package(package: &str, home: &Path) -> Result<()> {
+    let _operation = lock_dal_operation(&global_dal_dir(home))?;
     let roots_path = global_roots_path(home);
     let lock_path = global_lock_path(home);
     let install_root = global_package_store(home);
     let bin_root = global_bin_dir(home);
 
     let mut roots = read_dependency_roots_if_exists(&roots_path)?.unwrap_or_default();
-    let existing_lock = read_lock_from_path(&lock_path).unwrap_or_default();
+    let existing_lock = if lock_path.exists() {
+        read_lock_from_path(&lock_path)?
+    } else {
+        DalLock::default()
+    };
 
     let removed_direct_root = roots.dependencies.remove(package).is_some();
     if !removed_direct_root && !install_root.join(module_dir_name(package)).exists() {
@@ -646,17 +677,11 @@ fn remove_global_package(package: &str, home: &Path) -> Result<()> {
             install_dir: install_root.join(module_dir_name(package)),
         }]
     };
-    let removed_cli = remove_package_cli_binary(package, &existing_lock, &install_root, &bin_root)?;
 
     if removed_direct_root {
-        if roots.dependencies.is_empty() {
-            remove_file_if_exists(&roots_path)?;
-            remove_file_if_exists(&lock_path)?;
-        } else {
-            write_dependency_roots(&roots_path, &roots)?;
-            write_lock_to_path(&global_lock_path(home), &next_lock)?;
-        }
+        write_global_state(home, &roots, &next_lock)?;
     }
+    let removed_cli = remove_package_cli_binary(package, &existing_lock, &install_root, &bin_root)?;
 
     remove_installed_packages(&removed_packages)?;
     cleanup_empty_dir_if_possible(&install_root)?;
@@ -808,14 +833,6 @@ fn cleanup_empty_dir_if_possible(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn remove_file_if_exists(path: &Path) -> Result<bool> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    fs::remove_file(path).with_context(|| format!("cannot remove {}", path.display()))?;
-    Ok(true)
-}
-
 fn run_package(path: &std::path::Path, output: Option<PathBuf>) -> Result<()> {
     let built = build_package_archive(path)?;
     let out_path = match output {
@@ -836,201 +853,6 @@ fn run_package(path: &std::path::Path, output: Option<PathBuf>) -> Result<()> {
     );
 
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedPackageState {
-    name: String,
-    version: String,
-    dependencies: BTreeMap<String, DalDependencySpec>,
-    features: Vec<String>,
-}
-
-#[derive(Debug, Clone)]
-struct ResolvedGraph {
-    top_version: String,
-    packages: BTreeMap<String, ResolvedPackageState>,
-    archives: BTreeMap<String, Vec<u8>>,
-}
-
-impl ResolvedGraph {
-    fn to_lock(&self) -> DalLock {
-        DalLock {
-            packages: self
-                .packages
-                .values()
-                .map(|pkg| DalLockedPackage {
-                    name: pkg.name.clone(),
-                    module: module_dir_name(&pkg.name),
-                    version: pkg.version.clone(),
-                    dependencies: pkg
-                        .dependencies
-                        .keys()
-                        .filter_map(|dep_name| {
-                            self.packages
-                                .get(dep_name)
-                                .map(|dep| (dep_name.clone(), format!("={}", dep.version)))
-                        })
-                        .collect(),
-                    features: pkg.features.clone(),
-                })
-                .collect(),
-            ..Default::default()
-        }
-    }
-}
-
-struct PackageResolver<'a> {
-    client: &'a DalClient,
-    constraints: BTreeMap<String, Vec<semver::VersionReq>>,
-    requested_features: BTreeMap<String, BTreeSet<String>>,
-    packages: BTreeMap<String, ResolvedPackageState>,
-    archives: BTreeMap<String, Vec<u8>>,
-    stack: Vec<String>,
-}
-
-impl<'a> PackageResolver<'a> {
-    fn new(client: &'a DalClient) -> Self {
-        Self {
-            client,
-            constraints: BTreeMap::new(),
-            requested_features: BTreeMap::new(),
-            packages: BTreeMap::new(),
-            archives: BTreeMap::new(),
-            stack: vec![],
-        }
-    }
-
-    fn resolve_all(
-        &self,
-        top_package: &str,
-        root_requirements: &BTreeMap<String, DalDependencySpec>,
-    ) -> Result<ResolvedGraph> {
-        let mut resolver = PackageResolver::new(self.client);
-        for (package, spec) in root_requirements {
-            resolver.resolve_package(package, spec)?;
-        }
-
-        let top_version = resolver
-            .packages
-            .get(top_package)
-            .map(|pkg| pkg.version.clone())
-            .unwrap_or_default();
-
-        Ok(ResolvedGraph {
-            top_version,
-            packages: resolver.packages,
-            archives: resolver.archives,
-        })
-    }
-
-    fn resolve_package(&mut self, package: &str, spec: &DalDependencySpec) -> Result<()> {
-        validate_package_name(package)?;
-        let requirement = parse_dependency_req(spec.version_req())?;
-        self.constraints
-            .entry(package.to_string())
-            .or_default()
-            .push(requirement);
-        self.requested_features
-            .entry(package.to_string())
-            .or_default()
-            .extend(spec.features().iter().cloned());
-        self.resolve_locked(package)
-    }
-
-    fn resolve_locked(&mut self, package: &str) -> Result<()> {
-        if let Some(pos) = self.stack.iter().position(|entry| entry == package) {
-            let mut cycle = self.stack[pos..].to_vec();
-            cycle.push(package.to_string());
-            bail!("package dependency cycle detected: {}", cycle.join(" -> "));
-        }
-
-        let constraints = self.constraints.get(package).cloned().unwrap_or_default();
-        let index = self.client.index(package)?;
-        if index.is_empty() {
-            bail!("package `{package}` has no published versions");
-        }
-        let chosen = select_version_with_constraints(&index, &constraints)?;
-        let needs_archive_refresh = self
-            .packages
-            .get(package)
-            .map(|pkg| pkg.version != chosen.vers)
-            .unwrap_or(true)
-            || !self.archives.contains_key(package);
-        if needs_archive_refresh {
-            let archive = self.client.download_archive(package, &chosen.vers)?;
-            self.archives.insert(package.to_string(), archive);
-        }
-        let archive = self
-            .archives
-            .get(package)
-            .cloned()
-            .with_context(|| format!("missing downloaded archive for `{package}`"))?;
-        let manifest = read_manifest_from_archive(&archive)?;
-        let requested_features = self
-            .requested_features
-            .get(package)
-            .map(|features| features.iter().cloned().collect::<Vec<_>>())
-            .unwrap_or_default();
-        let dependency_versions = resolve_manifest_dependencies(&manifest, &requested_features)?;
-
-        let needs_update = self
-            .packages
-            .get(package)
-            .map(|pkg| {
-                pkg.version != chosen.vers
-                    || pkg.dependencies != dependency_versions
-                    || pkg.features != requested_features
-            })
-            .unwrap_or(true);
-        if !needs_update {
-            return Ok(());
-        }
-
-        self.stack.push(package.to_string());
-        self.packages.insert(
-            package.to_string(),
-            ResolvedPackageState {
-                name: package.to_string(),
-                version: chosen.vers.clone(),
-                dependencies: dependency_versions,
-                features: requested_features.clone(),
-            },
-        );
-
-        for (dep_name, dep_spec) in self
-            .packages
-            .get(package)
-            .map(|pkg| pkg.dependencies.clone())
-            .unwrap_or_default()
-        {
-            self.resolve_package(&dep_name, &dep_spec)?;
-        }
-        self.stack.pop();
-        Ok(())
-    }
-}
-
-fn select_version_with_constraints<'a>(
-    entries: &'a [api::IndexEntry],
-    constraints: &[semver::VersionReq],
-) -> Result<&'a api::IndexEntry> {
-    let mut candidates = entries
-        .iter()
-        .filter(|entry| !entry.yanked)
-        .filter_map(|entry| {
-            semver::Version::parse(&entry.vers)
-                .ok()
-                .map(|version| (entry, version))
-        })
-        .filter(|(_, version)| constraints.iter().all(|req| req.matches(version)))
-        .collect::<Vec<_>>();
-    candidates.sort_unstable_by(|left, right| right.1.cmp(&left.1));
-    candidates
-        .into_iter()
-        .map(|(entry, _)| entry)
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no non-yanked version satisfies all requested constraints"))
 }
 
 fn build_package_cli(package_root: &Path, cli: &DalCliMeta, bin_root: &Path) -> Result<PathBuf> {
@@ -1096,7 +918,7 @@ fn run_unyank(package: &str, version: &str, registry: Option<String>) -> Result<
 
 fn authenticated_client(registry: Option<String>) -> Result<DalClient> {
     let registry = config::resolve_registry(registry.as_deref())?;
-    let token = config::resolve_token(None)?;
+    let token = config::resolve_token(&registry, None)?;
     DalClient::new(registry, token)
 }
 
@@ -1214,12 +1036,15 @@ mod tests {
                 name: "consumer".to_string(),
                 version: "0.1.0".to_string(),
                 readme: Some("README.md".to_string()),
+                fidan: None,
+                additional_metadata: BTreeMap::new(),
             },
             dependencies: BTreeMap::from([(
                 "tool-package".to_string(),
                 DalDependencySpec::simple("=1.0.0"),
             )]),
             optional_dependencies: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
             features: BTreeMap::new(),
             cli: None,
         };
@@ -1230,6 +1055,8 @@ mod tests {
                 schema_version: 1,
                 packages: vec![
                     DalLockedPackage {
+                        checksum: None,
+                        fidan: None,
                         name: "tool-package".to_string(),
                         module: "tool_package".to_string(),
                         version: "1.0.0".to_string(),
@@ -1240,6 +1067,8 @@ mod tests {
                         features: vec![],
                     },
                     DalLockedPackage {
+                        checksum: None,
+                        fidan: None,
                         name: "leaf-package".to_string(),
                         module: "leaf_package".to_string(),
                         version: "1.0.0".to_string(),
@@ -1289,6 +1118,8 @@ mod tests {
                 schema_version: 1,
                 packages: vec![
                     DalLockedPackage {
+                        checksum: None,
+                        fidan: None,
                         name: "tool-package".to_string(),
                         module: "tool_package".to_string(),
                         version: "1.0.0".to_string(),
@@ -1299,6 +1130,8 @@ mod tests {
                         features: vec![],
                     },
                     DalLockedPackage {
+                        checksum: None,
+                        fidan: None,
                         name: "leaf-package".to_string(),
                         module: "leaf_package".to_string(),
                         version: "1.0.0".to_string(),
@@ -1359,9 +1192,12 @@ mod tests {
                 name: package_name.clone(),
                 version: "1.0.0".to_string(),
                 readme: Some("README.md".to_string()),
+                fidan: None,
+                additional_metadata: BTreeMap::new(),
             },
             dependencies: BTreeMap::new(),
             optional_dependencies: BTreeMap::new(),
+            dev_dependencies: BTreeMap::new(),
             features: BTreeMap::new(),
             cli: with_cli.then(|| DalCliMeta {
                 entry: "src/main.fdn".to_string(),
@@ -1391,6 +1227,8 @@ mod tests {
             .as_nanos();
         let dir = std::env::temp_dir().join(format!("{prefix}_{}_{}", std::process::id(), nonce));
         fs::create_dir_all(&dir).expect("failed to create temp test dir");
+        #[cfg(unix)]
+        let dir = std::fs::canonicalize(dir).expect("canonical temporary fixture");
         dir
     }
 }

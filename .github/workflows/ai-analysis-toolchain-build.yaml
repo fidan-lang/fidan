@@ -22,6 +22,9 @@ on:
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
+permissions:
+  contents: read
+
 jobs:
   build-ai-analysis-toolchain:
     name: Build AI analysis toolchain (${{ matrix.name }})
@@ -41,13 +44,15 @@ jobs:
             artifact_name: ai-analysis-toolchain-macos
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Install Linux packaging dependencies
         if: runner.os == 'Linux'
@@ -60,26 +65,33 @@ jobs:
       - name: Resolve helper version
         id: version
         shell: pwsh
+        env:
+          WF_INPUTS_TOOL_VERSION: ${{ inputs.tool_version }}
         run: |
+          . ./scripts/shared/release-inputs.ps1
           $cargoToml = Get-Content "crates/fidan-ai-analysis-helper/Cargo.toml" -Raw
           $match = [regex]::Match($cargoToml, '(?m)^version\s*=\s*"([^"]+)"')
           if (-not $match.Success) {
             throw "Failed to determine AI helper version from Cargo.toml"
           }
           $helperVersion = $match.Groups[1].Value
-          $toolVersion = "${{ inputs.tool_version }}"
+          $toolVersion = "$env:WF_INPUTS_TOOL_VERSION"
           if (-not $toolVersion) {
             $toolVersion = $helperVersion
           }
+          Assert-ReleaseVersion -Value $toolVersion -Name "AI tool version"
           "tool_version=$toolVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
       - name: Package AI analysis toolchain artifact
         shell: pwsh
+        env:
+          WF_INPUTS_TOOLCHAIN_VERSION: ${{ inputs.toolchain_version }}
+          WF_STEPS_VERSION_OUTPUTS_TOOL_VERSION: ${{ steps.version.outputs.tool_version }}
         run: |
           ./scripts/package-toolchain.ps1 `
             -Kind "ai-analysis" `
-            -ToolchainVersion "${{ inputs.toolchain_version }}" `
-            -ToolVersion "${{ steps.version.outputs.tool_version }}"
+            -ToolchainVersion "$env:WF_INPUTS_TOOLCHAIN_VERSION" `
+            -ToolVersion "$env:WF_STEPS_VERSION_OUTPUTS_TOOL_VERSION"
 
       - name: Install packaged AI analysis toolchain into validation FIDAN_HOME
         if: inputs.validate
@@ -108,7 +120,7 @@ jobs:
           cargo run -q -p fidan-cli -- exec ai help
 
       - name: Upload AI analysis toolchain artifact bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/release

@@ -16,6 +16,9 @@ on:
         required: true
         type: boolean
 
+permissions:
+  contents: read
+
 jobs:
   bundle:
     name: Merge manifest
@@ -23,10 +26,22 @@ jobs:
     environment: releases
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Validate artifact identifiers before download
+        shell: pwsh
+        env:
+          ARTIFACT_PATTERN: ${{ inputs.artifact_pattern }}
+          BUNDLE_ARTIFACT_NAME: ${{ inputs.bundle_artifact_name }}
+        run: |
+          . ./scripts/shared/release-inputs.ps1
+          Assert-ReleaseArtifactName -Value $env:ARTIFACT_PATTERN -AllowPattern
+          Assert-ReleaseArtifactName -Value $env:BUNDLE_ARTIFACT_NAME
 
       - name: Download toolchain artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           pattern: ${{ inputs.artifact_pattern }}
           path: dist/release
@@ -84,7 +99,7 @@ jobs:
           }
 
       - name: Upload merged distribution bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ inputs.bundle_artifact_name }}
           path: dist/release
@@ -97,7 +112,7 @@ jobs:
     environment: releases
 
     steps:
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: ${{ inputs.bundle_artifact_name }}
           path: dist/release

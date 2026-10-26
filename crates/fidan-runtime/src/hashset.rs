@@ -54,7 +54,7 @@ enum FidanHashKeyRepr {
     Shared(usize),
     WeakShared(usize),
     Pending(usize),
-    PendingTask(u64),
+    PendingTask(crate::PendingTaskId),
     Range {
         start: i64,
         end: i64,
@@ -147,6 +147,48 @@ pub struct FidanHashKey {
 }
 
 impl FidanHashKey {
+    pub(crate) fn remap_objects(&self, identities: &HashMap<usize, usize>) -> Self {
+        fn remap(value: &mut FidanHashKeyRepr, identities: &HashMap<usize, usize>) {
+            use FidanHashKeyRepr::*;
+            match value {
+                Object(id) => {
+                    if let Some(target) = identities.get(id) {
+                        *id = *target;
+                    }
+                }
+                List(values)
+                | Tuple(values)
+                | EnumVariant {
+                    payload: values, ..
+                }
+                | Closure {
+                    captured: values, ..
+                } => {
+                    for value in values {
+                        remap(value, identities);
+                    }
+                }
+                HashSet(values) => {
+                    for value in &mut *values {
+                        remap(value, identities);
+                    }
+                    values.sort_unstable();
+                }
+                Dict(entries) => {
+                    for (key, value) in &mut *entries {
+                        remap(key, identities);
+                        remap(value, identities);
+                    }
+                    entries.sort_unstable();
+                }
+                _ => {}
+            }
+        }
+        let mut copied = self.clone();
+        remap(&mut copied.repr, identities);
+        copied
+    }
+
     pub fn from_value(value: &FidanValue) -> Result<Self, HashKeyError> {
         Ok(Self {
             repr: FidanHashKeyRepr::from_value(value)?,
@@ -186,6 +228,31 @@ pub struct FidanHashSet {
 }
 
 impl FidanHashSet {
+    pub(crate) fn capture_values(
+        &self,
+        mut capture: impl FnMut(&FidanValue) -> FidanValue,
+    ) -> Self {
+        Self {
+            inner: Rc::new(
+                self.inner
+                    .iter()
+                    .map(|(key, value)| (key.clone(), capture(value)))
+                    .collect(),
+            ),
+            sorted_values_cache: Rc::new(RefCell::new(None)),
+        }
+    }
+
+    pub(crate) fn remap_object_keys(&mut self, identities: &HashMap<usize, usize>) {
+        self.inner = Rc::new(
+            self.inner
+                .iter()
+                .map(|(key, value)| (key.remap_objects(identities), value.clone()))
+                .collect(),
+        );
+        self.invalidate_sorted_values_cache();
+    }
+
     pub fn new() -> Self {
         Self {
             inner: Rc::new(HashMap::new()),

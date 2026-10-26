@@ -2,11 +2,12 @@
 name = "fidan-codegen-cranelift"
 version.workspace = true
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+fidan-diagnostics = { workspace = true }
 fidan-ast = { workspace = true }
 fidan-mir = { workspace = true }
 fidan-runtime = { workspace = true }

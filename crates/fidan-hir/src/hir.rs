@@ -14,8 +14,9 @@
 
 use fidan_ast::{BinOp, UnOp};
 use fidan_lexer::Symbol;
-use fidan_source::Span;
+use fidan_source::{FileId, Span};
 use fidan_typeck::FidanType;
+use std::path::PathBuf;
 
 // ── Module ─────────────────────────────────────────────────────────────────────
 
@@ -31,6 +32,9 @@ pub struct HirEnum {
 /// The HIR representation of a source module.
 #[derive(Debug)]
 pub struct HirModule {
+    /// Entry file and canonical source paths, retained across module merging.
+    pub file: FileId,
+    pub file_paths: Vec<(FileId, PathBuf)>,
     /// Object / class definitions.
     pub objects: Vec<HirObject>,
     /// Enum type declarations.
@@ -70,6 +74,9 @@ pub struct HirTestDecl {
 /// - `export use std.io`           → same as above but `re_export=true`
 #[derive(Debug, Clone)]
 pub struct HirUseDecl {
+    pub span: Span,
+    /// Resolved by the shared frontend; never inferred from a namespace alias.
+    pub target_path: Option<PathBuf>,
     /// Full module path segments, e.g. `["std", "io"]`.
     pub module_path: Vec<String>,
     /// Optional alias for the module namespace.
@@ -130,8 +137,6 @@ pub struct HirFunction {
     pub precompile: bool,
     /// Built-in foreign-function metadata for `@extern`.
     pub extern_decl: Option<HirExternDecl>,
-    /// User-defined (custom) decorators applied to this function.
-    pub custom_decorators: Vec<CustomDecorator>,
     pub span: Span,
 }
 
@@ -147,27 +152,6 @@ pub struct HirExternDecl {
     pub symbol: String,
     pub link: Option<String>,
     pub abi: HirExternAbi,
-}
-
-/// A compile-time literal argument to a user-defined decorator.
-#[derive(Debug, Clone)]
-pub enum DecoratorArg {
-    Int(i64),
-    Float(f64),
-    Str(String),
-    Bool(bool),
-}
-
-/// A user-defined decorator application on a function.
-///
-/// At program startup the runtime calls `decorator_action(fn_name, arg1, arg2, ...)`
-/// for every `CustomDecorator` entry on a function, in declaration order.
-#[derive(Debug, Clone)]
-pub struct CustomDecorator {
-    /// The name of the decorator action (resolved at HIR-lowering time).
-    pub name: Symbol,
-    /// Compile-time literal arguments beyond the implicit `fn_name: string` first arg.
-    pub args: Vec<DecoratorArg>,
 }
 
 #[derive(Debug)]
@@ -272,10 +256,42 @@ pub enum HirStmt {
         tasks: Vec<HirTask>,
         span: Span,
     },
+    /// Declaration-time transformations of a fixed public callable identity.
+    Decorate {
+        function: Symbol,
+        owner: Option<Symbol>,
+        binding: Symbol,
+        applications: Vec<HirExpr>,
+        span: Span,
+    },
     /// Error-recovery placeholder.
     Error {
         span: Span,
     },
+}
+
+impl HirStmt {
+    pub fn span(&self) -> Span {
+        match self {
+            Self::Expr(expr) => expr.span,
+            Self::VarDecl { span, .. }
+            | Self::Destructure { span, .. }
+            | Self::Assign { span, .. }
+            | Self::Return { span, .. }
+            | Self::Break { span }
+            | Self::Continue { span }
+            | Self::If { span, .. }
+            | Self::Check { span, .. }
+            | Self::For { span, .. }
+            | Self::While { span, .. }
+            | Self::Attempt { span, .. }
+            | Self::Panic { span, .. }
+            | Self::ParallelFor { span, .. }
+            | Self::ConcurrentBlock { span, .. }
+            | Self::Decorate { span, .. }
+            | Self::Error { span } => *span,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -420,6 +436,7 @@ pub enum HirExprKind {
     // ── Inline lambda ─────────────────────────────────────────────────────────
     /// `action with (params) { body }` — anonymous action used as a value.
     Lambda {
+        name: Option<Symbol>,
         params: Vec<HirParam>,
         body: Vec<HirStmt>,
         return_ty: FidanType,

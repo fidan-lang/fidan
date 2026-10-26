@@ -5,8 +5,8 @@ use fidan_ast::{
     AstArena, BinOp, Decorator, Expr, ExprId, Item, Module, Param, Stmt, StmtId, TypeExpr, UnOp,
 };
 use fidan_config::{
-    BUILTIN_BINDINGS, BUILTIN_DECORATORS, BuiltinReturnKind, BuiltinSemantic, builtin_return_kind,
-    builtin_semantic, receiver_method_arity_bounds,
+    BUILTIN_BINDINGS, BuiltinReturnKind, BuiltinSemantic, builtin_return_kind, builtin_semantic,
+    receiver_method_arity_bounds,
 };
 use fidan_diagnostics::{Confidence, Diagnostic, FixEngine, Label, Suggestion};
 use fidan_lexer::{Symbol, SymbolInterner};
@@ -149,16 +149,17 @@ pub struct TypeChecker {
     /// Type of every expression, keyed by `ExprId`.  Populated during type inference.
     /// Used by HIR lowering to annotate HIR nodes with concrete types.
     pub(crate) expr_types: FxHashMap<ExprId, FidanType>,
+    annotation_types: FxHashMap<Span, FidanType>,
     /// Top-level action signatures (name → ActionInfo).  Populated during Pass 1.
     pub(crate) actions: FxHashMap<Symbol, ActionInfo>,
     /// Lexically-scoped nested action signatures, one map per active scope.
     local_actions: Vec<FxHashMap<Symbol, ActionInfo>>,
     expr_actions: FxHashMap<ExprId, ActionInfo>,
     /// `@deprecated` markers for lexically-scoped nested actions.
-    local_deprecated_actions: Vec<rustc_hash::FxHashSet<Symbol>>,
-    /// Set of action names decorated with `@deprecated`.
+    local_deprecated_actions: Vec<FxHashMap<Symbol, Option<String>>>,
+    /// Action names decorated with `@deprecated`, retaining their optional reason.
     /// Used by `infer_call` to emit W2005 at call sites.
-    deprecated_actions: rustc_hash::FxHashSet<Symbol>,
+    deprecated_actions: FxHashMap<Symbol, Option<String>>,
     /// Non-call field / method accesses that hit a cross-module parent during
     /// `resolve_field`.  The LSP validates them cross-document.
     pub cross_module_field_accesses: Vec<(String, String, Span)>,
@@ -195,11 +196,12 @@ impl TypeChecker {
             is_repl: false,
             registering: false,
             expr_types: FxHashMap::default(),
+            annotation_types: FxHashMap::default(),
             actions: FxHashMap::default(),
             expr_actions: FxHashMap::default(),
             local_actions: vec![FxHashMap::default()],
-            local_deprecated_actions: vec![rustc_hash::FxHashSet::default()],
-            deprecated_actions: rustc_hash::FxHashSet::default(),
+            local_deprecated_actions: vec![FxHashMap::default()],
+            deprecated_actions: FxHashMap::default(),
             cross_module_field_accesses: vec![],
             cross_module_call_sites: vec![],
             import_bindings: vec![],
@@ -253,6 +255,22 @@ impl TypeChecker {
             SymbolInfo {
                 kind: SymbolKind::Action,
                 ty: FidanType::Function,
+                span,
+                is_mutable: false,
+                initialized: Initialized::Yes,
+                const_value: None,
+            },
+        );
+    }
+
+    pub fn pre_register_enum(&mut self, name: Symbol, info: EnumInfo) {
+        let span = info.span;
+        self.enums.insert(name, info);
+        self.table.define(
+            name,
+            SymbolInfo {
+                kind: SymbolKind::Object,
+                ty: FidanType::Enum(name),
                 span,
                 is_mutable: false,
                 initialized: Initialized::Yes,
@@ -366,6 +384,60 @@ impl TypeChecker {
             self.register_top_level(item, &module.arena);
         }
 
+        // All nominal names now exist. Rebuild member/action contracts that may
+        // have referred to their own object or a later declaration in pass 1.
+        for &item_id in &module.items {
+            match module.arena.get_item(item_id) {
+                Item::ObjectDecl {
+                    name,
+                    fields,
+                    methods,
+                    ..
+                } => {
+                    let resolved_fields: Vec<_> = fields
+                        .iter()
+                        .map(|field| (field.name, self.resolve_type_expr(&field.ty)))
+                        .collect();
+                    let resolved_methods: Vec<_> = methods
+                        .iter()
+                        .filter_map(|method| {
+                            if let Item::ActionDecl {
+                                name,
+                                params,
+                                return_ty,
+                                span,
+                                ..
+                            } = module.arena.get_item(*method)
+                            {
+                                Some((*name, self.build_action_info(params, return_ty, *span)))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if let Some(object) = self.objects.get_mut(name) {
+                        for (name, ty) in resolved_fields {
+                            if let Some(field) = object.fields.get_mut(&name) {
+                                field.ty = ty;
+                            }
+                        }
+                        object.methods.extend(resolved_methods);
+                    }
+                }
+                Item::ActionDecl {
+                    name,
+                    params,
+                    return_ty,
+                    span,
+                    ..
+                } => {
+                    let info = self.build_action_info(params, return_ty, *span);
+                    self.actions.insert(*name, info);
+                }
+                _ => {}
+            }
+        }
+
         // Pass 1b: register extension actions as methods on their target objects.
         for &item_id in &module.items {
             let item = module.arena.get_item(item_id).clone();
@@ -409,6 +481,8 @@ impl TypeChecker {
         crate::TypedModule {
             diagnostics: self.diags,
             expr_types: self.expr_types,
+            annotation_types: self.annotation_types,
+            expr_actions: self.expr_actions,
             objects: self.objects,
             enums: self.enums,
             actions: self.actions,
@@ -866,17 +940,27 @@ impl TypeChecker {
                                 .with_label(Label::secondary(prev.span, "declared here")),
                             );
                         }
-                        self.table.define(
-                            binding_sym,
-                            SymbolInfo {
-                                kind: SymbolKind::Var,
-                                ty: FidanType::Dynamic,
-                                span: *span,
-                                is_mutable: false,
-                                initialized: Initialized::Yes,
-                                const_value: None,
-                            },
-                        );
+                        // The shared import graph pre-registers real contracts. Keep
+                        // foreign declarations: erasing an object here also loses
+                        // its named-method parameter binding during MIR lowering.
+                        if !self
+                            .table
+                            .lookup_current_scope(binding_sym)
+                            .is_some_and(|binding| binding.span.file != span.file)
+                        {
+                            self.table.define(
+                                binding_sym,
+                                SymbolInfo {
+                                    kind: SymbolKind::Var,
+                                    ty: FidanType::Dynamic,
+                                    span: *span,
+                                    is_mutable: false,
+                                    initialized: Initialized::Yes,
+                                    const_value: None,
+                                },
+                            );
+                        }
+
                         self.record_import_binding(binding_sym, *span, *grouped, *re_export);
                     }
                 }
@@ -1059,7 +1143,7 @@ impl TypeChecker {
                 is_parallel,
                 ..
             } => {
-                self.check_decorators(decorators, params);
+                self.check_decorators(decorators, module);
                 self.validate_extern_action(
                     module,
                     *name,
@@ -1075,11 +1159,8 @@ impl TypeChecker {
                     },
                 );
                 // Track @deprecated actions for call-site warnings (W2005).
-                if decorators
-                    .iter()
-                    .any(|d| self.interner.resolve(d.name).as_ref() == "deprecated")
-                {
-                    self.deprecated_actions.insert(*name);
+                if let Some(reason) = self.action_deprecation(decorators, module) {
+                    self.deprecated_actions.insert(*name, reason);
                 }
                 if self.has_marker_decorator(decorators, "extern") {
                     if return_ty.is_none() {
@@ -1138,7 +1219,7 @@ impl TypeChecker {
                 is_parallel,
                 ..
             } => {
-                self.check_decorators(decorators, params);
+                self.check_decorators(decorators, module);
                 self.validate_extern_action(
                     module,
                     *name,
@@ -1154,11 +1235,8 @@ impl TypeChecker {
                     },
                 );
                 // Track @deprecated extension actions.
-                if decorators
-                    .iter()
-                    .any(|d| self.interner.resolve(d.name).as_ref() == "deprecated")
-                {
-                    self.deprecated_actions.insert(*name);
+                if let Some(reason) = self.action_deprecation(decorators, module) {
+                    self.deprecated_actions.insert(*name, reason);
                 }
                 let ext_ty = FidanType::Object(*extends);
                 let prev_this = self.this_ty.replace(ext_ty.clone());
@@ -1500,11 +1578,8 @@ impl TypeChecker {
                     return;
                 }
 
-                let is_deprecated = decorators
-                    .iter()
-                    .any(|d| self.interner.resolve(d.name).as_ref() == "deprecated");
-
-                self.define_local_action(name, info, is_deprecated);
+                let deprecation = self.action_deprecation(&decorators, module);
+                self.define_local_action(name, info, deprecation);
                 self.table.define(
                     name,
                     SymbolInfo {
@@ -1517,7 +1592,7 @@ impl TypeChecker {
                     },
                 );
 
-                self.check_decorators(&decorators, &params);
+                self.check_decorators(&decorators, module);
                 self.validate_extern_action(
                     module,
                     name,
@@ -1765,12 +1840,69 @@ impl TypeChecker {
             } => {
                 self.infer_expr(scrutinee, module);
                 for arm in &arms {
-                    self.infer_expr(arm.pattern, module);
+                    self.push_scope(ScopeKind::Block);
+                    self.check_pattern(arm.pattern, module);
                     self.check_arm_body(&arm.body, module);
+                    self.pop_scope();
                 }
             }
 
             Stmt::Error { .. } => {}
+        }
+    }
+
+    /// Identifier arguments in enum patterns declare arm-local payload bindings;
+    /// they are not expressions to resolve in the surrounding scope.
+    fn check_pattern(&mut self, pattern: ExprId, module: &Module) {
+        if let Expr::Call { callee, args, span } = module.arena.get_expr(pattern).clone()
+            && args.iter().all(|arg| {
+                arg.name.is_none() && matches!(module.arena.get_expr(arg.value), Expr::Ident { .. })
+            })
+            && let Expr::Field { object, field, .. } = module.arena.get_expr(callee).clone()
+            && let FidanType::Enum(enum_name) = self.infer_expr(object, module)
+            && let Some(arity) = self.enum_variant_arity(enum_name, field)
+        {
+            self.expr_types.insert(callee, FidanType::Function);
+            self.expr_types.insert(pattern, FidanType::Enum(enum_name));
+            if arity != args.len() {
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0305"),
+                    format!("expected {arity} payload bindings, got {}", args.len()),
+                    span,
+                );
+            }
+            for arg in args {
+                if let Expr::Ident { name, span } = module.arena.get_expr(arg.value).clone() {
+                    self.expr_types.insert(arg.value, FidanType::Dynamic);
+                    if self.interner.resolve(name).as_ref() == "_"
+                        || self.reject_reserved_builtin_binding(name, span)
+                    {
+                        continue;
+                    }
+                    if self.table.lookup_current_scope(name).is_some() {
+                        self.emit_error(
+                            fidan_diagnostics::diag_code!("E0109"),
+                            "duplicate enum payload binding",
+                            span,
+                        );
+                        continue;
+                    }
+                    // Enum IR stores payloads as boxed values; no scalar ABI is inferred.
+                    self.table.define(
+                        name,
+                        SymbolInfo {
+                            kind: SymbolKind::Var,
+                            ty: FidanType::Dynamic,
+                            span,
+                            is_mutable: false,
+                            initialized: Initialized::Yes,
+                            const_value: None,
+                        },
+                    );
+                }
+            }
+        } else {
+            self.infer_expr(pattern, module);
         }
     }
 
@@ -1912,7 +2044,7 @@ impl TypeChecker {
             None => inferred,
         };
         if let Some(info) = init.and_then(|expr| self.callable_info(expr, module)) {
-            self.define_local_action(name, info, false);
+            self.define_local_action(name, info, None);
         }
         self.table.define(
             name,
@@ -2655,8 +2787,10 @@ impl TypeChecker {
                 self.infer_expr(scrutinee, module);
                 let mut arm_types = Vec::with_capacity(arms.len());
                 for arm in arms {
-                    self.infer_expr(arm.pattern, module);
+                    self.push_scope(ScopeKind::Block);
+                    self.check_pattern(arm.pattern, module);
                     arm_types.push(self.infer_check_arm_body_type(&arm.body, module));
+                    self.pop_scope();
                 }
                 self.merge_possible_types(arm_types)
             }
@@ -2863,6 +2997,10 @@ impl TypeChecker {
             ReceiverReturnKind::ListOfReceiverElement => match receiver_ty {
                 FidanType::List(inner) => FidanType::List(inner.clone()),
                 FidanType::HashSet(inner) => FidanType::List(inner.clone()),
+                _ => FidanType::List(Box::new(FidanType::Dynamic)),
+            },
+            ReceiverReturnKind::ListOfDictKey => match receiver_ty {
+                FidanType::Dict(key, _) => FidanType::List(key.clone()),
                 _ => FidanType::List(Box::new(FidanType::Dynamic)),
             },
             ReceiverReturnKind::ListOfDictValue => match receiver_ty {
@@ -3630,24 +3768,34 @@ impl TypeChecker {
                             // The checker keeps the action signature up to date for
                             // unannotated actions once their body has been analyzed.
                             // Use that return type here instead of discarding it.
-                            if self.is_action_deprecated(name) {
-                                let n = self.interner.resolve(name).to_string();
+                            if let Some(message) = self.deprecation_warning(name) {
                                 self.emit_warning(
                                     fidan_diagnostics::diag_code!("W2005"),
-                                    format!("`{n}` is marked `@deprecated` and may be removed in a future version"),
+                                    message,
                                     callee_span,
                                 );
                             }
                             return info.return_ty;
                         }
                         // Emit W2005 if the action is marked @deprecated.
-                        if self.is_action_deprecated(name) {
-                            let n = self.interner.resolve(name).to_string();
+                        if let Some(message) = self.deprecation_warning(name) {
                             self.emit_warning(
                                 fidan_diagnostics::diag_code!("W2005"),
-                                format!("`{n}` is marked `@deprecated` and may be removed in a future version"),
+                                message,
                                 callee_span,
                             );
+                        }
+                        let callee_ty = self.infer_expr(callee_id, module);
+                        if !matches!(
+                            callee_ty,
+                            FidanType::Function
+                                | FidanType::Dynamic
+                                | FidanType::Unknown
+                                | FidanType::Error
+                                | FidanType::ClassType(_)
+                        ) {
+                            self.emit_not_callable_error(&callee_ty, span);
+                            return FidanType::Error;
                         }
                         FidanType::Dynamic
                     }
@@ -3749,13 +3897,24 @@ impl TypeChecker {
                     FidanType::Object(sym) => {
                         let object_type = FidanType::Object(sym);
                         if let Some(field_ty) = self.resolve_object_field_only(sym, field) {
-                            self.emit_unknown_member_error(&object_type, field, span, "method");
-                            let _ = field_ty;
+                            if matches!(
+                                field_ty,
+                                FidanType::Function
+                                    | FidanType::Dynamic
+                                    | FidanType::Unknown
+                                    | FidanType::Error
+                            ) {
+                                return FidanType::Dynamic;
+                            }
+                            self.emit_not_callable_error(&field_ty, span);
                             return FidanType::Error;
                         }
 
                         let ret = self.method_return(&sym, field);
-                        if matches!(ret, FidanType::Dynamic) {
+                        if let Some(info) = self.find_method_info(&sym, field) {
+                            // Dynamic is a valid return type, not a missing-method sentinel.
+                            self.check_call_arguments(&info.params, args, span, module);
+                        } else {
                             if self.object_method_may_be_cross_module(sym) {
                                 let recv_ty = self.interner.resolve(sym).to_string();
                                 let mname = self.interner.resolve(field).to_string();
@@ -3782,11 +3941,6 @@ impl TypeChecker {
                             } else {
                                 self.emit_unknown_member_error(&object_type, field, span, "method");
                                 return FidanType::Error;
-                            }
-                        } else {
-                            // Method found locally — validate the full local signature.
-                            if let Some(minfo) = self.find_method_info(&sym, field) {
-                                self.check_call_arguments(&minfo.params, args, span, module);
                             }
                         }
                         ret
@@ -4276,6 +4430,13 @@ impl TypeChecker {
             }
             Expr::Binary { op, lhs, rhs, .. } => {
                 let lhs = self.eval_const_value(*lhs, module)?;
+                // Type checking has already visited both operands. Constant
+                // evaluation follows the same lazy runtime contract as MIR.
+                if (*op == BinOp::And && matches!(lhs, ConstValue::Bool(false)))
+                    || (*op == BinOp::Or && matches!(lhs, ConstValue::Bool(true)))
+                {
+                    return Some(lhs);
+                }
                 let rhs = self.eval_const_value(*rhs, module)?;
                 self.eval_const_binary(*op, lhs, rhs)
             }
@@ -4398,6 +4559,27 @@ impl TypeChecker {
         span: Span,
         module: &Module,
     ) {
+        let mut labels = std::collections::HashSet::new();
+        for arg in args {
+            if let Some(name) = arg.name {
+                if !labels.insert(name) {
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0304"),
+                        format!(
+                            "argument `{}` was provided more than once",
+                            self.interner.resolve(name)
+                        ),
+                        arg.span,
+                    );
+                } else if !params.iter().any(|param| param.name == name) {
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0304"),
+                        format!("unknown named argument `{}`", self.interner.resolve(name)),
+                        arg.span,
+                    );
+                }
+            }
+        }
         // Named args supplied at this call site.
         let named: std::collections::HashSet<Symbol> =
             args.iter().filter_map(|arg| arg.name).collect();
@@ -4697,7 +4879,7 @@ impl TypeChecker {
     // ── TypeExpr resolution ───────────────────────────────────────────────
 
     pub(crate) fn resolve_type_expr(&mut self, te: &TypeExpr) -> FidanType {
-        match te {
+        let resolved = match te {
             TypeExpr::Named { name, span } => self.resolve_named_type(*name, *span),
             TypeExpr::Oftype { base, param, span } => {
                 let (base_str, base_span) = match base.as_ref() {
@@ -4755,7 +4937,9 @@ impl TypeChecker {
                 let types = elements.iter().map(|e| self.resolve_type_expr(e)).collect();
                 FidanType::Tuple(types)
             }
-        }
+        };
+        self.annotation_types.insert(te.span(), resolved.clone());
+        resolved
     }
 
     fn resolve_dict_type_annotation(&mut self, param: &TypeExpr, span: Span) -> FidanType {
@@ -4934,8 +5118,7 @@ impl TypeChecker {
     fn push_scope(&mut self, kind: ScopeKind) {
         self.table.push_scope(kind);
         self.local_actions.push(FxHashMap::default());
-        self.local_deprecated_actions
-            .push(rustc_hash::FxHashSet::default());
+        self.local_deprecated_actions.push(FxHashMap::default());
     }
 
     fn pop_scope(&mut self) {
@@ -4948,12 +5131,19 @@ impl TypeChecker {
         }
     }
 
-    fn define_local_action(&mut self, name: Symbol, info: ActionInfo, is_deprecated: bool) {
+    fn define_local_action(
+        &mut self,
+        name: Symbol,
+        info: ActionInfo,
+        deprecation: Option<Option<String>>,
+    ) {
         if let Some(scope) = self.local_actions.last_mut() {
             scope.insert(name, info);
         }
-        if is_deprecated && let Some(scope) = self.local_deprecated_actions.last_mut() {
-            scope.insert(name);
+        if let Some(reason) = deprecation
+            && let Some(scope) = self.local_deprecated_actions.last_mut()
+        {
+            scope.insert(name, reason);
         }
     }
 
@@ -4965,7 +5155,24 @@ impl TypeChecker {
             .or_else(|| self.actions.get(&name).cloned())
     }
 
-    fn is_action_deprecated(&self, name: Symbol) -> bool {
+    fn action_deprecation(
+        &self,
+        decorators: &[Decorator],
+        module: &Module,
+    ) -> Option<Option<String>> {
+        let decorator = decorators
+            .iter()
+            .find(|decorator| self.interner.resolve(decorator.name).as_ref() == "deprecated")?;
+        Some(decorator.args.first().and_then(|argument| {
+            match self.eval_const_value(argument.value, module) {
+                Some(ConstValue::String(message)) => Some(message),
+                _ => None,
+            }
+        }))
+    }
+
+    fn deprecation_warning(&self, name: Symbol) -> Option<String> {
+        let mut reason = self.deprecated_actions.get(&name);
         for (actions, deprecated) in self
             .local_actions
             .iter()
@@ -4973,10 +5180,20 @@ impl TypeChecker {
             .rev()
         {
             if actions.contains_key(&name) {
-                return deprecated.contains(&name);
+                reason = deprecated.get(&name);
+                break;
             }
         }
-        self.deprecated_actions.contains(&name)
+        let reason = reason?;
+        let mut message = format!(
+            "`{}` is marked `@deprecated` and may be removed in a future version",
+            self.interner.resolve(name)
+        );
+        if let Some(reason) = reason {
+            message.push_str(": ");
+            message.push_str(reason);
+        }
+        Some(message)
     }
 
     fn inject_this_and_parent(
@@ -5276,87 +5493,142 @@ impl TypeChecker {
         }
     }
 
-    /// Validate a list of decorators, emitting W2004 for any that are not
-    /// recognised by the compiler, and E0303 / E0304 for signature mismatches.
-    ///
-    /// Recognised decorators: `precompile`, `deprecated`, and any user-defined
-    /// action that is in scope (custom decorator pattern from §22.11).
-    ///
-    /// For user-defined decorators the following are also checked:
-    ///
-    /// - **E0303**: the first parameter of the decorator action must be typed
-    ///   `action` (`FidanType::Function`) or `flexible` (`FidanType::Dynamic`).
-    ///   Any other concrete type (e.g. `string`, `integer`) is an error because
-    ///   the runtime will pass a callable value there.
-    ///
-    /// - **E0304**: extra arguments passed to the decorator (`@dec(arg1, …)`)
-    ///   must match the number of *remaining* parameters (params after the first
-    ///   `action` param).  Too many or too few is an error.
-    fn check_decorators(&mut self, decorators: &[Decorator], params: &[Param]) {
+    /// Custom decorators use the normal call contract after the implicit action.
+    /// Reserved compiler spellings remain independent of ordinary symbol names.
+    fn check_decorators(&mut self, decorators: &[Decorator], module: &Module) {
         for dec in decorators {
             let name = self.interner.resolve(dec.name);
-            if BUILTIN_DECORATORS.contains(&name.as_ref()) {
-                continue; // built-in decorator — always valid
+            if let Some(metadata) = fidan_config::decorator_info(&name) {
+                if metadata.reserved_only {
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0304"),
+                        format!("decorator `@{name}` is reserved but not implemented"),
+                        dec.span,
+                    );
+                }
+                if let Some(parameters) = metadata.params {
+                    for argument in &dec.args {
+                        self.infer_expr(argument.value, module);
+                    }
+                    let parameters = parameters
+                        .iter()
+                        .map(|parameter| ParamInfo {
+                            name: self.interner.intern(parameter.name),
+                            ty: self
+                                .receiver_parameter_type(&FidanType::Dynamic, parameter.type_name),
+                            certain: true,
+                            optional: parameter.optional,
+                            has_default: parameter.optional,
+                        })
+                        .collect::<Vec<_>>();
+                    let arguments = dec
+                        .args
+                        .iter()
+                        .map(|argument| CallArgInfo {
+                            name: argument.name,
+                            value: argument.value,
+                            span: argument.span,
+                        })
+                        .collect::<Vec<_>>();
+                    self.check_call_arguments(&parameters, &arguments, dec.span, module);
+                    // Compiler attributes never execute user code to obtain metadata.
+                    // A supplied message must actually be usable at compile time.
+                    if metadata.name == "deprecated" {
+                        for argument in &dec.args {
+                            if matches!(
+                                self.expr_types.get(&argument.value),
+                                Some(FidanType::String | FidanType::Dynamic | FidanType::Unknown)
+                            ) && !matches!(
+                                self.eval_const_value(argument.value, module),
+                                Some(ConstValue::String(_))
+                            ) {
+                                self.emit_error(
+                                    fidan_diagnostics::diag_code!("E0303"),
+                                    "@deprecated message must be a compile-time string",
+                                    argument.span,
+                                );
+                            }
+                        }
+                    }
+                }
+                continue;
             }
-            // A user-defined action in scope is a valid custom decorator.
-            let is_user_action = self
-                .table
-                .lookup(dec.name)
-                .map(|i| matches!(i.kind, SymbolKind::Action))
-                .unwrap_or(false);
-            if !is_user_action {
+            let missing = matches!(module.arena.get_expr(dec.callee), Expr::Ident { name, .. }
+                if self.table.lookup(*name).is_none());
+            if missing {
                 self.emit_warning(
                     fidan_diagnostics::diag_code!("W2004"),
-                    format!("unknown decorator `@{name}` — will be ignored at runtime"),
+                    format!("unknown decorator `@{name}`; an action must be in scope"),
                     dec.span,
                 );
                 continue;
             }
-
-            // ── Signature checks for user-defined decorators ──────────────
-            // Clone the ActionInfo to avoid a simultaneous borrow on &self.
-            let info_opt = self.lookup_action_info(dec.name);
-            if let Some(info) = info_opt {
-                // E0303 — first param must accept an `action` value.
-                if let Some(first) = info.params.first() {
-                    let ok = matches!(
-                        first.ty,
-                        FidanType::Function | FidanType::Dynamic | FidanType::Unknown
+            let callee_type = self.infer_expr(dec.callee, module);
+            if !matches!(
+                callee_type,
+                FidanType::Function | FidanType::Dynamic | FidanType::Unknown | FidanType::Error
+            ) {
+                self.emit_error(
+                    fidan_diagnostics::diag_code!("E0303"),
+                    format!(
+                        "decorator `@{name}` must be callable, found `{}`",
+                        self.ty_name(&callee_type)
+                    ),
+                    dec.span,
+                );
+                continue;
+            }
+            for arg in &dec.args {
+                self.infer_expr(arg.value, module);
+            }
+            if let Some(info) = self.callable_info(dec.callee, module) {
+                let Some(first) = info.params.first() else {
+                    self.emit_error(fidan_diagnostics::diag_code!("E0303"),
+                        format!("decorator `@{name}` must accept the decorated action as its first parameter"), dec.span);
+                    continue;
+                };
+                if !matches!(
+                    first.ty,
+                    FidanType::Function | FidanType::Dynamic | FidanType::Unknown
+                ) {
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0303"),
+                        format!(
+                            "decorator `@{name}` first parameter must accept an action, found `{}`",
+                            self.ty_name(&first.ty)
+                        ),
+                        dec.span,
                     );
-                    if !ok {
-                        let got = self.ty_name(&first.ty);
-                        self.emit_error(
-                            fidan_diagnostics::diag_code!("E0303"),
-                            format!(
-                                "decorator `@{name}` expects its first parameter to be `action` \
-                                 but it is typed `{got}` — the runtime will pass a callable here"
-                            ),
-                            dec.span,
-                        );
-                    }
-                    // E0304 — extra literal args must match remaining params.
-                    let expected_extra = info.params.len().saturating_sub(1);
-                    let got_extra = dec.args.len();
-                    if got_extra != expected_extra {
-                        self.emit_error(
-                            fidan_diagnostics::diag_code!("E0304"),
-                            format!(
-                                "decorator `@{name}` expects {expected_extra} extra argument{} \
-                                 after the `action` parameter, but {} {} provided",
-                                if expected_extra == 1 { "" } else { "s" },
-                                got_extra,
-                                if got_extra == 1 { "was" } else { "were" },
-                            ),
-                            dec.span,
-                        );
-                    }
-                } else {
-                    // Decorator has no params at all — treat as marker-only; no checks.
                 }
+                if !matches!(
+                    info.return_ty,
+                    FidanType::Function
+                        | FidanType::Nothing
+                        | FidanType::Dynamic
+                        | FidanType::Unknown
+                        | FidanType::Error
+                ) {
+                    self.emit_error(
+                        fidan_diagnostics::diag_code!("E0303"),
+                        format!(
+                            "decorator `@{name}` must return an action or nothing, found `{}`",
+                            self.ty_name(&info.return_ty)
+                        ),
+                        dec.span,
+                    );
+                }
+                let args = dec
+                    .args
+                    .iter()
+                    .map(|arg| CallArgInfo {
+                        name: arg.name,
+                        value: arg.value,
+                        span: arg.span,
+                    })
+                    .collect::<Vec<_>>();
+                self.check_call_arguments(&info.params[1..], &args, dec.span, module);
             }
         }
-
-        let _ = params;
     }
 
     /// Emit W2002 if `expr_id` is a bare literal with no side effects.
@@ -5404,6 +5676,58 @@ impl TypeChecker {
 mod const_regressions {
     use super::*;
     #[test]
+    fn selective_import_retains_registered_object_types_and_method_checks() {
+        for (value, invalid) in [("[\"alias\"]", false), ("42", true)] {
+            let interner = Arc::new(SymbolInterner::new());
+            let name = interner.intern("Registry");
+            let method = interner.intern("label");
+            let parameter = interner.intern("aliases");
+            let span = Span::new(FileId(1), 0, 1);
+            let source = format!(
+                "use models.{{Registry}}\nvar registry = Registry()\nregistry.label(aliases = {value})\n"
+            );
+            let file =
+                fidan_source::SourceFile::new(FileId(0), "<selective-import>", source.as_str());
+            let (tokens, lexical) =
+                fidan_lexer::Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, parsed) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+            assert!(lexical.is_empty() && parsed.is_empty());
+            let mut checker = TypeChecker::new(Arc::clone(&interner), file.id);
+            checker.pre_register_object_data(
+                name,
+                None,
+                span,
+                [],
+                [(
+                    method,
+                    ActionInfo {
+                        params: vec![ParamInfo {
+                            name: parameter,
+                            ty: FidanType::List(Box::new(FidanType::String)),
+                            certain: true,
+                            optional: false,
+                            has_default: false,
+                        }],
+                        return_ty: FidanType::String,
+                        span,
+                    },
+                )],
+            );
+            checker.check_module(&module);
+            let typed = checker.finish_typed();
+            let errors = typed
+                .diagnostics
+                .iter()
+                .filter(|diag| diag.severity == fidan_diagnostics::Severity::Error)
+                .collect::<Vec<_>>();
+            assert_eq!(!errors.is_empty(), invalid, "{source}: {errors:?}");
+            if invalid {
+                assert!(errors.iter().any(|diag| diag.code == "E0302"));
+            }
+        }
+    }
+
+    #[test]
     fn full_width_integer_constant_ordering_and_checked_arithmetic() {
         let checker = TypeChecker::new(Arc::new(SymbolInterner::new()), FileId(0));
         for (left, right) in [
@@ -5440,5 +5764,46 @@ mod const_regressions {
             checker.eval_const_binary(BinOp::Pow, ConstValue::Int(2), ConstValue::Int(-3)),
             Some(ConstValue::Float(0.125))
         );
+    }
+    #[test]
+    fn dictionary_keys_preserve_the_receiver_key_type() {
+        let interner = Arc::new(SymbolInterner::new());
+        let checker = TypeChecker::new(interner.clone(), FileId(0));
+        for key in [FidanType::Integer, FidanType::String, FidanType::Dynamic] {
+            let receiver = FidanType::Dict(Box::new(key.clone()), Box::new(FidanType::Boolean));
+            assert_eq!(
+                checker.builtin_method_return(&receiver, interner.intern("keys")),
+                Some(FidanType::List(Box::new(key)))
+            );
+        }
+    }
+    #[test]
+    fn enum_payload_patterns_bind_only_inside_the_arm() {
+        for (tail, expected_error) in [("", None), ("print(value)", Some("E0101"))] {
+            let interner = Arc::new(SymbolInterner::new());
+            let source = format!(
+                "enum Result {{ Ok(integer) }}\nvar result = Result.Ok(3)\ncheck result {{ Result.Ok(value) => print(value) }}\n{tail}"
+            );
+            let file = fidan_source::SourceFile::new(FileId(0), "<enum-pattern>", source.as_str());
+            let (tokens, lexical) = fidan_lexer::Lexer::new(&file, interner.clone()).tokenise();
+            let (module, parsed) = fidan_parser::parse(&tokens, file.id, interner.clone());
+            assert!(lexical.is_empty() && parsed.is_empty());
+            let mut checker = TypeChecker::new(interner, file.id);
+            checker.check_module(&module);
+            let typed = checker.finish_typed();
+            let errors = typed
+                .diagnostics
+                .iter()
+                .filter(|diag| diag.severity == fidan_diagnostics::Severity::Error)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                errors.len(),
+                usize::from(expected_error.is_some()),
+                "{errors:?}"
+            );
+            if let Some(code) = expected_error {
+                assert_eq!(errors[0].code, code);
+            }
+        }
     }
 }

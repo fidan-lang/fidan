@@ -12,6 +12,14 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FunctionId(pub u32);
 
+/// Interpreter scheduler identity; IDs from another machine cannot address a
+/// coincidentally equal local task ID in a parallel worker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PendingTaskId {
+    pub owner: u64,
+    pub id: u64,
+}
+
 /// The universal boxed value type used by the interpreter and native runtime.
 ///
 /// AOT uses native scalars where possible and boxed values at runtime boundaries.
@@ -43,7 +51,7 @@ pub enum FidanValue {
     /// A value being computed asynchronously (`spawn` expression).
     Pending(FidanPending),
     /// Interpreter-only same-thread deferred task handle.
-    PendingTask(u64),
+    PendingTask(PendingTaskId),
     /// A stdlib module namespace (e.g. `io`, `math`).
     /// Method calls on this value are routed to `fidan_stdlib::dispatch_stdlib`.
     Namespace(Arc<str>),
@@ -136,103 +144,142 @@ impl FidanValue {
         }
     }
 
-    /// Create a version of this value safe to send into a parallel task.
-    ///
-    /// - **Primitives / String / Function** — cheap bit-copy or Arc bump.
-    /// - **List / Dict** — new `Rc<RefCell<T>>` wrapping the *shared* inner
-    ///   `Arc<Vec>` / `Arc<HashMap>`.  No data is copied until mutation (CoW).
-    /// - **Object** — each field is recursively captured; `Arc<FidanClass>`
-    ///   metadata is shared.
-    /// - **Shared** — `Arc<Mutex<T>>` is intentionally shared across threads.
-    /// - **Pending** — clones the `Arc<Mutex<JoinHandle>>` pointer.
-    /// - **Tuple** — recurse per element.
+    /// Snapshot ordinary mutable values into an independent thread-local graph.
+    /// Aliases and cycles inside that graph are preserved. Only explicit Shared,
+    /// pending handles and immutable Arc metadata retain cross-thread ownership.
     pub fn parallel_capture(&self) -> FidanValue {
+        Self::capture_values(std::slice::from_ref(self))
+            .pop()
+            .unwrap()
+    }
+
+    /// Capture all worker roots together so aliases between arguments and globals survive.
+    pub fn capture_values(values: &[FidanValue]) -> Vec<FidanValue> {
+        let mut memo = std::collections::HashMap::new();
+        let captured = values
+            .iter()
+            .map(|value| value.capture_local_graph(&mut memo))
+            .collect();
+        // Frozen structural keys retain insertion-time contents. Object identity keys
+        // must instead refer to the copied object after the entire graph is built.
+        let identities = memo
+            .iter()
+            .filter_map(|(source, value)| {
+                if let FidanValue::Object(object) = value {
+                    Some((*source, object.identity()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for value in memo.values() {
+            match value {
+                FidanValue::Dict(dict) => dict.borrow_mut().remap_object_keys(&identities),
+                FidanValue::HashSet(set) => set.borrow_mut().remap_object_keys(&identities),
+                _ => {}
+            }
+        }
+        captured
+    }
+
+    fn capture_local_graph(
+        &self,
+        memo: &mut std::collections::HashMap<usize, FidanValue>,
+    ) -> FidanValue {
+        let identity = match self {
+            Self::List(value) => Some(value.identity()),
+            Self::Dict(value) => Some(value.identity()),
+            Self::HashSet(value) => Some(value.identity()),
+            Self::Object(value) => Some(value.identity()),
+            _ => None,
+        };
+        if let Some(previous) = identity.and_then(|identity| memo.get(&identity)) {
+            return previous.clone();
+        }
         match self {
-            FidanValue::Integer(n) => FidanValue::Integer(*n),
-            FidanValue::Float(f) => FidanValue::Float(*f),
-            FidanValue::Boolean(b) => FidanValue::Boolean(*b),
-            FidanValue::Handle(h) => FidanValue::Handle(*h),
-            FidanValue::Nothing => FidanValue::Nothing,
-            FidanValue::Function(id) => FidanValue::Function(*id),
-
-            // Arc<str> — single atomic refcount bump, no data copy.
-            FidanValue::String(s) => FidanValue::String(s.clone()),
-
-            // New Rc+RefCell wrapping the *same* inner Arc<Vec> (CoW preserved).
-            FidanValue::List(r) => {
-                let inner = r.borrow().clone(); // O(1): clones Arc<Vec>
-                FidanValue::List(OwnedRef::new(inner))
+            Self::List(source) => {
+                let target = OwnedRef::new(FidanList::new());
+                let value = Self::List(target.clone());
+                memo.insert(source.identity(), value.clone());
+                let entries = source
+                    .borrow()
+                    .iter()
+                    .map(|item| item.capture_local_graph(memo))
+                    .collect();
+                *target.borrow_mut() = FidanList::from_vec(entries);
+                value
             }
-
-            // New Rc+RefCell wrapping the *same* inner Arc<HashMap> (CoW preserved).
-            FidanValue::Dict(r) => {
-                let inner = r.borrow().clone(); // O(1): clones Arc<HashMap>
-                FidanValue::Dict(OwnedRef::new(inner))
+            Self::Dict(source) => {
+                let target = OwnedRef::new(FidanDict::new());
+                let value = Self::Dict(target.clone());
+                memo.insert(source.identity(), value.clone());
+                *target.borrow_mut() = source
+                    .borrow()
+                    .capture_values(|item| item.capture_local_graph(memo));
+                value
             }
-
-            // New Rc+RefCell wrapping the same inner Rc<HashSet> (CoW preserved).
-            FidanValue::HashSet(r) => {
-                let inner = r.borrow().clone();
-                FidanValue::HashSet(OwnedRef::new(inner))
+            Self::HashSet(source) => {
+                let target = OwnedRef::new(FidanHashSet::new());
+                let value = Self::HashSet(target.clone());
+                memo.insert(source.identity(), value.clone());
+                *target.borrow_mut() = source
+                    .borrow()
+                    .capture_values(|item| item.capture_local_graph(memo));
+                value
             }
-
-            // Field-by-field capture; Arc<FidanClass> is shared.
-            FidanValue::Object(r) => {
-                let obj = r.borrow();
-                let fields: Vec<FidanValue> =
-                    obj.fields.iter().map(|f| f.parallel_capture()).collect();
-                FidanValue::Object(OwnedRef::new(FidanObject {
-                    class: Arc::clone(&obj.class),
-                    fields,
-                }))
+            Self::Object(source) => {
+                let source = source.borrow();
+                let target = OwnedRef::new(FidanObject {
+                    class: Arc::clone(&source.class),
+                    fields: Vec::new(),
+                });
+                let value = Self::Object(target.clone());
+                memo.insert(identity.unwrap(), value.clone());
+                target.borrow_mut().fields = source
+                    .fields
+                    .iter()
+                    .map(|item| item.capture_local_graph(memo))
+                    .collect();
+                value
             }
-
-            // Intentionally shared across threads.
-            FidanValue::Shared(s) => FidanValue::Shared(s.clone()),
-            FidanValue::WeakShared(ws) => FidanValue::WeakShared(ws.clone()),
-
-            // Share the Arc<Mutex<JoinHandle>>.
-            FidanValue::Pending(p) => FidanValue::Pending(p.clone()),
-            FidanValue::PendingTask(id) => FidanValue::PendingTask(*id),
-
-            // Recurse per element.
-            FidanValue::Tuple(elems) => {
-                FidanValue::Tuple(elems.iter().map(|e| e.parallel_capture()).collect())
-            }
-
-            // Namespace is stateless — just clone the Arc<str>.
-            FidanValue::Namespace(m) => FidanValue::Namespace(Arc::clone(m)),
-
-            // StdlibFn is stateless — clone both Arc<str> pointers.
-            FidanValue::StdlibFn(module, name) => {
-                FidanValue::StdlibFn(Arc::clone(module), Arc::clone(name))
-            }
-
-            // EnumType and EnumVariant: clone Arc<str> and deep-clone payload.
-            FidanValue::EnumType(s) => FidanValue::EnumType(Arc::clone(s)),
-            FidanValue::EnumVariant { tag, payload } => FidanValue::EnumVariant {
+            Self::Tuple(values) => Self::Tuple(
+                values
+                    .iter()
+                    .map(|value| value.capture_local_graph(memo))
+                    .collect(),
+            ),
+            Self::EnumVariant { tag, payload } => Self::EnumVariant {
                 tag: Arc::clone(tag),
-                payload: payload.iter().map(|v| v.parallel_capture()).collect(),
+                payload: payload
+                    .iter()
+                    .map(|value| value.capture_local_graph(memo))
+                    .collect(),
             },
-            // ClassType is stateless — clone the Arc<str>.
-            FidanValue::ClassType(s) => FidanValue::ClassType(Arc::clone(s)),
-
-            // Range is plain data — copy start/end/inclusive.
-            FidanValue::Range {
-                start,
-                end,
-                inclusive,
-            } => FidanValue::Range {
-                start: *start,
-                end: *end,
-                inclusive: *inclusive,
-            },
-
-            // Recurse on each captured element.
-            FidanValue::Closure { fn_id, captured } => FidanValue::Closure {
+            Self::Closure { fn_id, captured } => Self::Closure {
                 fn_id: *fn_id,
-                captured: captured.iter().map(|v| v.parallel_capture()).collect(),
+                captured: captured
+                    .iter()
+                    .map(|value| value.capture_local_graph(memo))
+                    .collect(),
             },
+            // Keep this exhaustive: a new Rc-backed variant must choose an
+            // explicit capture policy before it can cross an unsafe Send boundary.
+            Self::Integer(_)
+            | Self::Float(_)
+            | Self::Boolean(_)
+            | Self::Handle(_)
+            | Self::Nothing
+            | Self::String(_)
+            | Self::Shared(_)
+            | Self::WeakShared(_)
+            | Self::Function(_)
+            | Self::Pending(_)
+            | Self::PendingTask(_)
+            | Self::Namespace(_)
+            | Self::StdlibFn(..)
+            | Self::EnumType(_)
+            | Self::ClassType(_)
+            | Self::Range { .. } => self.clone(),
         }
     }
 }
@@ -245,6 +292,45 @@ pub fn display(val: &FidanValue) -> String {
     let mut out = String::new();
     display_into(&mut out, val);
     out
+}
+
+/// Conventional payload field for a user-defined exception's human-readable text.
+pub const EXCEPTION_MESSAGE_FIELD: &str = "message";
+
+/// Render an uncaught exception without changing ordinary value display or its
+/// catchable payload. The interpreter supplies its interned field identifier;
+/// native objects use the existing branded, string-keyed representation.
+pub fn display_exception(value: &FidanValue, message_field: Option<fidan_lexer::Symbol>) -> String {
+    let message = match value {
+        FidanValue::Object(object) => {
+            message_field.and_then(|field| match object.borrow().get_field(field) {
+                Some(FidanValue::String(message)) => Some(message.clone()),
+                _ => None,
+            })
+        }
+        FidanValue::Dict(dictionary) => {
+            let dictionary = dictionary.borrow();
+            if dictionary.aot_class_name().is_some() {
+                dictionary
+                    .iter()
+                    .find_map(|(key, value)| match (key, value) {
+                        (FidanValue::String(key), FidanValue::String(message))
+                            if key.as_str() == EXCEPTION_MESSAGE_FIELD =>
+                        {
+                            Some(message.clone())
+                        }
+                        _ => None,
+                    })
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    match message {
+        Some(message) => format!("{}: {}", display(value), message.as_str()),
+        None => display(value),
+    }
 }
 
 pub fn write_display_io<W: io::Write>(out: &mut W, val: &FidanValue) -> io::Result<()> {
@@ -277,10 +363,9 @@ pub fn write_display_io<W: io::Write>(out: &mut W, val: &FidanValue) -> io::Resu
         }
         FidanValue::Dict(d) => {
             let borrowed = d.borrow();
-            let class_key = FidanValue::String(FidanString::new("__class__"));
-            if let Ok(Some(FidanValue::String(cn))) = borrowed.get(&class_key) {
+            if let Some(cn) = borrowed.aot_class_name() {
                 out.write_all(b"<")?;
-                out.write_all(cn.as_str().as_bytes())?;
+                out.write_all(cn.as_bytes())?;
                 return out.write_all(b">");
             }
             out.write_all(b"{")?;
@@ -411,11 +496,10 @@ pub fn display_into(out: &mut String, val: &FidanValue) {
         }
         FidanValue::Dict(d) => {
             let borrowed = d.borrow();
-            // If the dict has a "__class__" entry it's an AOT object — display as <ClassName>.
-            let class_key = FidanValue::String(FidanString::new("__class__"));
-            if let Ok(Some(FidanValue::String(cn))) = borrowed.get(&class_key) {
+            // Only the runtime constructor can brand a Dict-backed native object.
+            if let Some(cn) = borrowed.aot_class_name() {
                 out.push('<');
-                out.push_str(cn.as_str());
+                out.push_str(cn);
                 out.push('>');
                 return;
             }
@@ -532,8 +616,144 @@ pub fn display_into(out: &mut String, val: &FidanValue) {
 
 #[cfg(test)]
 mod tests {
-    use super::{FidanValue, display, write_display_io};
-    use crate::{FidanHashSet, FidanList, FidanString, OwnedRef};
+    #[test]
+    fn exception_display_only_reads_a_branded_objects_string_message() {
+        let mut dictionary = FidanDict::new();
+        let key = FidanValue::String(FidanString::new(EXCEPTION_MESSAGE_FIELD));
+        dictionary
+            .insert(key.clone(), FidanValue::String(FidanString::new("details")))
+            .unwrap();
+        let ordinary = FidanValue::Dict(OwnedRef::new(dictionary.clone()));
+        assert_eq!(display_exception(&ordinary, None), display(&ordinary));
+        dictionary.mark_aot_object(FidanString::new("Problem"));
+        let object = FidanValue::Dict(OwnedRef::new(dictionary));
+        assert_eq!(display(&object), "<Problem>");
+        assert_eq!(display_exception(&object, None), "<Problem>: details");
+        let FidanValue::Dict(fields) = &object else {
+            unreachable!()
+        };
+        fields
+            .borrow_mut()
+            .insert(key, FidanValue::Integer(42))
+            .unwrap();
+        assert_eq!(display_exception(&object, None), "<Problem>");
+        let string = FidanValue::String(FidanString::new("plain error"));
+        assert_eq!(display_exception(&string, None), "plain error");
+    }
+
+    #[test]
+    fn parallel_capture_detaches_nested_mutable_values() {
+        let child = OwnedRef::new(FidanList::from_vec(vec![FidanValue::Integer(1)]));
+        let source = FidanValue::List(OwnedRef::new(FidanList::from_vec(vec![FidanValue::List(
+            child.clone(),
+        )])));
+        let FidanValue::List(snapshot) = source.parallel_capture() else {
+            panic!("expected list")
+        };
+        let FidanValue::List(captured_child) = snapshot.borrow().get(0).unwrap().clone() else {
+            panic!("expected nested list")
+        };
+        assert_ne!(
+            child.identity(),
+            captured_child.identity(),
+            "parallel tasks must never share an Rc allocation"
+        );
+        captured_child.borrow_mut().append(FidanValue::Integer(2));
+        assert_eq!(
+            child.borrow().len(),
+            1,
+            "captured mutations must not change the source thread"
+        );
+    }
+
+    #[test]
+    fn parallel_capture_preserves_aliases_and_cycles_across_roots() {
+        let list = OwnedRef::new(FidanList::new());
+        list.borrow_mut().append(FidanValue::List(list.clone()));
+        let values = FidanValue::capture_values(&[
+            FidanValue::List(list.clone()),
+            FidanValue::List(list.clone()),
+        ]);
+        let [FidanValue::List(first), FidanValue::List(second)] = values.as_slice() else {
+            panic!("lists")
+        };
+        assert_eq!(first.identity(), second.identity());
+        assert_ne!(first.identity(), list.identity());
+        let FidanValue::List(cycle) = first.borrow().get(0).unwrap().clone() else {
+            panic!("cycle")
+        };
+        assert_eq!(first.identity(), cycle.identity());
+        // Break the deliberate cycles so the regression itself does not leak Rc graphs.
+        first.borrow_mut().pop();
+        list.borrow_mut().pop();
+    }
+
+    #[test]
+    fn parallel_capture_preserves_frozen_collection_keys() {
+        let key = OwnedRef::new(FidanList::from_vec(vec![FidanValue::Integer(1)]));
+        let mut dictionary = crate::FidanDict::new();
+        dictionary
+            .insert(FidanValue::List(key.clone()), FidanValue::Integer(7))
+            .unwrap();
+        key.borrow_mut().append(FidanValue::Integer(2));
+        let source = FidanValue::Dict(OwnedRef::new(dictionary));
+        let FidanValue::Dict(captured) = source.parallel_capture() else {
+            panic!("dict")
+        };
+        let frozen_key = FidanValue::List(OwnedRef::new(FidanList::from_vec(vec![
+            FidanValue::Integer(1),
+        ])));
+        assert!(matches!(
+            captured.borrow().get(&frozen_key).unwrap(),
+            Some(FidanValue::Integer(7))
+        ));
+        assert!(
+            captured
+                .borrow()
+                .get(&FidanValue::List(key))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn parallel_capture_retargets_object_identity_keys() {
+        let class = std::sync::Arc::new(crate::FidanClass {
+            name: fidan_lexer::Symbol(0),
+            name_str: "Box".into(),
+            parent: None,
+            fields: vec![],
+            field_index: Default::default(),
+            methods: Default::default(),
+            has_drop_action: false,
+        });
+        let object = FidanValue::Object(OwnedRef::new(crate::FidanObject::new(class)));
+        let mut dictionary = crate::FidanDict::new();
+        dictionary
+            .insert(object.clone(), FidanValue::Integer(42))
+            .unwrap();
+        let set = crate::FidanHashSet::from_values([object.clone()]).unwrap();
+        let captured = FidanValue::capture_values(&[
+            object.clone(),
+            FidanValue::Dict(OwnedRef::new(dictionary)),
+            FidanValue::HashSet(OwnedRef::new(set)),
+        ]);
+        let [copied, FidanValue::Dict(dict), FidanValue::HashSet(set)] = captured.as_slice() else {
+            panic!("payload")
+        };
+        assert!(matches!(
+            dict.borrow().get(copied).unwrap(),
+            Some(FidanValue::Integer(42))
+        ));
+        assert!(dict.borrow().get(&object).unwrap().is_none());
+        assert!(set.borrow().contains(copied).unwrap());
+        assert!(!set.borrow().contains(&object).unwrap());
+    }
+
+    use super::{
+        EXCEPTION_MESSAGE_FIELD, FidanValue, display, display_exception, write_display_io,
+    };
+    use crate::{FidanDict, FidanHashSet, FidanList, FidanString, OwnedRef};
 
     #[test]
     fn io_display_matches_string_display_for_nested_values() {

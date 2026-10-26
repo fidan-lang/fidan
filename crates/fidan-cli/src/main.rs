@@ -2,7 +2,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use fidan_diagnostics::{Severity, render_backtrace_to_stderr, render_message_to_stderr};
 use fidan_driver::{
     CompileOptions, EmitKind, ExecutionMode, LtoMode, OptLevel, SandboxPolicy, StripMode, TraceMode,
@@ -51,6 +51,9 @@ fn ensure_utf8_console() {}
     long_about = None,
 )]
 struct Cli {
+    /// Operational diagnostics on stderr: -v INFO, -vv DEBUG, -vvv TRACE (maximum three)
+    #[arg(short = 'v', long, global = true, action = clap::ArgAction::Count)]
+    verbose: u8,
     #[command(subcommand)]
     command: Command,
 }
@@ -178,8 +181,9 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         suppress: Vec<String>,
     },
-    /// Run `test { ... }` blocks in a Fidan source file
+    /// Run `test { ... }` blocks in a source file or directory (recursively)
     Test {
+        /// Path to a .fdn source file or directory
         file: PathBuf,
         /// Stop after this many errors (default: 1, 0 = no limit)
         #[arg(long, default_value = "1")]
@@ -208,9 +212,9 @@ enum Command {
         #[arg(long)]
         stdio: bool,
     },
-    /// Format a Fidan source file
+    /// Format a Fidan source file or directory (recursively)
     Format {
-        /// Path to the .fdn source file
+        /// Path to a .fdn source file or directory (recursive)
         file: PathBuf,
         /// Rewrite the file in place instead of printing to stdout
         #[arg(long)]
@@ -225,9 +229,9 @@ enum Command {
         #[arg(long)]
         max_line_len: Option<usize>,
     },
-    /// Check a Fidan source file for errors without running it
+    /// Check source files for errors without running them (directories recursively)
     Check {
-        /// Path to the .fdn source file
+        /// Path to a .fdn source file or directory
         file: PathBuf,
         /// Stop after this many errors (0 = no limit)
         #[arg(long, default_value = "0")]
@@ -239,9 +243,9 @@ enum Command {
         #[arg(long, value_delimiter = ',')]
         suppress: Vec<String>,
     },
-    /// Apply high-confidence fix suggestions to a Fidan source file
+    /// Apply high-confidence fixes to source files (directories recursively)
     Fix {
-        /// Path to the .fdn source file
+        /// Path to a .fdn source file or directory
         file: PathBuf,
         /// Write changes to the file (default: print diff to stdout)
         #[arg(long)]
@@ -400,6 +404,7 @@ fn main() {
         } else {
             "unexpected internal error".to_string()
         };
+        let msg = fidan_diagnostics::logging::redact(&msg);
         let loc = info
             .location()
             .map(|l| format!(" [{}:{}]", l.file(), l.line()))
@@ -428,6 +433,91 @@ fn main() {
     }
 }
 
+/// Clap's global Count values are propagated, not summed across command levels.
+/// Normalize only recognized CLI occurrences, using its metadata for option values.
+/// Once run/exec reaches its trailing arguments, those arguments belong to the
+/// program; an explicit separator also makes their ownership unambiguous to Clap.
+fn normalize_verbosity(args: Vec<std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let mut root = Cli::command();
+    root.build();
+    let mut command = &root;
+    let mut normalized = vec![args[0].clone()];
+    let mut count = 0usize;
+    let mut positional_seen = false;
+    let mut index = 1;
+    while index < args.len() {
+        let value = args[index].to_string_lossy();
+        if value == "--" {
+            normalized.extend_from_slice(&args[index..]);
+            break;
+        }
+        let verbosity = value == "--verbose"
+            || (value.starts_with('-') && value.len() > 1 && value[1..].chars().all(|c| c == 'v'));
+        let (name, attached) = value
+            .split_once('=')
+            .map_or((value.as_ref(), false), |(name, _)| (name, true));
+        let option = command.get_arguments().find(|arg| {
+            name.strip_prefix("--")
+                .is_some_and(|long| arg.get_long() == Some(long))
+                || (name.len() == 2
+                    && name.starts_with('-')
+                    && arg.get_short() == name.chars().nth(1))
+        });
+        if matches!(command.get_name(), "run" | "exec")
+            && positional_seen
+            && (verbosity
+                || option.is_none()
+                || option.is_some_and(|arg| arg.get_id() == "verbose"))
+        {
+            normalized.push("--".into());
+            normalized.extend_from_slice(&args[index..]);
+            break;
+        }
+        if verbosity {
+            count = count.saturating_add(if value == "--verbose" {
+                1
+            } else {
+                value.len() - 1
+            });
+            index += 1;
+            continue;
+        }
+        if let Some(child) = command.find_subcommand(&*value) {
+            command = child;
+            positional_seen = false;
+            normalized.push(args[index].clone());
+            index += 1;
+            continue;
+        }
+        normalized.push(args[index].clone());
+        if let Some(option) = option {
+            if option.get_action().takes_values() && !attached && index + 1 < args.len() {
+                let next_is_flag = args[index + 1].to_string_lossy().starts_with('-');
+                if next_is_flag
+                    && !option.is_allow_hyphen_values_set()
+                    && option
+                        .get_num_args()
+                        .is_some_and(|range| range.min_values() > 0)
+                {
+                    return args; // Keep Clap's missing-value error, never reinterpret it.
+                }
+                if !next_is_flag || option.is_allow_hyphen_values_set() {
+                    index += 1;
+                    normalized.push(args[index].clone());
+                }
+            }
+        } else if !value.starts_with('-') || value == "-" {
+            positional_seen = true;
+        }
+        index += 1;
+    }
+    // Four is already a usage error; do not allocate for arbitrary input counts.
+    for _ in 0..count.min(usize::from(fidan_diagnostics::logging::MAX_VERBOSITY) + 1) {
+        normalized.insert(1, "--verbose".into());
+    }
+    normalized
+}
+
 fn run_cli() -> Result<()> {
     // Internal machine API used by the ai-analysis helper. Keep it out of Clap's
     // subcommand table so typo suggestions do not reveal it.
@@ -435,9 +525,46 @@ fn run_cli() -> Result<()> {
         return ai_analysis::handle_internal_request_from_stdio();
     }
 
-    let cli = Cli::parse();
+    let matches =
+        Cli::command().get_matches_from(normalize_verbosity(std::env::args_os().collect()));
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|error| error.exit());
+    if cli.verbose > fidan_diagnostics::logging::MAX_VERBOSITY {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::ValueValidation,
+                "at most three verbosity occurrences are supported; use -vvv",
+            )
+            .exit();
+    }
+    let configuration = fidan_diagnostics::logging::Configuration::from_environment(cli.verbose)
+        .map_err(anyhow::Error::msg)?;
+    fidan_diagnostics::logging::capture_environment_secrets();
+    fidan_diagnostics::tracing::subscriber::set_global_default(
+        fidan_diagnostics::logging::subscriber(configuration.clone(), std::io::stderr),
+    )
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "cannot initialize Fidan diagnostics: a tracing subscriber is already installed"
+        )
+    })?;
+    fidan_diagnostics::logging::configure_children(&configuration).map_err(anyhow::Error::msg)?;
+    let mut path = Vec::new();
+    let mut cursor = &matches;
+    while let Some((name, child)) = cursor.subcommand() {
+        path.push(name);
+        cursor = child;
+    }
+    let operation = path.join(" ");
+    let _span = fidan_diagnostics::tracing::info_span!("command").entered();
+    fidan_diagnostics::tracing::info!(command = %operation, "operation started");
+    let started = std::time::Instant::now();
+    let result = fidan_diagnostics::logging::phase("command_dispatch", || dispatch(cli.command));
+    fidan_diagnostics::tracing::info!(command = %operation, success = result.is_ok(), elapsed_ms = started.elapsed().as_millis() as u64, "operation completed");
+    result
+}
 
-    match cli.command {
+fn dispatch(command: Command) -> Result<()> {
+    match command {
         Command::Run {
             file,
             emit,
@@ -618,9 +745,6 @@ fn run_cli() -> Result<()> {
                 target_cpu: effective_target_cpu,
                 ..Default::default()
             };
-            if matches!(backend, fidan_driver::Backend::Llvm) {
-                let _ = toolchain::ensure_llvm_toolchain_installed()?;
-            }
             pipeline::run_pipeline(opts)
         }
         Command::Profile {
@@ -659,7 +783,7 @@ fn run_cli() -> Result<()> {
                 suppress,
                 ..Default::default()
             };
-            pipeline::run_pipeline(opts)
+            pipeline::run_pipeline_path(opts)
         }
         Command::Check {
             file,
@@ -679,7 +803,7 @@ fn run_cli() -> Result<()> {
                 suppress,
                 ..Default::default()
             };
-            pipeline::run_pipeline(opts)
+            pipeline::run_pipeline_path(opts)
         }
         Command::Fix {
             file,
@@ -743,5 +867,5 @@ fn format_cli_error(err: &anyhow::Error) -> String {
             rendered.push_str(&format!("\n  cause: {cause_text}"));
         }
     }
-    rendered
+    fidan_diagnostics::logging::redact(&rendered)
 }

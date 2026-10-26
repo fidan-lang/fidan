@@ -1,0 +1,17 @@
+object Binder {
+    action bind with (
+        certain name oftype string,
+        optional description oftype string = "default",
+        optional aliases oftype list oftype string = [],
+    ) returns dynamic {
+        return (name, description, aliases)
+    }
+}
+
+var binder = Binder()
+
+assert_eq(
+        binder.bind("name", aliases = ["alias"], description = "description"),
+        ("name", "description", ["alias"]),
+    )
+print("named method binding passed")

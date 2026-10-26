@@ -2,11 +2,12 @@
 name = "fidan-secrets"
 version.workspace = true
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+fidan-diagnostics = { workspace = true }
 anyhow = { workspace = true }
 keyring-core = { workspace = true }
 

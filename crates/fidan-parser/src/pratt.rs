@@ -841,6 +841,7 @@ impl<'t> Parser<'t> {
     /// (literals, operators, calls, member access, etc.) work correctly.
     fn parse_interp_fragment(&mut self, inner: &str, span: Span, fragment_offset: u32) -> ExprId {
         if inner.is_empty() {
+            self.error("interpolation expression cannot be empty", span);
             return self.error_expr(span);
         }
         // Build a tiny SourceFile for the fragment and tokenise it.
@@ -854,6 +855,7 @@ impl<'t> Parser<'t> {
             );
         }
         if frag_tokens.is_empty() || matches!(frag_tokens[0].kind, TokenKind::Eof) {
+            self.error("interpolation expression cannot be empty", span);
             return self.error_expr(span);
         }
         // Activate fragment mode: peek/advance will read from this token buffer.

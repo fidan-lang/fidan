@@ -6,19 +6,55 @@ use std::rc::Rc;
 #[derive(Debug, Clone)]
 pub struct FidanDict {
     inner: Rc<HashMap<FidanHashKey, (FidanValue, FidanValue)>>,
+    // Runtime-only provenance. Ordinary source keys must never brand a dict as an object.
+    aot_class: Option<crate::FidanString>,
 }
 
 impl FidanDict {
     pub fn new() -> Self {
         FidanDict {
             inner: Rc::new(HashMap::new()),
+            aot_class: None,
         }
     }
 
     pub fn with_capacity(capacity: usize) -> Self {
         FidanDict {
             inner: Rc::new(HashMap::with_capacity(capacity)),
+            aot_class: None,
         }
+    }
+
+    pub(crate) fn mark_aot_object(&mut self, class: crate::FidanString) {
+        self.aot_class = Some(class);
+    }
+
+    pub(crate) fn aot_class_name(&self) -> Option<&str> {
+        self.aot_class.as_ref().map(crate::FidanString::as_str)
+    }
+
+    pub(crate) fn capture_values(
+        &self,
+        mut capture: impl FnMut(&FidanValue) -> FidanValue,
+    ) -> Self {
+        Self {
+            inner: Rc::new(
+                self.inner
+                    .iter()
+                    .map(|(hashed, (key, value))| (hashed.clone(), (capture(key), capture(value))))
+                    .collect(),
+            ),
+            aot_class: self.aot_class.clone(),
+        }
+    }
+
+    pub(crate) fn remap_object_keys(&mut self, identities: &HashMap<usize, usize>) {
+        self.inner = Rc::new(
+            self.inner
+                .iter()
+                .map(|(key, value)| (key.remap_objects(identities), value.clone()))
+                .collect(),
+        );
     }
 
     pub fn get(&self, key: &FidanValue) -> Result<Option<&FidanValue>, HashKeyError> {

@@ -16,6 +16,7 @@ use fidan_stdlib::{
 use inkwell::AddressSpace;
 use inkwell::IntPredicate;
 use inkwell::OptimizationLevel;
+use inkwell::attributes::{Attribute, AttributeLoc};
 use inkwell::basic_block::BasicBlock as LlvmBlock;
 use inkwell::builder::Builder;
 use inkwell::context::Context;
@@ -87,6 +88,9 @@ fn native_target_cpu(target_triple: &str) -> Result<TargetCpuSpec> {
     }
     let raw_cpu = unsafe { LLVMGetHostCPUName() };
     let cpu = llvm_host_string(raw_cpu, "host CPU name")?;
+    if cpu.is_empty() {
+        bail!("LLVM returned an empty host CPU name");
+    }
     let raw_features = unsafe { LLVMGetHostCPUFeatures() };
     let features = llvm_host_string(raw_features, "host CPU features")?;
     Ok(TargetCpuSpec { cpu, features })
@@ -165,9 +169,8 @@ fn llvm_host_string(raw: *mut core::ffi::c_char, label: &str) -> Result<String> 
             LLVMDisposeMessage(raw);
         }
     }
-    if value.is_empty() {
-        bail!("LLVM returned an empty {label}");
-    }
+    // Empty feature overrides are valid: the named CPU supplies its defaults
+    // on hosts where LLVM does not expose an additional feature map (Darwin ARM).
     Ok(value)
 }
 
@@ -249,7 +252,8 @@ pub fn compile_and_link_module(
             cpu.as_ptr(),
             features.as_ptr(),
             map_opt_level(request.opt_level).into(),
-            RelocMode::Default.into(),
+            // Match Cranelift and support host linkers that default to PIE.
+            RelocMode::PIC.into(),
             CodeModel::Default.into(),
         )
     };
@@ -616,6 +620,16 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 )?;
 
                 if index > 0 {
+                    let metadata = self.backend.callable_metadata(function)?.to_string();
+                    let (metadata_ptr, metadata_len) = self.module_string_bytes(&metadata);
+                    self.call_runtime_void(
+                        "fdn_fn_metadata_register",
+                        &[
+                            metadata_ptr.into(),
+                            metadata_len.into(),
+                            self.i64_type.const_int(index as u64, false).into(),
+                        ],
+                    )?;
                     let name = self.backend.symbol_name(function.name)?.to_owned();
                     let (name_ptr, name_len) = self.module_string_bytes(&name);
                     self.call_runtime_void(
@@ -627,6 +641,96 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                         ],
                     )?;
                 }
+            }
+        }
+
+        let exports = self
+            .backend
+            .program()
+            .use_decls
+            .iter()
+            .filter(|decl| {
+                decl.re_export && decl.specific_names.is_none() && decl.alias.contains("::")
+            })
+            .map(|decl| (decl.alias.clone(), decl.module.clone()))
+            .collect::<Vec<_>>();
+        for (alias, target) in exports {
+            let (alias_ptr, alias_len) = self.module_string_bytes(&alias);
+            let (target_ptr, target_len) = self.module_string_bytes(&target);
+            self.call_runtime_void(
+                "fdn_namespace_export_register",
+                &[
+                    alias_ptr.into(),
+                    alias_len.into(),
+                    target_ptr.into(),
+                    target_len.into(),
+                ],
+            )?;
+        }
+
+        // Match interpreter startup: declarations' decorators precede fdn_init.
+        for function in &functions {
+            for (decorator, extras) in &function.custom_decorators {
+                let callback = self.call_runtime_ptr(
+                    "fdn_box_fn_ref",
+                    &[self.i64_type.const_int(decorator.0 as u64, false).into()],
+                )?;
+                let decorated = self.call_runtime_ptr(
+                    "fdn_box_fn_ref",
+                    &[self.i64_type.const_int(function.id.0 as u64, false).into()],
+                )?;
+                let mut args = vec![decorated];
+                for literal in extras {
+                    let value = match literal {
+                        MirLit::Int(value) => self.call_runtime_ptr(
+                            "fdn_box_int",
+                            &[self.i64_type.const_int(*value as u64, true).into()],
+                        )?,
+                        MirLit::Float(value) => self.call_runtime_ptr(
+                            "fdn_box_float",
+                            &[self.f64_type.const_float(*value).into()],
+                        )?,
+                        MirLit::Bool(value) => self.call_runtime_ptr(
+                            "fdn_box_bool",
+                            &[self.i8_type.const_int(u64::from(*value), false).into()],
+                        )?,
+                        MirLit::Str(value) => {
+                            let (ptr, len) = self.module_string_bytes(value);
+                            self.call_runtime_ptr("fdn_box_str", &[ptr.into(), len.into()])?
+                        }
+                        _ => bail!("unsupported decorator literal"),
+                    };
+                    args.push(value);
+                }
+                let (array, count) = self.build_ptr_array(&args)?;
+                let result = self.call_runtime_ptr(
+                    "fdn_call_dynamic",
+                    &[callback.into(), array.into(), count.into()],
+                )?;
+                for value in args.into_iter().chain([result, callback]) {
+                    self.call_runtime_void("fdn_drop", &[value.into()])?;
+                }
+                let pending = self.call_runtime_i8("fdn_has_exception", &[])?;
+                let pending = self
+                    .builder
+                    .build_int_compare(
+                        IntPredicate::NE,
+                        pending,
+                        self.i8_type.const_zero(),
+                        "decorator.pending",
+                    )
+                    .map_err(|err| anyhow!("{err}"))?;
+                let failed = self.context.append_basic_block(main, "decorator.failed");
+                let next = self.context.append_basic_block(main, "decorator.next");
+                self.builder
+                    .build_conditional_branch(pending, failed, next)
+                    .map_err(|err| anyhow!("{err}"))?;
+                self.builder.position_at_end(failed);
+                self.call_runtime_void("fdn_report_unhandled_exception", &[])?;
+                self.builder
+                    .build_return(Some(&self.i32_type.const_int(1, false)))
+                    .map_err(|err| anyhow!("{err}"))?;
+                self.builder.position_at_end(next);
             }
         }
 
@@ -664,8 +768,7 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 .map_err(|err| anyhow!("{err}"))?;
 
             self.builder.position_at_end(throw_block);
-            let exception = self.call_runtime_ptr("fdn_catch_exception", &[])?;
-            self.call_runtime_void("fdn_throw_unhandled", &[exception.into()])?;
+            self.call_runtime_void("fdn_report_unhandled_exception", &[])?;
             self.builder
                 .build_return(Some(&self.i32_type.const_int(1, false)))
                 .map_err(|err| anyhow!("{err}"))?;
@@ -1211,6 +1314,7 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
 
         for name in [
             "fdn_clone",
+            "fdn_global_load",
             "fdn_dyn_not",
             "fdn_dyn_neg",
             "fdn_to_string",
@@ -1223,6 +1327,12 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
             self.declare_runtime_fn(name, self.ptr_type.fn_type(&[self.ptr_type.into()], false));
         }
 
+        self.declare_runtime_fn(
+            "fdn_global_store",
+            self.context
+                .void_type()
+                .fn_type(&[self.ptr_type.into(), self.ptr_type.into()], false),
+        );
         self.declare_runtime_fn(
             "fdn_drop",
             self.context
@@ -1246,7 +1356,30 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
         }
 
         self.declare_runtime_fn(
+            "fdn_namespace_export_register",
+            self.context.void_type().fn_type(
+                &[
+                    self.ptr_type.into(),
+                    self.i64_type.into(),
+                    self.ptr_type.into(),
+                    self.i64_type.into(),
+                ],
+                false,
+            ),
+        );
+        self.declare_runtime_fn(
             "fdn_fn_name_register",
+            self.context.void_type().fn_type(
+                &[
+                    self.ptr_type.into(),
+                    self.i64_type.into(),
+                    self.i64_type.into(),
+                ],
+                false,
+            ),
+        );
+        self.declare_runtime_fn(
+            "fdn_fn_metadata_register",
             self.context.void_type().fn_type(
                 &[
                     self.ptr_type.into(),
@@ -1269,16 +1402,29 @@ impl<'ctx, 'a> ModuleCodegen<'ctx, 'a> {
                 .fn_type(&[self.i64_type.into(), self.i64_type.into()], false),
         );
         self.declare_runtime_fn(
-            "fdn_store_exception",
+            "fdn_join_all",
+            self.context
+                .void_type()
+                .fn_type(&[self.ptr_type.into(), self.i64_type.into()], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_exception_is_catchable",
+            self.i8_type.fn_type(&[], false),
+        );
+        self.declare_runtime_fn("fdn_enter_call", self.i8_type.fn_type(&[], false));
+        self.declare_runtime_fn(
+            "fdn_leave_call",
+            self.context.void_type().fn_type(&[], false),
+        );
+        self.declare_runtime_fn(
+            "fdn_store_panic",
             self.context
                 .void_type()
                 .fn_type(&[self.ptr_type.into()], false),
         );
         self.declare_runtime_fn(
-            "fdn_throw_unhandled",
-            self.context
-                .void_type()
-                .fn_type(&[self.ptr_type.into()], false),
+            "fdn_report_unhandled_exception",
+            self.context.void_type().fn_type(&[], false),
         );
         self.declare_runtime_fn(
             "fdn_float_div",
@@ -1968,6 +2114,36 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
     }
 
     fn initialize_entry(&mut self) -> Result<()> {
+        let entered = self.call_i8("fdn_enter_call", &[])?;
+        let can_enter = self
+            .module
+            .builder
+            .build_int_compare(
+                IntPredicate::NE,
+                entered,
+                self.module.i8_type.const_zero(),
+                "call.entered",
+            )
+            .map_err(|err| anyhow!("{err}"))?;
+        let body = self
+            .module
+            .context
+            .append_basic_block(self.llvm_function, "call.body");
+        let overflow = self
+            .module
+            .context
+            .append_basic_block(self.llvm_function, "call.overflow");
+        self.module
+            .builder
+            .build_conditional_branch(can_enter, body, overflow)
+            .map_err(|err| anyhow!("{err}"))?;
+        self.module.builder.position_at_end(overflow);
+        let nothing = self.call_ptr("fdn_box_nothing", &[])?;
+        self.module
+            .builder
+            .build_return(Some(&nothing))
+            .map_err(|err| anyhow!("{err}"))?;
+        self.module.builder.position_at_end(body);
         for local in 0..self.mir_function.local_count {
             let local_id = LocalId(local);
             let slot_ty = self.local_storage_type(local_id);
@@ -1997,6 +2173,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 .build_unconditional_branch(block)
                 .map_err(|err| anyhow!("{err}"))?;
         } else {
+            self.call_void("fdn_leave_call", &[])?;
             let nothing = self.call_ptr("fdn_box_nothing", &[])?;
             self.module
                 .builder
@@ -2082,11 +2259,12 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                         if let Some(value) = self.lower_native_call(callee, args, &effective_ty)? {
                             self.store_local_native(*dest, value)?;
                         } else {
-                            let value = self.lower_call(callee, args)?;
-                            self.store_local_boxed(*dest, value)?;
+                            let value = self.lower_checked_call(callee, args, &effective_ty)?;
+                            let native = self.unbox_owned_to_native(value, &effective_ty)?;
+                            self.store_local_native(*dest, native)?;
                         }
                     } else {
-                        let value = self.lower_call(callee, args)?;
+                        let value = self.lower_checked_call(callee, args, &effective_ty)?;
                         self.store_local_boxed(*dest, value)?;
                     }
                     self.namespace_locals.remove(dest);
@@ -2151,7 +2329,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 };
                 self.store_local_boxed(*dest, value)?;
                 self.namespace_locals.remove(dest);
-                Ok(())
+                self.emit_pending_exception_check(current_catch_stack)
             }
             Instr::GetIndex {
                 dest,
@@ -2207,20 +2385,15 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 self.call_void(
                     "fdn_certain_check",
                     &[operand.into(), name_ptr.into(), name_len.into()],
-                )
+                )?;
+                self.emit_pending_exception_check(current_catch_stack)
             }
             Instr::LoadGlobal { dest, global } => {
                 let global_id = *global;
                 let global = self.global(global_id)?;
-                let name = self.temp("gload");
-                let value = self
-                    .module
-                    .builder
-                    .build_load(self.module.ptr_type, global.as_pointer_value(), &name)
-                    .map_err(|err| anyhow!("{err}"))?
-                    .into_pointer_value();
-                let cloned = self.call_ptr("fdn_clone", &[value.into()])?;
-                self.store_local_boxed(*dest, cloned)?;
+                let value =
+                    self.call_ptr("fdn_global_load", &[global.as_pointer_value().into()])?;
+                self.store_local_boxed(*dest, value)?;
                 if let Some(namespace) = self.global_namespace_map.get(&global_id).cloned() {
                     self.namespace_locals.insert(*dest, namespace);
                 } else {
@@ -2229,25 +2402,13 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 Ok(())
             }
             Instr::StoreGlobal { global, value } => {
-                let value = self.lower_operand(value)?;
+                let value = self.lower_owned_operand(value)?;
                 let global = self.global(*global)?;
-                let current_name = self.temp("gcurrent");
-                let current = self
-                    .module
-                    .builder
-                    .build_load(
-                        self.module.ptr_type,
-                        global.as_pointer_value(),
-                        &current_name,
-                    )
-                    .map_err(|err| anyhow!("{err}"))?
-                    .into_pointer_value();
-                self.call_void("fdn_drop", &[current.into()])?;
-                let cloned = self.call_ptr("fdn_clone", &[value.into()])?;
-                self.module
-                    .builder
-                    .build_store(global.as_pointer_value(), cloned)
-                    .map_err(|err| anyhow!("{err}"))?;
+                self.call_void(
+                    "fdn_global_store",
+                    &[global.as_pointer_value().into(), value.into()],
+                )?;
+                self.call_void("fdn_drop", &[value.into()])?;
                 Ok(())
             }
             Instr::SpawnExpr {
@@ -2339,12 +2500,32 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 Ok(())
             }
             Instr::JoinAll { handles } => {
-                for handle in handles {
-                    let handle_value = self.lower_operand(&Operand::Local(*handle))?;
-                    let resolved = self.call_ptr("fdn_pending_join", &[handle_value.into()])?;
-                    self.store_local_boxed(*handle, resolved)?;
-                    self.emit_pending_exception_check(current_catch_stack)?;
+                let values = handles
+                    .iter()
+                    .map(|handle| self.lower_operand(&Operand::Local(*handle)))
+                    .collect::<Result<Vec<_>>>()?;
+                let (array, count) = self.build_ptr_array(&values)?;
+                self.call_void("fdn_join_all", &[array.into(), count.into()])?;
+                for (index, handle) in handles.iter().enumerate() {
+                    let offset = self.module.i64_type.const_int(index as u64, false);
+                    let slot = unsafe {
+                        self.module.builder.build_gep(
+                            self.module.ptr_type,
+                            array,
+                            &[offset],
+                            "joined.slot",
+                        )
+                    }
+                    .map_err(|err| anyhow!("{err}"))?;
+                    let result = self
+                        .module
+                        .builder
+                        .build_load(self.module.ptr_type, slot, "joined.value")
+                        .map_err(|err| anyhow!("{err}"))?
+                        .into_pointer_value();
+                    self.store_local_boxed(*handle, result)?;
                 }
+                self.emit_pending_exception_check(current_catch_stack)?;
                 Ok(())
             }
             Instr::AwaitPending { dest, handle } => {
@@ -2421,6 +2602,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
     ) -> Result<()> {
         match terminator {
             Terminator::Return(None) => {
+                self.call_void("fdn_leave_call", &[])?;
                 let nothing = self.call_ptr("fdn_box_nothing", &[])?;
                 self.module
                     .builder
@@ -2429,6 +2611,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 Ok(())
             }
             Terminator::Return(Some(operand)) => {
+                self.call_void("fdn_leave_call", &[])?;
                 let value = self.lower_owned_operand(operand)?;
                 self.module
                     .builder
@@ -2467,7 +2650,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             }
             Terminator::Throw { value } => {
                 let value = self.lower_operand(value)?;
-                self.call_void("fdn_store_exception", &[value.into()])?;
+                self.call_void("fdn_store_panic", &[value.into()])?;
                 if let Some(catch_block) = current_catch_stack.last() {
                     let target = self.prepare_edge_to(*catch_block)?;
                     self.module
@@ -2511,6 +2694,32 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
 
         self.module.builder.position_at_end(pending_block);
         if let Some(catch_block) = current_catch_stack.last() {
+            let catchable = self.call_i8("fdn_exception_is_catchable", &[])?;
+            let condition = self
+                .module
+                .builder
+                .build_int_compare(
+                    IntPredicate::NE,
+                    catchable,
+                    self.module.i8_type.const_zero(),
+                    "exception.catchable",
+                )
+                .map_err(|err| anyhow!("{err}"))?;
+            let catch_edge = self
+                .module
+                .context
+                .append_basic_block(self.llvm_function, "exception.catch");
+            let propagate = self
+                .module
+                .context
+                .append_basic_block(self.llvm_function, "exception.propagate");
+            self.module
+                .builder
+                .build_conditional_branch(condition, catch_edge, propagate)
+                .map_err(|err| anyhow!("{err}"))?;
+            self.module.builder.position_at_end(propagate);
+            self.emit_exceptional_return()?;
+            self.module.builder.position_at_end(catch_edge);
             let target = self.prepare_edge_to(*catch_block)?;
             self.module
                 .builder
@@ -2525,6 +2734,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
     }
 
     fn emit_exceptional_return(&mut self) -> Result<()> {
+        self.call_void("fdn_leave_call", &[])?;
         let nothing = self.call_ptr("fdn_box_nothing", &[])?;
         self.module
             .builder
@@ -2993,6 +3203,28 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
         }
     }
 
+    fn lower_checked_call(
+        &mut self,
+        callee: &Callee,
+        args: &[Operand],
+        expected: &MirTy,
+    ) -> Result<PointerValue<'ctx>> {
+        let value = self.lower_call(callee, args)?;
+        if matches!(callee, Callee::Dynamic(_))
+            && !matches!(expected, MirTy::Dynamic | MirTy::Error)
+        {
+            let (contract, length) = self.string_bytes(&expected.runtime_descriptor());
+            let checked = self.call_ptr(
+                "fdn_check_argument",
+                &[value.into(), contract.into(), length.into()],
+            )?;
+            self.call_void("fdn_drop", &[value.into()])?;
+            Ok(checked)
+        } else {
+            Ok(value)
+        }
+    }
+
     fn lower_call(&mut self, callee: &Callee, args: &[Operand]) -> Result<PointerValue<'ctx>> {
         match callee {
             Callee::Fn(function_id) => {
@@ -3005,26 +3237,41 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
                 let mir_function = self.module.backend.program().function(*function_id);
                 let mut call_args =
                     Vec::<BasicMetadataValueEnum<'ctx>>::with_capacity(mir_function.params.len());
-                let mut cloned_args = Vec::new();
+                let mut owned_args = Vec::new();
                 for (index, param) in mir_function.params.iter().enumerate() {
-                    let value = if let Some(arg) = args.get(index) {
+                    let raw = if let Some(arg) = args.get(index) {
                         self.lower_owned_operand(arg)?
                     } else {
                         self.module
                             .trampoline_default_value(param.default.as_ref())?
                     };
-                    // lower_owned_operand explicitly calls fdn_clone for this
-                    // case. Release only those clones after the borrowed call;
-                    // fresh scalar/default temporaries are tracked separately.
-                    if let Some(Operand::Local(local)) = args.get(index)
-                        && !is_native_scalar_ty(&self.local_type(*local))
-                    {
-                        cloned_args.push(value);
-                    }
+                    let value = if !param.certain && param.default.is_some() {
+                        // Apply the same Nothing/default contract as dynamic trampolines
+                        // before the callee's scalar prologue can erase Nothing to zero.
+                        let default = self
+                            .module
+                            .trampoline_default_value(param.default.as_ref())?;
+                        let prepared = self.call_ptr(
+                            "fdn_prepare_argument",
+                            &[
+                                raw.into(),
+                                default.into(),
+                                self.module.i8_type.const_zero().into(),
+                            ],
+                        )?;
+                        self.call_void("fdn_drop", &[raw.into()])?;
+                        self.call_void("fdn_drop", &[default.into()])?;
+                        prepared
+                    } else {
+                        raw
+                    };
+                    // All inputs here are owned: cloned locals, freshly boxed scalars
+                    // and literal/default boxes. The callee borrows them uniformly.
+                    owned_args.push(value);
                     call_args.push(value.into());
                 }
                 let result = self.call_decl(function, &call_args)?;
-                for argument in cloned_args {
+                for argument in owned_args {
                     self.call_void("fdn_drop", &[argument.into()])?;
                 }
                 Ok(result)
@@ -3100,16 +3347,29 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             }
             Callee::Builtin(symbol) => self.lower_builtin(*symbol, args),
             Callee::Dynamic(function_value) => {
-                let function_value = self.lower_operand(function_value)?;
-                let args = args
+                let function = self.lower_operand(function_value)?;
+                let boxed_args = args
                     .iter()
                     .map(|arg| self.lower_operand(arg))
                     .collect::<Result<Vec<_>>>()?;
-                let (array_ptr, count) = self.build_ptr_array(&args)?;
-                self.call_ptr(
+                let (array_ptr, count) = self.build_ptr_array(&boxed_args)?;
+                let result = self.call_ptr(
                     "fdn_call_dynamic",
-                    &[function_value.into(), array_ptr.into(), count.into()],
-                )
+                    &[function.into(), array_ptr.into(), count.into()],
+                )?;
+                if matches!(function_value, Operand::Const(_))
+                    || is_native_scalar_ty(&self.operand_type(function_value))
+                {
+                    self.call_void("fdn_drop", &[function.into()])?;
+                }
+                for (argument, boxed) in args.iter().zip(boxed_args) {
+                    if matches!(argument, Operand::Const(_))
+                        || is_native_scalar_ty(&self.operand_type(argument))
+                    {
+                        self.call_void("fdn_drop", &[boxed.into()])?;
+                    }
+                }
+                Ok(result)
             }
         }
     }
@@ -4580,9 +4840,31 @@ fn optimize_module(module: &Module<'_>, machine: &TargetMachine, level: OptLevel
         OptLevel::O1 => "default<O1>",
         OptLevel::O2 => "default<O2>",
         OptLevel::O3 => "default<O3>",
-        OptLevel::Os => "default<Os>",
-        OptLevel::Oz => "default<Oz>",
+        OptLevel::Os | OptLevel::Oz => "default<O2>",
     };
+    // LLVM 23 removed default<Os/Oz>. Size policy now belongs to function
+    // attributes, which also survive bitcode emission for the full-LTO linker.
+    for (name, enabled) in [
+        ("optsize", matches!(level, OptLevel::Os | OptLevel::Oz)),
+        ("minsize", matches!(level, OptLevel::Oz)),
+    ] {
+        if enabled {
+            let attribute = module
+                .get_context()
+                .create_enum_attribute(Attribute::get_named_enum_kind_id(name), 0);
+            for function in module.get_functions() {
+                if function.get_first_basic_block().is_some() {
+                    function.add_attribute(AttributeLoc::Function, attribute);
+                }
+            }
+        }
+    }
+    fidan_diagnostics::tracing::debug!(
+        pipeline,
+        optsize = matches!(level, OptLevel::Os | OptLevel::Oz),
+        minsize = matches!(level, OptLevel::Oz),
+        "LLVM optimization policy selected"
+    );
     let options = PassBuilderOptions::create();
     module
         .run_passes(pipeline, machine, options)
@@ -4777,6 +5059,74 @@ mod tests {
     use super::{merge_feature_strings, normalize_feature_string, parse_custom_cpu_spec};
 
     #[test]
+    fn size_optimization_levels_use_llvm23_pipeline_and_function_attributes() {
+        use crate::model::OptLevel;
+        use inkwell::attributes::{Attribute, AttributeLoc};
+        use inkwell::targets::{CodeModel, InitializationConfig, RelocMode, Target, TargetMachine};
+
+        Target::initialize_native(&InitializationConfig::default())
+            .expect("initialize native target");
+        let triple = TargetMachine::get_default_triple();
+        let target = Target::from_triple(&triple).expect("native target");
+        let machine = target
+            .create_target_machine(
+                &triple,
+                "generic",
+                "",
+                inkwell::OptimizationLevel::Default,
+                RelocMode::Default,
+                CodeModel::Default,
+            )
+            .expect("native target machine");
+        for (level, optsize, minsize) in [
+            (OptLevel::O2, false, false),
+            (OptLevel::Os, true, false),
+            (OptLevel::Oz, true, true),
+        ] {
+            let context = inkwell::context::Context::create();
+            let module = context.create_module("size_policy");
+            let external = module.add_function(
+                "external_effect",
+                context.void_type().fn_type(&[], false),
+                None,
+            );
+            let function =
+                module.add_function("probe", context.i64_type().fn_type(&[], false), None);
+            let builder = context.create_builder();
+            builder.position_at_end(context.append_basic_block(function, "entry"));
+            builder
+                .build_call(external, &[], "")
+                .expect("external effect");
+            builder
+                .build_return(Some(&context.i64_type().const_int(42, false)))
+                .expect("return");
+            super::optimize_module(&module, &machine, level)
+                .expect("supported LLVM optimization pipeline");
+            module.verify().expect("optimized module remains valid");
+            let function = module.get_function("probe").expect("exported definition");
+            let external = module
+                .get_function("external_effect")
+                .expect("used declaration");
+            for (name, expected) in [("optsize", optsize), ("minsize", minsize)] {
+                let kind = Attribute::get_named_enum_kind_id(name);
+                assert_eq!(
+                    function
+                        .get_enum_attribute(AttributeLoc::Function, kind)
+                        .is_some(),
+                    expected,
+                    "{level:?}: {name}"
+                );
+                assert!(
+                    external
+                        .get_enum_attribute(AttributeLoc::Function, kind)
+                        .is_none(),
+                    "must not change external ABI declarations"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn emitted_bitcode_preserves_trailing_binary_bytes() {
         let context = inkwell::context::Context::create();
         let module = context.create_module("bitcode_round_trip");
@@ -4813,6 +5163,19 @@ mod tests {
         };
         let spec = super::resolve_target_cpu(&request, "x86_64-pc-windows-msvc").unwrap();
         assert_eq!(spec.cpu, "aaaaaaé");
+    }
+
+    #[test]
+    fn empty_host_features_are_valid_but_null_is_not() {
+        let raw = unsafe { llvm_sys::core::LLVMCreateMessage(c"".as_ptr()) };
+        assert_eq!(
+            super::llvm_host_string(raw, "host CPU features").unwrap(),
+            ""
+        );
+        assert!(super::llvm_host_string(std::ptr::null_mut(), "host CPU features").is_err());
+        let host = super::current_host_triple().unwrap();
+        let spec = super::native_target_cpu(&host).unwrap();
+        assert!(!spec.cpu.is_empty());
     }
 
     #[test]

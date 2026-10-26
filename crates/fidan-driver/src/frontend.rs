@@ -1,6 +1,6 @@
 use crate::dal::{
     global_package_store, local_package_store, lock_entry_for_module, package_install_dir,
-    project_root_from, read_lock_if_exists,
+    project_root_from, read_lock_from_path,
 };
 use crate::install::resolve_fidan_home;
 use anyhow::{Context, Result, bail};
@@ -46,6 +46,7 @@ pub fn detect_import_cycles(entry_path: &Path) -> Vec<String> {
             ));
             return;
         }
+        fidan_diagnostics::tracing::trace!(path = %canon.display(), cached = visited.contains(&canon), "import graph visit");
         if !visited.insert(canon.clone()) {
             return;
         }
@@ -135,25 +136,62 @@ fn find_in_ancestor_local_package_stores(
     }
 }
 
-fn find_locked_package_import(base_dir: &Path, segments: &[String]) -> Option<PathBuf> {
-    let module = segments.first()?;
-    let project_root = project_root_from(base_dir)?;
-    let lock = read_lock_if_exists(&project_root).ok().flatten()?;
-    let locked = lock_entry_for_module(&lock, module)?;
+fn package_resolution_scope(base_dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    for ancestor in base_dir.ancestors() {
+        if ancestor.file_name().is_some_and(|v| v == "packages") {
+            let parent = ancestor.parent()?;
+            if parent.file_name().is_some_and(|v| v == ".dal") {
+                let root = parent.parent()?.to_path_buf();
+                return Some((root.clone(), crate::dal::lock_path(&root)));
+            }
+            if parent.file_name().is_some_and(|v| v == "dal")
+                && parent.join("global.lock").is_file()
+            {
+                return Some((parent.to_path_buf(), parent.join("global.lock")));
+            }
+        }
+    }
+    let root = project_root_from(base_dir)?;
+    Some((root.clone(), crate::dal::lock_path(&root)))
+}
 
-    if let Some(path) = find_in_ancestor_local_package_stores(
+fn find_locked_package_import(scope_dir: &Path, segments: &[String]) -> Result<Option<PathBuf>> {
+    let Some(module) = segments.first() else {
+        return Ok(None);
+    };
+    let Some((project_root, lock_file)) = package_resolution_scope(scope_dir) else {
+        return Ok(None);
+    };
+    if !lock_file.is_file() {
+        return Ok(None);
+    }
+    let lock = read_lock_from_path(&lock_file)?;
+    let Some(locked) = lock_entry_for_module(&lock, module) else {
+        return Ok(None);
+    };
+    let local = find_in_ancestor_local_package_stores(
         &project_root,
         &locked.name,
         &locked.version,
         &segments[1..],
-    ) {
-        return Some(path);
+    );
+    let path = if local.is_some() {
+        local
+    } else {
+        let home = resolve_fidan_home()?;
+        let global_root =
+            package_install_dir(&global_package_store(&home), &locked.name, &locked.version);
+        find_in_package_root(&global_root, &segments[1..])
+    };
+    if let Some(path) = &path {
+        let package_root = project_root_from(path).context("installed package has no manifest")?;
+        let manifest = crate::dal::read_manifest(&package_root)?;
+        if manifest.package.name != locked.name || manifest.package.version != locked.version {
+            bail!("installed package identity differs from `dal.lock`");
+        }
+        crate::dal::ensure_compiler_compatible(&manifest)?;
     }
-
-    let home = resolve_fidan_home().ok()?;
-    let global_root =
-        package_install_dir(&global_package_store(&home), &locked.name, &locked.version);
-    find_in_package_root(&global_root, &segments[1..])
+    Ok(path)
 }
 
 pub fn collect_file_import_paths(
@@ -161,6 +199,31 @@ pub fn collect_file_import_paths(
     interner: &SymbolInterner,
     base_dir: &Path,
 ) -> (VecDeque<ResolvedImport>, Vec<UnresolvedImport>) {
+    collect_file_import_paths_with_root(module, interner, base_dir, base_dir)
+}
+
+/// Transitive package imports use the consumer's resolved graph, not a publisher's
+/// embedded dal.lock. Relative source paths still resolve from the importing file.
+pub fn collect_file_import_paths_with_root(
+    module: &fidan_ast::Module,
+    interner: &SymbolInterner,
+    base_dir: &Path,
+    scope_dir: &Path,
+) -> (VecDeque<ResolvedImport>, Vec<UnresolvedImport>) {
+    let (paths, unresolved, _) = resolve_file_imports(module, interner, base_dir, scope_dir);
+    (paths, unresolved)
+}
+
+fn resolve_file_imports(
+    module: &fidan_ast::Module,
+    interner: &SymbolInterner,
+    base_dir: &Path,
+    scope_dir: &Path,
+) -> (
+    VecDeque<ResolvedImport>,
+    Vec<UnresolvedImport>,
+    Vec<(Span, PathBuf)>,
+) {
     enum Mode {
         Wildcard,
         Namespace,
@@ -170,7 +233,12 @@ pub fn collect_file_import_paths(
     let mut path_map: Vec<ResolvedImport> = Vec::new();
     let mut unresolved: Vec<UnresolvedImport> = Vec::new();
 
-    let mut add = |resolved: PathBuf, re_export: bool, mode: Mode| {
+    let mut bindings = Vec::new();
+    let mut add = |resolved: PathBuf, span: Span, re_export: bool, mode: Mode| {
+        bindings.push((
+            span,
+            resolved.canonicalize().unwrap_or_else(|_| resolved.clone()),
+        ));
         if let Some(entry) = path_map.iter_mut().find(|(p, _, _)| *p == resolved) {
             entry.1 |= re_export;
             if entry.2.as_ref().is_some_and(|s| s.is_empty()) {
@@ -226,7 +294,7 @@ pub fn collect_file_import_paths(
                 } else {
                     Mode::Wildcard
                 };
-                add(base_dir.join(&*first), *re_export, mode);
+                add(base_dir.join(&*first), *span, *re_export, mode);
                 continue;
             }
 
@@ -239,39 +307,112 @@ pub fn collect_file_import_paths(
                 .map(|&sym| interner.resolve(sym).to_string())
                 .collect();
 
+            // Preserve errors from corrupt locks and incompatible installed manifests.
+            let locked_path = match find_locked_package_import(scope_dir, &segments) {
+                Ok(path) => path,
+                Err(error) => {
+                    unresolved.push((error.to_string(), *span));
+                    continue;
+                }
+            };
+            let locked_prefix = if *grouped && segments.len() >= 2 {
+                match find_locked_package_import(scope_dir, &segments[..segments.len() - 1]) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        unresolved.push((error.to_string(), *span));
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
             if *grouped {
                 if segments.len() >= 2 {
                     let prefix = &segments[..segments.len() - 1];
                     let specific_name = segments.last().cloned().unwrap_or_default();
                     if let Some(resolved) = find_relative(base_dir, prefix) {
-                        add(resolved, *re_export, Mode::Flat(specific_name));
-                    } else if let Some(resolved) = find_locked_package_import(base_dir, prefix) {
-                        add(resolved, *re_export, Mode::Flat(specific_name));
+                        add(resolved, *span, *re_export, Mode::Flat(specific_name));
+                    } else if let Some(resolved) = locked_prefix.clone() {
+                        add(resolved, *span, *re_export, Mode::Flat(specific_name));
                     } else if let Some(resolved) = find_relative(base_dir, &segments) {
-                        add(resolved, *re_export, Mode::Namespace);
-                    } else if let Some(resolved) = find_locked_package_import(base_dir, &segments) {
-                        add(resolved, *re_export, Mode::Namespace);
+                        add(resolved, *span, *re_export, Mode::Namespace);
+                    } else if let Some(resolved) = locked_path.clone() {
+                        add(resolved, *span, *re_export, Mode::Namespace);
                     } else {
                         unresolved.push((segments.join("."), *span));
                     }
                 } else if let Some(resolved) = find_relative(base_dir, &segments) {
-                    add(resolved, *re_export, Mode::Namespace);
-                } else if let Some(resolved) = find_locked_package_import(base_dir, &segments) {
-                    add(resolved, *re_export, Mode::Namespace);
+                    add(resolved, *span, *re_export, Mode::Namespace);
+                } else if let Some(resolved) = locked_path.clone() {
+                    add(resolved, *span, *re_export, Mode::Namespace);
                 } else {
                     unresolved.push((segments.join("."), *span));
                 }
             } else if let Some(resolved) = find_relative(base_dir, &segments) {
-                add(resolved, *re_export, Mode::Namespace);
-            } else if let Some(resolved) = find_locked_package_import(base_dir, &segments) {
-                add(resolved, *re_export, Mode::Namespace);
+                add(resolved, *span, *re_export, Mode::Namespace);
+            } else if let Some(resolved) = locked_path.clone() {
+                add(resolved, *span, *re_export, Mode::Namespace);
             } else {
                 unresolved.push((segments.join("."), *span));
             }
         }
     }
 
-    (path_map.into_iter().collect(), unresolved)
+    (path_map.into_iter().collect(), unresolved, bindings)
+}
+
+/// Filesystem import diagnostics for editor documents, using the compiler's
+/// local/locked-package resolution and original source spans.
+pub fn import_resolution_diagnostics(
+    module: &fidan_ast::Module,
+    interner: &SymbolInterner,
+    base_dir: &Path,
+) -> Vec<Diagnostic> {
+    let (_, unresolved, bindings) = resolve_file_imports(module, interner, base_dir, base_dir);
+    unresolved
+        .into_iter()
+        .map(|(name, span)| {
+            Diagnostic::error(
+                diag_code!("E0106"),
+                format!("module `{name}` not found"),
+                span,
+            )
+        })
+        .chain(
+            bindings
+                .into_iter()
+                .filter(|(_, path)| !path.is_file())
+                .map(|(span, path)| {
+                    Diagnostic::error(
+                        diag_code!("E0106"),
+                        format!("module file `{}` not found", path.display()),
+                        span,
+                    )
+                }),
+        )
+        .collect()
+}
+
+/// Preserve each import's file identity for MIR namespace/function resolution.
+pub fn bind_hir_file_imports(
+    hir: &mut fidan_hir::HirModule,
+    module: &fidan_ast::Module,
+    interner: &SymbolInterner,
+    source_map: &SourceMap,
+    base_dir: &Path,
+    scope_dir: &Path,
+) {
+    let (_, _, bindings) = resolve_file_imports(module, interner, base_dir, scope_dir);
+    for decl in &mut hir.use_decls {
+        decl.target_path = bindings
+            .iter()
+            .find(|(span, _)| *span == decl.span)
+            .map(|(_, path)| path.clone());
+    }
+    let source = source_map.get(module.file);
+    let path = PathBuf::from(source.name.as_ref());
+    hir.file_paths
+        .push((module.file, path.canonicalize().unwrap_or(path)));
 }
 
 pub fn pre_register_hir_into_tc(
@@ -310,6 +451,18 @@ pub fn pre_register_hir_into_tc(
             span: func.span,
         };
         tc.pre_register_action(func.name, info);
+    }
+
+    for declaration in &hir.enums {
+        if visible(declaration.name) {
+            tc.pre_register_enum(
+                declaration.name,
+                fidan_typeck::EnumInfo {
+                    variants: declaration.variants.clone(),
+                    span: declaration.span,
+                },
+            );
+        }
     }
 
     for obj in &hir.objects {
@@ -370,21 +523,27 @@ pub fn pre_register_hir_into_tc(
         if decl.module_path.len() >= 2 {
             if let Some(names) = &decl.specific_names {
                 for name in names {
-                    tc.pre_register_namespace(name);
+                    if visible(interner.intern(name)) {
+                        tc.pre_register_namespace(name);
+                    }
                 }
             } else {
                 let alias = decl
                     .alias
                     .as_deref()
                     .unwrap_or(decl.module_path[1].as_str());
-                tc.pre_register_namespace(alias);
+                if visible(interner.intern(alias)) {
+                    tc.pre_register_namespace(alias);
+                }
             }
         } else if decl.module_path.len() == 1 && decl.specific_names.is_none() {
             let alias = decl
                 .alias
                 .as_deref()
                 .unwrap_or(decl.module_path[0].as_str());
-            tc.pre_register_namespace(alias);
+            if visible(interner.intern(alias)) {
+                tc.pre_register_namespace(alias);
+            }
         }
     }
 }
@@ -418,95 +577,6 @@ fn collect_error_messages(diags: &[Diagnostic], errors: &mut Vec<String>) -> usi
     count
 }
 
-fn load_imported_hirs(
-    module: &fidan_ast::Module,
-    interner: &Arc<SymbolInterner>,
-    base_dir: &Path,
-    source_map: &Arc<SourceMap>,
-    root_path: Option<&Path>,
-    errors: &mut Vec<String>,
-) -> Vec<(fidan_hir::HirModule, ImportFilter, bool)> {
-    type QueueItem = (PathBuf, bool, ImportFilter);
-
-    let mut hirs: Vec<(fidan_hir::HirModule, ImportFilter, bool)> = Vec::new();
-    let (main_paths, main_unresolved) = collect_file_import_paths(module, interner, base_dir);
-    for (name, _) in main_unresolved {
-        errors.push(format!(
-            "{}: module `{name}` not found",
-            diag_code!("E0106")
-        ));
-    }
-
-    let mut queue: VecDeque<QueueItem> = main_paths
-        .into_iter()
-        .map(|(path, _, filter)| (path, true, filter))
-        .collect();
-
-    let mut loaded: HashSet<PathBuf> = HashSet::new();
-    if let Some(path) = root_path
-        && let Ok(canon) = path.canonicalize()
-    {
-        loaded.insert(canon);
-    }
-
-    while let Some((import_path, expose, filter)) = queue.pop_front() {
-        let canon = import_path
-            .canonicalize()
-            .unwrap_or_else(|_| import_path.clone());
-        if !loaded.insert(canon) {
-            continue;
-        }
-
-        match std::fs::read_to_string(&import_path) {
-            Ok(import_src) => {
-                let import_name = import_path.display().to_string();
-                let import_file = source_map.add_file(&*import_name, &*import_src);
-                let (import_tokens, import_lex_diags) =
-                    Lexer::new(&import_file, Arc::clone(interner)).tokenise();
-                let lex_errs = collect_error_messages(&import_lex_diags, errors);
-
-                let (import_module, import_parse_diags) =
-                    fidan_parser::parse(&import_tokens, import_file.id, Arc::clone(interner));
-                let parse_errs = collect_error_messages(&import_parse_diags, errors);
-
-                let import_base = import_path
-                    .parent()
-                    .map(|p| p.to_path_buf())
-                    .unwrap_or_else(|| PathBuf::from("."));
-                let (sub_paths, sub_unresolved) =
-                    collect_file_import_paths(&import_module, interner, &import_base);
-                for (name, _) in sub_unresolved {
-                    errors.push(format!(
-                        "{}: module `{name}` not found",
-                        diag_code!("E0106")
-                    ));
-                }
-                for (sub_path, sub_re_export, sub_filter) in sub_paths {
-                    queue.push_back((sub_path, expose && sub_re_export, sub_filter));
-                }
-
-                if lex_errs == 0 && parse_errs == 0 {
-                    let import_tm =
-                        fidan_typeck::typecheck_full(&import_module, Arc::clone(interner));
-                    let type_errs = collect_error_messages(&import_tm.diagnostics, errors);
-                    if type_errs == 0 {
-                        let import_hir =
-                            fidan_hir::lower_module(&import_module, &import_tm, interner);
-                        hirs.push((import_hir, filter, expose));
-                    }
-                }
-            }
-            Err(err) => errors.push(format!(
-                "{}: cannot load import `{}`: {err}",
-                diag_code!("R0001"),
-                import_path.display()
-            )),
-        }
-    }
-
-    hirs
-}
-
 fn join_errors(errors: Vec<String>) -> String {
     let mut deduped: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -527,7 +597,9 @@ pub fn compile_source_to_mir(
     let file = source_map.add_file(source_name, src);
     let interner = Arc::new(SymbolInterner::new());
 
-    let (tokens, lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+    let (tokens, lex_diags) = fidan_diagnostics::logging::phase("frontend_lex", || {
+        Lexer::new(&file, Arc::clone(&interner)).tokenise()
+    });
     let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
 
     let mut errors = Vec::new();
@@ -536,7 +608,12 @@ pub fn compile_source_to_mir(
     error_count += collect_error_messages(&parse_diags, &mut errors);
 
     let imported_hirs = if error_count == 0 {
-        load_imported_hirs(&module, &interner, base_dir, &source_map, None, &mut errors)
+        let loaded =
+            crate::load_imported_hirs(&module, &interner, base_dir, &source_map, None, &|path| {
+                std::fs::read_to_string(path)
+            });
+        collect_error_messages(&loaded.diagnostics, &mut errors);
+        loaded.modules
     } else {
         Vec::new()
     };
@@ -549,7 +626,7 @@ pub fn compile_source_to_mir(
                 pre_register_hir_into_tc(&mut tc, hir, filter.as_ref(), &interner);
             }
         }
-        tc.check_module(&module);
+        fidan_diagnostics::logging::phase("frontend_typecheck", || tc.check_module(&module));
         let typed = tc.finish_typed();
         let type_errs = collect_error_messages(&typed.diagnostics, &mut errors);
         if type_errs == 0 { Some(typed) } else { None }
@@ -563,16 +640,20 @@ pub fn compile_source_to_mir(
 
     let merged_hir = typed_module
         .map(|typed| {
-            let base = fidan_hir::lower_module(&module, &typed, &interner);
+            let mut base = fidan_hir::lower_module(&module, &typed, &interner);
+            bind_hir_file_imports(
+                &mut base,
+                &module,
+                &interner,
+                &source_map,
+                base_dir,
+                base_dir,
+            );
             imported_hirs
                 .into_iter()
-                .fold(base, |acc, (import_hir, filter, _)| {
-                    let filtered = if let Some(names) = filter.as_ref().filter(|f| !f.is_empty()) {
-                        filter_hir_module(import_hir, names, &interner)
-                    } else {
-                        import_hir
-                    };
-                    fidan_hir::merge_module(acc, filtered)
+                .fold(base, |acc, (import_hir, _filter, _)| {
+                    // Import filters control visibility, not which internal helpers exist.
+                    fidan_hir::merge_module(acc, import_hir)
                 })
         })
         .context("frontend pipeline did not produce HIR")?;
@@ -590,7 +671,7 @@ pub fn compile_source_to_mir(
         bail!(join_errors(errors));
     }
 
-    fidan_passes::run_all(&mut mir);
+    fidan_diagnostics::logging::phase("frontend_optimize", || fidan_passes::run_all(&mut mir));
 
     Ok(FrontendOutput {
         interner,

@@ -4,10 +4,10 @@
 //
 // # Safety model
 // `FidanValue` is not `Send` because `OwnedRef<T>` is `Rc<RefCell<T>>`.
-// For parallel execution we create *fresh* `Rc<RefCell<T>>` wrappers around
-// the CoW `Arc<…>` inner data.  No `Rc` is *shared* across threads; only the
-// underlying `Arc` data is shared (and it is genuinely read-safe until
-// mutation triggers a CoW copy).  The `unsafe impl Send` on `ParallelCapture`
+// For parallel execution we snapshot the entire mutable value graph, including
+// collection backing storage and nested values. No `Rc` allocation crosses
+// a thread boundary with aliases remaining on the source thread. Explicit
+// Shared values use synchronized snapshot boundaries.  The `unsafe impl Send` on `ParallelCapture`
 // and `ParallelArgs` is sound under this invariant.
 //
 // # Rust 2021 partial-capture pitfall
@@ -22,10 +22,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::FidanValue;
+use crate::{FidanValue, exception::CapturedException};
 
-type PendingJoinHandle = std::thread::JoinHandle<Result<ParallelCapture, String>>;
-type DeferredPendingThunk = Box<dyn FnOnce() -> Result<ParallelCapture, String> + Send + 'static>;
+type PendingJoinHandle = std::thread::JoinHandle<Result<ParallelCapture, CapturedException>>;
+type DeferredPendingThunk =
+    Box<dyn FnOnce() -> Result<ParallelCapture, CapturedException> + Send + 'static>;
 
 struct DeferredScheduler {
     next_id: u64,
@@ -37,7 +38,7 @@ enum DeferredSchedulerEntry {
     Queued(DeferredPendingThunk),
     Sleeping(Instant),
     Running,
-    Ready(Result<ParallelCapture, String>),
+    Ready(Result<ParallelCapture, CapturedException>),
 }
 
 #[derive(Clone, Copy)]
@@ -98,7 +99,8 @@ fn deferred_scheduler_wake_sleepers() {
             if let DeferredSchedulerEntry::Sleeping(deadline) = entry
                 && *deadline <= now
             {
-                *entry = DeferredSchedulerEntry::Ready(Ok(ParallelCapture(FidanValue::Nothing)));
+                *entry =
+                    DeferredSchedulerEntry::Ready(Ok(ParallelCapture::new(&FidanValue::Nothing)));
             }
         }
     });
@@ -134,7 +136,7 @@ fn deferred_scheduler_state(id: u64) -> DeferredSchedulerState {
     })
 }
 
-fn deferred_scheduler_take_ready(id: u64) -> Result<ParallelCapture, String> {
+fn deferred_scheduler_take_ready(id: u64) -> Result<ParallelCapture, CapturedException> {
     deferred_scheduler_wake_sleepers();
     DEFERRED_SCHEDULER.with(|scheduler| {
         let mut scheduler = scheduler.borrow_mut();
@@ -145,7 +147,9 @@ fn deferred_scheduler_take_ready(id: u64) -> Result<ParallelCapture, String> {
     })
 }
 
-fn deferred_scheduler_try_take_ready(id: u64) -> Option<Result<ParallelCapture, String>> {
+fn deferred_scheduler_try_take_ready(
+    id: u64,
+) -> Option<Result<ParallelCapture, CapturedException>> {
     deferred_scheduler_wake_sleepers();
     DEFERRED_SCHEDULER.with(|scheduler| {
         let mut scheduler = scheduler.borrow_mut();
@@ -155,7 +159,7 @@ fn deferred_scheduler_try_take_ready(id: u64) -> Option<Result<ParallelCapture, 
                 scheduler.entries.insert(id, entry);
                 None
             }
-            None => Some(Ok(ParallelCapture(FidanValue::Nothing))),
+            None => Some(Ok(ParallelCapture::new(&FidanValue::Nothing))),
         }
     })
 }
@@ -195,7 +199,7 @@ fn deferred_scheduler_pop_next_queued() -> Option<(u64, DeferredPendingThunk)> {
     })
 }
 
-fn deferred_scheduler_store_ready(id: u64, result: Result<ParallelCapture, String>) {
+fn deferred_scheduler_store_ready(id: u64, result: Result<ParallelCapture, CapturedException>) {
     DEFERRED_SCHEDULER.with(|scheduler| {
         scheduler
             .borrow_mut()
@@ -213,7 +217,7 @@ fn deferred_scheduler_run_next() -> bool {
     true
 }
 
-fn deferred_scheduler_resolve(id: u64) -> Result<ParallelCapture, String> {
+fn deferred_scheduler_resolve(id: u64) -> Result<ParallelCapture, CapturedException> {
     loop {
         match deferred_scheduler_state(id) {
             DeferredSchedulerState::Queued | DeferredSchedulerState::Running => {
@@ -224,7 +228,8 @@ fn deferred_scheduler_resolve(id: u64) -> Result<ParallelCapture, String> {
                     }
                     return Err(
                         "same-thread task scheduler deadlocked while awaiting a running task"
-                            .to_string(),
+                            .to_string()
+                            .into(),
                     );
                 }
             }
@@ -235,15 +240,20 @@ fn deferred_scheduler_resolve(id: u64) -> Result<ParallelCapture, String> {
                 sleep_until(deadline);
             }
             DeferredSchedulerState::Ready => return deferred_scheduler_take_ready(id),
-            DeferredSchedulerState::Missing => return Ok(ParallelCapture(FidanValue::Nothing)),
+            DeferredSchedulerState::Missing => {
+                return Ok(ParallelCapture::new(&FidanValue::Nothing));
+            }
         }
     }
 }
 
 enum PendingStateEntry {
     Thread(PendingJoinHandle),
-    Deferred(u64),
-    Ready(Result<ParallelCapture, String>),
+    Deferred {
+        id: u64,
+        owner: std::thread::ThreadId,
+    },
+    Ready(Result<ParallelCapture, CapturedException>),
 }
 
 type PendingState = Arc<Mutex<Option<PendingStateEntry>>>;
@@ -254,15 +264,18 @@ type PendingState = Arc<Mutex<Option<PendingStateEntry>>>;
 ///
 /// ## Safety invariant
 /// The wrapped value **must be exclusively owned** by exactly one thread at a
-/// time.  Always create via [`FidanValue::parallel_capture`], which produces
-/// fresh `Rc<RefCell<T>>` wrappers (one per thread) around the shared CoW
-/// `Arc<…>` data.
-pub struct ParallelCapture(pub FidanValue);
+/// time. Construction snapshots the complete ordinary mutable graph. The private
+/// field prevents safe callers from retaining an Rc alias before sending it.
+pub struct ParallelCapture(FidanValue);
 
 // SAFETY: upheld by the invariant above.
 unsafe impl Send for ParallelCapture {}
 
 impl ParallelCapture {
+    pub fn new(value: &FidanValue) -> Self {
+        Self(value.parallel_capture())
+    }
+
     /// Consume the wrapper and return the inner value.
     ///
     /// **Must be called as a method** inside spawned closures — never access
@@ -280,12 +293,22 @@ impl ParallelCapture {
 ///
 /// Wrapping the argument vec prevents Rust 2021 partial-capture from
 /// extracting individual `FidanValue` fields inside spawned closures.
-pub struct ParallelArgs(pub Vec<ParallelCapture>);
+pub struct ParallelArgs(Vec<ParallelCapture>);
 
 // SAFETY: each ParallelCapture is exclusively owned by one thread.
 unsafe impl Send for ParallelArgs {}
 
 impl ParallelArgs {
+    /// Snapshot a whole payload with one alias/cycle memo.
+    pub fn new(values: &[FidanValue]) -> Self {
+        Self(
+            FidanValue::capture_values(values)
+                .into_iter()
+                .map(ParallelCapture)
+                .collect(),
+        )
+    }
+
     /// Build a `ParallelArgs` from an iterator of captured values.
     pub fn from_captures(caps: impl IntoIterator<Item = ParallelCapture>) -> Self {
         ParallelArgs(caps.into_iter().collect())
@@ -311,7 +334,7 @@ impl ParallelArgs {
 /// The first call to [`FidanPending::join`] consumes the `JoinHandle`; all
 /// subsequent calls return `FidanValue::Nothing`.
 ///
-/// The inner `JoinHandle` carries `Result<ParallelCapture, String>` so that
+/// The inner `JoinHandle` carries `Result<ParallelCapture, CapturedException>` so that
 /// task failures (Fidan panics / throws) can be propagated to the join site
 /// instead of being silently swallowed.  Use [`Self::try_join`] to observe
 /// the error; [`Self::join`] is the backwards-compatible convenience that
@@ -319,7 +342,31 @@ impl ParallelArgs {
 #[derive(Clone)]
 pub struct FidanPending(PendingState);
 
+pub const COOPERATIVE_PENDING_THREAD_MESSAGE: &str =
+    "cooperative pending handle must be awaited by its creator; share the resolved value instead";
+
+fn validate_pending_thread(
+    entry: &Option<PendingStateEntry>,
+) -> Result<(), crate::stdlib::StdlibRuntimeError> {
+    if matches!(entry, Some(PendingStateEntry::Deferred { owner, .. }) if *owner != std::thread::current().id())
+    {
+        return Err(crate::stdlib::StdlibRuntimeError::new(
+            fidan_diagnostics::diag_code!("R0001"),
+            COOPERATIVE_PENDING_THREAD_MESSAGE,
+        ));
+    }
+    Ok(())
+}
+
+fn pending_thread_error(error: crate::stdlib::StdlibRuntimeError) -> CapturedException {
+    crate::exception::RuntimeException::runtime(error.code, error.message).capture()
+}
+
 impl FidanPending {
+    pub fn validate_await_thread(&self) -> Result<(), crate::stdlib::StdlibRuntimeError> {
+        validate_pending_thread(&self.0.lock().unwrap())
+    }
+
     /// Spawn a closure on a new OS thread and wrap the result in a `FidanPending`.
     ///
     /// The closure returns a plain `FidanValue`; errors are not observable via
@@ -329,7 +376,8 @@ impl FidanPending {
     where
         F: FnOnce(ParallelArgs) -> FidanValue + Send + 'static,
     {
-        let handle = std::thread::spawn(move || Ok::<_, String>(ParallelCapture(f(args))));
+        let handle =
+            std::thread::spawn(move || Ok::<_, CapturedException>(ParallelCapture::new(&f(args))));
         FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Thread(
             handle,
         )))))
@@ -345,10 +393,30 @@ impl FidanPending {
     where
         F: FnOnce(ParallelArgs) -> Result<FidanValue, String> + Send + 'static,
     {
-        let handle = std::thread::spawn(move || f(args).map(ParallelCapture));
-        FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Thread(
+        Self::spawn_exception(args, move |args| f(args).map_err(Into::into))
+    }
+
+    pub(crate) fn spawn_exception<F>(args: ParallelArgs, f: F) -> Self
+    where
+        F: FnOnce(ParallelArgs) -> Result<FidanValue, CapturedException> + Send + 'static,
+    {
+        let handle = std::thread::spawn(move || f(args).map(|value| ParallelCapture::new(&value)));
+        Self(Arc::new(Mutex::new(Some(PendingStateEntry::Thread(
             handle,
         )))))
+    }
+
+    pub(crate) fn defer_exception<F>(args: ParallelArgs, f: F) -> Self
+    where
+        F: FnOnce(ParallelArgs) -> Result<FidanValue, CapturedException> + Send + 'static,
+    {
+        let thunk: DeferredPendingThunk =
+            Box::new(move || f(args).map(|value| ParallelCapture::new(&value)));
+        let id = DEFERRED_SCHEDULER.with(|scheduler| scheduler.borrow_mut().push(thunk));
+        Self(Arc::new(Mutex::new(Some(PendingStateEntry::Deferred {
+            id,
+            owner: std::thread::current().id(),
+        }))))
     }
 
     /// Schedule a closure to run lazily on the calling thread the first time the
@@ -357,9 +425,12 @@ impl FidanPending {
     where
         F: FnOnce(ParallelArgs) -> FidanValue + Send + 'static,
     {
-        let thunk: DeferredPendingThunk = Box::new(move || Ok(ParallelCapture(f(args))));
+        let thunk: DeferredPendingThunk = Box::new(move || Ok(ParallelCapture::new(&f(args))));
         let id = DEFERRED_SCHEDULER.with(|scheduler| scheduler.borrow_mut().push(thunk));
-        FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Deferred(id)))))
+        FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Deferred {
+            id,
+            owner: std::thread::current().id(),
+        }))))
     }
 
     /// Schedule a fallible closure to run lazily on the calling thread the first
@@ -368,9 +439,7 @@ impl FidanPending {
     where
         F: FnOnce(ParallelArgs) -> Result<FidanValue, String> + Send + 'static,
     {
-        let thunk: DeferredPendingThunk = Box::new(move || f(args).map(ParallelCapture));
-        let id = DEFERRED_SCHEDULER.with(|scheduler| scheduler.borrow_mut().push(thunk));
-        FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Deferred(id)))))
+        Self::defer_exception(args, move |args| f(args).map_err(Into::into))
     }
 
     /// Create a same-thread timer pending handle that resolves to `nothing`
@@ -380,7 +449,10 @@ impl FidanPending {
             .checked_add(Duration::from_millis(duration_ms))
             .unwrap_or_else(Instant::now);
         let id = DEFERRED_SCHEDULER.with(|scheduler| scheduler.borrow_mut().push_sleep(deadline));
-        FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Deferred(id)))))
+        FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Deferred {
+            id,
+            owner: std::thread::current().id(),
+        }))))
     }
 
     /// Create a pending handle that is already resolved on the current thread.
@@ -389,7 +461,9 @@ impl FidanPending {
     /// callers still observe a `Pending`, but no OS thread is involved.
     pub fn ready_result(result: Result<FidanValue, String>) -> Self {
         FidanPending(Arc::new(Mutex::new(Some(PendingStateEntry::Ready(
-            result.map(ParallelCapture),
+            result
+                .map(|value| ParallelCapture::new(&value))
+                .map_err(Into::into),
         )))))
     }
 
@@ -399,8 +473,18 @@ impl FidanPending {
     /// panicked / threw an uncaught error.  Returns `Ok(Nothing)` if the
     /// handle was already consumed (idempotent after the first call).
     pub fn try_join(&self) -> Result<FidanValue, String> {
+        self.try_join_exception().map_err(|error| error.to_string())
+    }
+
+    pub fn try_join_diagnostic(&self) -> Result<FidanValue, crate::exception::RuntimeException> {
+        self.try_join_exception()
+            .map_err(CapturedException::restore)
+    }
+
+    pub(crate) fn try_join_exception(&self) -> Result<FidanValue, CapturedException> {
         let maybe = {
             let mut guard = self.0.lock().unwrap();
+            validate_pending_thread(&guard).map_err(pending_thread_error)?;
             guard.take()
         };
         match maybe {
@@ -409,9 +493,9 @@ impl FidanPending {
                 Ok(Err(e)) => Err(e),
                 // The Rust thread itself panicked (shouldn't happen in normal
                 // operation, but handle defensively).
-                Err(_) => Err("task thread panicked unexpectedly".to_string()),
+                Err(_) => Err("task thread panicked unexpectedly".to_string().into()),
             },
-            Some(PendingStateEntry::Deferred(id)) => {
+            Some(PendingStateEntry::Deferred { id, .. }) => {
                 deferred_scheduler_resolve(id).map(ParallelCapture::into_inner)
             }
             Some(PendingStateEntry::Ready(result)) => result.map(ParallelCapture::into_inner),
@@ -423,7 +507,22 @@ impl FidanPending {
     ///
     /// Returns `None` when the handle is still pending.
     pub fn try_take_ready(&self) -> Option<Result<FidanValue, String>> {
+        self.try_take_ready_exception()
+            .map(|result| result.map_err(|error| error.to_string()))
+    }
+
+    pub fn try_take_ready_diagnostic(
+        &self,
+    ) -> Option<Result<FidanValue, crate::exception::RuntimeException>> {
+        self.try_take_ready_exception()
+            .map(|result| result.map_err(CapturedException::restore))
+    }
+
+    pub(crate) fn try_take_ready_exception(&self) -> Option<Result<FidanValue, CapturedException>> {
         let mut guard = self.0.lock().unwrap();
+        if let Err(error) = validate_pending_thread(&guard) {
+            return Some(Err(pending_thread_error(error)));
+        }
         match guard.as_ref() {
             Some(PendingStateEntry::Thread(handle)) if handle.is_finished() => {
                 let entry = guard.take();
@@ -432,12 +531,12 @@ impl FidanPending {
                     Some(PendingStateEntry::Thread(handle)) => Some(match handle.join() {
                         Ok(Ok(cap)) => Ok(cap.into_inner()),
                         Ok(Err(err)) => Err(err),
-                        Err(_) => Err("task thread panicked unexpectedly".to_string()),
+                        Err(_) => Err("task thread panicked unexpectedly".to_string().into()),
                     }),
                     _ => unreachable!("pending state changed while taking ready thread result"),
                 }
             }
-            Some(PendingStateEntry::Deferred(id)) => {
+            Some(PendingStateEntry::Deferred { id, .. }) => {
                 let id = *id;
                 match deferred_scheduler_try_take_ready(id) {
                     Some(result) => {
@@ -457,7 +556,8 @@ impl FidanPending {
                     _ => unreachable!("pending state changed while taking ready result"),
                 }
             }
-            Some(PendingStateEntry::Thread(_)) | None => None,
+            Some(PendingStateEntry::Thread(_)) => None,
+            None => Some(Ok(FidanValue::Nothing)),
         }
     }
 
@@ -476,5 +576,32 @@ impl FidanPending {
 impl std::fmt::Debug for FidanPending {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "<pending>")
+    }
+}
+
+#[cfg(test)]
+mod thread_boundary_tests {
+    use super::*;
+    #[test]
+    fn foreign_await_never_consumes_a_cooperative_task() {
+        let pending =
+            FidanPending::defer_with_args(ParallelArgs::new(&[]), |_| FidanValue::Integer(7));
+        let foreign = pending.clone();
+        std::thread::spawn(move || {
+            let error = foreign.try_join().expect_err("foreign await must fail");
+            assert!(error.contains("R0001"));
+            assert!(foreign.try_take_ready().unwrap().is_err());
+        })
+        .join()
+        .unwrap();
+        assert!(matches!(
+            pending.try_join().unwrap(),
+            FidanValue::Integer(7)
+        ));
+        assert!(matches!(pending.try_join().unwrap(), FidanValue::Nothing));
+        assert!(
+            matches!(pending.try_take_ready(), Some(Ok(FidanValue::Nothing))),
+            "consumed handles must not remain pending forever"
+        );
     }
 }

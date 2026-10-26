@@ -126,7 +126,10 @@ pub struct Param {
 
 #[derive(Debug, Clone)]
 pub struct Decorator {
+    /// Complete spelling for reserved-attribute classification and formatting.
     pub name: Symbol,
+    /// Ordinary identifier/member expression for user callable resolution.
+    pub callee: crate::ExprId,
     pub args: Vec<crate::Arg>,
     pub span: Span,
 }

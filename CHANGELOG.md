@@ -10,7 +10,65 @@ compiler releases.
 
 ## [Unreleased]
 
+### Fixed
+- Preserve runtime diagnostic identity and original caught values through native,
+  JIT, callback and async boundaries; uncaught user panics consistently report R1002.
+- Enforce R1001 call-depth/stack-reserve checks, aggregate task-group failures as
+  R9001, and stop callback/certain-argument execution after failure.
+- Preserve informational diagnostic codes, reject known non-callable values and
+  run MIR safety checks before backend provisioning; correct async/hot-loop warnings.
+
+
+### Added
+- Global `-v`/`-vv`/`-vvv` operational diagnostics on stderr, with compiler,
+  package/toolchain, native helper and LSP instrumentation, bounded redaction,
+  and documented first-party RUST_LOG filters. Program argument forwarding,
+  application stdout and existing language diagnostics are preserved.
+
+- **Semantic change:** logical `and`/`or` (including `&&`/`||`) now short-circuit
+  left-to-right. Both operands remain statically typechecked; only evaluated
+  flexible operands undergo runtime Boolean validation. Skipped RHS callbacks,
+  defaults, side effects and exceptions no longer execute. Explicitly sequence
+  any RHS work that was intended to run unconditionally.
+
+- Enforce compiler-attribute arguments and retain constant deprecation reasons.
+- Complete native numeric receiver methods and Shared/WeakShared type fields;
+  correct Cranelift Dict/HashSet emptiness lowering.
+- Reject empty interpolation before in-place formatting can replace invalid source.
+
+- Bind saved Dal credentials to canonical registry identities and reject authenticated redirects.
+- Preserve working compiler/helper installations on failed refresh; validate install selectors
+  and archive members, and serialize release publication using an OS-owned file lock.
+- Correct native named/default argument preparation and object/dict provenance.
+- Isolate mutable parallel capture/global graphs and Shared snapshots; failed updates
+  roll back callback mutations. Reject foreign cooperative scheduler handles cleanly.
+- Require matching LLVM backend protocol8 for thread-local native globals. Existing
+  public 1.0.16/helper 1.0.6 assets are unchanged. The selected next release is Fidan 1.1.0 stable
+  with LLVM helper 1.1.0; publication remains a separate approval gate.
+
+### Fixed
+- Honor advertised Unicode string and collection length properties through shared receiver dispatch.
+- Preserve the receiver key type in `Dict.keys()` type inference, signatures and editor metadata.
+- Complete arm-local enum payload bindings in both `check` forms, retain literal payload comparisons,
+  and preserve shadowed outer bindings. Native enum payload construction now matches interpreter dispatch.
+
 ---
+
+## Unreleased — Dal relaunch integration candidate
+
+- Verify registry archive checksums before install; bound and validate archives,
+  responses, cache contents and portable paths; use staging/rollback for replacement.
+- Preserve manifest metadata, support optional compiler SemVer requirements and
+  resolve transitive constraints/features with bounded deterministic backtracking.
+- Preserve exact checksum locks for yanked artifacts; serialize concurrent CLI updates
+  and atomically replace metadata with rollback on a second-file failure.
+- Fix package/module action, private state and re-export identity, nullable scalar
+  representation and Dynamic native conditions exposed by real package execution.
+- Enforce existing interpreter sandbox policy for std.env and canonical filesystem
+  boundaries. Update the compatible rustls security patch.
+- Require LLVM backend protocol 8 for the current module/callable/thread-local-global ABI. This needs a
+  coordinated Fidan 1.1.0 stable / LLVM helper 1.1.0 release; existing published assets and
+  package versions are unchanged by this local preparation.
 
 ## [1.0.16] — 2026-10-07
 
@@ -91,8 +149,7 @@ compiler releases.
 - README and contributor guidance describe actual backend coverage, build and
   test commands, optional LLVM requirements, and current limitations, while
   retaining Fidan's AI-native identity through structured compiler analysis,
-  first-party AI workflows, and MCP tooling. Detailed
-  verification and findings are recorded in `docs/ENGINEERING_AUDIT.md`.
+  first-party AI workflows, and MCP tooling.
 
 ### Tests
 - Added final semantic fixtures for receiver generic/callback contracts, dynamic

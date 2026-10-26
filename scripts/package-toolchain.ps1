@@ -1,4 +1,5 @@
 param(
+  [ValidateSet("llvm", "ai-analysis")]
   [string]$Kind = "llvm",
   [string]$ToolchainVersion = "",
   [Parameter(Mandatory = $true)]
@@ -17,6 +18,10 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "shared/release-inputs.ps1")
+
+. (Join-Path $PSScriptRoot "shared/cargo-artifacts.ps1")
 
 function Get-WorkspaceVersion {
   $cargoToml = Get-Content "Cargo.toml" -Raw
@@ -318,6 +323,106 @@ function Add-UnixSymlinkClosure {
   return @($keep)
 }
 
+function Get-UnixSharedLibraryNames {
+  param([string]$LibDir)
+  Get-ChildItem -LiteralPath $LibDir -File -Force |
+    Where-Object { $_.Name -match '\.(so(?:\..+)?|dylib(?:\..+)?)$' } |
+    Select-Object -ExpandProperty Name
+}
+
+function Get-LinuxLinkerDependencies {
+  param([string[]]$Lines)
+
+  foreach ($line in $Lines) {
+    if ($line -notmatch '=>') { continue } # vDSO and the host ELF loader.
+    if ($line -notmatch '^\s*(?<name>lib[A-Za-z0-9_+.-]+)\s+=>\s+(?<path>/\S+)\s+\(0x[0-9a-fA-F]+\)\s*$') {
+      throw "Unresolved or unsupported linker dependency: $line"
+    }
+    $name = $Matches.name
+    $path = $Matches.path
+    # Keep glibc, its loader and the standard C++ runtime on the host ABI.
+    if ($name -match '^lib(c|m|pthread|dl|rt|util|resolv)\.so\.' -or
+        $name -match '^lib(gcc_s|stdc\+\+)\.so\.') { continue }
+    [PSCustomObject]@{ Name = $name; Path = $path }
+  }
+}
+
+function Get-DebianLibraryPackage {
+  param([string]$LibraryPath, [string]$LibraryName)
+
+  $resolved = & readlink -f -- $LibraryPath
+  if ($LASTEXITCODE -ne 0 -or -not $resolved) { throw "Cannot resolve dependency $LibraryPath" }
+  # ldd and dpkg can spell the same file as /lib or /usr/lib on usrmerged hosts.
+  # Match a registered SONAME, then verify its real file rather than guessing aliases.
+  $records = & dpkg-query --search "*/$LibraryName"
+  if ($LASTEXITCODE -ne 0) { throw "Cannot find package records for $LibraryName" }
+  $owners = @()
+  foreach ($record in $records) {
+    if ($record -notmatch '^(?<package>[a-z0-9][a-z0-9+.-]*(?::[a-z0-9]+)?): (?<path>/.*)$') { continue }
+    $package = $Matches.package
+    $registeredPath = $Matches.path
+    $registered = & readlink -f -- $registeredPath
+    if ($LASTEXITCODE -eq 0 -and $registered -eq $resolved) { $owners += $package }
+  }
+  $owners = @($owners | Select-Object -Unique)
+  if ($owners.Count -ne 1) { throw "Cannot establish unique package ownership for $LibraryPath" }
+  return $owners[0]
+}
+
+function Copy-LinuxLinkerDependencies {
+  param([string]$LlvmRoot, [string]$StageDir)
+
+  $libDir = Join-Path $LlvmRoot 'lib'
+  $previousLibraryPath = $env:LD_LIBRARY_PATH
+  $previousLocale = $env:LC_ALL
+  try {
+    $env:LD_LIBRARY_PATH = $libDir
+    $env:LC_ALL = 'C'
+    $lines = & ldd (Join-Path $LlvmRoot 'bin/ld.lld') 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Cannot inspect packaged linker dependencies: $lines" }
+    $dependencies = @(Get-LinuxLinkerDependencies -Lines $lines)
+  } finally {
+    $env:LD_LIBRARY_PATH = $previousLibraryPath
+    $env:LC_ALL = $previousLocale
+  }
+
+  $licensesDir = Join-Path $StageDir 'licenses/linux-runtime'
+  $provenance = @()
+  foreach ($dependency in $dependencies) {
+    if ($dependency.Path.StartsWith($libDir + '/', [StringComparison]::Ordinal)) { continue }
+    if ($dependency.Path -notmatch '^/(usr/)?lib/') {
+      throw "Linker dependency is outside system library directories: $($dependency.Path)"
+    }
+    $package = Get-DebianLibraryPackage -LibraryPath $dependency.Path -LibraryName $dependency.Name
+    $packageName = ($package -split ':')[0]
+    $copyright = "/usr/share/doc/$packageName/copyright"
+    if (-not (Test-Path -LiteralPath $copyright -PathType Leaf)) {
+      throw "Missing redistribution notices for dependency package $package"
+    }
+    $version = & dpkg-query --show '--showformat=${Version}' $package
+    if ($LASTEXITCODE -ne 0 -or -not $version) { throw "Cannot determine version for $package" }
+    New-Item -ItemType Directory -Force -Path $licensesDir | Out-Null
+    Copy-Item -LiteralPath $copyright -Destination (Join-Path $licensesDir "$packageName-copyright") -Force
+    # Debian copyright records can refer to a complete license in common-licenses.
+    $notice = Get-Content -LiteralPath $copyright -Raw
+    foreach ($reference in [regex]::Matches($notice, '/usr/share/common-licenses/[A-Za-z0-9.+-]+')) {
+      $licensePath = $reference.Value.TrimEnd('.')
+      if (-not (Test-Path -LiteralPath $licensePath -PathType Leaf)) {
+        throw "Missing referenced license $licensePath for $package"
+      }
+      $licenseName = Split-Path -Leaf $licensePath
+      Copy-Item -LiteralPath $licensePath -Destination (Join-Path $licensesDir $licenseName) -Force
+    }
+    # Copy the content under the required SONAME, rather than a host-absolute symlink.
+    [IO.File]::Copy($dependency.Path, (Join-Path $libDir $dependency.Name), $false)
+    $provenance += [PSCustomObject]@{ library = $dependency.Name; package = $package; version = "$version" }
+  }
+  if ($provenance.Count) {
+    ConvertTo-Json -InputObject $provenance -Depth 3 |
+      Set-Content -LiteralPath (Join-Path $licensesDir 'packages.json') -Encoding utf8
+  }
+}
+
 function Remove-LlvmPayload {
   param([string]$LlvmRoot)
 
@@ -370,30 +475,8 @@ function Remove-LlvmPayload {
     if ($IsLinux) {
       [void]$keepLibTopLevel.Add("x86_64-unknown-linux-gnu")
     }
-    $libKeepCandidates = @(
-      Get-ChildItem -LiteralPath $libDir -Force |
-      Where-Object {
-        if ($_.PSIsContainer) {
-          return $false
-        }
-
-        return (
-          $_.Name -like "libclang.so" -or
-          $_.Name -like "libclang.so.*" -or
-          $_.Name -like "libclang-cpp.so" -or
-          $_.Name -like "libclang-cpp.so.*" -or
-          $_.Name -like "libLTO.so" -or
-          $_.Name -like "libLTO.so.*" -or
-          $_.Name -like "libclang.dylib" -or
-          $_.Name -like "libclang.dylib.*" -or
-          $_.Name -like "libclang-cpp.dylib" -or
-          $_.Name -like "libclang-cpp.dylib.*" -or
-          $_.Name -like "libLTO.dylib" -or
-          $_.Name -like "libLTO.dylib.*"
-        )
-      } |
-      Select-Object -ExpandProperty Name
-    )
+    # Keep upstream runtime dependencies as well as LLVM-branded libraries.
+    $libKeepCandidates = @(Get-UnixSharedLibraryNames -LibDir $libDir)
     $libKeep = Add-UnixSymlinkClosure -DirectoryPath $libDir -InitialNames $libKeepCandidates
     $keepLibNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($name in $libKeep) {
@@ -545,7 +628,7 @@ function Invoke-HelperBuild {
   }
 
   try {
-    $helperPath = Join-Path "target/release" $HelperBinary
+    $helperPath = Join-Path (Get-CargoReleaseDirectory) $HelperBinary
     if (Test-Path -LiteralPath $helperPath) {
       Remove-Item -LiteralPath $helperPath -Force
     }
@@ -760,6 +843,9 @@ function Invoke-HelperBuild {
   }
 }
 
+Assert-ReleaseVersion -Value $ToolVersion -Name "ToolVersion"
+if ($ToolchainVersion) { Assert-ReleaseVersion -Value $ToolchainVersion -Name "ToolchainVersion" }
+
 $hasUpstreamArchive = ($UpstreamArchivePath -ne "") -or ($UpstreamArchiveUrl -ne "")
 if (($Kind -eq "llvm") -and (-not $hasUpstreamArchive)) {
   throw "Either -UpstreamArchivePath or -UpstreamArchiveUrl is required for LLVM toolchain packaging"
@@ -768,6 +854,7 @@ if (($Kind -eq "llvm") -and (-not $hasUpstreamArchive)) {
 if (-not $ToolchainVersion) {
   $ToolchainVersion = Get-HelperVersion -Kind $Kind
 }
+Assert-ReleaseVersion -Value $ToolchainVersion -Name "ToolchainVersion"
 if (-not $SupportedFidanVersions) {
   $SupportedFidanVersions = "^$(Get-WorkspaceVersion)"
 }
@@ -826,6 +913,9 @@ else {
 }
 
 try {
+  foreach ($legalFile in @("LICENSE", "NOTICE")) {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "../$legalFile") -Destination (Join-Path $stageDir $legalFile)
+  }
   $helperDir = Join-Path $stageDir "helper"
   New-Item -ItemType Directory -Force -Path $helperDir | Out-Null
 
@@ -863,7 +953,7 @@ try {
       -HelperAdditionalLibPaths $HelperAdditionalLibPaths
   }
 
-  $helperPath = Join-Path "target/release" $helperBinary
+  $helperPath = Join-Path (Get-CargoReleaseDirectory) $helperBinary
   if (-not (Test-Path -LiteralPath $helperPath)) {
     throw "Expected helper binary at '$helperPath'"
   }
@@ -878,6 +968,9 @@ try {
   }
 
   if (($Kind -eq "llvm") -and $payloadRoot) {
+    if ($IsLinux) {
+      Copy-LinuxLinkerDependencies -LlvmRoot $payloadRoot -StageDir $stageDir
+    }
     Remove-LlvmPayload -LlvmRoot $payloadRoot
   }
 

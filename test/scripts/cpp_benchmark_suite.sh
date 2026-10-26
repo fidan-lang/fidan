@@ -2,6 +2,7 @@
 # ============================================================
 #  cpp_benchmark_suite.sh — Multi-case Fidan vs C++ comparison
 #  Usage:  ./test/scripts/cpp_benchmark_suite.sh [int_n] [call_n] [float_n]
+# Requires a compatible LLVM helper. Build/run failures are fatal.
 # ============================================================
 set -euo pipefail
 
@@ -30,41 +31,49 @@ mkdir -p "$OUT"
 
 echo "[1/4] Building Fidan release binary..."
 cd "$ROOT"
-cargo build --release -p fidan-cli 2>/dev/null
+cargo build --release --locked -p fidan-cli
 echo "      done."
 
 echo ""
 echo "[2/4] Compiling Fidan suite (Cranelift): $FDN_SRC"
 FDN_CR_OK=0
-if "$ROOT/target/release/fidan" build --backend cranelift --target-cpu native "$FDN_SRC" -o "$FDN_CR" 2>/dev/null; then
+if "$ROOT/target/release/fidan" build --backend cranelift --target-cpu native "$FDN_SRC" -o "$FDN_CR"; then
     echo "      Compiled to $FDN_CR"
     FDN_CR_OK=1
 else
-    echo "FAIL: fidan build --backend cranelift returned error"
+    echo "FAIL: fidan build --backend cranelift returned error" >&2
+    exit 1
 fi
 
 echo ""
 echo "[3/4] Compiling Fidan suite (LLVM): $FDN_SRC"
 FDN_LL_OK=0
-if "$ROOT/target/release/fidan" build --backend llvm --target-cpu native "$FDN_SRC" -o "$FDN_LL" 2>/dev/null; then
+if "$ROOT/target/release/fidan" build --backend llvm --target-cpu native "$FDN_SRC" -o "$FDN_LL"; then
     echo "      Compiled to $FDN_LL"
     FDN_LL_OK=1
 else
-    echo "SKIP: LLVM backend unavailable or build failed"
+    echo "FAIL: LLVM benchmark compilation failed; install a compatible LLVM helper" >&2
+    exit 1
 fi
 
 echo ""
 echo "[4/4] Compiling C++ suite: $CPP_SRC"
 CPP_OK=0
 if command -v g++ &>/dev/null; then
-    if g++ -O2 -march=native -std=c++17 -pthread -o "$CPP_BIN" "$CPP_SRC" 2>/dev/null; then
+    if g++ -O2 -march=native -std=c++17 -pthread -o "$CPP_BIN" "$CPP_SRC"; then
         echo "      Compiled with g++ -O2"
         CPP_OK=1
+    else
+        echo "FAIL: C++ benchmark compilation failed" >&2
+        exit 1
     fi
 elif command -v clang++ &>/dev/null; then
-    if clang++ -O2 -march=native -std=c++17 -pthread -o "$CPP_BIN" "$CPP_SRC" 2>/dev/null; then
+    if clang++ -O2 -march=native -std=c++17 -pthread -o "$CPP_BIN" "$CPP_SRC"; then
         echo "      Compiled with clang++ -O2"
         CPP_OK=1
+    else
+        echo "FAIL: C++ benchmark compilation failed" >&2
+        exit 1
     fi
 fi
 

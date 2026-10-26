@@ -47,6 +47,7 @@ pub(crate) fn run(namespace: Option<String>, args: Vec<String>) -> Result<()> {
         );
     }
 
+    fidan_diagnostics::tracing::debug!(helper = %registered.toolchain.helper_path.display(), "launching external namespace; arguments omitted");
     let status = Command::new(&registered.toolchain.helper_path)
         .arg("exec")
         .arg(&registered.namespace)

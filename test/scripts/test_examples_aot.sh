@@ -3,6 +3,7 @@ set -euo pipefail
 
 BACKEND="llvm"
 LTO="off"
+OPT="O2"
 RELEASE=0
 CASE=""
 FIDAN_HOME_OVERRIDE=""
@@ -19,6 +20,11 @@ while [ "$#" -gt 0 ]; do
         --lto)
             shift
             LTO="${1:?missing value for --lto}"
+            shift
+            ;;
+        --opt)
+            shift
+            OPT="${1:?missing value for --opt}"
             shift
             ;;
         --release)
@@ -66,6 +72,11 @@ case "$LTO" in
         echo "[FAIL] unsupported lto mode '$LTO' (expected: off, full)" >&2
         exit 1
         ;;
+esac
+
+case "$OPT" in
+    O0|O1|O2|O3|Os|Oz) ;;
+    *) echo "[FAIL] unsupported optimization level '$OPT'" >&2; exit 1 ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -136,6 +147,7 @@ echo " Fidan AOT Example Sweep"
 echo "========================================================"
 echo " backend: $BACKEND"
 echo " lto: $LTO"
+echo " opt: $OPT"
 [ -n "$CASE" ] && echo " case: $CASE"
 [ -n "${FIDAN_HOME:-}" ] && echo " FIDAN_HOME: $FIDAN_HOME"
 echo ""
@@ -202,7 +214,7 @@ while IFS= read -r file; do
 
     set +e
     run_with_timeout 600 "$compile_out" "$compile_err" \
-        "$FIDAN" build --backend "$BACKEND" --lto "$LTO" "$file" -o "$bin"
+        "$FIDAN" build --backend "$BACKEND" --lto "$LTO" --opt "$OPT" "$file" -o "$bin"
     compile_exit=$?
     set -e
     if [ "$compile_exit" -eq 124 ]; then
@@ -219,16 +231,21 @@ while IFS= read -r file; do
     fi
 
     timeout_secs="$DEFAULT_TIMEOUT_SECONDS"
-    allow_timeout=0
+    benchmark_work_items="${FIDAN_BENCHMARK_WORK_ITEMS:-10000}"
+    # Positional parameters avoid Bash 3.2 nounset errors for empty arrays.
+    set -- "$bin"
     expected_failure_message=""
-    stdin_flag=()
     case "$base_name" in
         parallel_benchmark.fdn)
             timeout_secs="$BENCHMARK_PROBE_SECONDS"
-            allow_timeout=1
+            set -- "$@" "$benchmark_work_items"
+            ;;
+        performance_suite.fdn)
+            timeout_secs="$BENCHMARK_PROBE_SECONDS"
+            set -- "$@" "$benchmark_work_items" "$benchmark_work_items" "$benchmark_work_items"
             ;;
         replay_demo.fdn)
-            stdin_flag=(--stdin-lines "6\\n3")
+            set -- --stdin-lines "6\\n3" "$@"
             ;;
         release_mega_1_0.fdn)
             if [ "$timeout_secs" -lt 30 ]; then timeout_secs=30; fi
@@ -239,21 +256,12 @@ while IFS= read -r file; do
     esac
 
     set +e
-    if [ "${#stdin_flag[@]}" -gt 0 ]; then
-        run_with_timeout "$timeout_secs" "$stdout" "$stderr" "${stdin_flag[@]}" "$bin"
-    else
-        run_with_timeout "$timeout_secs" "$stdout" "$stderr" "$bin"
-    fi
+    run_with_timeout "$timeout_secs" "$stdout" "$stderr" "$@"
     exit_code=$?
     set -e
 
-    if [ "$allow_timeout" -eq 1 ] && [ "$exit_code" -eq 124 ]; then
-        echo "[PASS] $rel - long-running benchmark reached timeout window"
-        PASS=$((PASS + 1))
-        continue
-    fi
     if [ "$exit_code" -eq 124 ]; then
-        echo "[FAIL] $rel - timed out after ${DEFAULT_TIMEOUT_SECONDS}s"
+        echo "[FAIL] $rel - timed out after ${timeout_secs}s"
         FAIL=$((FAIL + 1))
         continue
     fi

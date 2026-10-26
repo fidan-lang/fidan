@@ -1,9 +1,13 @@
-use crate::imports::{collect_file_import_paths, filter_hir_module, pre_register_hir_into_tc};
+use crate::imports::{bind_hir_file_imports, collect_file_import_paths, pre_register_hir_into_tc};
 use crate::last_error;
 use crate::replay::save_replay_bundle;
 use crate::terminal::paint;
 use anyhow::{Context, Result, bail};
 use fidan_diagnostics::{Diagnostic, Severity, render_message_to_stderr};
+use fidan_diagnostics::{
+    logging::phase,
+    tracing::{debug, info, trace},
+};
 use fidan_driver::dal::validate_package_name;
 use fidan_driver::{CompileOptions, EmitKind, ExecutionMode, TraceMode};
 use fidan_runtime::push_program_args;
@@ -331,7 +335,120 @@ fn scaffold_dal_package(project_dir: &std::path::Path, project_name: &str) -> Re
     Ok(())
 }
 
+fn warn_source_extension(file: &std::path::Path, suppress: &[String]) {
+    if file.as_os_str() != "-"
+        && file.extension().and_then(|e| e.to_str()) != Some("fdn")
+        && !is_suppressed("W2001", suppress)
+    {
+        let message = format!(
+            "file '{}' does not have the '.fdn' extension",
+            file.display()
+        );
+        last_error::record("W2001", &message);
+        render_message_to_stderr(
+            Severity::Warning,
+            fidan_diagnostics::diag_code!("W2001"),
+            &message,
+        );
+    }
+}
+
+/// Enumerate source files deterministically without following directory symlinks.
+/// Explicit files retain the normal extension diagnostic and IO error handling.
+fn source_files(path: &std::path::Path) -> Result<Vec<PathBuf>> {
+    if !path.is_dir() {
+        return Ok(vec![path.to_owned()]);
+    }
+    let mut pending = vec![path.to_owned()];
+    let mut files = Vec::new();
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("cannot read directory {}", dir.display()))?
+        {
+            let entry = entry.with_context(|| format!("cannot read entry in {}", dir.display()))?;
+            let ty = entry.file_type()?;
+            if ty.is_dir() {
+                pending.push(entry.path());
+            } else if ty.is_file() && entry.path().extension().is_some_and(|ext| ext == "fdn") {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+    trace!(files = files.len(), "recursive source discovery completed");
+    Ok(files)
+}
+
+pub(crate) fn run_source_files(
+    path: &std::path::Path,
+    mut run: impl FnMut(PathBuf) -> Result<()>,
+) -> Result<()> {
+    let files = source_files(path)?;
+    if files.is_empty() {
+        render_message_to_stderr(Severity::Note, "", "no .fdn files found");
+    }
+    let mut failed = 0;
+    for file in files {
+        if let Err(error) = run(file.clone()) {
+            render_message_to_stderr(
+                Severity::Error,
+                "cli",
+                &fidan_diagnostics::logging::redact(&format!("{}: {error:#}", file.display())),
+            );
+            failed += 1;
+        }
+    }
+    if failed != 0 {
+        bail!("{failed} source file(s) failed");
+    }
+    Ok(())
+}
+
+/// Check/test directories contain independent source files, not a single entry point.
+pub(crate) fn run_pipeline_path(opts: CompileOptions) -> Result<()> {
+    if !opts.input.is_dir() || !matches!(opts.mode, ExecutionMode::Check | ExecutionMode::Test) {
+        return run_pipeline(opts);
+    }
+    let operation = if opts.mode == ExecutionMode::Test {
+        "testing"
+    } else {
+        "checking"
+    };
+    run_source_files(&opts.input, |file| {
+        render_message_to_stderr(
+            Severity::Note,
+            "",
+            &format!("{operation} {}", file.display()),
+        );
+        let mut file_opts = opts.clone();
+        file_opts.input = file;
+        run_pipeline(file_opts)
+    })
+}
+
 pub(crate) fn run_fmt(
+    path: PathBuf,
+    in_place: bool,
+    check: bool,
+    indent_width: Option<usize>,
+    max_line_len: Option<usize>,
+) -> Result<()> {
+    if !path.is_dir() {
+        return run_fmt_file(path, in_place, check, indent_width, max_line_len);
+    }
+    run_source_files(&path, |file| {
+        if !in_place && !check {
+            render_message_to_stderr(
+                Severity::Note,
+                "",
+                &format!("formatting {}", file.display()),
+            );
+        }
+        run_fmt_file(file, in_place, check, indent_width, max_line_len)
+    })
+}
+
+fn run_fmt_file(
     file: PathBuf,
     in_place: bool,
     check: bool,
@@ -342,6 +459,9 @@ pub(crate) fn run_fmt(
     use fidan_source::SourceMap;
     use std::sync::Arc;
 
+    warn_source_extension(&file, &[]);
+
+    debug!(input = %file.display(), in_place, check, "formatting source");
     let src = std::fs::read_to_string(&file).with_context(|| format!("cannot read {:?}", file))?;
 
     let source_map = Arc::new(SourceMap::new());
@@ -378,12 +498,12 @@ pub(crate) fn run_fmt(
             Severity::Error,
             "fmt",
             &format!(
-                "{} is not formatted — run `fidan format {}` to fix",
+                "{} is not formatted — run `fidan format --in-place \"{}\"` to fix",
                 file.display(),
                 file.display()
             ),
         );
-        std::process::exit(1);
+        bail!("source is not formatted");
     }
 
     if in_place {
@@ -599,7 +719,7 @@ pub(crate) fn emit_mir_safety_diags(
                 sev,
                 fidan_diagnostics::diag_code!("W2006"),
                 &format!(
-                    "in `{}`: {} — this will panic at runtime",
+                    "in `{}`: {} — this will fail at runtime",
                     diag.fn_name, diag.context
                 ),
             );
@@ -635,28 +755,16 @@ pub(crate) fn emit_mir_safety_diags(
 }
 
 pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
+    let _span = fidan_diagnostics::tracing::info_span!("compilation").entered();
+    info!(mode = ?opts.mode, input = %opts.input.display(), "compilation started");
+    debug!(jit_threshold = opts.jit_threshold, optimization = ?opts.opt_level, strict = opts.strict_mode, "compilation configuration");
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
     use std::sync::Arc;
 
     let is_stdin = opts.input.as_os_str() == "-";
 
-    // ── Extension check (skipped for stdin) ───────────────────────────────────
-    if !is_stdin
-        && opts.input.extension().and_then(|e| e.to_str()) != Some("fdn")
-        && !is_suppressed("W2001", &opts.suppress)
-    {
-        let message = format!(
-            "file '{}' does not have the '.fdn' extension",
-            opts.input.display()
-        );
-        last_error::record("W2001", &message);
-        render_message_to_stderr(
-            Severity::Warning,
-            fidan_diagnostics::diag_code!("W2001"),
-            &message,
-        );
-    }
+    warn_source_extension(&opts.input, &opts.suppress);
 
     // ── Load source ────────────────────────────────────────────────────────────
     let (source_name, src) = if is_stdin {
@@ -680,7 +788,15 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     let mut budget = DiagnosticBudget::new(opts.max_errors);
 
     // ── Lex ────────────────────────────────────────────────────────────────────
-    let (tokens, lex_diags) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+    let (tokens, lex_diags) = phase("lex", || {
+        Lexer::new(&file, Arc::clone(&interner)).tokenise()
+    });
+    debug!(
+        lexed_items = tokens.len(),
+        diagnostics = lex_diags.len(),
+        bytes = src.len(),
+        "lexer completed"
+    );
     for diag in &lex_diags {
         budget.render_diag(diag, &source_map, &opts.suppress);
         if budget.would_block_further_errors() {
@@ -697,7 +813,14 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     }
 
     // ── Parse ──────────────────────────────────────────────────────────────────
-    let (module, parse_diags) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+    let (module, parse_diags) = phase("parse", || {
+        fidan_parser::parse(&tokens, file.id, Arc::clone(&interner))
+    });
+    debug!(
+        items = module.items.len(),
+        diagnostics = parse_diags.len(),
+        "parser completed"
+    );
 
     // Surface parse diagnostics via the diagnostics renderer
     for diag in &parse_diags {
@@ -719,7 +842,6 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     }
     // ── Type-check ────────────────────────────────────
     // Only proceed if parse is clean.
-    let mut error_count: usize = budget.error_count();
 
     // ── File-path import loading ───────────────────────────────────────────────
     //
@@ -736,157 +858,34 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             .unwrap_or_else(|| std::path::PathBuf::from("."))
     };
 
-    if !is_stdin {
-        for message in fidan_driver::detect_import_cycles(&opts.input) {
-            budget.render_message(Severity::Error, "", &message);
-            error_count = budget.error_count();
-            if budget.would_block_further_errors() {
-                break;
-            }
+    info!("discovering imports and checking types");
+    let imported = phase("imports", || {
+        fidan_driver::load_imported_hirs(
+            &module,
+            &interner,
+            &base_dir,
+            &source_map,
+            if is_stdin {
+                None
+            } else {
+                Some(opts.input.as_path())
+            },
+            &|path| std::fs::read_to_string(path),
+        )
+    });
+    debug!(
+        modules = imported.modules.len(),
+        diagnostics = imported.diagnostics.len(),
+        "import graph loaded"
+    );
+    for diagnostic in &imported.diagnostics {
+        budget.render_diag(diagnostic, &source_map, &opts.suppress);
+        if budget.would_block_further_errors() {
+            break;
         }
     }
-
-    let imported_hirs: Vec<(
-        fidan_hir::HirModule,
-        Option<std::collections::HashSet<String>>,
-        bool, // expose_to_typeck
-    )> = {
-        use fidan_lexer::Lexer;
-        use std::collections::{HashSet, VecDeque};
-
-        //   expose_to_typeck = true  → symbols visible in the top-level program
-        //   filter = None             → namespace import: call as `mod.fn()` only
-        //   filter = Some(empty)      → wildcard: everything flat
-        //   filter = Some(names)      → flat import: only listed names flat
-        type QueueItem = (std::path::PathBuf, bool, Option<HashSet<String>>);
-
-        let mut hirs: Vec<(
-            fidan_hir::HirModule,
-            Option<HashSet<String>>,
-            bool, // expose_to_typeck
-        )> = Vec::new();
-        let (main_paths, main_unresolved) =
-            collect_file_import_paths(&module, &interner, &base_dir);
-        for (name, span) in main_unresolved {
-            let diag = fidan_diagnostics::Diagnostic::error(
-                fidan_diagnostics::diag_code!("E0106"),
-                format!("module `{name}` not found"),
-                span,
-            );
-            budget.render_diag(&diag, &source_map, &opts.suppress);
-            if budget.would_block_further_errors() {
-                break;
-            }
-        }
-        let mut queue: VecDeque<QueueItem> = main_paths
-            .into_iter()
-            .map(|(p, _, filter)| (p, true, filter)) // direct imports always exposed
-            .collect();
-
-        // Track canonical paths to break import cycles.
-        let mut loaded: HashSet<std::path::PathBuf> = HashSet::new();
-        if !is_stdin && let Ok(canon) = opts.input.canonicalize() {
-            loaded.insert(canon);
-        }
-
-        while let Some((import_path, expose, filter)) = queue.pop_front() {
-            if budget.would_block_further_errors() {
-                break;
-            }
-            let canon = import_path
-                .canonicalize()
-                .unwrap_or_else(|_| import_path.clone());
-            if !loaded.insert(canon) {
-                continue; // already loaded or cycle detected
-            }
-
-            match std::fs::read_to_string(&import_path) {
-                Ok(imp_src) => {
-                    let imp_name = import_path.display().to_string();
-                    let imp_file = source_map.add_file(imp_name.as_str(), imp_src.as_str());
-                    let (imp_tokens, imp_lex_diags) =
-                        Lexer::new(&imp_file, Arc::clone(&interner)).tokenise();
-                    for d in &imp_lex_diags {
-                        budget.render_diag(d, &source_map, &opts.suppress);
-                        if budget.would_block_further_errors() {
-                            break;
-                        }
-                    }
-                    let (imp_module, imp_parse_diags) =
-                        fidan_parser::parse(&imp_tokens, imp_file.id, Arc::clone(&interner));
-                    for d in &imp_parse_diags {
-                        budget.render_diag(d, &source_map, &opts.suppress);
-                        if budget.would_block_further_errors() {
-                            break;
-                        }
-                    }
-                    let imp_lex_err = imp_lex_diags
-                        .iter()
-                        .any(|d| d.severity == fidan_diagnostics::Severity::Error);
-                    let imp_parse_err = imp_parse_diags
-                        .iter()
-                        .any(|d| d.severity == fidan_diagnostics::Severity::Error);
-                    error_count = budget.error_count();
-
-                    // Enqueue transitive imports (they use their own internal resolution,
-                    // no name filter needed — the filter only applies at the call site).
-                    let imp_base = import_path
-                        .parent()
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or_else(|| std::path::PathBuf::from("."));
-                    let (sub_paths, sub_unresolved) =
-                        collect_file_import_paths(&imp_module, &interner, &imp_base);
-                    for (name, span) in sub_unresolved {
-                        let diag = fidan_diagnostics::Diagnostic::error(
-                            fidan_diagnostics::diag_code!("E0106"),
-                            format!("module `{name}` not found"),
-                            span,
-                        );
-                        budget.render_diag(&diag, &source_map, &opts.suppress);
-                        if budget.would_block_further_errors() {
-                            break;
-                        }
-                    }
-                    for (sub, sub_re_export, sub_filter) in sub_paths {
-                        queue.push_back((sub, expose && sub_re_export, sub_filter));
-                    }
-
-                    // Typeck + HIR-lower the imported module (only if lex/parse clean).
-                    if !imp_lex_err && !imp_parse_err && !budget.would_block_further_errors() {
-                        let imp_tm =
-                            fidan_typeck::typecheck_full(&imp_module, Arc::clone(&interner));
-                        for d in &imp_tm.diagnostics {
-                            budget.render_diag(d, &source_map, &opts.suppress);
-                            if budget.would_block_further_errors() {
-                                break;
-                            }
-                        }
-                        let imp_tc_err = imp_tm
-                            .diagnostics
-                            .iter()
-                            .any(|d| d.severity == fidan_diagnostics::Severity::Error);
-                        error_count = budget.error_count();
-                        if !imp_tc_err && !budget.would_block_further_errors() {
-                            let imp_hir = fidan_hir::lower_module(&imp_module, &imp_tm, &interner);
-                            // Always push so private transitive deps are compiled into MIR
-                            // (their functions may be called by the importing module).
-                            // `expose` only controls whether names appear in the outer typeck.
-                            hirs.push((imp_hir, filter, expose));
-                        }
-                    }
-                }
-                Err(e) => {
-                    budget.render_message(
-                        Severity::Error,
-                        "",
-                        &format!("cannot load import `{}`: {e}", import_path.display()),
-                    );
-                    error_count = budget.error_count();
-                }
-            }
-        }
-        hirs
-    };
+    let mut error_count = budget.error_count();
+    let imported_hirs = imported.modules;
 
     // Always run the full typed path so HIR/MIR emit has type information.
     // Pre-register imported symbols before checking the main file so the checker
@@ -898,7 +897,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                 pre_register_hir_into_tc(&mut tc, hir, filter.as_ref(), &interner);
             }
         }
-        tc.check_module(&module);
+        phase("typecheck", || tc.check_module(&module));
         let tm = tc.finish_typed();
         for diag in &tm.diagnostics {
             if is_suppressed(diag.code.as_str(), &opts.suppress) {
@@ -932,19 +931,25 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     // Compute once; all --emit and run blocks share the merged result without
     // re-calling lower_module.
     let merged_hir: Option<fidan_hir::HirModule> = typed_module.as_ref().map(|tm| {
-        let base = fidan_hir::lower_module(&module, tm, &interner);
+        let mut base = phase("hir", || fidan_hir::lower_module(&module, tm, &interner));
+        debug!(
+            functions = base.functions.len(),
+            globals = base.globals.len(),
+            "HIR lowered"
+        );
+        bind_hir_file_imports(
+            &mut base,
+            &module,
+            &interner,
+            &source_map,
+            &base_dir,
+            &base_dir,
+        );
         imported_hirs
             .into_iter()
-            .fold(base, |acc, (imp, filter, _expose_tc)| {
-                // None (namespace) or Some(empty) (wildcard): merge the full HIR so that
-                // all functions exist in MIR (namespace dispatch / flat exposure).
-                // Some(non-empty names): flat import — strip everything except those names.
-                let filtered = if let Some(names) = filter.as_ref().filter(|f| !f.is_empty()) {
-                    filter_hir_module(imp, names, &interner)
-                } else {
-                    imp
-                };
-                fidan_hir::merge_module(acc, filtered)
+            .fold(base, |acc, (imp, _filter, _expose_tc)| {
+                // Keep helpers; filters apply to name visibility, not code retention.
+                fidan_hir::merge_module(acc, imp)
             })
     });
 
@@ -1008,7 +1013,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     // ── --emit mir ─────────────────────────────────────────────────────────────
     if opts.emit.contains(&EmitKind::Mir) {
         if let Some(ref hir) = merged_hir {
-            let mir = fidan_mir::lower_program(hir, &interner, &[]);
+            let mir = phase("mir", || fidan_mir::lower_program(hir, &interner, &[]));
             println!("=== mir: {source_name} ===");
             println!("  functions: {}", mir.functions.len());
             fidan_mir::print_program(&mir);
@@ -1042,7 +1047,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             if error_count == 0
                 && let Some(ref hir) = merged_hir
             {
-                let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                let mut mir = phase("mir", || fidan_mir::lower_program(hir, &interner, &[]));
                 // ── MIR safety analysis (E0401, W1004) ───────────────────────
                 emit_mir_safety_diags(
                     &mir,
@@ -1055,15 +1060,22 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                 if error_count == 0 {
                     // ── Optimisation passes (Phase 6) ─────────────────────
                     if opts.trace == TraceMode::Full {
-                        fidan_passes::run_preserving_call_frames(&mut mir);
+                        phase("optimize_preserving_frames", || {
+                            fidan_passes::run_preserving_call_frames(&mut mir)
+                        });
                     } else {
-                        fidan_passes::run_all(&mut mir);
+                        phase("optimize", || fidan_passes::run_all(&mut mir));
                     }
                     let mut program_argv = vec![opts.input.display().to_string()];
                     program_argv.extend(opts.program_args.iter().cloned());
                     let _program_args_guard = push_program_args(program_argv);
                     let replay_inputs = std::mem::take(&mut opts.replay_inputs);
                     let sandbox = opts.sandbox.take();
+                    info!(
+                        backend = "interpreter",
+                        selective_jit = opts.jit_threshold > 0,
+                        "executing program"
+                    );
                     let (result, captured) = fidan_interp::run_mir_with_replay(
                         mir,
                         Arc::clone(&interner),
@@ -1109,16 +1121,25 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             }
         }
         ExecutionMode::Check => {
-            // Parse + typecheck already ran above; non-zero exit if errors found.
-            if error_count > 0 {
-                std::process::exit(1);
+            if error_count == 0
+                && let Some(ref hir) = merged_hir
+            {
+                let mir = phase("mir", || fidan_mir::lower_program(hir, &interner, &[]));
+                emit_mir_safety_diags(
+                    &mir,
+                    &interner,
+                    opts.strict_mode,
+                    &opts.suppress,
+                    &mut budget,
+                );
+                error_count = budget.error_count();
             }
         }
         ExecutionMode::Build => {
             if error_count == 0
                 && let Some(ref hir) = merged_hir
             {
-                let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                let mut mir = phase("mir", || fidan_mir::lower_program(hir, &interner, &[]));
                 emit_mir_safety_diags(
                     &mir,
                     &interner,
@@ -1128,7 +1149,12 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                 );
                 error_count = budget.error_count();
                 if error_count == 0 {
-                    fidan_passes::run_all(&mut mir);
+                    // Invalid source must report frontend diagnostics before any
+                    // optional backend installation or network operation.
+                    if opts.backend == fidan_driver::Backend::Llvm {
+                        let _ = crate::toolchain::ensure_llvm_toolchain_installed()?;
+                    }
+                    phase("optimize", || fidan_passes::run_all(&mut mir));
                     let session = fidan_driver::Session::new();
                     if let Err(e) =
                         fidan_driver::compile(&session, mir, Arc::clone(&interner), &opts)
@@ -1137,7 +1163,9 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                         render_message_to_stderr(
                             Severity::Error,
                             "",
-                            &format!("AOT compilation failed: {e:#}"),
+                            &fidan_diagnostics::logging::redact(&format!(
+                                "AOT compilation failed: {e:#}"
+                            )),
                         );
                     }
                 }
@@ -1147,11 +1175,11 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             if error_count == 0
                 && let Some(ref hir) = merged_hir
             {
-                let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                let mut mir = phase("mir", || fidan_mir::lower_program(hir, &interner, &[]));
                 // Safety analysis warns about potential issues — profile run
                 // continues regardless (warnings don't block profiling).
                 emit_mir_safety_diags(&mir, &interner, false, &opts.suppress, &mut budget);
-                fidan_passes::run_all(&mut mir);
+                phase("optimize", || fidan_passes::run_all(&mut mir));
                 let prog_name = opts
                     .input
                     .file_name()
@@ -1202,7 +1230,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
             if error_count == 0
                 && let Some(ref hir) = merged_hir
             {
-                let mut mir = fidan_mir::lower_program(hir, &interner, &[]);
+                let mut mir = phase("mir", || fidan_mir::lower_program(hir, &interner, &[]));
                 // ── MIR safety analysis (E0401, W1004) ───────────────────
                 emit_mir_safety_diags(
                     &mir,
@@ -1213,7 +1241,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                 );
                 error_count = budget.error_count();
                 if error_count == 0 {
-                    fidan_passes::run_all(&mut mir);
+                    phase("optimize", || fidan_passes::run_all(&mut mir));
                     let test_count = mir.test_functions.len();
                     if test_count == 0 {
                         render_message_to_stderr(Severity::Note, "", "no test blocks found");
@@ -1236,7 +1264,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                                 if !err.trace.is_empty() && opts.trace != TraceMode::None {
                                     render_trace_to_stderr(&err.trace, opts.trace);
                                 }
-                                std::process::exit(1);
+                                bail!("test execution failed");
                             }
                             (Ok(()), results) => {
                                 let mut passed = 0usize;
@@ -1282,7 +1310,7 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
                                         paint(color, "\x1b[1;32m", &format!("{passed} passed")),
                                         paint(color, "\x1b[1;31m", &format!("{failed} failed"))
                                     );
-                                    std::process::exit(1);
+                                    bail!("test execution failed");
                                 }
                             }
                         }
@@ -1293,6 +1321,12 @@ pub(crate) fn run_pipeline(mut opts: CompileOptions) -> Result<()> {
     }
 
     if error_count > 0 {
+        if opts.mode == ExecutionMode::Test {
+            bail!("test compilation failed");
+        }
+        if opts.mode == ExecutionMode::Check {
+            bail!("source check failed");
+        }
         std::process::exit(1);
     }
 

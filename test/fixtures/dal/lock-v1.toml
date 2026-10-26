@@ -1,0 +1,9 @@
+schema_version = 1
+
+[[packages]]
+name = "core"
+module = "core"
+version = "1.0.0"
+checksum = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+fidan = ">=1.0.16, <2.0.0"
+features = []

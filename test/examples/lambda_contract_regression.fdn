@@ -1,0 +1,61 @@
+var effects = Shared(0)
+
+action make with (certain base oftype integer) returns action {
+    return action with (optional value oftype integer = base + 1) returns integer {
+        return value
+    }
+}
+
+var callback = make(7)
+
+assert_eq(callback.parameters[0]["type"], "integer")
+assert_eq(callback.parameters[0]["required"], false)
+assert_eq(callback.parameters[0]["default_known"], false)
+assert_eq(callback.invoke([]), 8)
+assert_eq(callback.invoke([4]), 4)
+
+action next_default returns integer {
+    effects.update(action with (value oftype dynamic) {
+        return value + 1
+    })
+    return 12
+}
+
+var computed = action with (optional value oftype integer = next_default()) returns integer {
+    return value
+}
+
+assert_eq(effects.get(), 0)
+assert_eq(computed.invoke([]), 12)
+assert_eq(effects.get(), 1)
+
+var certain_callback = action with (certain value oftype integer) returns integer {
+    return value
+}
+var caught = false
+
+attempt {
+    certain_callback.invoke([nothing])
+} catch error {
+    caught = true
+}
+assert_eq(caught, true)
+
+var identity = action with (certain callback oftype callable) returns action {
+    return callback
+}
+
+assert_eq(identity(callback).invoke([]), 8)
+
+var shadowed = 100
+
+action shadow_capture with (certain shadowed oftype integer) returns action {
+    return action returns integer {
+        return shadowed
+    }
+}
+
+var captured = shadow_capture(3)
+
+assert_eq(captured.invoke([]), 3)
+print("lambda contracts passed")

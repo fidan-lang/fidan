@@ -2,11 +2,12 @@
 name = "fidan-lsp"
 version.workspace = true
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+fidan-driver = { workspace = true }
 fidan-config = { workspace = true }
 fidan-source = { workspace = true }
 fidan-ast = { workspace = true }

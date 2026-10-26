@@ -13,6 +13,7 @@ mod dead_code;
 pub mod escape_analysis;
 mod inlining;
 pub mod null_safety;
+mod nullable_representation;
 pub mod parallel_check;
 pub mod precompile_hints;
 pub mod unawaited_pending;
@@ -84,6 +85,7 @@ pub fn run_escape_analysis(program: &MirProgram) -> Vec<EscapeInfo> {
 ///      locals left behind after inlining + propagation.
 ///   6. `UnreachablePruning` — strip blocks after unconditional returns.
 pub fn run_all(program: &mut MirProgram) {
+    nullable_representation::NullableRepresentation.run(program);
     ConstantFolding.run(program);
     Inlining.run(program);
     ConstantFolding.run(program); // second run: fold constants exposed by inlining
@@ -98,6 +100,7 @@ pub fn run_all(program: &mut MirProgram) {
 /// call chain instead of a flattened optimized stack. We still keep the cheap cleanup
 /// passes so debug runs stay reasonably tidy and fast.
 pub fn run_preserving_call_frames(program: &mut MirProgram) {
+    nullable_representation::NullableRepresentation.run(program);
     ConstantFolding.run(program);
     CopyPropagation.run(program);
     DeadCodeElimination.run(program);

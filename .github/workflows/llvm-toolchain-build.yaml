@@ -23,6 +23,9 @@ env:
   VCPKG_COMMIT: b472291f295551b7127359ea38fdd2ca092f6f1b
   VCPKG_WINDOWS_TRIPLET: x64-windows-static-md
 
+permissions:
+  contents: read
+
 jobs:
   build-llvm-toolchain:
     name: Build LLVM toolchain (${{ matrix.name }})
@@ -35,8 +38,9 @@ jobs:
             os: windows-latest
             artifact_name: llvm-toolchain-windows
             source_key: windows
+          # Match the upstream SDK ABI; bundle its non-base linker dependencies.
           - name: Linux
-            os: ubuntu-latest
+            os: ubuntu-22.04
             artifact_name: llvm-toolchain-linux
             source_key: linux
           - name: macOS
@@ -45,15 +49,17 @@ jobs:
             source_key: macos
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy
 
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Install Linux packaging dependencies
         if: runner.os == 'Linux'
@@ -61,11 +67,11 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y pkg-config libdbus-1-dev
+          sudo apt-get install -y pkg-config libdbus-1-dev libicu70
 
       - name: Cache Windows vcpkg artifacts
         if: runner.os == 'Windows'
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             .vcpkg
@@ -119,10 +125,15 @@ jobs:
       - name: Resolve LLVM source metadata
         id: source
         shell: pwsh
+        env:
+          WF_INPUTS_LLVM_TOOL_VERSION: ${{ inputs.llvm_tool_version }}
+          WF_MATRIX_SOURCE_KEY: ${{ matrix.source_key }}
         run: |
+          . ./scripts/shared/release-inputs.ps1
+          Assert-ReleaseVersion -Value $env:WF_INPUTS_LLVM_TOOL_VERSION -Name "LLVM version"
           $sources = Get-Content "config/llvm-toolchain-sources.json" -Raw | ConvertFrom-Json -AsHashtable
-          $version = "${{ inputs.llvm_tool_version }}"
-          $platform = "${{ matrix.source_key }}"
+          $version = "$env:WF_INPUTS_LLVM_TOOL_VERSION"
+          $platform = "$env:WF_MATRIX_SOURCE_KEY"
           if (-not $sources.ContainsKey($version)) {
             throw "Unsupported LLVM version '$version' in config/llvm-toolchain-sources.json"
           }
@@ -139,6 +150,7 @@ jobs:
           if (-not $llvmSysPrefixEnv) {
             throw "Missing llvm_sys_prefix_env for version '$version' in config/llvm-toolchain-sources.json"
           }
+          Assert-LlvmSourceMetadata -Url $platformInfo.url -Sha256 $platformInfo.sha256 -Feature $backendFeature -PrefixEnv $llvmSysPrefixEnv
           "archive_url=$($platformInfo.url)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "archive_sha256=$($platformInfo.sha256)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "backend_feature=$backendFeature" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -146,16 +158,25 @@ jobs:
 
       - name: Package LLVM toolchain artifact
         shell: pwsh
+        env:
+          # Ubuntu runners mount /tmp as a small tmpfs; SDK extraction needs disk.
+          TMPDIR: ${{ runner.temp }}
+          WF_INPUTS_TOOLCHAIN_VERSION: ${{ inputs.toolchain_version }}
+          WF_INPUTS_LLVM_TOOL_VERSION: ${{ inputs.llvm_tool_version }}
+          WF_STEPS_SOURCE_OUTPUTS_BACKEND_FEATURE: ${{ steps.source.outputs.backend_feature }}
+          WF_STEPS_SOURCE_OUTPUTS_LLVM_SYS_PREFIX_ENV: ${{ steps.source.outputs.llvm_sys_prefix_env }}
+          WF_STEPS_SOURCE_OUTPUTS_ARCHIVE_URL: ${{ steps.source.outputs.archive_url }}
+          WF_STEPS_SOURCE_OUTPUTS_ARCHIVE_SHA256: ${{ steps.source.outputs.archive_sha256 }}
         run: |
           ./scripts/package-toolchain.ps1 `
             -Kind "llvm" `
-            -ToolchainVersion "${{ inputs.toolchain_version }}" `
-            -ToolVersion "${{ inputs.llvm_tool_version }}" `
-            -HelperCargoFeatures "${{ steps.source.outputs.backend_feature }}" `
-            -LlvmSysPrefixEnvVar "${{ steps.source.outputs.llvm_sys_prefix_env }}" `
+            -ToolchainVersion "$env:WF_INPUTS_TOOLCHAIN_VERSION" `
+            -ToolVersion "$env:WF_INPUTS_LLVM_TOOL_VERSION" `
+            -HelperCargoFeatures "$env:WF_STEPS_SOURCE_OUTPUTS_BACKEND_FEATURE" `
+            -LlvmSysPrefixEnvVar "$env:WF_STEPS_SOURCE_OUTPUTS_LLVM_SYS_PREFIX_ENV" `
             -HelperAdditionalLibPaths @($env:VCPKG_LIBXML2_LIB_DIR) `
-            -UpstreamArchiveUrl "${{ steps.source.outputs.archive_url }}" `
-            -UpstreamArchiveSha256 "${{ steps.source.outputs.archive_sha256 }}"
+            -UpstreamArchiveUrl "$env:WF_STEPS_SOURCE_OUTPUTS_ARCHIVE_URL" `
+            -UpstreamArchiveSha256 "$env:WF_STEPS_SOURCE_OUTPUTS_ARCHIVE_SHA256"
 
       - name: Install packaged LLVM toolchain into validation FIDAN_HOME
         if: inputs.validate
@@ -175,6 +196,28 @@ jobs:
           New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
           tar -xzf $archive.FullName -C $installRoot
           "FIDAN_HOME=$fidanHome" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Verbosity, diagnostic and native helper contracts
+        if: inputs.validate
+        shell: pwsh
+        env:
+          FIDAN_REQUIRE_LLVM: "1"
+        run: |
+          cargo build --workspace --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Workspace build failed' }
+          cargo test -p fidan-cli --test verbosity_cli --locked -- --nocapture
+          if ($LASTEXITCODE -ne 0) { throw 'Verbosity contracts failed' }
+          cargo test -p fidan-driver --test concurrent_e2e --test extern_e2e --locked
+          if ($LASTEXITCODE -ne 0) { throw 'Native backend and diagnostic contracts failed' }
+
+      - name: Helper-dependent CLI LLVM integration cases
+        if: inputs.validate
+        shell: pwsh
+        env:
+          FIDAN_REQUIRE_LLVM: "1"
+        run: |
+          cargo test -p fidan-cli --test dal_registry --locked -- --ignored
+          if ($LASTEXITCODE -ne 0) { throw 'Helper-dependent CLI LLVM integrations failed' }
 
       - name: Validate packaged LLVM toolchain (Windows)
         if: inputs.validate && runner.os == 'Windows'
@@ -196,7 +239,7 @@ jobs:
             --fidan-home "${FIDAN_HOME}"
 
       - name: Upload LLVM toolchain artifact bundle
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ${{ matrix.artifact_name }}
           path: dist/release

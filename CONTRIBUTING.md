@@ -278,3 +278,18 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for more details.
 ## Final Note
 
 By contributing to Fidan, you help improve the language and its ecosystem for everyone. Thank you for your contribution.
+
+
+### Workspace attribution copies
+
+The root `LICENSE` and `NOTICE` are authoritative. Crate-level legal files are generated copies
+so Cargo source archives preserve attribution alongside the standard license. When
+updating root legal files, synchronize first-party crates from the repository root:
+
+```powershell
+Get-ChildItem crates -Directory | ForEach-Object { Copy-Item LICENSE, NOTICE $_.FullName }
+```
+
+CI checks the copies against the root. Do not edit crate legal copies independently or
+apply this operation to third-party dependencies. Workspace license metadata uses
+SPDX `Apache-2.0`; the standard license file remains included in package archives.

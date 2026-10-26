@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-pub const LLVM_BACKEND_PROTOCOL_VERSION: u32 = 5;
+// File-qualified MIR members and resolved re-exports require the matching
+// helper/runtime lowering. Protocol5 helpers can silently miscompile these values.
+pub const LLVM_BACKEND_PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlvmCompileRequest {
@@ -138,6 +140,8 @@ pub fn invoke_llvm_helper(
         serde_json::to_vec(&request).context("failed to serialize LLVM compile request")?;
 
     let mut command = Command::new(helper);
+    fidan_diagnostics::logging::configure_child(&mut command);
+    fidan_diagnostics::tracing::debug!(helper = %helper.display(), protocol = LLVM_BACKEND_PROTOCOL_VERSION, request_bytes = request_bytes.len(), "launching LLVM helper");
     configure_helper_environment(&mut command, toolchain);
 
     let mut child = command
@@ -159,6 +163,19 @@ pub fn invoke_llvm_helper(
         .wait_with_output()
         .context("failed while waiting for LLVM helper to finish")?;
 
+    if !output_result.stderr.is_empty() && output_result.status.success() {
+        use std::io::Write as _;
+        std::io::stderr()
+            .write_all(
+                fidan_diagnostics::logging::redact(&String::from_utf8_lossy(&output_result.stderr))
+                    .as_bytes(),
+            )
+            .context("failed to forward LLVM helper diagnostics")?;
+    }
+    fidan_diagnostics::tracing::trace!(
+        success = output_result.status.success(),
+        "LLVM helper process completed"
+    );
     if !output_result.status.success() {
         let stderr = String::from_utf8_lossy(&output_result.stderr)
             .trim()

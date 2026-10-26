@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+permissions:
+  contents: read
+
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -20,17 +23,35 @@ jobs:
           - ubuntu-latest
           - windows-latest
           - macos-latest
+          - macos-15-intel
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Verify standard Apache license and attribution
+        shell: pwsh
+        run: |
+          if ((Get-FileHash LICENSE -Algorithm SHA256).Hash -ne 'cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30') { throw 'LICENSE must be unmodified Apache 2.0' }
+          if (-not (Test-Path NOTICE -PathType Leaf)) { throw 'NOTICE must be preserved' }
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           components: clippy, rustfmt
 
+      - name: Verify crate attribution copies
+        shell: pwsh
+        run: |
+          foreach ($file in @('LICENSE', 'NOTICE')) {
+            $expected = (Get-FileHash $file -Algorithm SHA256).Hash
+            foreach ($manifest in Get-ChildItem crates/*/Cargo.toml) {
+              $copy = Join-Path $manifest.DirectoryName $file
+              if ((Get-FileHash $copy -Algorithm SHA256).Hash -ne $expected) { throw "Crate legal file differs: $copy" }
+            }
+          }
+
       - name: Cache Cargo
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
 
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
@@ -45,6 +66,10 @@ jobs:
         shell: pwsh
         run: ./test/scripts/test-bootstrap-windows.ps1
 
+      - name: Release input security regressions
+        shell: pwsh
+        run: ./test/scripts/test-release-inputs.ps1
+
       - name: Windows release pipeline regressions
         if: runner.os == 'Windows'
         shell: pwsh
@@ -53,10 +78,24 @@ jobs:
       - name: Build
         run: cargo build --workspace --locked
 
+      - name: Cranelift AOT example regressions
+        shell: pwsh
+        run: |
+          ./test/scripts/test_examples_aot.ps1 -Backend cranelift
+          if ($LASTEXITCODE -ne 0) { throw 'Cranelift example sweep failed' }
+
+      - name: Windows benchmark runner failure regressions
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./test/scripts/test-benchmark-runners.ps1
+
       - name: Toolchain packaging environment regression
         shell: pwsh
         run: |
           ./test/scripts/test-toolchain-build-env.ps1
+
+      - name: AOT sweep argument portability
+        run: python test/scripts/test-aot-sweep-invocation.py
 
       - name: Formatting
         run: cargo fmt --all --check
@@ -64,5 +103,29 @@ jobs:
       - name: Test
         run: cargo test --workspace --locked
 
+      - name: Verbose LSP transport regression
+        run: python test/scripts/test_args_lsp.py ArgsLspTests.test_verbose_json_rpc_transport_and_errors
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  workflow-security:
+    name: Workflow input and immutable dependency security
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Checkout audited workflow checks (requires coordinated upstream push)
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: fidan-lang/fidan-actions
+          ref: 096d2a496cfd03b31fb0e67e4cdbb34f23f98df3
+          path: .ci-actions
+          persist-credentials: false
+      - run: python -m pip install PyYAML==6.0.3
+      - run: python .ci-actions/scripts/test-workflows.py
+      - run: python .ci-actions/scripts/check-workflows.py . .ci-actions
+      - run: python test/scripts/test-workflow-inputs.py

@@ -17,6 +17,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymKind {
+    Module,
     Action,
     Object,
     Enum,
@@ -217,6 +218,7 @@ fn receiver_return_summary(
         ReceiverReturnKind::ListOfInteger => ("list oftype integer", Some("list")),
         ReceiverReturnKind::ListOfDynamic => ("list oftype dynamic", Some("list")),
         ReceiverReturnKind::ListOfReceiverElement => ("list", Some("list")),
+        ReceiverReturnKind::ListOfDictKey => ("list oftype K", Some("list")),
         ReceiverReturnKind::ListOfDictValue => ("list", Some("list")),
         ReceiverReturnKind::ListOfDynamicPairs => ("list", Some("list")),
         ReceiverReturnKind::SharedInnerValue => ("Shared inner value", None),
@@ -913,6 +915,9 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
 
     // ── Actions ───────────────────────────────────────────────────────────────
     for (&sym, info) in &typed.actions {
+        if info.span.file != module.file {
+            continue;
+        }
         let name = res(sym);
         let detail = fmt_action_sig(&name, info, interner);
         let param_types: Vec<String> = info
@@ -939,6 +944,9 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
 
     // ── Objects and their members ─────────────────────────────────────────────
     for (&sym, info) in &typed.objects {
+        if info.span.file != module.file {
+            continue;
+        }
         let name = res(sym);
         let detail = fmt_object(&name, info, interner);
         table.put(
@@ -1015,6 +1023,9 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
 
     // ── Enums and their variants ──────────────────────────────────────────────
     for (&sym, info) in &typed.enums {
+        if info.span.file != module.file {
+            continue;
+        }
         let name = res(sym);
         let variant_labels: Vec<String> = info
             .variants
@@ -1252,6 +1263,7 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
     let child_parent_pairs: Vec<(Symbol, Option<Symbol>)> = typed
         .objects
         .iter()
+        .filter(|(_, info)| info.span.file == module.file)
         .map(|(&s, info)| (s, info.parent))
         .collect();
 
@@ -1261,8 +1273,8 @@ pub fn build(module: &Module, typed: &TypedModule, interner: &SymbolInterner) ->
         let mut cur = child_info.parent;
         while let Some(parent_sym) = cur {
             let parent_info = match typed.objects.get(&parent_sym) {
-                Some(i) => i,
-                None => break,
+                Some(i) if i.span.file == module.file => i,
+                _ => break,
             };
             let parent_name = res(parent_sym);
             // Inherited fields — reuse the already-corrected field span.

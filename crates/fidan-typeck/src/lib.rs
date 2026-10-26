@@ -58,6 +58,10 @@ pub struct TypedModule {
     pub diagnostics: Vec<Diagnostic>,
     /// Type of every expression, keyed by `ExprId`.
     pub expr_types: FxHashMap<ExprId, FidanType>,
+    /// Resolved annotation types keyed by source span; HIR must not resolve names again.
+    pub annotation_types: FxHashMap<Span, FidanType>,
+    /// Existing callable signatures for lambda expressions (including inferred returns).
+    pub expr_actions: FxHashMap<ExprId, ActionInfo>,
     /// Class/object registry: layout (fields, methods, parent) per class name.
     pub objects: FxHashMap<Symbol, ObjectInfo>,
     /// Enum registry: variants per enum name.
@@ -223,6 +227,23 @@ mod tests {
     }
 
     // ── Well-typed programs produce no errors ─────────────────────────────────
+
+    #[test]
+    fn extern_parameters_cannot_have_optional_sentinel_abi() {
+        for annotation in [
+            "optional value oftype float",
+            "optional value oftype integer = 1",
+            "optional value oftype boolean",
+        ] {
+            let source =
+                format!("@extern(\"unused\")\naction external with ({annotation}) returns integer");
+            assert!(
+                check_errors(&source)
+                    .iter()
+                    .any(|message| message.contains("cannot be optional or have a default"))
+            );
+        }
+    }
 
     #[test]
     fn integer_var_is_clean() {
@@ -1246,6 +1267,48 @@ var result = choose(true)
     }
 
     #[test]
+    fn dynamic_returning_object_methods_exist_and_keep_argument_checks() {
+        let source = r#"object Store {
+            action value with (certain index oftype integer) returns flexible { return index }
+            action call returns flexible { return this.value(3) }
+        }
+        var store = Store()
+        print(store.value(1))"#;
+        assert!(
+            check_errors(source).is_empty(),
+            "{:?}",
+            check_errors(source)
+        );
+        for call in ["store.value()", "store.value(\"bad\")", "store.missing()"] {
+            assert!(
+                !check_errors(&format!("{source}\n{call}")).is_empty(),
+                "{call}"
+            );
+        }
+    }
+
+    #[test]
+    fn decorator_contract_checks_defaults_types_and_results() {
+        let valid = r#"action decorate with (callback oftype action, optional value oftype integer = 7) returns action { return callback }
+            @decorate
+            action target {}"#;
+        assert!(check_errors(valid).is_empty(), "{:?}", check_errors(valid));
+        for source in [
+            "action decorate {} @decorate action target {}",
+            "action decorate with (callback oftype action) returns string { return \"bad\" } @decorate action target {}",
+            "action decorate with (callback oftype action, amount oftype integer) {} @decorate(\"wrong\") action target {}",
+            "action decorate with (callback oftype action, optional amount oftype integer = 1) {} @decorate(unknown = 2) action target {}",
+            "action decorate with (callback oftype action, optional amount oftype integer = 1) {} @decorate(amount = 2, amount = 3) action target {}",
+            "action gpu with (callback oftype action) {} @gpu action target {}",
+        ] {
+            assert!(
+                !check_errors(source).is_empty(),
+                "accepted invalid decorator: {source}"
+            );
+        }
+    }
+
+    #[test]
     fn nested_action_decorators_are_clean() {
         assert!(
             check_errors(
@@ -1570,5 +1633,154 @@ var result = choose(true)
             assert_eq!(errors[0].code, expected, "{expression}");
         }
         assert!(check_errors("var empty = hashset()\nvar one = hashset([1])\nvar shared = Shared(1)\nvar weak = WeakShared(shared)").is_empty());
+    }
+    #[test]
+    fn receiver_catalog_covers_metadata_and_finite_method_arity_errors() {
+        use fidan_config::{
+            ReceiverBuiltinKind as Kind, receiver_member_specs, receiver_method_arity_bounds,
+        };
+        let fixture = include_str!("../../../test/examples/receiver_catalog_regression.fdn");
+        let actual = fixture
+            .lines()
+            .filter_map(|line| line.strip_prefix("# "))
+            .filter(|line| line.contains('.') && !line.contains(' '))
+            .map(str::to_owned)
+            .collect::<std::collections::HashSet<_>>();
+        let mut expected = std::collections::HashSet::new();
+        for (kind, name, value) in [
+            (Kind::Integer, "integer", "4"),
+            (Kind::Float, "float", "2.25"),
+            (Kind::String, "string", "\"é\""),
+            (Kind::List, "list", "[1]"),
+            (Kind::Dict, "dict", "{\"a\": 1}"),
+            (Kind::HashSet, "hashset", "hashset([1])"),
+            (Kind::Shared, "shared", "shared"),
+            (Kind::WeakShared, "weak_shared", "WeakShared(shared)"),
+            (Kind::Function, "function", "sample"),
+        ] {
+            let prefix = format!(
+                "action sample with (certain n oftype integer) returns integer {{return n}}\nvar shared = Shared(1)\nvar receiver = {value}\n"
+            );
+            assert!(check_errors(&prefix).is_empty(), "{prefix}");
+            for member in receiver_member_specs(kind) {
+                expected.insert(format!("{name}.{}", member.info.canonical_name));
+                if member.info.method_return.is_none() {
+                    continue;
+                }
+                let Some((_, Some(max))) =
+                    receiver_method_arity_bounds(kind, member.info.canonical_name)
+                else {
+                    continue;
+                };
+                let arguments = std::iter::repeat_n("nothing", max + 1)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let source = format!(
+                    "{prefix}receiver.{}({arguments})\n",
+                    member.info.canonical_name
+                );
+                let interner = Arc::new(SymbolInterner::new());
+                let file = SourceFile::new(FileId(0), "<receiver-arity>", source.as_str());
+                let (tokens, lexical) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+                let (module, parsed) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+                assert!(lexical.is_empty() && parsed.is_empty(), "{source}");
+                let diagnostics = typecheck(&module, interner);
+                assert!(
+                    diagnostics.iter().any(|diag| diag.code == "E0305"),
+                    "Missing arity diagnostic for {source}: {diagnostics:?}"
+                );
+            }
+        }
+        assert_eq!(
+            actual, expected,
+            "Every declared receiver requires an observable positive fixture"
+        );
+    }
+
+    #[test]
+    fn compiler_attributes_do_not_silently_discard_arguments() {
+        for source in [
+            "@precompile(42)\naction value {}",
+            "@unsafe(42)\naction value {}",
+            "@deprecated(42)\naction value {}",
+            "@deprecated(\"first\", \"second\")\naction value {}",
+            "@deprecated(missing_reason)\naction value {}",
+            "action reason returns string {return \"runtime\"}\n@deprecated(reason())\naction value {}",
+        ] {
+            assert!(
+                !check_errors(source).is_empty(),
+                "silently accepted attribute arguments: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn deprecation_warnings_preserve_constant_reasons_and_lexical_scope() {
+        let source = r#"
+@deprecated("Use " + "replacement")
+action old {}
+action outer {
+    @deprecated(message = "Use local replacement")
+    action old {}
+    old()
+}
+old()
+outer()
+old()
+"#;
+        let interner = Arc::new(SymbolInterner::new());
+        let file = SourceFile::new(FileId(0), "<deprecation-message>", source);
+        let (tokens, lexical) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+        let (module, parsed) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+        assert!(lexical.is_empty() && parsed.is_empty());
+        let diagnostics = typecheck(&module, interner);
+        assert!(
+            !diagnostics
+                .iter()
+                .any(|diag| diag.severity == Severity::Error),
+            "{diagnostics:?}"
+        );
+        let warnings = diagnostics
+            .iter()
+            .filter(|diag| diag.code == "W2005")
+            .map(|diag| diag.message.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), 3, "{diagnostics:?}");
+        assert!(
+            warnings[0].contains("Use local replacement"),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[1..]
+                .iter()
+                .all(|message| message.contains("Use replacement")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn short_circuit_still_typechecks_both_operands() {
+        for (expression, expected) in [
+            ("false and 1", "E0203"),
+            ("true or 1", "E0203"),
+            ("false and \"text\"", "E0203"),
+            ("true or []", "E0203"),
+            ("false and nothing", "E0203"),
+            ("true or missing_logical_operand", "E0101"),
+        ] {
+            let source = format!("var result = {expression}");
+            let interner = Arc::new(SymbolInterner::new());
+            let file = SourceFile::new(FileId(0), "<short-circuit>", source.as_str());
+            let (tokens, lexical) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+            let (module, parsed) = fidan_parser::parse(&tokens, FileId(0), Arc::clone(&interner));
+            assert!(lexical.is_empty() && parsed.is_empty());
+            let diagnostics = typecheck(&module, interner);
+            assert!(
+                diagnostics
+                    .iter()
+                    .any(|diag| diag.severity == Severity::Error && diag.code == expected),
+                "{expression}: {diagnostics:?}"
+            );
+        }
     }
 }

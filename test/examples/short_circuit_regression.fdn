@@ -1,0 +1,177 @@
+# Owner-approved lazy Boolean semantics; both operands are statically checked.
+var events = []
+
+@precompile
+action mark with (certain label oftype string, certain value oftype boolean) returns boolean {
+    events.append(label)
+    return value
+}
+
+@precompile
+action fail returns boolean {
+    events.append("failure")
+    panic("expected failure")
+}
+
+assert_eq(mark("false and", false) and mark("skipped", true), false)
+assert_eq(mark("true or", true) or mark("skipped", false), true)
+assert_eq(mark("true and", true) and mark("right and", true), true)
+assert_eq(mark("false or", false) or mark("right or", false), false)
+assert_eq(events, ["false and", "true or", "true and", "right and", "false or", "right or"])
+events = []
+assert_eq(false and fail(), false)
+assert_eq(true or fail(), true)
+assert_eq(events, [])
+
+var caught = 0
+
+attempt {
+    print(true and fail())
+} catch error {
+    assert_eq(error, "expected failure")
+    caught = caught + 1
+}
+attempt {
+    print(false or fail())
+} catch error {
+    assert_eq(error, "expected failure")
+    caught = caught + 1
+}
+assert_eq(caught, 2)
+assert_eq(events, ["failure", "failure"])
+events = []
+assert_eq(mark("a", false) and fail() or mark("b", true) and mark("c", true), true)
+assert_eq(events, ["a", "b", "c"])
+assert_eq(false and fail(), false)
+assert_eq(true or fail(), true)
+
+const var lazy_constant = false and 1 / 0 == 0
+
+assert_eq(lazy_constant, false)
+
+var absent oftype dynamic = nothing
+
+assert_eq(absent != nothing and len(absent.parameters) > 0, false)
+
+var invalid oftype dynamic = "invalid"
+
+assert_eq(false and invalid, false)
+assert_eq(true or invalid, true)
+caught = 0
+attempt {
+    print(invalid and true)
+} catch error {
+    assert(string(error).contains("R0001"))
+    caught = caught + 1
+}
+attempt {
+    print(true and invalid)
+} catch error {
+    assert(string(error).contains("R0001"))
+    caught = caught + 1
+}
+attempt {
+    print(false or absent)
+} catch error {
+    assert(string(error).contains("R0001"))
+    caught = caught + 1
+}
+attempt {
+    print(absent or false)
+} catch error {
+    assert(string(error).contains("R0001"))
+    caught = caught + 1
+}
+assert_eq(caught, 4)
+events = []
+# Alias spellings have the same lazy behavior.
+assert_eq(false && fail(), false)
+assert_eq(true || fail(), true)
+assert_eq(true && mark("alias and", true), true)
+assert_eq(false || mark("alias or", false), false)
+assert_eq(events, ["alias and", "alias or"])
+events = []
+# An invalid left operand fails before the right operand can have effects.
+caught = 0
+attempt {
+    print(invalid and mark("must not run", true))
+} catch error {
+    assert(string(error).contains("R0001"))
+    caught = caught + 1
+}
+attempt {
+    print(absent or mark("must not run", false))
+} catch error {
+    assert(string(error).contains("R0001"))
+    caught = caught + 1
+}
+assert_eq(caught, 2)
+assert_eq(events, [])
+# Discarding a result must preserve selected effects and runtime validation.
+false and fail()
+true or fail()
+true and mark("discarded and", false)
+false or mark("discarded or", true)
+assert_eq(events, ["discarded and", "discarded or"])
+caught = 0
+attempt {
+    invalid and true
+} catch error {
+    assert(string(error).contains("R0001"))
+    caught = caught + 1
+}
+assert_eq(caught, 1)
+events = []
+# Adjacent conditional constructs must evaluate only their selected branch too.
+assert_eq(mark("selected", true) if mark("condition", true) else fail(), true)
+assert_eq(events, ["condition", "selected"])
+assert_eq(5 ?? fail(), 5)
+if false and fail() {
+    panic("unreachable")
+}
+
+var count = 0
+
+while count < 3 and mark("loop", true) {
+    count = count + 1
+}
+assert_eq(count, 3)
+assert_eq(events, ["condition", "selected", "loop", "loop", "loop"])
+events = []
+
+action defaulted with (
+    optional value oftype boolean = mark("default", true),
+) returns boolean {
+    return value
+}
+
+assert_eq(false and defaulted(), false)
+assert_eq(true or defaulted(), true)
+assert_eq(events, [])
+assert_eq(true and defaulted(), true)
+assert_eq(false or defaulted(), true)
+assert_eq(events, ["default", "default"])
+assert_eq(not (false and fail()), true)
+
+# Non-certain Boolean parameters are nullable; their ABI must retain Nothing.
+action nullable_and with (value oftype boolean) returns boolean {
+    return value and true
+}
+
+action nullable_or with (value oftype boolean) returns boolean {
+    return false or value
+}
+
+var nullable_calls oftype list oftype action = [nullable_and, nullable_or]
+
+caught = 0
+for callback in nullable_calls {
+    attempt {
+        callback(nothing)
+    } catch error {
+        assert(string(error).contains("R0001"))
+        caught = caught + 1
+    }
+}
+assert_eq(caught, 2)
+print("short circuit passed")

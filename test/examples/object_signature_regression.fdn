@@ -1,0 +1,34 @@
+object Node {
+    var children oftype list oftype dynamic = []
+
+    action same with (certain target oftype Node) returns boolean {
+        return this == target
+    }
+
+    action visit with (certain target oftype Node, certain seen oftype list oftype dynamic) returns boolean {
+        if this == target {
+            return true
+        }
+        if seen.contains(this) {
+            return false
+        }
+
+        seen.append(this)
+
+        for child in this.children {
+            print(child)
+        }
+
+        return false
+    }
+}
+
+var a = Node()
+var b = Node()
+
+assert_eq(a.same(a), true)
+assert_eq(a.same(b), false)
+assert_eq(a.visit(b, []), false)
+assert_eq([a].contains(a), true)
+assert_eq([a].contains(b), false)
+print("object signatures and identity passed")

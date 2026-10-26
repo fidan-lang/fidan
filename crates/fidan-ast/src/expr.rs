@@ -247,7 +247,9 @@ pub enum BinOp {
     LtEq,
     Gt,
     GtEq,
+    /// Strict Boolean, left-to-right; false skips the right operand.
     And,
+    /// Strict Boolean, left-to-right; true skips the right operand.
     Or,
     BitXor,         // `^`
     BitAnd,         // `&`

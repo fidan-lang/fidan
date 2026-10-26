@@ -115,6 +115,7 @@ pub enum ReceiverReturnKind {
     ListOfInteger,
     ListOfDynamic,
     ListOfReceiverElement,
+    ListOfDictKey,
     ListOfDictValue,
     ListOfDynamicPairs,
     SharedInnerValue,
@@ -669,7 +670,7 @@ const DICT_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
         "keys",
         Some(ReceiverMethodOp::Keys),
         None,
-        Some(ReceiverReturnKind::ListOfString),
+        Some(ReceiverReturnKind::ListOfDictKey),
     ),
     spec_with_op(
         &["values"],
@@ -806,12 +807,21 @@ const WEAK_SHARED_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
     ),
 ];
 
-const FUNCTION_MEMBER_SPECS: &[ReceiverMemberSpec] = &[spec(
-    &["name"],
-    "name",
-    Some(ReceiverReturnKind::String),
-    None,
-)];
+const FUNCTION_MEMBER_SPECS: &[ReceiverMemberSpec] = &[
+    spec(&["name"], "name", Some(ReceiverReturnKind::String), None),
+    spec(
+        &["parameters"],
+        "parameters",
+        Some(ReceiverReturnKind::ListOfDynamic),
+        None,
+    ),
+    spec(
+        &["invoke"],
+        "invoke",
+        None,
+        Some(ReceiverReturnKind::Dynamic),
+    ),
+];
 
 pub fn receiver_member_specs(receiver_kind: ReceiverBuiltinKind) -> &'static [ReceiverMemberSpec] {
     use ReceiverBuiltinKind as Kind;
@@ -844,6 +854,8 @@ pub struct DecoratorInfo {
     pub name: &'static str,
     pub doc: &'static str,
     pub reserved_only: bool,
+    /// None delegates to the attribute's specialized checker (extern/reserved).
+    pub params: Option<&'static [ReceiverParamInfo]>,
 }
 
 pub const LANGUAGE_BUILTINS: &[BuiltinInfo] = &[
@@ -1050,26 +1062,31 @@ pub const LANGUAGE_DECORATORS: &[DecoratorInfo] = &[
         name: "precompile",
         doc: "Eagerly compile the action before the first hot-path call. Useful for avoiding first-call JIT latency in performance-sensitive code.",
         reserved_only: false,
+        params: Some(&[]),
     },
     DecoratorInfo {
         name: "deprecated",
         doc: "Mark an action as deprecated so callers receive a warning and can migrate to a replacement before removal.",
         reserved_only: false,
+        params: Some(&[optional_param("message", "string")]),
     },
     DecoratorInfo {
         name: "extern",
         doc: "Declare a foreign action imported from a native library. Used for ABI-bound native interop.",
         reserved_only: false,
+        params: None,
     },
     DecoratorInfo {
         name: "unsafe",
         doc: "Acknowledge an intentionally unsafe boundary, typically alongside native extern usage.",
         reserved_only: false,
+        params: Some(&[]),
     },
     DecoratorInfo {
         name: "gpu",
         doc: "Reserved for future GPU/offload support. This spelling is reserved but not implemented yet.",
         reserved_only: true,
+        params: None,
     },
 ];
 
@@ -1148,6 +1165,7 @@ fn receiver_return_type_name(
         ReceiverReturnKind::ListOfInteger => "list oftype integer".to_string(),
         ReceiverReturnKind::ListOfDynamic => "list oftype dynamic".to_string(),
         ReceiverReturnKind::ListOfReceiverElement => "list oftype T".to_string(),
+        ReceiverReturnKind::ListOfDictKey => "list oftype K".to_string(),
         ReceiverReturnKind::ListOfDictValue => "list oftype V".to_string(),
         ReceiverReturnKind::ListOfDynamicPairs => "list oftype (dynamic, dynamic)".to_string(),
         ReceiverReturnKind::SharedInnerValue => "T".to_string(),
@@ -1440,7 +1458,13 @@ pub fn receiver_member_params(
             _ => return None,
         },
         ReceiverBuiltinKind::Function => match canonical {
-            "name" => NO_RECEIVER_PARAMS,
+            "name" | "parameters" => NO_RECEIVER_PARAMS,
+            "invoke" => &[ReceiverParamInfo {
+                name: "arguments",
+                type_name: "list oftype dynamic",
+                optional: false,
+                variadic: false,
+            }],
             _ => return None,
         },
         ReceiverBuiltinKind::Handle

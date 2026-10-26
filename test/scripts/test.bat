@@ -13,6 +13,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\test\scripts\run-doctests
 if errorlevel 1 exit /b 1
 
 set "FAILED=0"
+if not defined FIDAN_BENCHMARK_WORK_ITEMS set "FIDAN_BENCHMARK_WORK_ITEMS=10000"
 
 for /R ".\test" %%F in (*.fdn) do (
     if /I "%%~nxF"=="replay_demo.fdn" (
@@ -22,6 +23,13 @@ for /R ".\test" %%F in (*.fdn) do (
         .\target\debug\fidan run "%%F" --replay ".\test\replays\replay_demo_success.bundle"
         if errorlevel 1 (
             echo [FAIL] %%F exited unexpectedly
+            set "FAILED=1"
+        )
+    ) else if /I "%%~nxF"=="parallel_benchmark.fdn" (
+        echo Running bounded benchmark correctness check: %%F
+        .\target\debug\fidan run "%%F" -- "%FIDAN_BENCHMARK_WORK_ITEMS%"
+        if errorlevel 1 (
+            echo [FAIL] %%F benchmark correctness check failed
             set "FAILED=1"
         )
     ) else if /I "%%~nxF"=="trace_demo.fdn" (

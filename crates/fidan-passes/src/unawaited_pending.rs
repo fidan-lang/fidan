@@ -59,6 +59,7 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<UnawaitedPendi
         let mut global_container_roots: FxHashMap<GlobalId, FxHashSet<LocalId>> =
             FxHashMap::default();
         let mut async_namespace_locals: FxHashSet<LocalId> = FxHashSet::default();
+        let mut async_result_locals: FxHashSet<LocalId> = FxHashSet::default();
         let mut async_consumer_fn_locals: FxHashMap<LocalId, String> = FxHashMap::default();
         let mut global_async_consumer_fns: FxHashMap<GlobalId, String> = FxHashMap::default();
 
@@ -154,6 +155,36 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<UnawaitedPendi
                             container_roots.insert(*dest, roots);
                         }
                     }
+                    Instr::Assign {
+                        dest,
+                        rhs: Rvalue::Call { callee, args },
+                        ..
+                    }
+                    | Instr::Call {
+                        dest: Some(dest),
+                        callee,
+                        args,
+                        ..
+                    } if async_consumer_name(
+                        callee,
+                        interner,
+                        &async_namespace_locals,
+                        &async_consumer_fn_locals,
+                        &copy_of,
+                    )
+                    .is_some() =>
+                    {
+                        let roots = consumed_pending_roots(
+                            &args[..args.len().min(1)],
+                            &pending_locals,
+                            &copy_of,
+                            &container_roots,
+                        );
+                        async_result_locals.insert(*dest);
+                        if !roots.is_empty() {
+                            container_roots.insert(*dest, roots);
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -164,34 +195,22 @@ pub fn check(prog: &MirProgram, interner: &SymbolInterner) -> Vec<UnawaitedPendi
 
         for block in &func.blocks {
             for instr in &block.instructions {
-                match instr {
-                    Instr::AwaitPending {
-                        handle: Operand::Local(l),
-                        ..
-                    } => {
-                        // Chase copy-aliases so `await h` where `h = spawn`
-                        // correctly resolves back to the SpawnExpr dest.
-                        awaited_locals.insert(chase(*l, &copy_of));
+                if let Instr::AwaitPending {
+                    handle: Operand::Local(l),
+                    ..
+                } = instr
+                {
+                    // Chase copy-aliases so `await h` where `h = spawn`
+                    // correctly resolves back to the SpawnExpr dest.
+                    let root = chase(*l, &copy_of);
+                    if pending_locals.contains(&root) {
+                        awaited_locals.insert(root);
                     }
-                    Instr::Call { callee, args, .. } => {
-                        if let Some(name) = async_consumer_name(
-                            callee,
-                            interner,
-                            &async_namespace_locals,
-                            &async_consumer_fn_locals,
-                            &copy_of,
-                        ) {
-                            mark_async_consumed(
-                                &mut awaited_locals,
-                                &name,
-                                args,
-                                &pending_locals,
-                                &copy_of,
-                                &container_roots,
-                            );
-                        }
+                    if async_result_locals.contains(&root)
+                        && let Some(inputs) = container_roots.get(&root)
+                    {
+                        awaited_locals.extend(inputs.iter().copied());
                     }
-                    _ => {}
                 }
             }
         }
@@ -291,6 +310,13 @@ fn async_consumer_name(
 ) -> Option<String> {
     match callee {
         Callee::Method {
+            receiver: Operand::Const(MirLit::Namespace(module)),
+            method,
+        } if module == "async" => {
+            let name = interner.resolve(*method);
+            async_consumes_pending(name.as_ref()).then(|| name.to_string())
+        }
+        Callee::Method {
             receiver: Operand::Local(local),
             method,
         } if async_namespace_locals.contains(&chase(*local, copy_of)) => {
@@ -306,39 +332,6 @@ fn async_consumer_name(
             Some(name.clone())
         }
         _ => None,
-    }
-}
-
-fn mark_async_consumed(
-    awaited_locals: &mut FxHashSet<LocalId>,
-    name: &str,
-    args: &[Operand],
-    pending_locals: &FxHashSet<LocalId>,
-    copy_of: &FxHashMap<LocalId, LocalId>,
-    container_roots: &FxHashMap<LocalId, FxHashSet<LocalId>>,
-) {
-    match name {
-        "gather" | "waitAll" | "wait_all" | "waitAny" | "wait_any" => {
-            if let Some(arg) = args.first() {
-                awaited_locals.extend(consumed_pending_roots(
-                    std::slice::from_ref(arg),
-                    pending_locals,
-                    copy_of,
-                    container_roots,
-                ));
-            }
-        }
-        "timeout" => {
-            if let Some(arg) = args.first() {
-                awaited_locals.extend(consumed_pending_roots(
-                    std::slice::from_ref(arg),
-                    pending_locals,
-                    copy_of,
-                    container_roots,
-                ));
-            }
-        }
-        _ => {}
     }
 }
 

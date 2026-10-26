@@ -1,10 +1,11 @@
 pub mod async_std;
 pub mod collections;
-mod common;
+pub(crate) mod common;
 pub mod env;
 pub mod io;
 pub mod json;
 pub mod math;
+pub mod parallel;
 pub mod regex;
 pub mod string;
 pub mod test_runner;

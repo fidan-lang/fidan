@@ -3,7 +3,9 @@
 use std::sync::{OnceLock, RwLock};
 
 pub mod builtins;
+pub mod callable;
 mod dict;
+pub mod exception;
 pub mod ffi;
 mod hashset;
 pub mod index;
@@ -13,6 +15,7 @@ mod object;
 mod owned_ref;
 pub mod parallel;
 mod range;
+pub mod receivers;
 mod shared_ref;
 mod slice;
 pub mod stdlib;
@@ -29,7 +32,10 @@ pub use range::{range_length, range_method};
 pub use shared_ref::{SharedRef, WeakSharedRef};
 pub use slice::slice_value;
 pub use string::FidanString;
-pub use value::{FidanValue, FunctionId, display, display_into, write_display_io};
+pub use value::{
+    EXCEPTION_MESSAGE_FIELD, FidanValue, FunctionId, PendingTaskId, display, display_exception,
+    display_into, write_display_io,
+};
 
 static PROGRAM_ARGS_OVERRIDE: OnceLock<RwLock<Option<Vec<String>>>> = OnceLock::new();
 

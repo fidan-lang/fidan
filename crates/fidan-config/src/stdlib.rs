@@ -104,13 +104,17 @@ fn parameter_shape(raw: &str) -> StdlibCallableParam {
 
 /// Parameter shape without compiler types or runtime values.
 pub fn member_call_params(module: &str, name: &str) -> Option<Vec<StdlibCallableParam>> {
-    let info = member_info(module, name)?;
-    let mut params = raw_signature_params(info.signature)?
+    let signature = if module == crate::BUILTIN_VALUE_MODULE {
+        crate::builtin_info(name)?.signature
+    } else {
+        member_info(module, name)?.signature
+    };
+    let mut params = raw_signature_params(signature)?
         .into_iter()
         .map(parameter_shape)
         .collect::<Vec<_>>();
     // Preserve the compiler's established optional default-pattern contract.
-    if module == "time" && info.names.first() == Some(&"format") {
+    if module == "time" && member_info(module, name)?.names.first() == Some(&"format") {
         params.get_mut(1)?.optional = true;
     }
     Some(params)
@@ -120,14 +124,7 @@ pub fn member_call_params(module: &str, name: &str) -> Option<Vec<StdlibCallable
 /// Aliases use the same member descriptor. Top-level builtins reuse their own
 /// existing declarative signatures rather than a copied arity table.
 pub fn callable_arity(module: &str, name: &str) -> Option<(usize, Option<usize>)> {
-    let params = if module == crate::BUILTIN_VALUE_MODULE {
-        raw_signature_params(crate::builtin_info(name)?.signature)?
-            .into_iter()
-            .map(parameter_shape)
-            .collect()
-    } else {
-        member_call_params(module, name)?
-    };
+    let params = member_call_params(module, name)?;
     let minimum = params
         .iter()
         .rposition(|param| !param.optional && !param.variadic)

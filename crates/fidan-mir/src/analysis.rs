@@ -25,7 +25,7 @@ pub fn collect_effective_local_types(
     let mut namespace_locals: HashMap<LocalId, String> = HashMap::new();
 
     for param in &function.params {
-        map.insert(param.local.0, param.ty.clone());
+        map.insert(param.local.0, function.param_abi_ty(param).clone());
     }
 
     for block in &function.blocks {
@@ -153,18 +153,21 @@ pub fn collect_effective_local_types(
                 if is_primitive_scalar(map.get(&phi.result.0).unwrap_or(&MirTy::Dynamic)) {
                     continue;
                 }
+                // A boxed join may only become scalar when every incoming value
+                // proves the same scalar type. One scalar arm cannot describe
+                // another arm containing Nothing, a string or an unknown value.
                 let inferred = if is_primitive_scalar(&phi.ty) {
                     Some(phi.ty.clone())
                 } else {
-                    phi.operands.iter().find_map(|(_, operand)| match operand {
-                        Operand::Local(local) => map
-                            .get(&local.0)
-                            .filter(|ty| is_primitive_scalar(ty))
-                            .cloned(),
+                    let mut incoming = phi.operands.iter().map(|(_, operand)| match operand {
+                        Operand::Local(local) => map.get(&local.0).cloned(),
                         Operand::Const(MirLit::Float(_)) => Some(MirTy::Float),
                         Operand::Const(MirLit::Int(_)) => Some(MirTy::Integer),
                         Operand::Const(MirLit::Bool(_)) => Some(MirTy::Boolean),
                         _ => None,
+                    });
+                    incoming.next().flatten().filter(|first| {
+                        is_primitive_scalar(first) && incoming.all(|ty| ty.as_ref() == Some(first))
                     })
                 };
                 if let Some(ty) = inferred {
@@ -194,7 +197,8 @@ pub fn collect_may_throw_functions(program: &MirProgram) -> HashMap<FunctionId, 
     loop {
         let mut changed = false;
         for function in &program.functions {
-            let may_throw = function_may_throw(function, &map);
+            // Every native language entry enforces the shared R1001 call budget.
+            let may_throw = function.extern_decl.is_none() || function_may_throw(function, &map);
             if map.insert(function.id, may_throw) != Some(may_throw) {
                 changed = true;
             }

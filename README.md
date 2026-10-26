@@ -8,7 +8,7 @@
 
 **An AI-native general-purpose programming language and compiler toolchain built for human-readable code, native backends, and compiler-grounded AI tooling.**
 
-[![License](https://img.shields.io/badge/license-Apache%202.0%20%2B%20Fidan%20Terms-blue.svg)](LICENSE) &nbsp; [![CI](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml/badge.svg)](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://marketplace.visualstudio.com/items?itemName=fidan.fidan)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) &nbsp; [![CI](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml/badge.svg)](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://marketplace.visualstudio.com/items?itemName=fidan.fidan)
 
 [Getting Started](#getting-started) • [Language Tour](#language-tour) • [CLI Reference](#cli-reference) • [Standard Library](#standard-library) • [VS Code Extension](#vs-code-extension) • [Contributing](#contributing)
 
@@ -23,6 +23,13 @@ Fidan is an **AI-native general-purpose programming language and compiler toolch
 Fidan is designed around the idea that AI development tools should understand programs through structured compiler knowledge, alongside source text. Its toolchain exposes diagnostics, inferred types, symbol information, reads/writes, call graphs, type maps, and static execution traces to first-party explain/fix/improve workflows and MCP tooling. This compiler-grounded integration is a central architectural direction of the project.
 
 Implemented in Rust, the compiler lowers source through typed HIR and MIR optimization to a MIR interpreter with selective Cranelift JIT, Cranelift AOT, or optional LLVM AOT. The workspace also includes a formatter, LSP server, REPL, package tooling, and embedding APIs. See [AI-native tooling](#ai-native-tooling) for the analysis interfaces and provider requirements.
+
+Logical `and` (`&&`) and `or` (`||`) use left-to-right short-circuit evaluation:
+`false and rhs` and `true or rhs` skip `rhs`. Both operands are still statically
+checked. Evaluated operands must be Boolean; flexible non-Booleans, including
+`nothing`, raise R0001. This upcoming candidate intentionally changes the earlier
+eager behavior.
+
 
 ```fidan
 object Person {
@@ -54,6 +61,22 @@ still be called before their textual declaration in the same module.
 
 ---
 
+## Operational diagnostics
+
+The upcoming compiler candidate provides `-v` (INFO), `-vv` (DEBUG), and `-vvv`
+(TRACE). `-V` still prints the version. Diagnostics go to stderr; program output
+and LSP JSON-RPC keep stdout. Existing errors, warnings and progress stay active
+without verbosity. Put verbosity before the source path when running a program:
+
+```sh
+fidan -vv run main.fdn -- --verbose
+fidan -v build main.fdn --backend llvm --lto full
+fidan toolchain list -vv
+```
+
+See [global CLI diagnostics](docs/CLI_DIAGNOSTICS.md) for forwarding rules,
+RUST_LOG precedence, editor integration and log privacy.
+
 ## Project status
 
 Fidan is an actively developed language implementation. Examples and regression tests exercise objects, control flow, collections, concurrency, native interop, and tooling. Language APIs and compiler behavior may evolve; the existence of a compiler stage does not imply complete support for every construct in every backend.
@@ -63,8 +86,6 @@ Fidan is an actively developed language implementation. Examples and regression 
 - `fidan build --backend llvm` uses a separately installed LLVM helper. `--backend auto` prefers a compatible installed LLVM toolchain and otherwise uses Cranelift. `--release` selects optimization defaults, not a backend.
 - AI explain/fix/improve requires the optional AI helper and a configured provider. Compiler analysis, diagnostics, formatting, and deterministic fixes do not require a model.
 - Backend regression tests cover specific programs; general backend parity is not guaranteed. The interpreter's file/environment policy is not an OS security boundary for arbitrary native interop.
-
-See [the engineering audit](docs/ENGINEERING_AUDIT.md) for verified configurations, dependency decisions, and remaining limitations.
 
 ---
 ## Getting Started
@@ -477,6 +498,14 @@ Existing syntax remains available: `text[1..4]`, `text[.. step 2]`, and `text[1.
 
 File paths in `std.io` and `std.json` resolve relative to the process working directory, not the source file's directory. For example, running `fidan run LOCAL/test_file_manager.fdn` from the repository root reads/writes `./tasks.json` in that root. `io.cwd()` shows the working directory; `io.join(...)` builds a platform path. `io.file_exists(path)` returns `false` for missing paths and reports other filesystem inspection failures.
 
+Conversion receiver methods use the aliases declared centrally in `fidan-config`:
+strings support `toInt`/`to_int`/`parseInt`/`parse_int`, the corresponding Float
+spellings, `toBool`/`to_bool`, and `toString`/`to_string`. Integers support
+`toFloat`/`to_float` and string conversion; floats support `toInt`/`to_int` and
+string conversion. String receiver parsing trims whitespace; invalid numeric text
+raises catchable R0001. Boolean parsing recognizes `true`, `1`, and `yes`
+(case-insensitively) as true, preserving the existing receiver contract.
+
 ### Integer arithmetic and powers
 
 Signed 64-bit addition, subtraction, multiplication, negation and nonnegative integer powers are checked. Overflow reports `R2003`; division or modulo by zero reports `R2001`. `i64::MIN / -1` and `i64::MIN % -1` report overflow without a host trap.
@@ -609,7 +638,7 @@ parallel {
 print(counter.get())   # 2, after both tasks join
 ```
 
-`get()` and `set()` synchronize individual accesses. A separate get followed by set, such as `counter.set(counter.get() + 1)`, is not an atomic read-modify-write. `update(callback)` holds the Shared mutex while calling the action with the current value and replacing it with the result. It returns the new value. Named actions, inline actions, and captured closures use the normal callable dispatch.
+`get()` and `set()` synchronize individual accesses. A separate get followed by set, such as `counter.set(counter.get() + 1)`, is not an atomic read-modify-write. `update(callback)` holds the Shared mutex while calling the action with the current value and replacing it with the result. It returns the new value. Named actions, inline actions, and captured closures use the normal callable dispatch. Ordinary mutable collections and objects cross the Shared boundary as detached snapshots: changing a value passed to `Shared`/`set`, or returned by `get`/`update`, cannot mutate the stored value through an escaped alias. A failed callback leaves the committed value unchanged, including nested collections. Use `update` to commit compound mutation. Cooperative `spawn`/`async` pending handles must be awaited by their creator; awaiting them from another parallel worker raises R0001 and leaves the original handle usable. Thread-backed parallel results remain transferable.
 
 ```fidan
 var counter = Shared(0)
@@ -680,7 +709,7 @@ test "negative numbers" {
 }
 ```
 
-Run them with `fidan test yourfile.fdn`. Each test reports pass/fail with coloured output.
+Run them with `fidan test yourfile.fdn` or recursively with `fidan test path/to/directory`. Each test reports pass/fail with coloured output. Directory runs continue after file-level failures and return a failing status if any file fails.
 
 ---
 
@@ -873,10 +902,10 @@ fidan <COMMAND> [OPTIONS] [FILE]
 |---|---|
 | `fidan run <file>` | Run a Fidan source file |
 | `fidan build <file>` | Compile to a native binary |
-| `fidan check <file>` | Type-check and lint without running |
-| `fidan fix <file>` | Auto-apply high-confidence fixes |
-| `fidan format <file>` | Format source code |
-| `fidan test <file>` | Run inline `test {}` blocks |
+| `fidan check <file-or-directory>` | Type-check and lint without running (directories recursively) |
+| `fidan fix <file-or-directory>` | Suggest/apply high-confidence fixes (directories recursively) |
+| `fidan format <file-or-directory>` | Format source code (directories recursively) |
+| `fidan test <file-or-directory>` | Run inline `test {}` blocks (directories recursively) |
 | `fidan profile <file>` | Run with profiling output |
 | `fidan repl` | Start the interactive REPL |
 | `fidan lsp` | Start the Language Server (used by editors) |
@@ -889,11 +918,24 @@ fidan <COMMAND> [OPTIONS] [FILE]
 | `fidan exec <namespace>` | Run commands registered by installed toolchains, such as `fidan exec ai ...` |
 | `fidan dal <command>` | Work with the Dal package registry |
 
+`format`, `test`, `check`, and `fix` accept directory paths, including `.`. They
+select `.fdn` files recursively in sorted path order without traversing symlinks.
+File-level failures are reported while processing continues; the command returns
+failure if any file operation fails. `check` never executes the source programs.
+
+`fix` previews edits by default; `--in-place` writes them. Explicit `--ai`,
+`--improve`, or `--refactor` options use the existing validated helper workflow for
+each selected file. Without those flags no AI helper is requested. Unresolved
+diagnostics are still reported; use `check` to require an error-free result.
+
 `fidan format` behavior:
 
 - default mode prints formatted source to stdout and does not modify the file
 - `--in-place` rewrites the file on disk
 - `--check` exits with status 1 when formatting changes are required
+- each selected file uses its own formatter configuration; the CLI overrides still apply
+- directory checks report all file failures; malformed files are never rewritten
+- explicit file paths retain the `.fdn` extension warning
 
 `fidan new` scaffolds `main.fdn` with an explicit `main()` call so the entry
 behavior is obvious in new projects.
@@ -903,7 +945,7 @@ behavior is obvious in new projects.
 | Command | Description |
 |---|---|
 | `fidan dal login` | Store a Dal API token in the OS keychain for CLI use |
-| `fidan dal logout` | Remove the stored Dal API token from the OS keychain |
+| `fidan dal logout [--registry URL]` | Remove the saved token for the selected registry |
 | `fidan dal whoami` | Show the authenticated Dal account |
 | `fidan dal search <query>` | Search packages on Dal |
 | `fidan dal info <package>` | Show package metadata and published versions |
@@ -929,25 +971,28 @@ fidan dal add my-package[json,cli] --version "^1.2"
 fidan dal add my-tool --global
 ```
 
-Dal resolves dependencies into `dal.lock`, supports optional dependencies through feature wiring, and can install package-provided CLI entries declared in `[cli]` metadata.
+Dal resolves dependencies into `dal.lock`, supports optional dependencies through feature wiring, and can install package-provided CLI entries declared in `[cli]` metadata. The local relaunch branch adds verified archive integrity, explicit compiler constraints and bounded backtracking; see the [package contract](docs/DAL_PACKAGE_CONTRACT.md) for archive integrity, resolution and credential handling.
 
-Dal token lookup order:
+Dal login verifies the token supplied with `--token` (or a masked interactive
+prompt) and saves it for the selected registry. Authenticated commands use
+`FIDAN_DAL_API_TOKEN` when present; an empty value explicitly disables saved-token
+lookup. Otherwise they load the OS keychain entry bound to that registry.
+`fidan dal logout --registry URL` removes only that registry's saved token; it does
+not unset an environment override. Tokens are never printed by login/logout.
 
-1. `--token` argument to `fidan dal login`
-2. `FIDAN_DAL_API_TOKEN` environment override
-3. OS keychain / credential manager
-
-Registry lookup order:
-
-1. `--registry`
-2. `FIDAN_DAL_REGISTRY`
-3. default: `https://api.dal.fidan.dev`
+Registry lookup order is `--registry`, then `FIDAN_DAL_REGISTRY`, then
+`https://api.dal.fidan.dev`. Registry identity includes the normalized scheme,
+host/effective port and significant path prefix. HTTPS is required, with HTTP
+allowed only for literal loopback development endpoints. URL credentials, queries
+and fragments are rejected. Authenticated requests do not follow redirects;
+public archive downloads can follow object-store redirects. An old unscoped
+keychain entry migrates only to the canonical official default, never an override.
 
 Dal package preflight validation happens locally before archive creation or upload. A package must contain:
 
 - `dal.toml`
 - `src/init.fdn`
-- only allowed top-level entries such as `README*`, `LICENSE*`, `CHANGELOG.md`, `src/`, `examples/`, `tests/`, `docs/`, and `assets/`
+- only allowed top-level entries such as `README*`, `LICENSE*`, `NOTICE*`, `CHANGELOG.md`, `src/`, `examples/`, `tests/`, `docs/`, and `assets/`
 - no symlinks, path traversal, or unsafe archive paths
 
 ### `fidan run` flags
@@ -984,6 +1029,18 @@ Dal package preflight validation happens locally before archive creation or uplo
 | `--link-runtime static\|dynamic` | Choose runtime linkage mode |
 | `--linker <path-or-name>` | Override the linker used for AOT output |
 | `--emit tokens\|ast\|hir\|mir\|obj` | Dump intermediate representation or object output |
+
+Optimization labels are backend-specific, not a guarantee that O3 runs faster
+than O2. LLVM O3 enables more aggressive transformations; Os/Oz use LLVM 23's O2
+pipeline with `optsize`/`minsize` function attributes. Cranelift maps O0 to `none`,
+O1/O2 to `speed`, and O3/Os/Oz to `speed_and_size`. Measure the workload and code
+size before choosing a performance preset.
+
+AOT compilation currently targets the host operating system and architecture.
+`--target-cpu` changes CPU tuning/features within that host target; it is not an
+OS/architecture cross-compilation option. Windows-to-Linux builds would also need
+a Linux-target runtime, linker and system libraries, which this release does not
+bundle as a cross-compilation SDK.
 
 ### `fidan self`, `fidan toolchain`, and `fidan exec`
 
@@ -1113,6 +1170,12 @@ Diagnostic codes:
 ```bash
 fidan explain --diagnostic E0401    # print a full page of documentation for this code
 ```
+
+The source candidate preserves diagnostic identity across execution backends:
+uncaught user panics use R1002, guarded call-stack exhaustion uses R1001, and
+task-group failures use R9001. Use `fidan explain --diagnostic CODE` for each
+documented error contract. [Native regression tests](crates/fidan-driver/tests/concurrent_e2e.rs)
+exercise catchability, callback propagation and backend-specific limits.
 
 ---
 
@@ -1255,7 +1318,7 @@ cargo run -- run test/examples/test.fdn --emit mir
 
 ```
 
-The default workspace builds do not link LLVM. To use LLVM AOT, install a compatible packaged toolchain with `fidan toolchain add llvm`, then build with `fidan build --backend llvm file.fdn`. The 1.0.15 release toolchain targets LLVM 23.1.2, `llvm-sys` 231 and Inkwell pinned to upstream revision `c8234a0ee4171e946f94f6b3b5da0ea8d6ef5f3b` for LLVM 23 support. Contributors building the helper need matching LLVM libraries and headers, `LLVM_SYS_231_PREFIX`, and `cargo build -p fidan-llvm-helper --features llvm-toolchain-23`. Windows links the official LLVM-C DLL; source executions need the LLVM `bin` directory on PATH, and packaged builds include the DLL beside the helper. Use [scripts/package-toolchain.ps1](scripts/package-toolchain.ps1) for distributable builds: it disables Rust release LTO only while building/testing the helper, while Fidan's `--backend llvm --lto full` remains supported and validated. The [engineering audit](docs/ENGINEERING_AUDIT.md) records the tested configuration and registry-publishing limitations.
+The default workspace builds do not link LLVM. To use LLVM AOT, install a compatible packaged toolchain with `fidan toolchain add llvm`, then build with `fidan build --backend llvm file.fdn`. The 1.0.15 release toolchain targets LLVM 23.1.2, `llvm-sys` 231 and Inkwell pinned to upstream revision `c8234a0ee4171e946f94f6b3b5da0ea8d6ef5f3b` for LLVM 23 support. Contributors building the helper need matching LLVM libraries and headers, `LLVM_SYS_231_PREFIX`, and `cargo build -p fidan-llvm-helper --features llvm-toolchain-23`. Windows links the official LLVM-C DLL; source executions need the LLVM `bin` directory on PATH, and packaged builds include the DLL beside the helper. Use [scripts/package-toolchain.ps1](scripts/package-toolchain.ps1) for distributable builds: it disables Rust release LTO only while building/testing the helper, while Fidan's `--backend llvm --lto full` remains supported and validated.
 
 Benchmark programs and runners live under `test/`. Their timings depend on the host, backend, build profile, and workload; they are not general performance guarantees.
 
@@ -1284,18 +1347,17 @@ The 1.0.15 release preparation focuses on correctness and maintenance of the imp
 
 ## License
 
-The Fidan programming language — including its source code, compiler, interpreter, runtime, and official distributions — is licensed under the **Apache License 2.0 with Fidan Additional Terms**.
+Fidan's source code, compiler, interpreter, and runtime are licensed under the
+standard [Apache License 2.0](LICENSE), with attribution in [NOTICE](NOTICE).
 
-**Key points**:
-- ✅ You can use Fidan to write and ship programs — those programs are entirely yours
-- ✅ You can contribute to this repository
-- ✅ You can study and read the source
-- ❌ You cannot commercially redistribute or sell the Fidan compiler/runtime as a competing product
-- ❌ You cannot use the Fidan™ name or logo for derivative languages without permission
+Fidan is free to use. You may use, modify, fork, redistribute, host, and sell the
+Apache-licensed software, including commercial compiler/runtime distributions.
+You may develop and sell software using Fidan; comply with the licenses of any
+components you redistribute. Third-party packages retain their own licenses.
 
-See [LICENSE](LICENSE) for the full text.
-
-**Fidan™ is a trademark of Kaan Gönüldinc (AppSolves).**
+Branding is addressed separately in [TRADEMARKS.md](TRADEMARKS.md). Truthful
+references and attribution are welcome; unofficial projects must not misleadingly
+claim official affiliation, sponsorship, or endorsement.
 
 ---
 
@@ -1308,3 +1370,40 @@ Made with ❤️ by [Kaan Gönüldinc (AppSolves)](https://github.com/AppSolves)
 [⭐ Star this repo](https://github.com/fidan-lang/fidan) if you find Fidan interesting!
 
 </div>
+
+## Upcoming source candidate versus released 1.0.16
+
+The public 1.0.16 release remains available through the stable installer. The
+reviewed upcoming source additionally provides callable `.name`/`.parameters`
+metadata and `.invoke(list)`, custom decorator replacement, Boolean short-circuit
+execution, recursive source-tool directory handling and global `-v` diagnostics.
+Do not infer support from a version string alone while source package metadata
+still reports 1.0.16. Candidate CI pins full source commits and probes behavior.
+
+Use `callback(a, b)` normally; `callback.invoke(arguments)` is for a positional
+argument list computed at runtime. It reuses normal arity/default/type/error
+handling. Reflection never executes computed defaults or exposes closure captures.
+Both operands of `and`/`or` are statically checked; only the necessary RHS executes.
+The new args framework depends on these candidate contracts, not the old binary.
+LLVM candidate execution requires the matching backend-protocol-8 helper; do not
+mix it with the older published helper or overwrite stable artifacts.
+
+The website source contains implementation-verified guides for operators,
+collections/enums, callable reflection, args, complete generated API/CLI catalogs
+and migration. Its exact-source CI is a coordinated PR dependency, not proof that
+the new website/compiler/package has already been published. Production release
+approval remains separate from local engineering validation.
+
+## Planned stable release sequence
+
+The next coordinated release is **Fidan 1.1.0 stable** with **LLVM helper 1.1.0**
+(protocol 8), followed by **args 0.1.0**. No public RC is planned.
+The source checkout still reports 1.0.16 until isolated release preparation applies
+`config/release-candidate.json`; source-candidate CI identifies it by exact commit.
+Published 1.0.16 and older helper artifacts remain immutable.
+
+Release order: engineering/merge gates → Fidan 1.1.0 stable artifacts → DAL
+production readiness and launch → args 0.1.0 publication → approved editor,
+website and distribution updates. The args source manifest remains blocked until
+both its compatible compiler release and production registry are operational.
+Preparation and CI do not authorize tags, publication or deployment.

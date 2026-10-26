@@ -508,7 +508,26 @@ impl<'t> Parser<'t> {
         while matches!(self.peek(), TokenKind::At) {
             let start = self.current_span().start;
             self.advance(); // eat `@`
-            let name = self.expect_ident_sym("expected decorator name");
+            let name_span = self.current_span();
+            let first = self.expect_ident_sym("expected decorator name");
+            let mut callee = self.module.arena.alloc_expr(fidan_ast::Expr::Ident {
+                name: first,
+                span: name_span,
+            });
+            let mut spelling = self.interner.resolve(first).to_string();
+            while matches!(self.peek(), TokenKind::Dot) {
+                self.advance();
+                let field_span = self.current_span();
+                let field = self.expect_ident_sym("expected decorator member name");
+                spelling.push('.');
+                spelling.push_str(self.interner.resolve(field).as_ref());
+                callee = self.module.arena.alloc_expr(fidan_ast::Expr::Field {
+                    object: callee,
+                    field,
+                    span: Span::new(self.module.file, name_span.start, field_span.end),
+                });
+            }
+            let name = self.interner.intern(&spelling);
             let args = if matches!(self.peek(), TokenKind::LParen) {
                 self.advance();
                 let args = self.parse_arg_list();
@@ -520,6 +539,7 @@ impl<'t> Parser<'t> {
             let end = self.current_span().end;
             decs.push(Decorator {
                 name,
+                callee,
                 args,
                 span: Span::new(self.module.file, start, end),
             });
@@ -725,7 +745,7 @@ impl<'t> Parser<'t> {
                         params,
                         return_ty: None,
                         body,
-                        decorators: vec![],
+                        decorators: method_decs,
                         is_parallel: false,
                         span: Span::new(self.module.file, item_start, end),
                     });
@@ -1353,17 +1373,18 @@ impl<'t> Parser<'t> {
                 if matches!(self.peek(), TokenKind::Action) {
                     self.parse_local_action_decl_stmt(true, vec![])
                 } else if matches!(self.peek(), TokenKind::For) {
-                    self.parse_parallel_for()
+                    self.parse_parallel_for(span.start)
                 } else if matches!(self.peek(), TokenKind::LBrace) {
-                    self.parse_task_block(true)
+                    self.parse_task_block(true, span.start)
                 } else {
                     self.error("expected `for` or `{` after `parallel`", span);
                     return Some(self.error_stmt(span));
                 }
             }
             TokenKind::Concurrent => {
+                let start = self.current_span().start;
                 self.advance();
-                self.parse_task_block(false)
+                self.parse_task_block(false, start)
             }
             TokenKind::RBrace | TokenKind::Eof => return None,
             _ => self.parse_assign_or_expr_stmt(),
@@ -1694,8 +1715,7 @@ impl<'t> Parser<'t> {
         })
     }
 
-    fn parse_parallel_for(&mut self) -> StmtId {
-        let start = self.current_span().start;
+    fn parse_parallel_for(&mut self, start: u32) -> StmtId {
         self.advance(); // eat `for`
         let binding = self.expect_ident_sym("expected loop variable");
         self.expect_tok(&TokenKind::In);
@@ -1711,8 +1731,7 @@ impl<'t> Parser<'t> {
         })
     }
 
-    fn parse_task_block(&mut self, is_parallel: bool) -> StmtId {
-        let start = self.current_span().start;
+    fn parse_task_block(&mut self, is_parallel: bool, start: u32) -> StmtId {
         self.expect_tok(&TokenKind::LBrace);
         let mut tasks = vec![];
         loop {

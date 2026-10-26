@@ -11,6 +11,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+. (Join-Path $PSScriptRoot "shared/release-inputs.ps1")
+
+. (Join-Path $PSScriptRoot "shared/cargo-artifacts.ps1")
+
 $hostPlatformHelperPath = Join-Path $PSScriptRoot "shared/host-platform.ps1"
 if (-not (Test-Path -LiteralPath $hostPlatformHelperPath)) {
   throw "Missing host platform helper: '$hostPlatformHelperPath'"
@@ -175,6 +179,8 @@ if (-not $Version) {
   $Version = Get-WorkspaceVersion
 }
 
+Assert-ReleaseVersion -Value $Version
+
 if ($PrepareWinget -and $SubmitWinget) {
   throw "Use either -PrepareWinget or -SubmitWinget, not both."
 }
@@ -198,9 +204,11 @@ $shouldBuildWindowsInstaller = $script:IsWindowsHost -and (
 
 if (-not $SkipBuild) {
   cargo build -p fidan-cli -p fidan-runtime -p libfidan --release
+  if ($LASTEXITCODE -ne 0) { throw "Release build failed; refusing to package an older binary." }
 }
 
-$binaryPath = Join-Path "target/release" $binaryName
+$releaseDirectory = Get-CargoReleaseDirectory
+$binaryPath = Join-Path $releaseDirectory $binaryName
 if (-not (Test-Path -LiteralPath $binaryPath)) {
   throw "Expected release binary at '$binaryPath'"
 }
@@ -217,7 +225,7 @@ if ($shouldBuildWindowsInstaller) {
 
 $runtimeArtifacts = @()
 foreach ($name in (Get-RuntimeArtifactNames)) {
-  $path = Join-Path "target/release" $name
+  $path = Join-Path $releaseDirectory $name
   if (-not (Test-Path -LiteralPath $path)) {
     throw "Expected runtime artifact at '$path'"
   }
@@ -226,7 +234,7 @@ foreach ($name in (Get-RuntimeArtifactNames)) {
 
 $libfidanArtifacts = @()
 foreach ($artifact in (Get-LibFidanArtifactNames)) {
-  $path = Join-Path "target/release" $artifact.Source
+  $path = Join-Path $releaseDirectory $artifact.Source
   if (-not (Test-Path -LiteralPath $path)) {
     throw "Expected libfidan artifact at '$path'"
   }
@@ -279,8 +287,8 @@ Copy-Item -LiteralPath $libfidanExample -Destination (Join-Path $stageDir "examp
 if (Test-Path -LiteralPath "README.md") {
   Copy-Item -LiteralPath "README.md" -Destination (Join-Path $stageDir "README.md")
 }
-if (Test-Path -LiteralPath "LICENSE") {
-  Copy-Item -LiteralPath "LICENSE" -Destination (Join-Path $stageDir "LICENSE")
+foreach ($legalFile in @("LICENSE", "NOTICE")) {
+  Copy-Item -LiteralPath (Join-Path $PSScriptRoot "../$legalFile") -Destination (Join-Path $stageDir $legalFile)
 }
 
 try {

@@ -3,11 +3,16 @@ param(
     [string]$Backend = "llvm",
     [ValidateSet("off", "full")]
     [string]$Lto = "off",
+    [ValidateSet("O0", "O1", "O2", "O3", "Os", "Oz")]
+    [string]$Opt = "O2",
     [switch]$Release,
     [string]$Case,
     [string]$FidanHome,
+    [string]$FidanBinary,
     [int]$DefaultTimeoutSeconds = 10,
-    [int]$BenchmarkProbeSeconds = 5
+    [int]$BenchmarkProbeSeconds = 5,
+    [ValidateRange(1, [int]::MaxValue)]
+    [int]$BenchmarkWorkItems = 10000
 )
 
 $ErrorActionPreference = "Stop"
@@ -113,7 +118,7 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\\..")).Path
 $buildMode = if ($Release) { "--release" } else { "" }
 $binDir = Join-Path $repoRoot ($(if ($Release) { "target\\release" } else { "target\\debug" }))
 $fidanName = if ($IsWindows) { "fidan.exe" } else { "fidan" }
-$fidan = Join-Path $binDir $fidanName
+$fidan = if ($FidanBinary) { (Resolve-Path -LiteralPath $FidanBinary).Path } else { Join-Path $binDir $fidanName }
 $outDir = Join-Path $repoRoot "target\\aot_examples"
 $binarySuffix = if ($IsWindows) { ".exe" } else { "" }
 
@@ -127,20 +132,23 @@ Write-Host " Fidan AOT Example Sweep"
 Write-Host "========================================================"
 Write-Host " backend: $Backend"
 Write-Host " lto: $Lto"
+Write-Host " opt: $Opt"
 if ($Case) { Write-Host " case: $Case" }
 if ($env:FIDAN_HOME) { Write-Host " FIDAN_HOME: $env:FIDAN_HOME" }
 Write-Host ""
 
 Push-Location $repoRoot
 try {
-    Write-Host "[build] cargo build $buildMode -p fidan-cli ..."
-    if ($Release) {
-        cargo build --release -p fidan-cli
-    } else {
-        cargo build -p fidan-cli
-    }
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo build failed"
+    if (-not $FidanBinary) {
+        Write-Host "[build] cargo build $buildMode -p fidan-cli ..."
+        if ($Release) {
+            cargo build --release -p fidan-cli
+        } else {
+            cargo build -p fidan-cli
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "cargo build failed"
+        }
     }
 
     New-Item -ItemType Directory -Force -Path $outDir | Out-Null
@@ -199,7 +207,7 @@ try {
 
         $compileExit = Invoke-ProgramWithTimeout `
             -ExePath $fidan `
-            -Arguments @("build", "--backend", $Backend, "--lto", $Lto, $file.FullName, "-o", $bin) `
+            -Arguments @("build", "--backend", $Backend, "--lto", $Lto, "--opt", $Opt, $file.FullName, "-o", $bin) `
             -WorkingDirectory $repoRoot `
             -StdoutPath $compileOut `
             -StderrPath $compileErr `
@@ -240,14 +248,19 @@ try {
 
         $timeoutMs = $DefaultTimeoutSeconds * 1000
         $stdinLines = $null
-        $allowTimeout = $false
+        $runArguments = @()
         $expectFailure = $false
         $expectedFailureMessage = ""
+        $workItems = [string]$BenchmarkWorkItems
 
         switch ($baseName) {
             "parallel_benchmark.fdn" {
                 $timeoutMs = $BenchmarkProbeSeconds * 1000
-                $allowTimeout = $true
+                $runArguments = @($workItems)
+            }
+            "performance_suite.fdn" {
+                $timeoutMs = $BenchmarkProbeSeconds * 1000
+                $runArguments = @($workItems, $workItems, $workItems)
             }
             "release_mega_1_0.fdn" {
                 $timeoutMs = [Math]::Max($timeoutMs, 30000)
@@ -263,7 +276,7 @@ try {
 
         $exitCode = Invoke-ProgramWithTimeout `
             -ExePath $bin `
-            -Arguments @() `
+            -Arguments $runArguments `
             -WorkingDirectory $repoRoot `
             -StdoutPath $stdout `
             -StderrPath $stderr `
@@ -271,14 +284,9 @@ try {
             -StdinLines $stdinLines `
             -Label "run $rel"
 
-        if ($allowTimeout -and $exitCode -eq 124) {
-            Write-Host "[PASS] $rel - long-running benchmark reached timeout window"
-            $pass += 1
-            continue
-        }
 
         if ($exitCode -eq 124) {
-            Write-Host "[FAIL] $rel - timed out after $DefaultTimeoutSeconds s"
+            Write-Host "[FAIL] $rel - timed out after $($timeoutMs / 1000) s"
             $fail += 1
             continue
         }

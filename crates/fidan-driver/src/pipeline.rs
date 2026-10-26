@@ -42,6 +42,8 @@ pub fn compile(
     match opts.mode {
         ExecutionMode::Build => match crate::install::resolve_effective_backend(opts.backend)? {
             crate::install::EffectiveBackend::Cranelift => {
+                fidan_diagnostics::tracing::info!(backend = "cranelift", output = %output.display(), "AOT backend selected");
+                fidan_diagnostics::tracing::debug!(optimization = ?opts.opt_level, lto = ?opts.lto, dynamic_runtime = opts.link_dynamic, "native build configuration");
                 let progress =
                     crate::progress::ProgressReporter::spinner("build", "compiling with Cranelift");
                 let result = compile_aot_cranelift(&program, interner.clone(), opts, output);
@@ -56,6 +58,8 @@ pub fn compile(
                 Ok(())
             }
             crate::install::EffectiveBackend::Llvm(toolchain) => {
+                fidan_diagnostics::tracing::info!(backend = "llvm", version = %toolchain.metadata.tool_version, output = %output.display(), "AOT backend selected");
+                fidan_diagnostics::tracing::debug!(optimization = ?opts.opt_level, lto = ?opts.lto, protocol = toolchain.metadata.backend_protocol_version, "native build configuration");
                 let progress = crate::progress::ProgressReporter::spinner(
                     "build",
                     format!(

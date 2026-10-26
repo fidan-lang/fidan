@@ -562,6 +562,7 @@ fn render_one(diag: &Diagnostic, source_map: &SourceMap, depth: usize) {
         Severity::Warning if !diag.code.is_empty() => format!("warning[{}]", diag.code),
         Severity::Error => "error".to_string(),
         Severity::Warning => "warning".to_string(),
+        Severity::Note if !diag.code.is_empty() => format!("note[{}]", diag.code),
         Severity::Note => "note".to_string(),
     };
     if pretty {

@@ -4,9 +4,9 @@ mod hir;
 mod lower;
 
 pub use hir::{
-    CustomDecorator, DecoratorArg, HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf,
-    HirEnum, HirExpr, HirExprKind, HirExternAbi, HirExternDecl, HirField, HirFunction, HirGlobal,
-    HirInterpPart, HirModule, HirObject, HirParam, HirStmt, HirTask, HirTestDecl, HirUseDecl,
+    HirArg, HirCatchClause, HirCheckArm, HirCheckExprArm, HirElseIf, HirEnum, HirExpr, HirExprKind,
+    HirExternAbi, HirExternDecl, HirField, HirFunction, HirGlobal, HirInterpPart, HirModule,
+    HirObject, HirParam, HirStmt, HirTask, HirTestDecl, HirUseDecl,
 };
 pub use lower::{lower_module, merge_module};
 
@@ -211,20 +211,32 @@ action outer {
             other => panic!("expected nested action var decl, got {other:?}"),
         }
 
-        match &outer.body[1] {
-            HirStmt::Expr(HirExpr {
-                kind: HirExprKind::Call { callee, args },
-                ..
-            }) => {
-                assert!(matches!(callee.kind, HirExprKind::Var(name) if name == decorate_name));
-                assert_eq!(
-                    args.len(),
-                    2,
-                    "decorator call should receive function + extra args"
-                );
-                assert!(matches!(args[0].value.kind, HirExprKind::Var(name) if name == inner_name));
-            }
-            other => panic!("expected decorator call expr, got {other:?}"),
-        }
+        let HirStmt::Assign { target, value, .. } = &outer.body[1] else {
+            panic!("decorator must preserve its replacement result");
+        };
+        assert!(matches!(target.kind, HirExprKind::Var(name) if name == inner_name));
+        let HirExprKind::Call {
+            callee: validator,
+            args: checked,
+        } = &value.kind
+        else {
+            panic!("decorator result must use normal action argument validation");
+        };
+        assert!(matches!(validator.kind, HirExprKind::Lambda { .. }));
+        let HirExprKind::NullCoalesce { lhs, rhs } = &checked[0].value.kind else {
+            panic!("nothing must retain the original callable");
+        };
+        assert!(matches!(rhs.kind, HirExprKind::Var(name) if name == inner_name));
+        let HirExprKind::Call { callee, args } = &lhs.kind else {
+            panic!("expected decorator call");
+        };
+        assert!(matches!(callee.kind, HirExprKind::Var(name) if name == decorate_name));
+        assert_eq!(
+            args.len(),
+            2,
+            "callable and supplied label must both be retained"
+        );
+        assert!(matches!(args[0].value.kind, HirExprKind::Var(name) if name == inner_name));
+        assert!(matches!(&args[1].value.kind, HirExprKind::StrLit(label) if label == "local"));
     }
 }

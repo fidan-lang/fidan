@@ -76,12 +76,14 @@ pub struct ReceiverChainMethodCallSite {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileImport {
+    pub re_export: bool,
     pub path: String,
     pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserModuleImport {
+    pub re_export: bool,
     pub path: Vec<String>,
     pub alias: Option<String>,
     pub grouped: bool,
@@ -139,7 +141,26 @@ pub struct AnalysisResult {
 /// The `uri` string is used as the "file name" inside `SourceFile` so that
 /// diagnostics printed to stderr (if any) show a meaningful path.
 pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
-    let file = SourceFile::new(FileId(0), uri_str, text);
+    analyze_inner(text, uri_str, None)
+}
+
+/// Editor refreshes also validate imports against the importing file's location.
+/// Non-file buffers retain syntax/type analysis without guessing a filesystem root.
+pub fn analyze_document(
+    text: &str,
+    uri_str: &str,
+    open_sources: &std::collections::HashMap<std::path::PathBuf, String>,
+) -> AnalysisResult {
+    analyze_inner(text, uri_str, Some(open_sources))
+}
+
+fn analyze_inner(
+    text: &str,
+    uri_str: &str,
+    open_sources: Option<&std::collections::HashMap<std::path::PathBuf, String>>,
+) -> AnalysisResult {
+    let source_map = Arc::new(fidan_source::SourceMap::new());
+    let file = source_map.add_file(uri_str, text);
     let interner = Arc::new(SymbolInterner::new());
 
     // ── Lex ──────────────────────────────────────────────────────────────────
@@ -164,7 +185,50 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     augment_identifier_spans_with_ast(&module, &interner, text, &mut identifier_spans);
 
     // ── Type-check (full — needed to build hover/completion symbol table) ────
-    let typed = fidan_typeck::typecheck_full(&module, Arc::clone(&interner));
+    let mut checker = fidan_typeck::TypeChecker::new(Arc::clone(&interner), file.id);
+    let mut import_errors = Vec::new();
+    if let Some(open_sources) = open_sources
+        && let Some(path) = lsp::Url::parse(uri_str)
+            .ok()
+            .and_then(|uri| uri.to_file_path().ok())
+        && let Some(base) = path.parent()
+    {
+        let reader = |path: &std::path::Path| {
+            let canonical = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+            open_sources
+                .get(&canonical)
+                .cloned()
+                .map(Ok)
+                .unwrap_or_else(|| std::fs::read_to_string(path))
+        };
+        let imported = fidan_driver::load_imported_hirs(
+            &module,
+            &interner,
+            base,
+            &source_map,
+            Some(&path),
+            &reader,
+        );
+        import_errors.extend(
+            imported
+                .diagnostics
+                .into_iter()
+                .filter(|diagnostic| diagnostic.severity == Severity::Error),
+        );
+        for (hir, filter, expose) in &imported.modules {
+            if *expose {
+                fidan_driver::pre_register_hir_into_tc(
+                    &mut checker,
+                    hir,
+                    filter.as_ref(),
+                    &interner,
+                );
+            }
+        }
+    }
+
+    checker.check_module(&module);
+    let typed = checker.finish_typed();
     let symbol_table = symbols::build(&module, &typed, &interner);
 
     // ── File-path import extraction ─────────────────────────────────────
@@ -204,10 +268,26 @@ pub fn analyze(text: &str, uri_str: &str) -> AnalysisResult {
     let cross_module_call_sites = typed.cross_module_call_sites;
 
     // ── Diagnostics ───────────────────────────────────────────────────────────
+    let mut import_diags = Vec::new();
+    for mut error in import_errors {
+        if error.span.file != file.id {
+            error.message = format!(
+                "{}: {}",
+                source_map.get(error.span.file).name,
+                error.message
+            );
+            error.span = Span::point(file.id, 0);
+            // Imported spans must not become edits or locations in this document.
+            error.labels.clear();
+            error.suggestions.clear();
+        }
+        import_diags.push(error);
+    }
     let diagnostics = lex_diags
         .into_iter()
         .chain(parse_diags)
         .chain(typeck_diags)
+        .chain(import_diags)
         .map(|d| fidan_to_lsp(&d, &file))
         .collect();
 
@@ -241,7 +321,13 @@ fn extract_imports(module: &Module, interner: &SymbolInterner) -> Vec<FileImport
         .items
         .iter()
         .filter_map(|&iid| {
-            if let Item::Use { path, alias, .. } = module.arena.get_item(iid) {
+            if let Item::Use {
+                path,
+                alias,
+                re_export,
+                ..
+            } = module.arena.get_item(iid)
+            {
                 if path.len() != 1 {
                     return None;
                 }
@@ -255,6 +341,7 @@ fn extract_imports(module: &Module, interner: &SymbolInterner) -> Vec<FileImport
                     return None;
                 }
                 Some(FileImport {
+                    re_export: *re_export,
                     path: path_str,
                     alias: alias.map(|a| interner.resolve(a).to_string()),
                 })
@@ -279,6 +366,7 @@ fn extract_user_module_imports(
                 path,
                 alias,
                 grouped,
+                re_export,
                 ..
             } = module.arena.get_item(iid)
             {
@@ -295,6 +383,7 @@ fn extract_user_module_imports(
                     return None;
                 }
                 Some(UserModuleImport {
+                    re_export: *re_export,
                     path: path
                         .iter()
                         .map(|sym| interner.resolve(*sym).to_string())
@@ -2576,6 +2665,66 @@ fn extract_type_from_detail(detail: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_unused_import_has_error_and_unused_note() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "fidan-missing-import-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let uri = lsp::Url::from_file_path(root.join("main.fdn")).unwrap();
+        for source in [
+            "use dfjksdfkhdfkjhsdkjfh\n",
+            "use \"./missing.fdn\" as missing\n",
+        ] {
+            let result = analyze_document(source, uri.as_str(), &Default::default());
+            assert!(
+                result.diagnostics.iter().any(|d| d.code
+                    == Some(lsp::NumberOrString::String("E0106".into()))
+                    && d.severity == Some(DiagnosticSeverity::ERROR)
+                    && d.range.start.line == 0),
+                "{:?}",
+                result.diagnostics
+            );
+            assert!(
+                result
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.message.contains("unused import")
+                        && d.severity == Some(DiagnosticSeverity::INFORMATION)),
+                "{:?}",
+                result.diagnostics
+            );
+        }
+        std::fs::create_dir_all(root.join("present")).unwrap();
+        std::fs::write(root.join("present/init.fdn"), "var value = 1\n").unwrap();
+        let result = analyze_document(
+            "use present\nuse std.math\n",
+            uri.as_str(),
+            &Default::default(),
+        );
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == Some(lsp::NumberOrString::String("E0106".into()))),
+            "{:?}",
+            result.diagnostics
+        );
+        let result = analyze_document("use unresolved\n", "untitled:buffer", &Default::default());
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == Some(lsp::NumberOrString::String("E0106".into())))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
     use std::path::Path;
 
@@ -2772,10 +2921,12 @@ use "./utils_lib.fdn" as lib
             result.imports,
             vec![
                 FileImport {
+                    re_export: false,
                     path: "./utils.fdn".to_string(),
                     alias: None,
                 },
                 FileImport {
+                    re_export: false,
                     path: "./utils_lib.fdn".to_string(),
                     alias: Some("lib".to_string()),
                 },
@@ -2795,16 +2946,19 @@ use nested.tools as tools
             result.user_module_imports,
             vec![
                 UserModuleImport {
+                    re_export: false,
                     path: vec!["utils_lib".to_string()],
                     alias: None,
                     grouped: false,
                 },
                 UserModuleImport {
+                    re_export: false,
                     path: vec!["utils_flat".to_string(), "sub_ints".to_string()],
                     alias: None,
                     grouped: true,
                 },
                 UserModuleImport {
+                    re_export: false,
                     path: vec!["nested".to_string(), "tools".to_string()],
                     alias: Some("tools".to_string()),
                     grouped: false,
@@ -2974,6 +3128,66 @@ approx_equal(x, x)
             "test/syntax.fdn",
         ] {
             assert_file_analyzes_without_errors(rel_path);
+        }
+    }
+    #[test]
+    fn short_circuit_keeps_rhs_frontend_diagnostics_in_editor() {
+        let invalid = analyze(
+            "var first = false and 42\nvar second = true or missing_logical_rhs\n",
+            "file:///logical.fdn",
+        );
+        for expected in ["E0203", "E0101"] {
+            assert!(
+                invalid.diagnostics.iter().any(|diag| diag.code
+                    == Some(lsp::NumberOrString::String(expected.into()))
+                    && diag.severity == Some(lsp::DiagnosticSeverity::ERROR)),
+                "{expected}: {:?}",
+                invalid.diagnostics
+            );
+        }
+        let valid = analyze(
+            "var absent oftype flexible = nothing\nvar safe = absent != nothing and len(absent) > 0\nprint(safe)\n",
+            "file:///logical.fdn",
+        );
+        assert!(
+            !valid
+                .diagnostics
+                .iter()
+                .any(|diag| diag.severity == Some(lsp::DiagnosticSeverity::ERROR)),
+            "{:?}",
+            valid.diagnostics
+        );
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_transport_tests {
+    use super::*;
+
+    #[test]
+    fn all_registered_codes_preserve_identity_and_explicit_severity() {
+        let file = fidan_source::SourceFile::new(FileId(0), "diagnostics.fdn", "x");
+        for entry in fidan_diagnostics::CODES {
+            for (severity, expected) in [
+                (Severity::Error, DiagnosticSeverity::ERROR),
+                (Severity::Warning, DiagnosticSeverity::WARNING),
+                (Severity::Note, DiagnosticSeverity::INFORMATION),
+            ] {
+                let mut diagnostic = FidanDiag::error(
+                    fidan_diagnostics::DiagCode::new(entry.code),
+                    "diagnostic contract",
+                    Span::new(file.id, 0, 1),
+                );
+                diagnostic.severity = severity;
+                let result = fidan_to_lsp(&diagnostic, &file);
+                assert_eq!(
+                    result.code,
+                    Some(lsp::NumberOrString::String(entry.code.into()))
+                );
+                assert_eq!(result.severity, Some(expected));
+                assert_eq!(result.message, "diagnostic contract");
+                assert_eq!(result.range.end.character, 1);
+            }
         }
     }
 }

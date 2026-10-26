@@ -1,0 +1,51 @@
+use std.math
+
+var values = [-1, 2, -3]
+
+assert_eq(values.map(math.abs), [1, 2, 3])
+assert_eq(
+        values
+            .filter(
+                action with (certain value oftype integer) returns boolean {
+                    return value > 0
+                },
+            ),
+        [2],
+    )
+assert_eq(
+        values
+            .reduce(
+                action with (certain a oftype integer, certain b oftype integer) returns integer {
+                    return a + b
+                },
+                10,
+            ),
+        8,
+    )
+assert_eq(
+        values
+            .reduce(
+                action with (certain a oftype integer, certain b oftype integer) returns integer {
+                    return a + b
+                },
+            ),
+        -2,
+    )
+
+var events = []
+var caught = false
+
+attempt {
+    values
+        .map(
+            action with (value oftype integer) {
+                events.append(value)
+                panic("callback failed")
+            },
+        )
+} catch error {
+    caught = true
+}
+assert_eq(caught, true)
+assert_eq(events, [-1])
+print("receiver callbacks passed")

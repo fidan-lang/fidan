@@ -46,11 +46,7 @@ fn accepts(value: &FidanValue, contract: &Value) -> bool {
         | ("WeakShared", FidanValue::WeakShared(_))
         | ("Pending", FidanValue::Pending(_) | FidanValue::PendingTask(_)) => true,
         ("Object", FidanValue::Object(_)) | ("Enum", FidanValue::EnumVariant { .. }) => true,
-        ("Object", FidanValue::Dict(dict)) => matches!(
-            dict.borrow()
-                .get(&FidanValue::String(crate::FidanString::new("__class__"))),
-            Ok(Some(FidanValue::String(_)))
-        ),
+        ("Object", FidanValue::Dict(dict)) => dict.borrow().aot_class_name().is_some(),
         _ => false,
     }
 }

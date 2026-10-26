@@ -657,19 +657,66 @@ fn ensure_installed_version(root: &Path, version: &str) -> Result<()> {
 }
 
 fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("metadata path has no parent directory")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("failed to create `{}`", parent.display()))?;
-    let temp_path = path.with_extension(format!("tmp-{}-{}", std::process::id(), now_secs()));
     let bytes = serde_json::to_vec_pretty(value).context("failed to serialize metadata")?;
-    fs::write(&temp_path, bytes)
-        .with_context(|| format!("failed to write `{}`", temp_path.display()))?;
-    if path.exists() {
-        fs::remove_file(path).with_context(|| format!("failed to replace `{}`", path.display()))?;
+    write_atomic(path, &bytes)
+}
+
+/// Commit a complete sibling file by rename. Never unlink the previous value
+/// before the replacement succeeds, including on Windows.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let parent = path.parent().context("metadata path has no parent")?;
+    fs::create_dir_all(parent)?;
+    let permissions = match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || metadata.permissions().readonly() {
+                bail!(
+                    "refusing to replace symlink or read-only metadata `{}`",
+                    path.display()
+                );
+            }
+            Some(metadata.permissions())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temp = path.with_extension(format!(
+        "tmp-{}-{nonce}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp)?;
+    let written = (|| -> std::io::Result<()> {
+        if let Some(permissions) = permissions {
+            file.set_permissions(permissions)?;
+        }
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    drop(file);
+    let committed = written.and_then(|()| fs::rename(&temp, path));
+    if let Err(error) = committed {
+        if let Err(cleanup) = fs::remove_file(&temp)
+            && cleanup.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error).with_context(|| {
+                format!(
+                    "metadata replacement failed; cleanup `{}` also failed: {cleanup}",
+                    temp.display()
+                )
+            });
+        }
+        return Err(error).with_context(|| format!("cannot replace `{}`", path.display()));
     }
-    fs::rename(&temp_path, path).with_context(|| format!("failed to finalize `{}`", path.display()))
+    Ok(())
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -848,6 +895,8 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        let dir = std::fs::canonicalize(dir).expect("canonical temporary fixture");
         dir
     }
 
@@ -865,6 +914,35 @@ mod tests {
         let (active, installs) = load_or_repair_metadata(&root).unwrap();
         assert_eq!(active.active_version, "1.2.3");
         assert_eq!(installs.installs.len(), 1);
+    }
+
+    #[test]
+    fn previous_llvm_protocol_helper_is_not_selected() {
+        let home = sandbox();
+        let root = home
+            .join("toolchains/llvm")
+            .join(host_triple())
+            .join("0.0.0-test");
+        fs::create_dir_all(&root).unwrap();
+        let mut metadata = ToolchainMetadata {
+            schema_version: TOOLCHAIN_SCHEMA_VERSION,
+            kind: "llvm".into(),
+            toolchain_version: "0.0.0-test".into(),
+            tool_version: "23.1.2".into(),
+            host_triple: host_triple(),
+            supported_fidan_versions: format!("={}", env!("CARGO_PKG_VERSION")),
+            backend_protocol_version: LLVM_BACKEND_PROTOCOL_VERSION - 1,
+            helper_relpath: "helper/not-executed".into(),
+            exec_commands: vec![],
+            archive_sha256: None,
+        };
+        write_json_atomic(&root.join("metadata.json"), &metadata).unwrap();
+        assert_eq!(installed_toolchains(&home, Some("llvm")).unwrap().len(), 1);
+        assert!(installed_llvm_toolchains(&home).unwrap().is_empty());
+        metadata.backend_protocol_version = LLVM_BACKEND_PROTOCOL_VERSION;
+        write_json_atomic(&root.join("metadata.json"), &metadata).unwrap();
+        assert_eq!(installed_llvm_toolchains(&home).unwrap().len(), 1);
+        fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

@@ -1,0 +1,7 @@
+var table = {1: "one", 2: "two"}
+var keys oftype list oftype integer = table.keys()
+assert_eq(type(keys[0]), "integer")
+assert_eq(keys[0] + keys[1], 3)
+var flags = {true: 1, false: 2}
+var flag_keys oftype list oftype boolean = flags.keys()
+assert_eq(len(flag_keys), 2)

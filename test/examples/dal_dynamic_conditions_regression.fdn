@@ -1,0 +1,48 @@
+@precompile
+action has_short with (certain spec oftype flexible) returns boolean {
+    for name in spec.keys() {
+        var entry oftype flexible = spec[name]
+        if entry.containsKey("short") { return true }
+    }
+    return false
+}
+assert_eq(has_short({"name":{"kind":"value"}}), false)
+assert_eq(has_short({"name":{"kind":"value","short":"n"}}), true)
+@precompile
+action choose with (condition oftype flexible) returns integer {
+    if condition { return 1 }
+    return 0
+}
+assert_eq(choose(false), 0)
+assert_eq(choose(true), 1)
+assert_eq(choose(nothing), 0)
+assert_eq(choose(0), 0)
+assert_eq(choose(42), 1)
+assert_eq(choose(""), 0)
+assert_eq(choose("x"), 1)
+assert_eq(choose([]), 1)
+assert_eq(choose({}), 1)
+assert_eq(boolean([]), true)
+assert_eq(boolean({}), true)
+assert_eq(choose(-0.0), 0)
+assert_eq(choose(0.5), 1)
+assert_eq(choose(hashset()), 0)
+assert_eq(choose(hashset([1])), 1)
+assert_eq(choose(1..1), 0)
+assert_eq(choose(1...1), 1)
+@precompile
+action choose_string with (certain condition oftype string) returns integer {
+    if condition { return 1 }
+    return 0
+}
+assert_eq(choose_string(""), 0)
+assert_eq(choose_string("ä"), 1)
+@precompile
+action choose_loop with (condition oftype flexible) returns integer {
+    while condition { return 1 }
+    return 0
+}
+assert_eq(choose_loop(false), 0)
+assert_eq(choose_loop(""), 0)
+assert_eq(choose_loop("x"), 1)
+print("dynamic conditions preserved")

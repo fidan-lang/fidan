@@ -31,13 +31,25 @@ enum Command {
 
 fn main() {
     if let Err(error) = run() {
-        eprintln!("fidan-llvm-helper: {error:#}");
+        eprintln!(
+            "fidan-llvm-helper: {}",
+            fidan_diagnostics::logging::redact(&format!("{error:#}"))
+        );
         std::process::exit(1);
     }
 }
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let configuration =
+        fidan_diagnostics::logging::child_configuration().map_err(anyhow::Error::msg)?;
+    fidan_diagnostics::logging::capture_environment_secrets();
+    fidan_diagnostics::tracing::subscriber::set_global_default(
+        fidan_diagnostics::logging::subscriber(configuration, std::io::stderr),
+    )
+    .map_err(|_| {
+        anyhow::anyhow!("cannot initialize LLVM helper diagnostics: subscriber already installed")
+    })?;
     match cli.command {
         Command::Compile { request, response } => {
             handle_compile(request.as_ref(), response.as_ref())
@@ -78,6 +90,8 @@ fn handle_compile(request_path: Option<&PathBuf>, response_path: Option<&PathBuf
             )),
         }
     } else {
+        fidan_diagnostics::tracing::info!("LLVM helper compile started");
+        fidan_diagnostics::tracing::debug!(optimization = ?request.opt_level, lto = ?request.lto, functions = request.payload.program.functions.len(), "LLVM compile request accepted");
         let backend_request = to_backend_request(request);
         let helper_path =
             std::env::current_exe().context("failed to resolve current LLVM helper executable")?;
@@ -92,11 +106,12 @@ fn handle_compile(request_path: Option<&PathBuf>, response_path: Option<&PathBuf
                 protocol_version: LLVM_BACKEND_PROTOCOL_VERSION,
                 success: false,
                 output: None,
-                message: Some(format!("{error:#}")),
+                message: Some(fidan_diagnostics::logging::redact(&format!("{error:#}"))),
             },
         }
     };
 
+    fidan_diagnostics::tracing::info!(success = response.success, "LLVM helper compile completed");
     let response_bytes =
         serde_json::to_vec(&response).context("failed to serialize LLVM response")?;
     match response_path {

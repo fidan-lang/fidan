@@ -2,7 +2,7 @@
 name = "fidan-interp"
 version.workspace = true
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
@@ -19,6 +19,7 @@ fidan-codegen-cranelift = { workspace = true }
 rustc-hash = { workspace = true }
 parking_lot = { workspace = true }
 libffi = { workspace = true }
+stacker = { workspace = true }
 
 [dev-dependencies]
 fidan-parser = { workspace = true }

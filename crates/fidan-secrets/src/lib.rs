@@ -62,7 +62,10 @@ pub fn resolve_secret(spec: &SecretSpec<'_>, explicit: Option<&str>) -> Result<O
 pub fn load_secret(spec: &SecretSpec<'_>) -> Result<Option<String>> {
     let entry = keychain_entry(spec)?;
     match entry.get_password() {
-        Ok(secret) => Ok(Some(secret)),
+        Ok(secret) => {
+            fidan_diagnostics::logging::register_acquired_secret(&secret);
+            Ok(Some(secret))
+        }
         Err(err) if is_no_entry_error(&err) => Ok(None),
         Err(err) => Err(err)
             .with_context(|| format!("failed to read {} from OS keychain", spec.display_name)),
@@ -151,7 +154,10 @@ fn normalize_secret_value_option(value: Option<&str>) -> Option<String> {
 
 fn normalize_secret_value(value: &str) -> Option<String> {
     let trimmed = value.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
+    (!trimmed.is_empty()).then(|| {
+        fidan_diagnostics::logging::register_acquired_secret(trimmed);
+        trimmed.to_string()
+    })
 }
 
 #[cfg(target_os = "windows")]

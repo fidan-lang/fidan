@@ -43,19 +43,60 @@ impl FileAccess {
             FileAccess::Denied => false,
             FileAccess::AllowAll => true,
             FileAccess::AllowPrefixes(prefixes) => {
-                // Prefixes are pre-normalised at insertion — only normalise the
-                // incoming path once per call rather than once per prefix.
                 let canonical = normalise_path(path);
-                prefixes.iter().any(|p| canonical.starts_with(p.as_str()))
+                !canonical.is_empty()
+                    && prefixes.iter().any(|prefix| {
+                        !prefix.is_empty()
+                            && std::path::Path::new(&canonical)
+                                .starts_with(std::path::Path::new(prefix))
+                    })
             }
         }
     }
 }
 
 /// Normalise a path string for prefix-matching (forward slashes, no trailing slash).
-fn normalise_path(p: &str) -> String {
-    let s = p.replace('\\', "/");
-    s.trim_end_matches('/').to_string()
+// Canonicalize existing ancestors so a sibling prefix, .. or existing symlink
+// cannot escape a grant. Missing normal suffixes allow creating new files.
+// This is an interpreter policy, not OS isolation against hostile filesystem races.
+fn normalise_path(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    let mut path = std::path::PathBuf::from(value);
+    if !path.is_absolute() {
+        let Ok(cwd) = std::env::current_dir() else {
+            return String::new();
+        };
+        path = cwd.join(path);
+    }
+    let mut suffix = Vec::new();
+    loop {
+        match path.canonicalize() {
+            Ok(mut parent) => {
+                for component in suffix.iter().rev() {
+                    parent.push(component);
+                }
+                return parent.to_string_lossy().into_owned();
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if path
+                    .components()
+                    .any(|c| matches!(c, std::path::Component::ParentDir))
+                {
+                    return String::new();
+                }
+                let Some(component) = path.file_name().map(|c| c.to_os_string()) else {
+                    return String::new();
+                };
+                suffix.push(component);
+                if !path.pop() {
+                    return String::new();
+                }
+            }
+            Err(_) => return String::new(),
+        }
+    }
 }
 
 /// The sandbox policy constructed from CLI flags.
@@ -243,6 +284,48 @@ impl SandboxPolicy {
 #[cfg(test)]
 mod tests {
     use super::{SandboxPolicy, SandboxViolation};
+
+    #[test]
+    fn path_grants_are_component_bounded_and_resolve_existing_ancestors() {
+        let root = std::env::temp_dir().join(format!(
+            "fidan-policy-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("allowed")).unwrap();
+        std::fs::create_dir_all(root.join("allowed-sibling")).unwrap();
+        std::fs::write(root.join("outside"), "private fixture").unwrap();
+        let policy =
+            SandboxPolicy::default().with_allow_read_prefix(root.join("allowed").to_string_lossy());
+        assert!(
+            policy
+                .allow_read
+                .permits(&root.join("allowed/new.txt").to_string_lossy())
+        );
+        assert!(
+            !policy
+                .allow_read
+                .permits(&root.join("allowed-sibling/file").to_string_lossy())
+        );
+        assert!(
+            !policy
+                .allow_read
+                .permits(&root.join("allowed/../outside").to_string_lossy())
+        );
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("outside"), root.join("allowed/link")).unwrap();
+            assert!(
+                !policy
+                    .allow_read
+                    .permits(&root.join("allowed/link").to_string_lossy())
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn copy_file_requires_readable_source_and_writable_destination() {

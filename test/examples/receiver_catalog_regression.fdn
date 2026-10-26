@@ -1,0 +1,256 @@
+# One observable positive assertion for every canonical receiver descriptor.
+# Descriptor coverage is checked against fidan-config by the catalog test.
+var i = 4
+var f = 2.25
+var s = "éaé"
+var l = [1, 2, 3]
+var d = {"a": 1}
+var h = hashset([1, 2])
+var shared = Shared(1)
+var weak = WeakShared(shared)
+var visits = []
+
+action increment with (certain n oftype integer) returns integer {
+    return n + 1
+}
+
+action even with (certain n oftype integer) returns boolean {
+    return n % 2 == 0
+}
+
+action sum with (certain a oftype integer, certain b oftype integer) returns integer {
+    return a + b
+}
+
+action remember with (certain n oftype integer) {
+    visits.append(n)
+}
+
+# integer.abs
+assert_eq((-i).abs(), 4)
+# integer.sqrt
+assert_eq(i.sqrt(), 2.0)
+# integer.toFloat
+assert_eq(type(i.toFloat()), "float")
+# integer.toString
+assert_eq(i.toString(), "4")
+# float.abs
+assert_eq((-f).abs(), 2.25)
+# float.sqrt
+assert_eq(f.sqrt(), 1.5)
+# float.floor
+assert_eq(f.floor(), 2)
+assert_eq(type(f.floor()), "integer")
+# float.ceil
+assert_eq(f.ceil(), 3)
+assert_eq(type(f.ceil()), "integer")
+# float.round
+assert_eq(f.round(), 2)
+assert_eq(type(f.round()), "integer")
+# float.toInt
+assert_eq(type(f.toInt()), "integer")
+# float.toString
+assert_eq(f.toString(), "2.25")
+# string.len
+assert_eq(s.len(), 3)
+# string.byteLen
+assert_eq(s.byteLen(), 5)
+# string.lower
+assert_eq("ÉA".lower(), "éa")
+# string.upper
+assert_eq("éa".upper(), "ÉA")
+# string.capitalize
+assert_eq("élan".capitalize(), "Élan")
+# string.trim
+assert_eq(" a ".trim(), "a")
+# string.trimStart
+assert_eq(" a ".trimStart(), "a ")
+# string.trimEnd
+assert_eq(" a ".trimEnd(), " a")
+# string.split
+assert_eq("a,b".split(","), ["a", "b"])
+# string.lines
+assert_eq("a\nb".lines(), ["a", "b"])
+# string.chars
+assert_eq(s.chars(), ["é", "a", "é"])
+# string.join
+assert_eq(",".join(["a", "b"]), "a,b")
+# string.contains
+assert(s.contains("a"))
+# string.startsWith
+assert(s.startsWith("é"))
+# string.endsWith
+assert(s.endsWith("é"))
+# string.indexOf
+assert_eq(s.indexOf("a"), 1)
+# string.lastIndexOf
+assert_eq(s.lastIndexOf("é"), 2)
+# string.replace
+assert_eq("axa".replace("x", "y"), "aya")
+# string.replaceAll
+assert_eq("aa".replaceAll("a", "b"), "bb")
+# string.replaceFirst
+assert_eq("aa".replaceFirst("a", "b"), "ba")
+# string.repeat
+assert_eq("é".repeat(2), "éé")
+# string.reverse
+assert_eq("éa".reverse(), "aé")
+# string.charAt
+assert_eq(s.charAt(1), "a")
+# string.substring
+assert_eq(s.substring(1, 2), "a")
+# string.toInt
+assert_eq("12".toInt(), 12)
+# string.toFloat
+assert_eq("1.5".toFloat(), 1.5)
+# string.toBool
+assert_eq("true".toBool(), true)
+# string.toString
+assert_eq(s.toString(), s)
+# string.padStart
+assert_eq("é".padStart(2), " é")
+# string.padEnd
+assert_eq("é".padEnd(2), "é ")
+# string.bytes
+assert_eq("é".bytes(), [195, 169])
+# string.charCode
+assert_eq("é".charCode(), 233)
+# string.format
+assert_eq("\{\}:\{\}".format(1, 2), "1:2")
+# string.isEmpty
+assert("".isEmpty())
+# list.len
+assert_eq(l.len(), 3)
+# list.isEmpty
+assert_eq(l.isEmpty(), false)
+# list.append
+l.append(4)
+assert_eq(l, [1, 2, 3, 4])
+# list.pop
+assert_eq(l.pop(), 4)
+# list.first
+assert_eq(l.first(), 1)
+# list.last
+assert_eq(l.last(), 3)
+# list.get
+assert_eq(l.get(1), 2)
+# list.contains
+assert(l.contains(2))
+# list.indexOf
+assert_eq(l.indexOf(2), 1)
+# list.reverse
+l.reverse()
+assert_eq(l, [3, 2, 1])
+# list.reversed
+assert_eq(l.reversed(), [1, 2, 3])
+assert_eq(l, [3, 2, 1])
+# list.sort
+l.sort()
+assert_eq(l, [1, 2, 3])
+# list.join
+assert_eq(l.join(","), "1,2,3")
+# list.slice
+assert_eq(l.slice(1, 3), [2, 3])
+# list.flatten
+assert_eq([[1], [2]].flatten(), [1, 2])
+# list.extend
+l.extend([4])
+assert_eq(l, [1, 2, 3, 4])
+# list.toString
+assert(l.toString().contains("4"))
+# list.forEach
+l.forEach(remember)
+assert_eq(visits, l)
+# list.map
+assert_eq(l.map(increment), [2, 3, 4, 5])
+# list.filter
+assert_eq(l.filter(even), [2, 4])
+# list.find
+assert_eq(l.find(3), 2)
+# list.firstWhere
+assert_eq(l.firstWhere(even), 2)
+# list.remove
+assert_eq(l.remove(1), 2)
+assert_eq(l, [1, 3, 4])
+# list.reduce
+assert_eq(l.reduce(sum, 0), 8)
+# dict.len
+assert_eq(d.len(), 1)
+# dict.isEmpty
+assert_eq(d.isEmpty(), false)
+# dict.get
+assert_eq(d.get("a"), 1)
+# dict.set
+d.set("b", 2)
+assert_eq(d.get("b"), 2)
+# dict.containsKey
+assert(d.containsKey("b"))
+# dict.remove
+assert_eq(d.remove("b"), nothing)
+assert_eq(d.containsKey("b"), false)
+# dict.keys
+assert_eq(d.keys(), ["a"])
+# dict.values
+assert_eq(d.values(), [1])
+# dict.entries
+assert_eq(d.entries(), [["a", 1]])
+# dict.toString
+assert(d.toString().contains("a"))
+# hashset.len
+assert_eq(h.len(), 2)
+# hashset.isEmpty
+assert_eq(h.isEmpty(), false)
+# hashset.insert
+h.insert(3)
+assert(h.contains(3))
+# hashset.remove
+h.remove(3)
+assert_eq(h.contains(3), false)
+# hashset.contains
+assert(h.contains(1))
+# hashset.toList
+assert(h.toList().contains(1))
+# hashset.union
+assert_eq(h.union(hashset([3])).len(), 3)
+# hashset.intersect
+assert_eq(h.intersect(hashset([2, 3])).toList(), [2])
+# hashset.diff
+assert_eq(h.diff(hashset([2])).toList(), [1])
+# hashset.toString
+assert(h.toString().contains("1"))
+# shared.type
+assert_eq(shared.type, "Shared")
+# shared.get
+assert_eq(shared.get(), 1)
+# shared.set
+shared.set(2)
+assert_eq(shared.get(), 2)
+# shared.update
+assert_eq(shared.update(increment), 3)
+# shared.weak
+assert_eq(shared.weak().upgrade().get(), 3)
+# weak_shared.type
+assert_eq(weak.type, "WeakShared")
+# weak_shared.upgrade
+assert_eq(weak.upgrade().get(), 3)
+# weak_shared.isAlive
+assert(weak.isAlive())
+# function.name
+assert_eq(increment.name, "increment")
+# function.parameters
+assert_eq(increment.parameters[0]["name"], "n")
+# function.invoke
+assert_eq(increment.invoke([4]), 5)
+
+var numeric_receiver oftype dynamic = 4
+var invalid_arity_caught = false
+
+attempt {
+    numeric_receiver.sqrt(42)
+} catch error {
+    assert(string(error).contains("R0001"))
+    assert(string(error).contains("argument count"))
+    invalid_arity_caught = true
+}
+assert(invalid_arity_caught)
+print("receiver catalog passed")

@@ -142,6 +142,11 @@ impl AotCompiler {
         flag_builder
             .set("is_pic", "true")
             .expect("Cranelift: unknown is_pic");
+        fidan_diagnostics::tracing::debug!(
+            optimization = opt_str,
+            functions = program.functions.len(),
+            "Cranelift target initialization"
+        );
         let flags = settings::Flags::new(flag_builder);
         let isa = build_target_isa(opts.target_cpu.as_deref(), flags)?;
 
@@ -237,6 +242,7 @@ impl AotCompiler {
         )?;
 
         // ── Finalise and write object file ─────────────────────────────────────
+        fidan_diagnostics::tracing::trace!("Cranelift object emission started");
         let obj = module
             .finish()
             .emit()
@@ -248,6 +254,7 @@ impl AotCompiler {
         std::fs::write(&obj_path, &obj)
             .with_context(|| format!("writing object file to {:?}", obj_path))?;
 
+        fidan_diagnostics::tracing::debug!(bytes = obj.len(), "Cranelift object emitted");
         // ── Link ───────────────────────────────────────────────────────────────
         link(
             &obj_path,
@@ -464,6 +471,8 @@ struct RuntimeDecls {
     unbox_handle: cranelift_module::FuncId,
     // Reference counting
     clone_any: cranelift_module::FuncId,
+    global_load: cranelift_module::FuncId,
+    global_store: cranelift_module::FuncId,
     drop_any: cranelift_module::FuncId,
     // Truthiness
     truthy: cranelift_module::FuncId,
@@ -558,8 +567,12 @@ struct RuntimeDecls {
     push_catch: cranelift_module::FuncId,
     pop_catch: cranelift_module::FuncId,
     throw_fn: cranelift_module::FuncId,
-    throw_unhandled: cranelift_module::FuncId,
-    store_exception: cranelift_module::FuncId,
+    join_all: cranelift_module::FuncId,
+    exception_is_catchable: cranelift_module::FuncId,
+    enter_call: cranelift_module::FuncId,
+    leave_call: cranelift_module::FuncId,
+    report_unhandled: cranelift_module::FuncId,
+    store_panic: cranelift_module::FuncId,
     catch_exception: cranelift_module::FuncId,
     has_exception: cranelift_module::FuncId,
     // Closures
@@ -568,6 +581,8 @@ struct RuntimeDecls {
     fn_table_init: cranelift_module::FuncId,
     fn_table_set: cranelift_module::FuncId,
     fn_name_register: cranelift_module::FuncId,
+    fn_metadata_register: cranelift_module::FuncId,
+    namespace_export_register: cranelift_module::FuncId,
     call_dynamic: cranelift_module::FuncId,
     validate_call: cranelift_module::FuncId,
     prepare_argument: cranelift_module::FuncId,
@@ -651,6 +666,8 @@ impl RuntimeDecls {
             unbox_bool: decl!("fdn_unbox_bool", sig!((p) -> i8)),
             unbox_handle: decl!("fdn_unbox_handle", sig!((p) -> i64)),
             clone_any: decl!("fdn_clone", sig!((p) -> ptr)),
+            global_load: decl!("fdn_global_load", sig!((p) -> ptr)),
+            global_store: decl!("fdn_global_store", sig!((p, p) -> void)),
             drop_any: decl!("fdn_drop", sig!((p) -> void)),
             truthy: decl!("fdn_truthy", sig!((p) -> i8)),
             null_coalesce: decl!("fdn_null_coalesce", sig!((p, p) -> ptr)),
@@ -754,14 +771,23 @@ impl RuntimeDecls {
             push_catch: decl!("fdn_push_catch", sig!((i64t) -> void)),
             pop_catch: decl!("fdn_pop_catch", sig!(() -> void)),
             throw_fn: decl!("fdn_throw", sig!((p) -> void)),
-            throw_unhandled: decl!("fdn_throw_unhandled", sig!((p) -> void)),
-            store_exception: decl!("fdn_store_exception", sig!((p) -> void)),
+            join_all: decl!("fdn_join_all", sig!((p, i64t) -> void)),
+            exception_is_catchable: decl!("fdn_exception_is_catchable", sig!(() -> i8)),
+            enter_call: decl!("fdn_enter_call", sig!(() -> i8)),
+            leave_call: decl!("fdn_leave_call", sig!(() -> void)),
+            report_unhandled: decl!("fdn_report_unhandled_exception", sig!(() -> void)),
+            store_panic: decl!("fdn_store_panic", sig!((p) -> void)),
             catch_exception: decl!("fdn_catch_exception", sig!(() -> ptr)),
             has_exception: decl!("fdn_has_exception", sig!(() -> i8)),
             make_closure: decl!("fdn_make_closure", sig!((i64t, p, i64t) -> ptr)),
             fn_table_init: decl!("fdn_fn_table_init", sig!((i64t) -> void)),
             fn_table_set: decl!("fdn_fn_table_set", sig!((i64t, i64t) -> void)),
             fn_name_register: decl!("fdn_fn_name_register", sig!((p, i64t, i64t) -> void)),
+            fn_metadata_register: decl!("fdn_fn_metadata_register", sig!((p, i64t, i64t) -> void)),
+            namespace_export_register: decl!(
+                "fdn_namespace_export_register",
+                sig!((p, i64t, p, i64t) -> void)
+            ),
             call_dynamic: decl!("fdn_call_dynamic", sig!((p, p, i64t) -> ptr)),
             validate_call: decl!("fdn_validate_call", sig!((i64t, i64t, i64t) -> i8)),
             prepare_argument: decl!("fdn_prepare_argument", sig!((p, p, i8t) -> ptr)),
@@ -825,7 +851,8 @@ fn declare_all_functions(
         let mangled = mangle_fn(name.as_ref(), mf.id.0);
         let mut sig = module.make_signature();
         for p in &mf.params {
-            sig.params.push(AbiParam::new(mir_ty_to_cl(&p.ty)));
+            sig.params
+                .push(AbiParam::new(mir_ty_to_cl(mf.param_abi_ty(p))));
         }
         // If the declared return type is Nothing/Error but the body contains
         // a `return expr` terminator (e.g. an `action` that returns a value),
@@ -1145,7 +1172,8 @@ fn lower_function(
     // Build the Cranelift function signature.
     let mut sig = module.make_signature();
     for p in &mf.params {
-        sig.params.push(AbiParam::new(mir_ty_to_cl(&p.ty)));
+        sig.params
+            .push(AbiParam::new(mir_ty_to_cl(mf.param_abi_ty(p))));
     }
     let eff_ret = effective_return_ty(mf);
     let has_return = !matches!(&eff_ret, MirTy::Nothing | MirTy::Error);
@@ -1164,6 +1192,9 @@ fn lower_function(
     let mut builder = FunctionBuilder::new(&mut ctx.func, builder_ctx);
 
     // ── Phase 0: create one Cranelift block per MIR basic block ───────────────
+    // A MIR backedge may target bb0. Entry guards/parameter binding belong to
+    // a distinct prologue and must run once per physical function call.
+    let entry = builder.create_block();
     let cl_blocks: Vec<cranelift_codegen::ir::Block> =
         mf.blocks.iter().map(|_| builder.create_block()).collect();
 
@@ -1182,7 +1213,7 @@ fn lower_function(
 
     // ── Phase 0b: block params for phi nodes (non-entry blocks) ───────────────
     let mut phi_param_vals: HashMap<(usize, usize), cranelift_codegen::ir::Value> = HashMap::new();
-    builder.append_block_params_for_function_params(cl_blocks[0]);
+    builder.append_block_params_for_function_params(entry);
     for (bi, mir_bb) in mf.blocks.iter().enumerate() {
         if bi == 0 {
             continue; // entry block uses function params
@@ -1209,17 +1240,27 @@ fn lower_function(
     }
 
     // ── Entry block: bind function params to local variables ──────────────────
-    builder.switch_to_block(cl_blocks[0]);
+    builder.switch_to_block(entry);
     {
         for (index, var) in cl_vars.iter().enumerate() {
             let zero = zero_value_for_local(&mut builder, local_types.get(&(index as u32)));
             builder.def_var(*var, zero);
         }
-        let params: Vec<cranelift_codegen::ir::Value> = builder.block_params(cl_blocks[0]).to_vec();
+        let params: Vec<cranelift_codegen::ir::Value> = builder.block_params(entry).to_vec();
         for (idx, param) in mf.params.iter().enumerate() {
             builder.def_var(cl_vars[param.local.0 as usize], params[idx]);
         }
     }
+
+    let entered =
+        call_rt(module, &mut builder, rt.enter_call, &[])?.context("call depth result")?;
+    let overflow = builder.create_block();
+    builder
+        .ins()
+        .brif(entered, cl_blocks[0], &[], overflow, &[]);
+    builder.switch_to_block(overflow);
+    emit_exceptional_return(&mut builder, mf);
+    builder.switch_to_block(cl_blocks[0]);
 
     // ── Catch-stack pre-pass ───────────────────────────────────────────────────
     // Compute the catch-handler stack state at the entry of each basic block.
@@ -1307,7 +1348,11 @@ fn box_fidan_abi_params(
     let mut boxed = Vec::with_capacity(params.len());
     for (param, value) in mf.params.iter().zip(params.iter().copied()) {
         boxed.push(box_raw_value_for_type(
-            module, rt, builder, value, &param.ty,
+            module,
+            rt,
+            builder,
+            value,
+            mf.param_abi_ty(param),
         )?);
     }
     Ok(boxed)
@@ -1491,7 +1536,13 @@ fn lower_instr(
                 &call_result_ty,
                 interner,
             )?;
-            if let (Some(d), Some(v)) = (dest, ret) {
+            if let Some(d) = dest {
+                // A void ABI still has a source-level Nothing value when observed.
+                let v = match ret {
+                    Some(value) => value,
+                    None => call_rt(module, builder, rt.box_nothing, &[])?
+                        .context("Nothing call result")?,
+                };
                 let effective_ty = result_ty
                     .clone()
                     .filter(|ty| !matches!(ty, MirTy::Dynamic | MirTy::Error))
@@ -1570,6 +1621,18 @@ fn lower_instr(
                 .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0))
             };
             builder.def_var(cl_vars[dest.0 as usize], r);
+            emit_pending_exception_check(
+                module,
+                rt,
+                builder,
+                cl_blocks,
+                cl_vars,
+                local_types,
+                mf,
+                bi,
+                current_catch_stack,
+                interner,
+            )?;
         }
 
         Instr::SetField {
@@ -1658,6 +1721,18 @@ fn lower_instr(
             let val = lower_operand_boxed(builder, cl_vars, local_types, operand, rt, module)?;
             let (np, nl) = str_const(module, builder, interner.resolve(*name).as_ref())?;
             call_rt(module, builder, rt.certain_check, &[val, np, nl])?;
+            emit_pending_exception_check(
+                module,
+                rt,
+                builder,
+                cl_blocks,
+                cl_vars,
+                local_types,
+                mf,
+                bi,
+                current_catch_stack,
+                interner,
+            )?;
         }
 
         Instr::PushCatch(bid) => {
@@ -1679,8 +1754,9 @@ fn lower_instr(
                 }
                 let gv = module.declare_data_in_func(data_id, builder.func);
                 let addr = builder.ins().symbol_value(PTR_TY, gv);
-                let val = builder.ins().load(PTR_TY, MemFlagsData::new(), addr, 0);
+                let val = call_rt(module, builder, rt.global_load, &[addr])?.unwrap();
                 store_local_from_boxed(builder, cl_vars, local_types, *dest, val, rt, module)?;
+                call_rt(module, builder, rt.drop_any, &[val])?;
             } else {
                 namespace_locals.remove(dest);
                 let zero = zero_value_for_local(builder, local_types.get(&dest.0));
@@ -1694,13 +1770,12 @@ fn lower_instr(
                 let gv = module.declare_data_in_func(data_id, builder.func);
                 let addr = builder.ins().symbol_value(PTR_TY, gv);
                 let val = lower_operand_boxed(builder, cl_vars, local_types, value, rt, module)?;
-                let cloned = call_rt(module, builder, rt.clone_any, &[val])?
-                    .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
-                // The global owns its box; replacing it must release the old
-                // owner so WeakShared observes the same lifetime as the interpreter.
-                let current = builder.ins().load(PTR_TY, MemFlagsData::new(), addr, 0);
-                call_rt(module, builder, rt.drop_any, &[current])?;
-                builder.ins().store(MemFlagsData::new(), cloned, addr, 0);
+                call_rt(module, builder, rt.global_store, &[addr, val])?;
+                if matches!(value, Operand::Const(_))
+                    || is_scalar(&operand_mir_ty(local_types, value))
+                {
+                    call_rt(module, builder, rt.drop_any, &[val])?;
+                }
             }
         }
 
@@ -1759,31 +1834,40 @@ fn lower_instr(
         }
 
         Instr::JoinAll { handles } => {
-            for handle in handles {
-                let handle_ptr = lower_operand_as_ptr(
-                    builder,
-                    cl_vars,
-                    local_types,
-                    &Operand::Local(*handle),
-                    rt,
-                    module,
-                )?;
-                let resolved = call_rt(module, builder, rt.pending_join, &[handle_ptr])?
-                    .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
-                builder.def_var(cl_vars[handle.0 as usize], resolved);
-                emit_pending_exception_check(
-                    module,
-                    rt,
-                    builder,
-                    cl_blocks,
-                    cl_vars,
-                    local_types,
-                    mf,
-                    bi,
-                    current_catch_stack,
-                    interner,
-                )?;
+            let values = handles
+                .iter()
+                .map(|handle| {
+                    lower_operand_as_ptr(
+                        builder,
+                        cl_vars,
+                        local_types,
+                        &Operand::Local(*handle),
+                        rt,
+                        module,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let (array, count) = build_boxed_value_array(builder, &values)?;
+            call_rt(module, builder, rt.join_all, &[array, count])?;
+            for (index, handle) in handles.iter().enumerate() {
+                let result =
+                    builder
+                        .ins()
+                        .load(PTR_TY, MemFlagsData::new(), array, (index * 8) as i32);
+                builder.def_var(cl_vars[handle.0 as usize], result);
             }
+            emit_pending_exception_check(
+                module,
+                rt,
+                builder,
+                cl_blocks,
+                cl_vars,
+                local_types,
+                mf,
+                bi,
+                current_catch_stack,
+                interner,
+            )?;
         }
 
         Instr::AwaitPending { dest, handle } => {
@@ -1923,6 +2007,17 @@ fn emit_pending_exception_check(
 
     builder.switch_to_block(pending_block);
     if let Some(catch_bid) = current_catch_stack.last() {
+        let catchable = call_rt(module, builder, rt.exception_is_catchable, &[])?
+            .context("exception catchability")?;
+        let catch_edge = builder.create_block();
+        let propagate = builder.create_block();
+        builder
+            .ins()
+            .brif(catchable, catch_edge, &[], propagate, &[]);
+        builder.switch_to_block(propagate);
+        call_rt(module, builder, rt.leave_call, &[])?;
+        emit_exceptional_return(builder, mf);
+        builder.switch_to_block(catch_edge);
         let catch_idx = catch_bid.0 as usize;
         let catch_args = collect_phi_args(
             module,
@@ -1937,6 +2032,7 @@ fn emit_pending_exception_check(
         )?;
         builder.ins().jump(cl_blocks[catch_idx], &catch_args);
     } else {
+        call_rt(module, builder, rt.leave_call, &[])?;
         emit_exceptional_return(builder, mf);
     }
 
@@ -1963,6 +2059,7 @@ fn lower_terminator(
 ) -> Result<()> {
     match term {
         Terminator::Return(None) => {
+            call_rt(module, builder, rt.leave_call, &[])?;
             let eff_ty = effective_return_ty(mf);
             let has_return = !matches!(&eff_ty, MirTy::Nothing | MirTy::Error);
             if has_return {
@@ -1981,6 +2078,7 @@ fn lower_terminator(
             }
         }
         Terminator::Return(Some(op)) => {
+            call_rt(module, builder, rt.leave_call, &[])?;
             let eff_ty = effective_return_ty(mf);
             let has_return = !matches!(&eff_ty, MirTy::Nothing | MirTy::Error);
             if has_return {
@@ -2048,9 +2146,18 @@ fn lower_terminator(
             then_bb,
             else_bb,
         } => {
-            let cv = lower_operand(builder, cl_vars, cond);
-            // brif requires integer condition; widen if needed.
-            let cv64 = widen_to_i64(builder, cv, local_types, cond);
+            let cv64 = if matches!(
+                operand_mir_ty(local_types, cond),
+                MirTy::Boolean | MirTy::Integer | MirTy::Handle
+            ) {
+                let value = lower_operand(builder, cl_vars, cond);
+                widen_to_i64(builder, value, local_types, cond)
+            } else {
+                // A boxed false/nothing is a non-null pointer. Inspect its value,
+                // matching interpreter branches and LLVM's existing fdn_truthy path.
+                let boxed = lower_operand_boxed(builder, cl_vars, local_types, cond, rt, module)?;
+                call_rt(module, builder, rt.truthy, &[boxed])?.unwrap()
+            };
             let then_args = collect_phi_args(
                 module,
                 rt,
@@ -2084,7 +2191,7 @@ fn lower_terminator(
         Terminator::Throw { value } => {
             let v = lower_operand_boxed(builder, cl_vars, local_types, value, rt, module)?;
             // Store the exception in thread-local storage.
-            call_rt(module, builder, rt.store_exception, &[v])?;
+            call_rt(module, builder, rt.store_panic, &[v])?;
             if let Some(catch_bid) = current_catch_stack.last() {
                 // Direct jump to the catch block — no runtime indirection needed.
                 let catch_idx = catch_bid.0 as usize;
@@ -2104,6 +2211,7 @@ fn lower_terminator(
                 // No local catch handler in this function. Leave the exception in
                 // thread-local storage and return early so the caller can either
                 // catch it or propagate it further upward.
+                call_rt(module, builder, rt.leave_call, &[])?;
                 emit_exceptional_return(builder, mf);
             }
         }
@@ -2730,18 +2838,61 @@ fn emit_call(
             let mut arg_vals = Vec::with_capacity(mir_fn.params.len());
             let mut cloned_args = Vec::new();
             for (i, param) in mir_fn.params.iter().enumerate() {
-                let v = if let Some(arg_op) = args.get(i) {
-                    lower_operand_coerced(
-                        builder,
-                        cl_vars,
-                        local_types,
-                        arg_op,
-                        &param.ty,
-                        rt,
-                        module,
-                    )?
+                // Named omissions carry Nothing in MIR, just like explicit Nothing.
+                // Resolve literal defaults before entering a scalar ABI/unboxer.
+                let provided = args.get(i).filter(|argument| {
+                    param.default.is_none() || !matches!(argument, Operand::Const(MirLit::Nothing))
+                });
+                let mut prepared_owned = false;
+                let v = if let Some(arg_op) = provided {
+                    if !param.certain
+                        && param.default.is_some()
+                        && !is_scalar(&operand_mir_ty(local_types, arg_op))
+                    {
+                        // A flexible/nullable value may become Nothing only at runtime.
+                        // Reuse the dynamic-call default contract, preserving zero/false.
+                        let raw =
+                            lower_operand_boxed(builder, cl_vars, local_types, arg_op, rt, module)?;
+                        let default = emit_trampoline_default_value(
+                            module,
+                            rt,
+                            builder,
+                            param.default.as_ref(),
+                            &MirTy::Dynamic,
+                        )?;
+                        let certain = builder.ins().iconst(I8, 0);
+                        let prepared = call_rt(
+                            module,
+                            builder,
+                            rt.prepare_argument,
+                            &[raw, default, certain],
+                        )?
+                        .unwrap();
+                        call_rt(module, builder, rt.drop_any, &[default])?;
+                        if matches!(arg_op, Operand::Const(_)) {
+                            call_rt(module, builder, rt.drop_any, &[raw])?;
+                        }
+                        prepared_owned = !is_scalar(mir_fn.param_abi_ty(param));
+                        coerce_boxed_call_result(
+                            module,
+                            rt,
+                            builder,
+                            prepared,
+                            mir_fn.param_abi_ty(param),
+                        )?
+                    } else {
+                        lower_operand_coerced(
+                            builder,
+                            cl_vars,
+                            local_types,
+                            arg_op,
+                            mir_fn.param_abi_ty(param),
+                            rt,
+                            module,
+                        )?
+                    }
                 } else if let Some(default_lit) = &param.default {
-                    let raw = if is_scalar(&param.ty) {
+                    let raw = if is_scalar(mir_fn.param_abi_ty(param)) {
                         lower_lit(module, builder, rt, default_lit, interner)?
                     } else {
                         lower_owned_boxed_operand(
@@ -2753,7 +2904,7 @@ fn emit_call(
                             module,
                         )?
                     };
-                    let expected_cl_ty = mir_ty_to_cl(&param.ty);
+                    let expected_cl_ty = mir_ty_to_cl(mir_fn.param_abi_ty(param));
                     let actual_cl_ty = builder.func.dfg.value_type(raw);
                     if actual_cl_ty != expected_cl_ty {
                         coerce_value(builder, module, rt, raw, actual_cl_ty, expected_cl_ty)?
@@ -2767,11 +2918,12 @@ fn emit_call(
                         interner.resolve(mir_fn.name)
                     );
                 };
-                // This is precisely lower_owned_boxed_operand's fdn_clone
-                // branch. Do not treat unknown or scalar arguments as clones.
-                if !is_scalar(&param.ty)
-                    && let Some(Operand::Local(local)) = args.get(i)
-                    && matches!(local_types.get(&local.0), Some(ty) if !matches!(ty, MirTy::Error) && !is_scalar(ty))
+                // Prepared arguments and boxed defaults are owned temporaries;
+                // ordinary boxed locals are cloned by lower_owned_boxed_operand.
+                let cloned_local = provided.is_some_and(|argument| matches!(argument,
+                    Operand::Local(local) if matches!(local_types.get(&local.0), Some(ty) if !matches!(ty, MirTy::Error) && !is_scalar(ty))));
+                if !is_scalar(mir_fn.param_abi_ty(param))
+                    && (prepared_owned || provided.is_none() || cloned_local)
                 {
                     cloned_args.push(v);
                 }
@@ -2865,14 +3017,44 @@ fn emit_call(
         }
 
         Callee::Dynamic(fn_op) => {
-            // fdn_call_dynamic(fn_val: *mut FidanValue, args_ptr, args_cnt) -> *mut FidanValue
             let fn_val = lower_operand_boxed(builder, cl_vars, local_types, fn_op, rt, module)?;
             let (arr, cnt) =
                 build_ptr_array(module, rt, builder, cl_vars, local_types, args, interner)?;
             let boxed = call_rt(module, builder, rt.call_dynamic, &[fn_val, arr, cnt])?;
-            if let Some(boxed) = boxed {
-                let coerced = coerce_boxed_call_result(module, rt, builder, boxed, result_ty)?;
-                Ok(Some(coerced))
+            // Dynamic dispatch borrows its inputs. Release only boxes created here,
+            // never the caller's borrowed boxed locals.
+            if matches!(fn_op, Operand::Const(_)) || is_scalar(&operand_mir_ty(local_types, fn_op))
+            {
+                call_rt(module, builder, rt.drop_any, &[fn_val])?;
+            }
+            for (index, argument) in args.iter().enumerate() {
+                if matches!(argument, Operand::Const(_))
+                    || is_scalar(&operand_mir_ty(local_types, argument))
+                {
+                    let temporary =
+                        builder
+                            .ins()
+                            .load(PTR_TY, MemFlagsData::new(), arr, (index * 8) as i32);
+                    call_rt(module, builder, rt.drop_any, &[temporary])?;
+                }
+            }
+            if let Some(mut boxed) = boxed {
+                if !matches!(result_ty, MirTy::Dynamic | MirTy::Error) {
+                    let (contract, length) =
+                        str_const(module, builder, &result_ty.runtime_descriptor())?;
+                    let checked = call_rt(
+                        module,
+                        builder,
+                        rt.check_argument,
+                        &[boxed, contract, length],
+                    )?
+                    .context("checked call result")?;
+                    call_rt(module, builder, rt.drop_any, &[boxed])?;
+                    boxed = checked;
+                }
+                Ok(Some(coerce_boxed_call_result(
+                    module, rt, builder, boxed, result_ty,
+                )?))
             } else {
                 Ok(None)
             }
@@ -2961,7 +3143,6 @@ fn emit_container_method_call(
         (ReceiverBuiltinKind::Dict, ReceiverMethodOp::IsEmpty) => {
             let len = call_rt(module, builder, rt.dict_len, &[recv])?.unwrap_or(recv);
             let is_empty = builder.ins().icmp_imm_s(IntCC::Equal, len, 0);
-            let is_empty = builder.ins().uextend(I8, is_empty);
             return box_container_scalar_result(
                 module,
                 rt,
@@ -3049,7 +3230,6 @@ fn emit_container_method_call(
         (ReceiverBuiltinKind::HashSet, ReceiverMethodOp::IsEmpty) => {
             let len = call_rt(module, builder, rt.len_fn, &[recv])?.unwrap_or(recv);
             let is_empty = builder.ins().icmp_imm_s(IntCC::Equal, len, 0);
-            let is_empty = builder.ins().uextend(I8, is_empty);
             return box_container_scalar_result(
                 module,
                 rt,
@@ -3635,7 +3815,7 @@ fn emit_trampolines(
             call_rt(module, &mut builder, rt.drop_any, &[prepared])?;
             let prepared = checked;
             owned_args.push(prepared);
-            let value = match &param.ty {
+            let value = match mf.param_abi_ty(param) {
                 MirTy::Integer => {
                     call_rt(module, &mut builder, rt.unbox_int, &[prepared])?.unwrap()
                 }
@@ -3775,6 +3955,79 @@ fn emit_c_main(
             let (np, nl) = str_const(module, &mut builder, name_str)?;
             let idx = builder.ins().iconst(I64, i as i64);
             builder.ins().call(reg_ref, &[np, nl, idx]);
+            let metadata = mf
+                .callable_metadata(|symbol| interner.resolve(symbol).to_string())
+                .to_string();
+            let (metadata_ptr, metadata_len) = str_const(module, &mut builder, &metadata)?;
+            call_rt(
+                module,
+                &mut builder,
+                rt.fn_metadata_register,
+                &[metadata_ptr, metadata_len, idx],
+            )?;
+        }
+    }
+
+    for decl in &program.use_decls {
+        if decl.re_export && decl.specific_names.is_none() && decl.alias.contains("::") {
+            let (alias, alias_len) = str_const(module, &mut builder, &decl.alias)?;
+            let (target, target_len) = str_const(module, &mut builder, &decl.module)?;
+            call_rt(
+                module,
+                &mut builder,
+                rt.namespace_export_register,
+                &[alias, alias_len, target, target_len],
+            )?;
+        }
+    }
+
+    // Top-level decorators run in declaration order before module initialization,
+    // matching interpreter startup. Dispatch through the normal arity/default ABI.
+    for function in &program.functions {
+        for (decorator, extras) in &function.custom_decorators {
+            let callback = lower_lit(
+                module,
+                &mut builder,
+                rt,
+                &MirLit::FunctionRef(decorator.0),
+                interner,
+            )?;
+            let mut args = vec![Operand::Const(MirLit::FunctionRef(function.id.0))];
+            args.extend(extras.iter().cloned().map(Operand::Const));
+            let (array, count) = build_ptr_array(
+                module,
+                rt,
+                &mut builder,
+                &[],
+                &HashMap::new(),
+                &args,
+                interner,
+            )?;
+            let result = call_rt(
+                module,
+                &mut builder,
+                rt.call_dynamic,
+                &[callback, array, count],
+            )?
+            .context("decorator result")?;
+            call_rt(module, &mut builder, rt.drop_any, &[result])?;
+            call_rt(module, &mut builder, rt.drop_any, &[callback])?;
+            for index in 0..args.len() {
+                let arg =
+                    builder
+                        .ins()
+                        .load(PTR_TY, MemFlagsData::new(), array, (index * 8) as i32);
+                call_rt(module, &mut builder, rt.drop_any, &[arg])?;
+            }
+            let pending =
+                call_rt(module, &mut builder, rt.has_exception, &[])?.context("exception flag")?;
+            let failed = builder.create_block();
+            let next = builder.create_block();
+            builder.ins().brif(pending, failed, &[], next, &[]);
+            builder.switch_to_block(failed);
+            call_rt(module, &mut builder, rt.report_unhandled, &[])?;
+            builder.ins().trap(TrapCode::unwrap_user(2));
+            builder.switch_to_block(next);
         }
     }
 
@@ -3794,9 +4047,7 @@ fn emit_c_main(
             .brif(has_exception, exn_block, &[], ok_block, &[]);
 
         builder.switch_to_block(exn_block);
-        let exn = call_rt(module, &mut builder, rt.catch_exception, &[])?
-            .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0));
-        call_rt(module, &mut builder, rt.throw_unhandled, &[exn])?;
+        call_rt(module, &mut builder, rt.report_unhandled, &[])?;
         builder.ins().trap(TrapCode::unwrap_user(2));
 
         builder.switch_to_block(ok_block);
@@ -4288,6 +4539,8 @@ fn link(
     extern_link_inputs: &[String],
 ) -> Result<()> {
     let linker = find_linker()?;
+    fidan_diagnostics::tracing::info!("linking native executable");
+    fidan_diagnostics::tracing::debug!(linker = %linker, "native linker selected");
     let runtime_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_owned()))

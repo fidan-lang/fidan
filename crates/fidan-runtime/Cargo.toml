@@ -2,7 +2,7 @@
 name = "fidan-runtime"
 version.workspace = true
 edition.workspace = true
-license-file.workspace = true
+license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
@@ -21,3 +21,4 @@ regex = { workspace = true }
 dashmap = { workspace = true }
 serde_json = { workspace = true }
 itoa = { workspace = true }
+stacker = { workspace = true }

@@ -283,6 +283,7 @@ fn render_plain_diagnostics(
 }
 
 pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Result<()> {
+    fidan_diagnostics::tracing::info!("REPL started");
     use fidan_lexer::{Lexer, SymbolInterner};
     use fidan_source::SourceMap;
     use rustyline::error::ReadlineError;
@@ -613,10 +614,15 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
         // ── Fresh type-check (consumes exec_tc to produce TypedModule) ──────
         let mut exec_tc = fidan_typeck::TypeChecker::new(Arc::clone(&interner), boot_fid);
         exec_tc.set_repl(true);
-        exec_tc.check_module(&full_module);
+        fidan_diagnostics::logging::phase("repl_typecheck", || exec_tc.check_module(&full_module));
         let typed = exec_tc.finish_typed();
         if !typed.diagnostics.is_empty() {
-            let used_plain = (echo_sym_opt.is_some() || transformed_input)
+            let has_errors = typed
+                .diagnostics
+                .iter()
+                .any(|diag| diag.severity == Severity::Error);
+            let used_plain = has_errors
+                && (echo_sym_opt.is_some() || transformed_input)
                 && render_plain_diagnostics(
                     &plain_source,
                     &interner,
@@ -625,26 +631,33 @@ pub(crate) fn run_repl(trace_mode: TraceMode, max_errors_per_input: usize) -> Re
                     &mut error_history,
                 );
             if !used_plain {
-                let _ = render_repl_diagnostics(
+                render_repl_diagnostics(
                     &typed.diagnostics,
                     &exec_smap,
                     &mut diag_budget,
                     Some(&mut error_history),
                 );
             }
-            continue;
+            // A warning must remain visible without discarding valid input.
+            if has_errors {
+                continue;
+            }
         }
 
         // ── HIR → MIR → optimisation passes ───────────────────────────────
         let hir = fidan_hir::lower_module(&full_module, &typed, &interner);
-        let mut mir =
-            fidan_mir::lower_program(&hir, &interner, &mir_repl_state.persistent_global_names);
+        let mut mir = fidan_mir::lower_repl_program(
+            &hir,
+            &interner,
+            &mir_repl_state.persistent_global_names,
+            mir_repl_state.accumulated_source.len(),
+        );
         // Run MIR safety diagnostics (W2006 null-safety, W1004 unawaited, etc.).
         emit_mir_safety_diags(&mir, &interner, false, &[], &mut diag_budget);
         if diag_budget.error_count() > 0 {
             continue;
         }
-        fidan_passes::run_all(&mut mir);
+        fidan_diagnostics::logging::phase("repl_optimize", || fidan_passes::run_all(&mut mir));
 
         // ── Execute the new delta on the MIR machine ───────────────────────
         match fidan_interp::run_mir_repl_line(

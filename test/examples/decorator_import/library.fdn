@@ -1,0 +1,10 @@
+action wrap with (certain callback oftype action) returns action {
+    return action with (certain value oftype integer) returns integer {
+        return callback(value) + 10
+    }
+}
+
+@wrap
+action value with (certain argument oftype integer) returns integer {
+    return argument + 1
+}

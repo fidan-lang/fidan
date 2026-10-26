@@ -261,6 +261,12 @@ fn run_explain_ai(
     let request_bytes =
         serde_json::to_vec(&request).context("failed to serialize ai-analysis helper request")?;
 
+    fidan_diagnostics::tracing::info!("requesting AI source analysis");
+    fidan_diagnostics::tracing::debug!(
+        protocol = AI_ANALYSIS_HELPER_PROTOCOL_VERSION,
+        bytes = request_bytes.len(),
+        "AI helper request prepared; payload omitted"
+    );
     let mut child = Command::new(&toolchain.helper_path)
         .arg("analyze")
         .stdin(Stdio::piped())
@@ -295,8 +301,7 @@ fn run_explain_ai(
         indicatif::ProgressBar::hidden()
     };
 
-    let output = child
-        .wait_with_output()
+    let output = fidan_diagnostics::logging::phase("ai_helper_wait", || child.wait_with_output())
         .context("failed while waiting for ai-analysis helper to finish")?;
 
     spinner.finish_and_clear();

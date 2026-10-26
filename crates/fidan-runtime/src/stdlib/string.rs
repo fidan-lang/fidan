@@ -198,7 +198,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "padStart" | "pad_start" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
             let width = match args.get(1) {
-                Some(FidanValue::Integer(n)) => *n as usize,
+                Some(FidanValue::Integer(n)) => (*n).max(0) as usize,
                 _ => 0,
             };
             let pad = args
@@ -211,7 +211,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "padEnd" | "pad_end" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
             let width = match args.get(1) {
-                Some(FidanValue::Integer(n)) => *n as usize,
+                Some(FidanValue::Integer(n)) => (*n).max(0) as usize,
                 _ => 0,
             };
             let pad = args
@@ -224,7 +224,7 @@ pub fn dispatch(name: &str, args: Vec<FidanValue>) -> Option<FidanValue> {
         "repeat" => {
             let s = coerce_string(args.first().unwrap_or(&FidanValue::Nothing));
             let n = match args.get(1) {
-                Some(FidanValue::Integer(n)) => *n as usize,
+                Some(FidanValue::Integer(n)) => (*n).max(0) as usize,
                 _ => 0,
             };
             Some(string_value(&s.repeat(n)))
@@ -402,6 +402,16 @@ mod tests {
             ),
             ""
         );
+    }
+
+    #[test]
+    fn negative_padding_and_repeat_counts_are_empty_work() {
+        for (name, expected) in [("padStart", "é"), ("padEnd", "é"), ("repeat", "")] {
+            assert_eq!(
+                dispatch_string(name, vec![string_arg("é"), FidanValue::Integer(-1)]),
+                expected
+            );
+        }
     }
 
     #[test]

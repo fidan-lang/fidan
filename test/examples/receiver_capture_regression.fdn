@@ -1,0 +1,19 @@
+object Counter {
+    var value oftype integer = 3
+
+    action callback returns action {
+        return action with (certain extra oftype integer) returns integer {
+            return this.value + extra
+        }
+    }
+}
+
+var counter = Counter()
+var callback = counter.callback()
+
+assert_eq(callback(4), 7)
+assert_eq(callback.invoke([5]), 8)
+assert_eq(len(callback.parameters), 1)
+counter.value = 10
+assert_eq(callback(1), 11)
+print("receiver capture passed")

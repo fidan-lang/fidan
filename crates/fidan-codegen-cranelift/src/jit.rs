@@ -55,6 +55,7 @@ pub struct JitRuntimeHooks {
     pub load_global_raw: JitLoadGlobalRawFn,
     pub store_global_raw: JitStoreGlobalRawFn,
     pub call_fn_raw: JitCallFnRawFn,
+    pub receiver_raw: unsafe fn(*mut c_void, i64, *const u8, i64, *const i64, i64, i8) -> i64,
 }
 
 static JIT_RUNTIME_HOOKS: OnceLock<JitRuntimeHooks> = OnceLock::new();
@@ -129,6 +130,7 @@ pub fn encode_jit_abi_value(value: &FidanValue, ty: &MirTy) -> i64 {
         (FidanValue::Integer(n), MirTy::Integer) => *n,
         (FidanValue::Float(f), MirTy::Float) => f.to_bits() as i64,
         (FidanValue::Boolean(b), MirTy::Boolean) => i64::from(*b),
+        (FidanValue::Handle(handle), MirTy::Handle) => *handle as i64,
         _ => register_jit_abi_ptr(Box::into_raw(Box::new(value.clone()))),
     }
 }
@@ -138,6 +140,7 @@ pub fn decode_jit_abi_value(raw: i64, ty: &MirTy) -> FidanValue {
         MirTy::Integer => FidanValue::Integer(raw),
         MirTy::Float => FidanValue::Float(f64::from_bits(raw as u64)),
         MirTy::Boolean => FidanValue::Boolean(raw != 0),
+        MirTy::Handle => FidanValue::Handle(raw as usize),
         _ if raw == 0 => FidanValue::Nothing,
         _ => unsafe { (*(raw as *mut FidanValue)).clone() },
     }
@@ -357,11 +360,60 @@ extern "C" fn fdn_jit_store_global_raw(global_id: i64, raw: i64) {
     unsafe { (hooks.store_global_raw)(ctx, global_id as u32, raw) }
 }
 
+// Boxed receiver operations share the active interpreter's dispatch and exception channel.
+unsafe extern "C" fn fdn_jit_receiver_raw(
+    receiver: i64,
+    name: *const u8,
+    len: i64,
+    args: *const i64,
+    count: i64,
+    invoke: i8,
+) -> i64 {
+    unsafe {
+        (active_jit_runtime_hooks().receiver_raw)(
+            active_jit_context(),
+            receiver,
+            name,
+            len,
+            args,
+            count,
+            invoke,
+        )
+    }
+}
+extern "C" fn fdn_jit_box_function_scoped(id: i64) -> i64 {
+    encode_jit_abi_value(
+        &FidanValue::Function(fidan_runtime::FunctionId(id as u32)),
+        &MirTy::Function,
+    )
+}
+unsafe extern "C" fn fdn_jit_box_stdlib_scoped(
+    module: *const u8,
+    module_len: i64,
+    name: *const u8,
+    name_len: i64,
+) -> i64 {
+    register_jit_abi_ptr(unsafe {
+        fidan_runtime::ffi::fdn_box_stdlib_fn(module, module_len, name, name_len)
+    })
+}
+
 #[unsafe(no_mangle)]
 extern "C" fn fdn_jit_call_fn_raw(fn_id: i64, args_ptr: *const i64, arg_cnt: i64) -> i64 {
     let hooks = active_jit_runtime_hooks();
     let ctx = active_jit_context();
     unsafe { (hooks.call_fn_raw)(ctx, fn_id as u32, args_ptr, arg_cnt) }
+}
+
+/// Strict boxed Boolean negation using the runtime's existing error channel.
+/// The returned runtime box is owned here and consumed exactly once.
+unsafe extern "C" fn fdn_jit_not_bool(value: i64) -> i8 {
+    let result = unsafe { fidan_runtime::ffi::fdn_dyn_not(value as *mut FidanValue) };
+    let result = unsafe { Box::from_raw(result) };
+    match *result {
+        FidanValue::Boolean(value) => i8::from(value),
+        _ => 0,
+    }
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -416,7 +468,11 @@ impl JitFnEntry {
     fn fallback(func: &MirFunction) -> Self {
         Self {
             fn_ptr: None,
-            param_tys: func.params.iter().map(|p| p.ty.clone()).collect(),
+            param_tys: func
+                .params
+                .iter()
+                .map(|p| func.param_abi_ty(p).clone())
+                .collect(),
             return_ty: func.return_ty.clone(),
         }
     }
@@ -445,6 +501,9 @@ pub struct JitCompiler {
     load_global_raw_id: FuncId,
     store_global_raw_id: FuncId,
     call_fn_raw_id: FuncId,
+    receiver_raw_id: FuncId,
+    box_function_scoped_id: FuncId,
+    box_stdlib_scoped_id: FuncId,
     int_add_id: FuncId,
     int_sub_id: FuncId,
     int_mul_id: FuncId,
@@ -455,6 +514,8 @@ pub struct JitCompiler {
     int_abs_id: FuncId,
     float_div_id: FuncId,
     has_exception_id: FuncId,
+    not_bool_id: FuncId,
+    truthy_id: FuncId,
     box_int_scoped_id: FuncId,
     box_float_scoped_id: FuncId,
     box_bool_scoped_id: FuncId,
@@ -530,6 +591,17 @@ impl JitCompiler {
         builder.symbol(
             "fdn_has_exception",
             fidan_runtime::ffi::fdn_has_exception as *const u8,
+        );
+        builder.symbol("fdn_jit_not_bool", fdn_jit_not_bool as *const u8);
+        builder.symbol("fdn_truthy", fidan_runtime::ffi::fdn_truthy as *const u8);
+        builder.symbol("fdn_jit_receiver_raw", fdn_jit_receiver_raw as *const u8);
+        builder.symbol(
+            "fdn_jit_box_function_scoped",
+            fdn_jit_box_function_scoped as *const u8,
+        );
+        builder.symbol(
+            "fdn_jit_box_stdlib_scoped",
+            fdn_jit_box_stdlib_scoped as *const u8,
         );
         builder.symbol("fdn_jit_call_fn_raw", fdn_jit_call_fn_raw as *const u8);
         builder.symbol(
@@ -662,6 +734,24 @@ impl JitCompiler {
                 .declare_function("fdn_jit_call_fn_raw", Linkage::Import, &sig)
                 .expect("declare fdn_jit_call_fn_raw")
         };
+        let receiver_raw_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_receiver_raw",
+            &[I64, I64, I64, I64, I64, I8],
+            Some(I64),
+        );
+        let box_function_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_box_function_scoped",
+            &[I64],
+            Some(I64),
+        );
+        let box_stdlib_scoped_id = declare_import_fn(
+            &mut module,
+            "fdn_jit_box_stdlib_scoped",
+            &[I64, I64, I64, I64],
+            Some(I64),
+        );
         let box_int_scoped_id =
             declare_import_fn(&mut module, "fdn_jit_box_int_scoped", &[I64], Some(I64));
         let int_add_id = declare_import_fn(&mut module, "fdn_int_add", &[I64, I64], Some(I64));
@@ -673,7 +763,9 @@ impl JitCompiler {
         let int_abs_id = declare_import_fn(&mut module, "fdn_int_abs", &[I64], Some(I64));
         let int_neg_id = declare_import_fn(&mut module, "fdn_int_neg", &[I64], Some(I64));
         let float_div_id = declare_import_fn(&mut module, "fdn_float_div", &[F64, F64], Some(F64));
+        let not_bool_id = declare_import_fn(&mut module, "fdn_jit_not_bool", &[I64], Some(I8));
         let has_exception_id = declare_import_fn(&mut module, "fdn_has_exception", &[], Some(I8));
+        let truthy_id = declare_import_fn(&mut module, "fdn_truthy", &[I64], Some(I8));
         let box_float_scoped_id =
             declare_import_fn(&mut module, "fdn_jit_box_float_scoped", &[F64], Some(I64));
         let box_bool_scoped_id =
@@ -801,6 +893,9 @@ impl JitCompiler {
             load_global_raw_id,
             store_global_raw_id,
             call_fn_raw_id,
+            receiver_raw_id,
+            box_function_scoped_id,
+            box_stdlib_scoped_id,
             int_add_id,
             int_sub_id,
             int_mul_id,
@@ -811,6 +906,8 @@ impl JitCompiler {
             int_abs_id,
             float_div_id,
             has_exception_id,
+            not_bool_id,
+            truthy_id,
             box_int_scoped_id,
             box_float_scoped_id,
             box_bool_scoped_id,
@@ -867,7 +964,7 @@ impl JitCompiler {
     ) -> Option<JitFnEntry> {
         // ── Eligibility check ─────────────────────────────────────────────────
         for p in &func.params {
-            if !is_jit_abi_supported(&p.ty) {
+            if !is_jit_abi_supported(func.param_abi_ty(p)) {
                 return None;
             }
         }
@@ -913,7 +1010,8 @@ impl JitCompiler {
                     let target = program.functions.get(id.0 as usize)?;
                     if args.len() != target.params.len()
                         || args.iter().zip(&target.params).any(|(arg, param)| {
-                            jit_operand_type(arg, &local_types).as_ref() != Some(&param.ty)
+                            jit_operand_type(arg, &local_types).as_ref()
+                                != Some(target.param_abi_ty(param))
                         })
                     {
                         return None;
@@ -999,7 +1097,19 @@ impl JitCompiler {
             let call_fn_raw_ref = self
                 .module
                 .declare_func_in_func(self.call_fn_raw_id, builder.func);
+            let truthy_ref = self
+                .module
+                .declare_func_in_func(self.truthy_id, builder.func);
             let rt = JitRuntimeRefs {
+                receiver_raw: self
+                    .module
+                    .declare_func_in_func(self.receiver_raw_id, builder.func),
+                box_function_scoped: self
+                    .module
+                    .declare_func_in_func(self.box_function_scoped_id, builder.func),
+                box_stdlib_scoped: self
+                    .module
+                    .declare_func_in_func(self.box_stdlib_scoped_id, builder.func),
                 int_abs: self
                     .module
                     .declare_func_in_func(self.int_abs_id, builder.func),
@@ -1027,6 +1137,9 @@ impl JitCompiler {
                 int_neg: self
                     .module
                     .declare_func_in_func(self.int_neg_id, builder.func),
+                not_bool: self
+                    .module
+                    .declare_func_in_func(self.not_bool_id, builder.func),
                 has_exception: self
                     .module
                     .declare_func_in_func(self.has_exception_id, builder.func),
@@ -1134,7 +1247,7 @@ impl JitCompiler {
                 let entry_params: Vec<Value> = builder.block_params(cl_blocks[0]).to_vec();
                 for (idx, param) in func.params.iter().enumerate() {
                     let raw_i64 = entry_params[idx];
-                    let actual = abi_i64_to_native(&mut builder, raw_i64, &param.ty);
+                    let actual = abi_i64_to_native(&mut builder, raw_i64, func.param_abi_ty(param));
                     builder.def_var(cl_vars[param.local.0 as usize], actual);
                 }
             }
@@ -1216,16 +1329,36 @@ impl JitCompiler {
                                         let dest_ty = dest
                                             .and_then(|local| local_types.get(&local))
                                             .unwrap_or(&MirTy::Nothing);
-                                        emit_container_method_call(
-                                            &mut builder,
-                                            &cl_vars,
-                                            &local_types,
-                                            &rt,
-                                            receiver,
-                                            mname.as_ref(),
-                                            args,
-                                            dest_ty,
-                                        )?
+                                        if mname.as_ref() == "invoke" && !is_scalar_ty(dest_ty) {
+                                            let emit_ctx = RvalueEmitCtx {
+                                                vars: &cl_vars,
+                                                local_types: &local_types,
+                                                ns_locals: &namespace_locals,
+                                                interner,
+                                                call_fn_raw_ref,
+                                                rt: &rt,
+                                            };
+                                            emit_receiver_operation(
+                                                &mut self.module,
+                                                &mut builder,
+                                                receiver,
+                                                "invoke",
+                                                args,
+                                                true,
+                                                &emit_ctx,
+                                            )?
+                                        } else {
+                                            emit_container_method_call(
+                                                &mut builder,
+                                                &cl_vars,
+                                                &local_types,
+                                                &rt,
+                                                receiver,
+                                                mname.as_ref(),
+                                                args,
+                                                dest_ty,
+                                            )?
+                                        }
                                     }
                                 }
                                 Callee::Fn(fid) => {
@@ -1247,6 +1380,31 @@ impl JitCompiler {
                             if let Some(d) = dest {
                                 builder.def_var(cl_vars[d.0 as usize], val);
                             }
+                            emit_jit_exception_check(&mut builder, &rt)?;
+                        }
+                        Instr::GetField {
+                            dest,
+                            object,
+                            field,
+                        } => {
+                            let emit_ctx = RvalueEmitCtx {
+                                vars: &cl_vars,
+                                local_types: &local_types,
+                                ns_locals: &namespace_locals,
+                                interner,
+                                call_fn_raw_ref,
+                                rt: &rt,
+                            };
+                            let value = emit_receiver_operation(
+                                &mut self.module,
+                                &mut builder,
+                                object,
+                                interner.resolve(*field).as_ref(),
+                                &[],
+                                false,
+                                &emit_ctx,
+                            )?;
+                            builder.def_var(cl_vars[dest.0 as usize], value);
                             emit_jit_exception_check(&mut builder, &rt)?;
                         }
                         Instr::GetIndex {
@@ -1306,8 +1464,7 @@ impl JitCompiler {
                         | Instr::AwaitPending { .. }
                         | Instr::JoinAll { .. }
                         | Instr::ParallelIter { .. }
-                        | Instr::SetField { .. }
-                        | Instr::GetField { .. } => return None,
+                        | Instr::SetField { .. } => return None,
 
                         Instr::CertainCheck { .. } => {}
                         Instr::Drop { .. } | Instr::Nop => {}
@@ -1345,17 +1502,34 @@ impl JitCompiler {
                         then_bb,
                         else_bb,
                     } => {
-                        let cond_val = load_operand(&mut builder, &cl_vars, cond);
-                        let cond_ty = builder.func.dfg.value_type(cond_val);
-                        // brif needs any-int condition (non-zero = true)
-                        let cond_i64 = match cond_ty {
-                            t if t == I8 => builder.ins().uextend(I64, cond_val),
-                            t if t == F64 => {
-                                let zero = builder.ins().f64const(0.0);
-                                let flag = builder.ins().fcmp(FloatCC::NotEqual, cond_val, zero);
-                                builder.ins().uextend(I64, flag)
+                        let cond_flag = match jit_operand_type(cond, &local_types) {
+                            Some(MirTy::Boolean | MirTy::Integer | MirTy::Handle) => {
+                                load_operand(&mut builder, &cl_vars, cond)
                             }
-                            _ => cond_val,
+                            Some(MirTy::Float) => {
+                                let value = load_operand(&mut builder, &cl_vars, cond);
+                                let zero = builder.ins().f64const(0.0);
+                                builder.ins().fcmp(FloatCC::NotEqual, value, zero)
+                            }
+                            _ => {
+                                // I64 can also contain a boxed pointer. Reuse the
+                                // interpreter/AOT value contract, not pointer truth.
+                                let emit_ctx = RvalueEmitCtx {
+                                    vars: &cl_vars,
+                                    local_types: &local_types,
+                                    ns_locals: &namespace_locals,
+                                    interner,
+                                    call_fn_raw_ref,
+                                    rt: &rt,
+                                };
+                                let boxed = box_operand_for_abi(
+                                    &mut self.module,
+                                    &mut builder,
+                                    cond,
+                                    &emit_ctx,
+                                )?;
+                                call_runtime(&mut builder, truthy_ref, &[boxed])?
+                            }
                         };
 
                         let then_args = collect_phi_args(
@@ -1376,7 +1550,7 @@ impl JitCompiler {
                         );
 
                         builder.ins().brif(
-                            cond_i64,
+                            cond_flag,
                             cl_blocks[then_bb.0 as usize],
                             &then_args,
                             cl_blocks[else_bb.0 as usize],
@@ -1409,7 +1583,11 @@ impl JitCompiler {
 
         Some(JitFnEntry {
             fn_ptr: Some(fn_ptr),
-            param_tys: func.params.iter().map(|p| p.ty.clone()).collect(),
+            param_tys: func
+                .params
+                .iter()
+                .map(|p| func.param_abi_ty(p).clone())
+                .collect(),
             return_ty: func.return_ty.clone(),
         })
     }
@@ -1427,6 +1605,9 @@ struct RvalueEmitCtx<'a> {
 }
 
 struct JitRuntimeRefs {
+    receiver_raw: cranelift_codegen::ir::FuncRef,
+    box_function_scoped: cranelift_codegen::ir::FuncRef,
+    box_stdlib_scoped: cranelift_codegen::ir::FuncRef,
     int_add: cranelift_codegen::ir::FuncRef,
     int_sub: cranelift_codegen::ir::FuncRef,
     int_mul: cranelift_codegen::ir::FuncRef,
@@ -1437,6 +1618,7 @@ struct JitRuntimeRefs {
     int_abs: cranelift_codegen::ir::FuncRef,
     float_div: cranelift_codegen::ir::FuncRef,
     has_exception: cranelift_codegen::ir::FuncRef,
+    not_bool: cranelift_codegen::ir::FuncRef,
     box_int_scoped_ref: cranelift_codegen::ir::FuncRef,
     box_float_scoped_ref: cranelift_codegen::ir::FuncRef,
     box_bool_scoped_ref: cranelift_codegen::ir::FuncRef,
@@ -1687,9 +1869,19 @@ fn emit_rvalue(
     ctx: &RvalueEmitCtx<'_>,
 ) -> Option<Value> {
     match rhs {
-        Rvalue::Literal(lit) => Some(emit_literal(builder, lit)),
+        Rvalue::Literal(lit) => match dest_ty {
+            MirTy::Integer | MirTy::Float | MirTy::Boolean | MirTy::Handle => {
+                Some(emit_literal(builder, lit))
+            }
+            _ => box_const_for_abi(module, builder, lit, ctx),
+        },
 
-        Rvalue::Use(op) => Some(load_operand(builder, ctx.vars, op)),
+        Rvalue::Use(op) => match dest_ty {
+            MirTy::Integer | MirTy::Float | MirTy::Boolean | MirTy::Handle => {
+                Some(load_operand(builder, ctx.vars, op))
+            }
+            _ => box_operand_for_abi(module, builder, op, ctx),
+        },
 
         Rvalue::Binary { op, lhs, rhs } => {
             let left = operand_scalar_kind(lhs, ctx.local_types)?;
@@ -1715,6 +1907,14 @@ fn emit_rvalue(
             emit_binop(builder, *op, lv, rv, dest_ty, ctx.rt)
         }
 
+        Rvalue::Unary {
+            op: fidan_ast::UnOp::Not,
+            operand,
+        } if jit_operand_type(operand, ctx.local_types).is_some_and(|ty| !is_scalar_ty(&ty)) => {
+            let raw = box_operand_for_abi(module, builder, operand, ctx)?;
+            let call = builder.ins().call(ctx.rt.not_bool, &[raw]);
+            Some(builder.inst_results(call)[0])
+        }
         Rvalue::Unary { op, operand } => {
             let kind = operand_scalar_kind(operand, ctx.local_types)?;
             let valid = match op {
@@ -1750,7 +1950,7 @@ fn emit_rvalue(
                     method,
                 },
             args,
-        } => {
+        } if ctx.ns_locals.contains_key(recv) => {
             let ns = ctx.ns_locals.get(recv)?;
             let mname = ctx.interner.resolve(*method);
             emit_stdlib_method_call(
@@ -1769,6 +1969,11 @@ fn emit_rvalue(
             args,
         } => {
             let mname = ctx.interner.resolve(*method);
+            if mname.as_ref() == "invoke" && !is_scalar_ty(dest_ty) {
+                return emit_receiver_operation(
+                    module, builder, receiver, "invoke", args, true, ctx,
+                );
+            }
             emit_container_method_call(
                 builder,
                 ctx.vars,
@@ -1783,6 +1988,37 @@ fn emit_rvalue(
 
         _ => None,
     }
+}
+
+fn is_scalar_ty(ty: &MirTy) -> bool {
+    matches!(
+        ty,
+        MirTy::Integer | MirTy::Float | MirTy::Boolean | MirTy::Handle
+    )
+}
+
+fn emit_receiver_operation(
+    module: &mut JITModule,
+    builder: &mut FunctionBuilder,
+    receiver: &Operand,
+    name: &str,
+    args: &[Operand],
+    invoke: bool,
+    ctx: &RvalueEmitCtx<'_>,
+) -> Option<Value> {
+    let receiver = box_operand_for_abi(module, builder, receiver, ctx)?;
+    let (np, nl) = str_const(module, builder, name)?;
+    let values = args
+        .iter()
+        .map(|arg| box_operand_for_abi(module, builder, arg, ctx))
+        .collect::<Option<Vec<_>>>()?;
+    let (ap, ac) = stack_i64_array(builder, &values);
+    let mode = builder.ins().iconst(I8, i64::from(invoke));
+    call_runtime(
+        builder,
+        ctx.rt.receiver_raw,
+        &[receiver, np, nl, ap, ac, mode],
+    )
 }
 
 fn emit_tuple_rvalue(
@@ -1860,6 +2096,18 @@ fn box_const_for_abi(
         MirLit::Str(text) => {
             let (ptr, len) = str_const(module, builder, text)?;
             call_runtime(builder, ctx.rt.box_str_scoped_ref, &[ptr, len])
+        }
+        MirLit::FunctionRef(id) => {
+            let id = builder.ins().iconst(I64, *id as i64);
+            call_runtime(builder, ctx.rt.box_function_scoped, &[id])
+        }
+        MirLit::StdlibFn {
+            module: module_name,
+            name,
+        } => {
+            let (mp, ml) = str_const(module, builder, module_name)?;
+            let (np, nl) = str_const(module, builder, name)?;
+            call_runtime(builder, ctx.rt.box_stdlib_scoped, &[mp, ml, np, nl])
         }
         _ => None,
     }
@@ -2494,6 +2742,181 @@ mod tests {
             assert_ne!(fidan_runtime::ffi::fdn_has_exception(), 0);
             let exception = unsafe { Box::from_raw(fidan_runtime::ffi::fdn_catch_exception()) };
             assert!(fidan_runtime::display(&exception).contains(code));
+        }
+    }
+
+    #[test]
+    fn boxed_branch_conditions_execute_natively() {
+        use fidan_runtime::{FidanDict, FidanHashSet, FidanList, FidanString, OwnedRef, SharedRef};
+        let live = SharedRef::from_value(FidanValue::Integer(1));
+        let expired = SharedRef::from_value(FidanValue::Integer(1)).downgrade();
+        let cases = [
+            (FidanValue::Boolean(false), 0),
+            (FidanValue::Boolean(true), 1),
+            (FidanValue::Nothing, 0),
+            (FidanValue::Integer(0), 0),
+            (FidanValue::Integer(-42), 1),
+            (FidanValue::Float(-0.0), 0),
+            (FidanValue::Float(0.5), 1),
+            (FidanValue::Float(f64::NAN), 1),
+            (FidanValue::Handle(0), 0),
+            (FidanValue::Handle(1), 1),
+            (FidanValue::String(FidanString::new("")), 0),
+            (FidanValue::String(FidanString::new("ä")), 1),
+            (FidanValue::List(OwnedRef::new(FidanList::new())), 1),
+            (FidanValue::Dict(OwnedRef::new(FidanDict::new())), 1),
+            (FidanValue::Tuple(vec![]), 1),
+            (FidanValue::HashSet(OwnedRef::new(FidanHashSet::new())), 0),
+            (
+                FidanValue::HashSet(OwnedRef::new(
+                    FidanHashSet::from_values([FidanValue::Integer(1)]).unwrap(),
+                )),
+                1,
+            ),
+            (
+                FidanValue::Range {
+                    start: 1,
+                    end: 1,
+                    inclusive: false,
+                },
+                0,
+            ),
+            (
+                FidanValue::Range {
+                    start: 1,
+                    end: 1,
+                    inclusive: true,
+                },
+                1,
+            ),
+            (FidanValue::WeakShared(live.downgrade()), 1),
+            (FidanValue::WeakShared(expired), 0),
+        ];
+        for (control, type_name) in ["if", "while"].into_iter().flat_map(|control| {
+            [
+                "flexible", "string", "integer", "float", "boolean", "handle",
+            ]
+            .map(|type_name| (control, type_name))
+        }) {
+            let (mir, interner) = lower(&format!(
+                "action choose with (condition oftype {type_name}) returns integer {{ {control} condition {{ return 1 }}; return 0 }}",
+            ));
+            let function = mir
+                .functions
+                .iter()
+                .find(|f| interner.resolve(f.name).as_ref() == "choose")
+                .unwrap();
+            let mut jit = JitCompiler::new();
+            let entry = jit.compile_function(function, &mir, &interner);
+            assert!(
+                entry.is_native(),
+                "boxed {control} condition must execute native JIT"
+            );
+            for _ in 0..100 {
+                for (condition, expected) in &cases {
+                    if type_name != "flexible" && type_name != condition.type_name() {
+                        continue;
+                    }
+                    let result = with_jit_runtime_context(std::ptr::null_mut(), || {
+                        call_jit_fn(&entry, std::slice::from_ref(condition))
+                    });
+                    assert!(
+                        matches!(result, FidanValue::Integer(value) if value == *expected),
+                        "{control} {condition:?}: {result:?}"
+                    );
+                }
+            }
+        }
+        for handle in [0, 1, usize::MAX] {
+            let raw = encode_jit_abi_value(&FidanValue::Handle(handle), &MirTy::Handle);
+            assert_eq!(raw as usize, handle);
+            assert!(
+                matches!(decode_jit_abi_value(raw, &MirTy::Handle), FidanValue::Handle(value) if value == handle)
+            );
+        }
+    }
+
+    #[test]
+    fn boxed_branch_literals_are_materialized_for_native_jit() {
+        let (mir, interner) = lower(
+            "action choose with (condition oftype flexible) returns integer { if condition { return 1 }; return 0 }",
+        );
+        let original = mir
+            .functions
+            .iter()
+            .find(|f| interner.resolve(f.name).as_ref() == "choose")
+            .unwrap();
+        for (literal, expected) in [
+            (MirLit::Str("".into()), 0),
+            (MirLit::Str("text".into()), 1),
+            (MirLit::Nothing, 0),
+        ] {
+            let mut function = original.clone();
+            for block in &mut function.blocks {
+                if let Terminator::Branch { cond, .. } = &mut block.terminator {
+                    *cond = Operand::Const(literal.clone());
+                }
+            }
+            let mut jit = JitCompiler::new();
+            let entry = jit.compile_function(&function, &mir, &interner);
+            assert!(entry.is_native());
+            let result = with_jit_runtime_context(std::ptr::null_mut(), || {
+                call_jit_fn(&entry, &[FidanValue::Nothing])
+            });
+            assert!(matches!(result, FidanValue::Integer(value) if value == expected));
+        }
+    }
+
+    #[test]
+    fn boxed_branch_local_literals_and_copies_are_materialized() {
+        let (mir, interner) = lower(
+            "action choose with (condition oftype flexible) returns integer { if condition { return 1 }; return 0 }",
+        );
+        let original = mir
+            .functions
+            .iter()
+            .find(|f| interner.resolve(f.name).as_ref() == "choose")
+            .unwrap();
+        for (literal, expected) in [
+            (MirLit::Str("".into()), 0),
+            (MirLit::Str("text".into()), 1),
+            (MirLit::Bool(false), 0),
+            (MirLit::Int(0), 0),
+            (MirLit::Int(42), 1),
+            (MirLit::Float(-0.0), 0),
+            (MirLit::Nothing, 0),
+        ] {
+            for rhs in [
+                Rvalue::Literal(literal.clone()),
+                Rvalue::Use(Operand::Const(literal)),
+            ] {
+                let mut function = original.clone();
+                let local = LocalId(function.local_count);
+                function.local_count += 1;
+                for block in &mut function.blocks {
+                    if let Terminator::Branch { cond, .. } = &mut block.terminator {
+                        *cond = Operand::Local(local);
+                    }
+                }
+                function.blocks[0].instructions.insert(
+                    0,
+                    Instr::Assign {
+                        dest: local,
+                        ty: MirTy::Dynamic,
+                        rhs,
+                    },
+                );
+                let mut jit = JitCompiler::new();
+                let entry = jit.compile_function(&function, &mir, &interner);
+                assert!(entry.is_native());
+                let result = with_jit_runtime_context(std::ptr::null_mut(), || {
+                    call_jit_fn(&entry, &[FidanValue::Nothing])
+                });
+                assert!(
+                    matches!(result, FidanValue::Integer(value) if value == expected),
+                    "{result:?}"
+                );
+            }
         }
     }
 

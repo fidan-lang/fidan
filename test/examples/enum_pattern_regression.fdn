@@ -1,0 +1,41 @@
+enum Result {
+    Ok(integer)
+    Err(string)
+    toString(integer)
+}
+var item = Result.Ok(3)
+var value = 99
+var answer = check item {
+    Result.Ok(value) => value
+    otherwise => 0
+}
+assert_eq(answer, 3)
+assert_eq(value, 99)
+var observed = 0
+check item {
+    Result.Ok(value) => { observed = value }
+    otherwise => { observed = -1 }
+}
+assert_eq(observed, 3)
+# Literal payloads are values to compare, not variable-binding patterns.
+var literal = check item {
+    Result.Ok(2) => false
+    Result.Ok(3) => true
+    otherwise => false
+}
+assert_eq(literal, true)
+var failure = Result.Err("message")
+var message = check failure {
+    Result.Err(text) => text
+    otherwise => "missing"
+}
+assert_eq(message, "message")
+
+# Variant names retain constructor semantics even when they resemble conversions.
+var conversion_named = Result.toString(7)
+assert_eq(type(conversion_named), "enum")
+var conversion_payload = check conversion_named {
+    Result.toString(value) => value
+    otherwise => 0
+}
+assert_eq(conversion_payload, 7)
