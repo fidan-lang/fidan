@@ -43,7 +43,8 @@ compiler releases.
 - Isolate mutable parallel capture/global graphs and Shared snapshots; failed updates
   roll back callback mutations. Reject foreign cooperative scheduler handles cleanly.
 - Require matching LLVM backend protocol8 for thread-local native globals. Existing
-  public1.0.16/helper1.0.6 assets are unchanged; a coordinated future patch pair is required.
+  public 1.0.16/helper 1.0.6 assets are unchanged. The selected next release is Fidan 1.1.0 stable
+  with LLVM helper 1.1.0; publication remains a separate approval gate.
 
 ### Fixed
 - Honor advertised Unicode string and collection length properties through shared receiver dispatch.
@@ -66,7 +67,7 @@ compiler releases.
 - Enforce existing interpreter sandbox policy for std.env and canonical filesystem
   boundaries. Update the compatible rustls security patch.
 - Require LLVM backend protocol 8 for the current module/callable/thread-local-global ABI. This needs a
-  future separately versioned compiler/helper release; existing published assets and
+  coordinated Fidan 1.1.0 stable / LLVM helper 1.1.0 release; existing published assets and
   package versions are unchanged by this local preparation.
 
 ## [1.0.16] — 2026-10-07
