@@ -17,6 +17,7 @@ use std::time::Duration;
 #[derive(Parser)]
 #[command(
     name = "fidan-ai-analysis-helper",
+    version,
     about = "AI analysis helper process for Fidan toolchains"
 )]
 struct Cli {

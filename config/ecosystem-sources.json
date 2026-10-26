@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "setup_sha": "f02424b12857f728098a2ec42760ad8c4304aa7d",
+  "args_sha": "855acdd025962633cd784ce7ddbbfb9a4384956d",
+  "dal_sha": "5e8aa66e6e859d56899d4c10124cc9a033b7b517",
+  "scope": "Reviewed source snapshots; consumer-only CI reference commits do not repin producers"
+}
