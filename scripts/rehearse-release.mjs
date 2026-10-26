@@ -5,11 +5,14 @@ import {createServer} from 'node:http';
 import {spawn,spawnSync} from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
-const [compilerArg,fragmentArg,payloadArg,outputArg]=process.argv.slice(2);
+const [compilerArg,fragmentArg,payloadArg,outputArg,argsArg]=process.argv.slice(2);
 assert(compilerArg&&fragmentArg&&payloadArg&&outputArg,'Usage: node scripts/rehearse-release.mjs <candidate-cli> <helper-fragment> <payload-root> <new-target-output>');
 const compiler=path.resolve(compilerArg), output=path.resolve(outputArg);
+const argsRoot=path.resolve(argsArg ?? path.join(root,'../args'));
+let argsArchive;
+let argsIndex;
 assert(output.startsWith(path.join(root,'target')+path.sep),'Output must remain in this checkout target/');
 fs.mkdirSync(output); // Never overwrite a previous rehearsal.
 const candidate=JSON.parse(fs.readFileSync(path.join(root,'config/release-candidate.json'),'utf8'));
@@ -25,7 +28,7 @@ const binary=process.platform==='win32'?'fidan.exe':'fidan';
 fs.copyFileSync(compiler,path.join(stage,binary));
 for(const name of ['LICENSE','NOTICE'])fs.copyFileSync(path.join(root,name),path.join(stage,name));
 // Include the matching source ABI runtime required for native link tests.
-for(const name of fs.readdirSync(path.join(root,'target/debug')).filter(n=>/^(?:lib)?fidan_runtime\.(?:lib|dll|dll.lib|a|so|dylib)$/.test(n)))
+for(const name of fs.readdirSync(path.dirname(compiler)).filter(n=>/^(?:lib)?fidan_runtime\.(?:lib|dll|dll.lib|a|so|dylib)$/.test(n)))
  fs.copyFileSync(path.join(root,'target/debug',name),path.join(stage,name));
 const compilerArchive=path.join(output,'compiler.tar.gz');
 assert.equal(spawnSync('tar',['-czf',compilerArchive,'-C',stage,'.'],{windowsHide:true}).status,0);
@@ -43,13 +46,15 @@ const server=createServer((req,res)=>{
  if(req.url==='/manifest.json'){res.setHeader('Content-Type','application/json');res.end(JSON.stringify(served));}
  else if(req.url==='/compiler.tar.gz')fs.createReadStream(compilerArchive).pipe(res);
  else if(req.url==='/helper.tar.gz')fs.createReadStream(archive).pipe(res);
+ else if(req.url==='/index/args' && argsIndex)res.end(JSON.stringify(argsIndex));
+ else if(req.url==='/packages/args/versions/0.1.0/download' && argsArchive)fs.createReadStream(argsArchive).pipe(res);
  else {res.statusCode=404;res.end();}
 });
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const base=`http://127.0.0.1:${server.address().port}`;
 served.fidan_versions[0].url=base+'/compiler.tar.gz';served.toolchains[0].url=base+'/helper.tar.gz';
-async function run(exe,args,allowed=0){
- const child=spawn(exe,args,{cwd:root,env:{...isolated,FIDAN_DIST_MANIFEST:base+'/manifest.json'},windowsHide:true,signal:AbortSignal.timeout(120000),stdio:['ignore','pipe','pipe']});
+async function run(exe,args,allowed=0,cwd=root){
+ const child=spawn(exe,args,{cwd,env:{...isolated,FIDAN_DIST_MANIFEST:base+'/manifest.json'},windowsHide:true,signal:AbortSignal.timeout(120000),stdio:['ignore','pipe','pipe']});
  let out='',err='';child.stdout.on('data',v=>out+=v);child.stderr.on('data',v=>err+=v);
  const status=await new Promise((resolve,reject)=>{child.once('error',reject);child.once('close',resolve);});
  if(allowed===0)assert.equal(status,0,`${args.join(' ')}: ${err}`);else assert.notEqual(status,0);
@@ -67,17 +72,37 @@ try{
  const before=JSON.parse(fs.readFileSync(activeFile,"utf8")).active_version;
  const installedCompiler=path.join(installRoot,"versions",candidate.compiler_version,binary);
  const beforeBinary=digest(installedCompiler);
- served.fidan_versions[0].version='1.1.0-rc.2';served.fidan_versions[0].sha256='0'.repeat(64);
- assert.match(await run(compiler,['self','install','1.1.0-rc.2'],1),/checksum|sha-?256|hash/i);
+ served.fidan_versions[0].version='1.1.1';served.fidan_versions[0].sha256='0'.repeat(64);
+ assert.match(await run(compiler,['self','install','1.1.1'],1),/checksum|sha-?256|hash/i);
  assert.equal(JSON.parse(fs.readFileSync(activeFile,'utf8')).active_version,before,'Failed install changed active version');
  assert.equal(digest(installedCompiler),beforeBinary,'Failed install replaced the active binary');
- served.toolchains[0].toolchain_version='1.1.0-rc.2';served.toolchains[0].sha256='0'.repeat(64);
- assert.match(await run(compiler,['toolchain','add','llvm','--version','1.1.0-rc.2'],1),/checksum|sha-?256|hash/i);
+ served.toolchains[0].toolchain_version='1.1.1';served.toolchains[0].sha256='0'.repeat(64);
+ assert.match(await run(compiler,['toolchain','add','llvm','--version','1.1.1'],1),/checksum|sha-?256|hash/i);
  assert.equal(JSON.parse(fs.readFileSync(path.join(installed,'metadata.json'),'utf8')).backend_protocol_version,8);
+ const installedVersion = await run(installedCompiler,['--version']);
+ assert.match(installedVersion,new RegExp('^fidan '+candidate.compiler_version.replaceAll('.', '\\.')+'\\s*$'));
  const smoke=path.join(output,'smoke.fdn');fs.writeFileSync(smoke,'assert_eq(2 ** -3, 0.125)\nprint("candidate protocol eight")\n');
  const native=path.join(output,process.platform==='win32'?'smoke.exe':'smoke');
- await run(installedCompiler,['build','--backend','llvm','--lto','full',smoke,'-o',native]);
- assert.match(await run(native,[]),/candidate protocol eight/);
+ for (const backend of ['cranelift','llvm']) {
+  await run(installedCompiler,['build','--backend',backend,...(backend==='llvm'?['--lto','full']:[]),smoke,'-o',native]);
+  assert.match(await run(native,[]),/candidate protocol eight/);
+ }
+ const {stageLocalPackage}=await import(pathToFileURL(path.join(argsRoot,'tests/stage-local.mjs')));
+ const stagedArgs=stageLocalPackage(path.join(output,'args'),installedCompiler);
+ argsArchive=path.join(output,'args-0.1.0.tar.gz');
+ await run(installedCompiler,['dal','package',stagedArgs,'--output',argsArchive]);
+ argsIndex={name:'args',vers:candidate.args_version,yanked:false,cksum:digest(argsArchive),fidan:candidate.args_compiler_requirement};
+ const consumer=path.join(output,'consumer');fs.mkdirSync(consumer);
+ fs.writeFileSync(path.join(consumer,'dal.toml'),'[package]\nname = "stable-rehearsal-consumer"\nversion = "0.1.0"\n');
+ await run(installedCompiler,['dal','add','args','--registry',base],0,consumer);
+ assert(fs.readFileSync(path.join(consumer,'dal.lock'),'utf8').includes(argsIndex.cksum));
+ const consumerSource=path.join(consumer,'main.fdn');
+ fs.writeFileSync(consumerSource,'use args.{run}\naction greet with (optional name oftype string = "world") { print("Hello, " + name) }\nrun(greet)\n');
+ for(const threshold of ['0','1'])assert.match(await run(installedCompiler,['run','--jit-threshold',threshold,consumerSource,'--','--name','Ada'],0,consumer),/Hello, Ada/);
+ for(const backend of ['cranelift','llvm']) {
+  await run(installedCompiler,['build','--backend',backend,...(backend==='llvm'?['--lto','full']:[]),consumerSource,'-o',native],0,consumer);
+  assert.match(await run(native,['--name','Ada'],0,consumer),/Hello, Ada/);
+ }
  const requestFile=path.join(output,'wrong-protocol-request.json'),responseFile=path.join(output,'wrong-protocol-response.json');
  fs.writeFileSync(requestFile,JSON.stringify({protocol_version:5,input:smoke,output:native,runtime_dir:path.dirname(installedCompiler),payload:{program:{functions:[],objects:[],enums:[],use_decls:[],globals:[],test_functions:[],namespace_global_count:0},symbols:[]},opt_level:'o2',lto:'full',strip:'off',emit_obj:false,extra_lib_dirs:[],link_dynamic:false,target_cpu:null}));
  await run(path.join(installed,helper.helper_relpath),['compile','--request',requestFile,'--response',responseFile]);
@@ -87,6 +112,6 @@ try{
  fs.writeFileSync(path.join(installed,'metadata.json'),JSON.stringify({...meta,backend_protocol_version:5}));
  assert.match(await run(installedCompiler,['build','--backend','llvm',smoke,'-o',native],1),/protocol|compatible|installed/i);
  fs.writeFileSync(path.join(installed,'metadata.json'),JSON.stringify(meta));
- fs.writeFileSync(path.join(output,'receipt.json'),JSON.stringify({status:'LOCAL_REHEARSAL_COMPLETE_NOT_PUBLISHED',candidate,home,compiler_sha256:digest(compiler),helper_sha256:digest(archive),checks:['compiler install/use','helper install protocol8','legal bytes','corrupt compiler rollback','corrupt helper rollback','LLVM full LTO','protocol5 request and metadata rejected']},null,2));
+ fs.writeFileSync(path.join(output,'receipt.json'),JSON.stringify({status:'LOCAL_REHEARSAL_COMPLETE_NOT_PUBLISHED',candidate,home,compiler_sha256:digest(compiler),helper_sha256:digest(archive),checks:['compiler install/use','helper install protocol8','legal bytes','corrupt compiler rollback','corrupt helper rollback','Cranelift and LLVM full LTO','args install/lock/interpreter/JIT/native','protocol5 request and metadata rejected']},null,2));
  console.log(`Local compiler/helper candidate rehearsal passed; home=${home}`);
 }finally{await new Promise(resolve=>server.close(resolve));}

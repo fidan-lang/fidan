@@ -14,6 +14,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 BINARY = Path(os.environ.get("FIDAN_BIN", ROOT / "target/debug" / ("fidan.exe" if os.name == "nt" else "fidan")))
 
+ARGS_ROOT = Path(os.environ.get("FIDAN_ARGS_ROOT", ROOT.parent / "args")).resolve()
 
 class Rpc:
     def __init__(self, cli_args=()):
@@ -164,14 +165,14 @@ class ArgsLspTests(unittest.TestCase):
         try:
             rpc.initialize()
             for relative in ("src/core.fdn", "src/app.fdn", "src/init.fdn", "examples/greet.fdn"):
-                path = ROOT.parent / "args" / relative
+                path = ARGS_ROOT / relative
                 text = path.read_text(encoding="utf-8")
                 diagnostics = rpc.open(path, text)
                 self.assertFalse([item for item in diagnostics if item.get("severity", 1) <= 2],
                                  f"{relative}: {diagnostics}")
                 changed = rpc.change(path, text + "\n", 2)
                 self.assertFalse([item for item in changed if item.get("severity", 1) <= 2], changed)
-            path = ROOT.parent / "args/examples/greet.fdn"
+            path = ARGS_ROOT / "examples/greet.fdn"
             text = path.read_text(encoding="utf-8")
             invalid = rpc.change(path, text + "\n@missing_decorator_control\naction invalid_control {}\nprint(greet.missing_member_control)\n", 3)
             self.assertTrue(any(item.get("code") == "W2004" for item in invalid), invalid)

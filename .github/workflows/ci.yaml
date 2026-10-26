@@ -122,7 +122,7 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           repository: fidan-lang/fidan-actions
-          ref: a1800c42f9fba633b78ab6a96c204952ebca5ff5
+          ref: 096d2a496cfd03b31fb0e67e4cdbb34f23f98df3
           path: .ci-actions
           persist-credentials: false
       - run: python -m pip install PyYAML==6.0.3

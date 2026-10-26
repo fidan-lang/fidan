@@ -15,8 +15,10 @@ def configuration(root=ROOT):
     if candidate["status"] != "PROPOSED_NOT_RELEASED":
         raise ValueError("Only explicitly proposed candidates may be staged")
     for key in ("compiler_version", "llvm_helper_version"):
-        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+-rc\.[1-9][0-9]*", candidate[key]):
-            raise ValueError("Rehearsals require explicit rc versions")
+        if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", candidate[key]):
+            raise ValueError("Release preparation requires stable SemVer versions")
+    if candidate["llvm_helper_version"] != candidate["compiler_version"]:
+        raise ValueError("Compiler and protocol-8 helper must use the same stable release version")
     source = (root / "crates/fidan-driver/src/llvm_helper.rs").read_text()
     protocol = int(re.search(r"LLVM_BACKEND_PROTOCOL_VERSION: u32 = (\d+)", source)[1])
     if candidate["llvm_backend_protocol"] != protocol:
@@ -47,8 +49,9 @@ def prepare(output, args_root, root=ROOT):
         raise ValueError("Candidate destination already exists; never overwrite")
     candidate = configuration(root)
     args_root = args_root.resolve()
-    if tomllib.loads((args_root / "dal.toml").read_text())["package"]["name"] != "args":
-        raise ValueError("Expected the actual args source repository")
+    args_package = tomllib.loads((args_root / "dal.toml").read_text())["package"]
+    if args_package["name"] != "args" or args_package["version"] != candidate["args_version"]:
+        raise ValueError("Expected the actual args source repository at the selected package version")
     output.mkdir(parents=True)
     compiler = output / "fidan"
     copy_source(root, compiler)

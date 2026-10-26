@@ -20,6 +20,21 @@ class CandidateTests(unittest.TestCase):
         self.assertEqual(value["llvm_backend_protocol"], 8)
         self.assertEqual(value["args_compiler_requirement"], "=" + value["compiler_version"])
 
+    def test_final_release_is_stable_and_rejects_unmatched_or_prerelease_pairs(self):
+        value = candidate.configuration()
+        self.assertEqual(value["compiler_version"], "1.1.0")
+        self.assertEqual(value["llvm_helper_version"], "1.1.0")
+        with tempfile.TemporaryDirectory(dir=ROOT / "target") as temp:
+            fixture = Path(temp)
+            (fixture / "config").mkdir()
+            source = fixture / "crates/fidan-driver/src"
+            source.mkdir(parents=True)
+            (source / "llvm_helper.rs").write_text((ROOT / "crates/fidan-driver/src/llvm_helper.rs").read_text())
+            for changes in ({"compiler_version": "1.1.0-rc.1"}, {"llvm_helper_version": "1.0.6"}, {"compiler_version": "01.1.0"}):
+                (fixture / "config/release-candidate.json").write_text(json.dumps({**value, **changes}))
+                with self.assertRaises(ValueError):
+                    candidate.configuration(fixture)
+
     def test_unsafe_or_existing_destinations_are_never_overwritten(self):
         with self.assertRaises(ValueError):
             candidate.prepare(ROOT.parent / "outside-candidate", ROOT.parent / "args")
@@ -38,6 +53,10 @@ class CandidateTests(unittest.TestCase):
             self.assertEqual(tomllib.loads((output / "fidan/crates/fidan-llvm-helper/Cargo.toml").read_text())["package"]["version"], value["llvm_helper_version"])
             self.assertEqual(tomllib.loads((output / "args/dal.toml").read_text())["package"]["fidan"], value["args_compiler_requirement"])
             self.assertEqual(json.loads((output / "release-preparation.json").read_text())["status"], "PROPOSED_NOT_RELEASED")
+            for package in lock["package"]:
+                if package["name"].startswith("fidan-") and "source" not in package:
+                    expected = "1.0.4" if package["name"] == "fidan-ai-analysis-helper" else value["compiler_version"]
+                    self.assertEqual(package["version"], expected, package["name"])
             self.assertEqual((output / "fidan/NOTICE").read_bytes(), (ROOT / "NOTICE").read_bytes())
         self.assertEqual(before, [p.read_bytes() for p in names])
 

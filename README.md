@@ -1392,3 +1392,17 @@ collections/enums, callable reflection, args, complete generated API/CLI catalog
 and migration. Its exact-source CI is a coordinated PR dependency, not proof that
 the new website/compiler/package has already been published. Production release
 approval remains separate from local engineering validation.
+
+## Planned stable release sequence
+
+The next coordinated release is **Fidan 1.1.0 stable** with **LLVM helper 1.1.0**
+(protocol 8), followed by **args 0.1.0**. No public RC is planned.
+The source checkout still reports 1.0.16 until isolated release preparation applies
+`config/release-candidate.json`; source-candidate CI identifies it by exact commit.
+Published 1.0.16 and older helper artifacts remain immutable.
+
+Release order: engineering/merge gates → Fidan 1.1.0 stable artifacts → DAL
+production readiness and launch → args 0.1.0 publication → approved editor,
+website and distribution updates. The args source manifest remains blocked until
+both its compatible compiler release and production registry are operational.
+Preparation and CI do not authorize tags, publication or deployment.
