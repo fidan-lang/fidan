@@ -245,6 +245,30 @@ pub fn extract_tar_gz(bytes: &[u8], destination: &Path) -> Result<()> {
         .with_context(|| format!("failed to unpack archive into `{}`", destination.display()))
 }
 
+// Explicit unlocking is required even when a concurrently spawned child briefly
+// inherits a duplicate handle; closing only this handle need not release the lock.
+struct ReleasePublicationLock(fs::File);
+
+impl ReleasePublicationLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(path)?;
+        file.try_lock()
+            .context("another installer is publishing this release; retry after it finishes")?;
+        Ok(Self(file))
+    }
+}
+impl Drop for ReleasePublicationLock {
+    fn drop(&mut self) {
+        if let Err(error) = self.0.unlock() {
+            eprintln!("warning: could not release installation lock: {error}");
+        }
+    }
+}
 pub fn materialize_release_root(
     staging_dir: &Path,
     expected_relpath: &Path,
@@ -262,15 +286,7 @@ pub fn materialize_release_root(
     lock_name.push(".install.lock");
     // Keep this sibling file in place: unlinking a locked file permits a second
     // inode/handle to bypass serialization on Unix. OS ownership ends on crash.
-    let publication_lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(parent.join(lock_name))?;
-    publication_lock
-        .try_lock()
-        .context("another installer is publishing this release; retry after it finishes")?;
+    let _publication_lock = ReleasePublicationLock::acquire(&parent.join(lock_name))?;
 
     let candidate = if staging_dir.join(expected_relpath).exists() {
         staging_dir.to_path_buf()
@@ -518,14 +534,7 @@ mod tests {
         fs::write(staging.join("helper"), b"NEW").unwrap();
         fs::write(final_dir.join("helper"), b"OLD").unwrap();
         fs::write(final_dir.join("metadata.json"), b"OLD metadata").unwrap();
-        let lock = fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(root.join("installed.install.lock"))
-            .unwrap();
-        lock.try_lock().unwrap();
+        let lock = ReleasePublicationLock::acquire(&root.join("installed.install.lock")).unwrap();
         let candidate = staging.clone();
         let destination = final_dir.clone();
         let result = std::thread::spawn(move || {
@@ -564,6 +573,28 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn publication_scope_releases_lock_while_an_inherited_handle_remains_open() {
+        let root = test_temp_dir("inherited-release-lock");
+        let path = root.join("installed.install.lock");
+        for failure in [false, true] {
+            let lock = ReleasePublicationLock::acquire(&path).unwrap();
+            let inherited = lock.0.try_clone().unwrap();
+            let result: Result<()> = (|| {
+                let _lock = lock;
+                if failure {
+                    bail!("candidate validation failed");
+                }
+                Ok(())
+            })();
+            assert_eq!(result.is_err(), failure);
+            let next = ReleasePublicationLock::acquire(&path)
+                .expect("scope exit must release the lock before every inherited handle closes");
+            drop(next);
+            drop(inherited);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn manifest_rejects_install_path_escape_before_any_download() {
         let root = test_temp_dir("unsafe-manifest");
