@@ -41,6 +41,7 @@ class PublicationTests(unittest.TestCase):
                 return {}
             with patch.object(publisher, "aws", side_effect=aws):
                 publisher.publish(bundle)
+            self.assertIn("#install-from-a-published-release", (bundle / "release-notes.md").read_text())
             puts = [args for operation, args in calls if operation == "put-object"]
             self.assertEqual(len(puts), 2)
             self.assertIn("--if-none-match", puts[0])
