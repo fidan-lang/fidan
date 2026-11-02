@@ -398,6 +398,27 @@ fn short_circuit_side_effects_exceptions_and_conditional_evaluation() {
 }
 
 #[test]
+fn xor_precedence_evaluation_order_and_runtime_types() {
+    let source = include_str!("../../../test/examples/xor_precedence_regression.fdn");
+    for threshold in [0, 1] {
+        run_src_with_threshold(source, threshold)
+            .unwrap_or_else(|error| panic!("threshold {threshold}: {}", error.message));
+    }
+    for mode in [0, 1, 2] {
+        let (mut program, interner) = build_mir(source);
+        match mode {
+            1 => fidan_passes::run_preserving_call_frames(&mut program),
+            2 => fidan_passes::run_all(&mut program),
+            _ => {}
+        }
+        let sources = Arc::new(SourceMap::new());
+        sources.add_file("<xor>", source);
+        run_mir(program, interner, sources)
+            .unwrap_or_else(|error| panic!("optimization mode {mode}: {}", error.message));
+    }
+}
+
+#[test]
 fn short_circuit_agrees_before_and_after_optimization() {
     let source = include_str!("../../../test/examples/short_circuit_regression.fdn");
     for mode in [0, 1, 2] {

@@ -2627,6 +2627,7 @@ fn lower_binary(
                 return Ok(call_rt(module, builder, rt.make_range, &[l, r, inc])?
                     .unwrap_or_else(|| builder.ins().iconst(PTR_TY, 0)));
             }
+            Xor => anyhow::bail!("logical xor must be normalized during MIR lowering"),
             And | Or => {
                 // Box and dispatch through C ABI.
                 let lb = call_rt(module, builder, rt.box_int, &[l])?.unwrap();
@@ -2723,6 +2724,7 @@ fn dyn_binop(
         LtEq => rt.dyn_le,
         Gt => rt.dyn_gt,
         GtEq => rt.dyn_ge,
+        Xor => anyhow::bail!("logical xor must be normalized during MIR lowering"),
         And => rt.dyn_and,
         Or => rt.dyn_or,
         BitXor => rt.dyn_bit_xor,

@@ -3190,4 +3190,24 @@ mod diagnostic_transport_tests {
             }
         }
     }
+    #[test]
+    fn xor_editor_diagnostics_preserve_strict_types_and_contextual_identifiers() {
+        let invalid = analyze("var result = true xor 1\n", "file:///xor.fdn");
+        assert!(
+            invalid.diagnostics.iter().any(|diag| diag.code
+                == Some(lsp::NumberOrString::String("E0203".into()))
+                && diag.severity == Some(lsp::DiagnosticSeverity::ERROR)),
+            "{:?}",
+            invalid.diagnostics
+        );
+        let valid = analyze("var xor = true\nprint(xor xor false)\n", "file:///xor.fdn");
+        assert!(
+            !valid
+                .diagnostics
+                .iter()
+                .any(|diag| diag.severity == Some(lsp::DiagnosticSeverity::ERROR)),
+            "{:?}",
+            valid.diagnostics
+        );
+    }
 }

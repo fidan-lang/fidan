@@ -1888,6 +1888,9 @@ fn emit_rvalue(
             let right = operand_scalar_kind(rhs, ctx.local_types)?;
             use fidan_ast::BinOp;
             let valid = match op {
+                BinOp::BitXor => {
+                    left == StdlibValueKind::Integer && right == StdlibValueKind::Integer
+                }
                 BinOp::And | BinOp::Or => {
                     left == StdlibValueKind::Boolean && right == StdlibValueKind::Boolean
                 }
@@ -2324,6 +2327,7 @@ fn emit_binop(
             }
         }
 
+        BinOp::BitXor if lv_ty == I64 && rv_ty == I64 => builder.ins().bxor(lv, rv),
         BinOp::And => {
             let li = ensure_i64(builder, lv, lv_ty);
             let ri = ensure_i64(builder, rv, rv_ty);

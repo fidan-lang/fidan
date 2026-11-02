@@ -1783,4 +1783,34 @@ old()
             );
         }
     }
+    #[test]
+    fn xor_rejects_every_known_non_boolean_without_coercion() {
+        for operand in [
+            "1",
+            "1.5",
+            "\"text\"",
+            "[]",
+            "{\"x\": 1}",
+            "nothing",
+            "hashset()",
+        ] {
+            for expression in [
+                format!("true xor {operand}"),
+                format!("{operand} xor false"),
+            ] {
+                let interner = Arc::new(SymbolInterner::new());
+                let file =
+                    SourceFile::new(FileId(0), "<xor>", format!("var result = {expression}"));
+                let (tokens, lexical) = Lexer::new(&file, Arc::clone(&interner)).tokenise();
+                let (module, parsed) = fidan_parser::parse(&tokens, file.id, Arc::clone(&interner));
+                assert!(lexical.is_empty() && parsed.is_empty());
+                assert!(
+                    typecheck(&module, interner)
+                        .iter()
+                        .any(|diagnostic| diagnostic.code == "E0203"),
+                    "{expression}"
+                );
+            }
+        }
+    }
 }

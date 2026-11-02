@@ -5,7 +5,7 @@
 //! wrapped when they exceed the configured soft line-length limit.
 
 use crate::printer::Printer;
-use fidan_ast::{Arg, BinOp, Expr, ExprId, InterpPart, Param, StmtId, TypeExpr, UnOp};
+use fidan_ast::{Arg, BinOp, Expr, ExprId, InterpPart, Param, StmtId, TypeExpr, UnOp, precedence};
 
 #[derive(Clone)]
 enum ChainSegment {
@@ -22,23 +22,6 @@ enum LayoutMode {
 
 // ── Precedence ────────────────────────────────────────────────────────────────
 
-/// Precedence of a binary operator (higher = binds tighter).
-fn binop_prec(op: BinOp) -> u8 {
-    match op {
-        BinOp::Range | BinOp::RangeInclusive => 2,
-        BinOp::Or => 3,
-        BinOp::And => 4,
-        BinOp::Eq | BinOp::NotEq | BinOp::Lt | BinOp::LtEq | BinOp::Gt | BinOp::GtEq => 5,
-        BinOp::BitOr => 6,
-        BinOp::BitXor => 7,
-        BinOp::BitAnd => 8,
-        BinOp::Shl | BinOp::Shr => 9,
-        BinOp::Add | BinOp::Sub => 10,
-        BinOp::Mul | BinOp::Div | BinOp::Rem => 11,
-        BinOp::Pow => 12,
-    }
-}
-
 /// Textual representation of a binary operator.
 pub(crate) fn binop_str(op: BinOp) -> &'static str {
     match op {
@@ -54,6 +37,7 @@ pub(crate) fn binop_str(op: BinOp) -> &'static str {
         BinOp::LtEq => "<=",
         BinOp::Gt => ">",
         BinOp::GtEq => ">=",
+        BinOp::Xor => "xor",
         BinOp::And => "and",
         BinOp::Or => "or",
         BinOp::BitXor => "^",
@@ -98,7 +82,7 @@ pub fn emit_expr_after_prefix(p: &mut Printer<'_>, id: ExprId) {
         if let Some((root, segments)) = decompose_chain_expr(p, id)
             && root_fits_after_prefix(p, root)
         {
-            emit_expr_prec(p, root, 15);
+            emit_expr_prec(p, root, precedence::POSTFIX);
             emit_wrapped_chain_segments(p, &segments);
         } else {
             p.indent_in();
@@ -158,17 +142,11 @@ fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: Layo
 
         // ── Binary ────────────────────────────────────────────────────────
         Expr::Binary { op, lhs, rhs, .. } => {
-            let prec = binop_prec(op);
+            let (prec, rhs_min) = op.binding_power();
             let needs_parens = prec < min_prec;
             if needs_parens {
                 p.w("(");
             }
-            // Right operand needs prec+1 for left-associative ops (all except Pow).
-            // For Pow use the same prec so `a ** b ** c` parses as `a ** (b ** c)`.
-            let rhs_min = match op {
-                BinOp::Pow => prec,
-                _ => prec + 1,
-            };
             emit_expr_prec_mode(p, lhs, prec, mode);
             p.w(" ");
             p.w(binop_str(op));
@@ -182,12 +160,12 @@ fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: Layo
         // ── Unary ─────────────────────────────────────────────────────────
         Expr::Unary { op, operand, .. } => {
             // Unary operators bind very tightly (prec 14).
-            let needs_parens = 14_u8 < min_prec;
+            let needs_parens = precedence::PREFIX < min_prec;
             if needs_parens {
                 p.w("(");
             }
             p.w(unop_str(op));
-            emit_expr_prec_mode(p, operand, 14, mode);
+            emit_expr_prec_mode(p, operand, precedence::PREFIX, mode);
             if needs_parens {
                 p.w(")");
             }
@@ -196,7 +174,7 @@ fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: Layo
         // ── Null-coalesce ─────────────────────────────────────────────────
         Expr::NullCoalesce { lhs, rhs, .. } => {
             // Treat ?? as prec 1 (just above ternary).
-            let prec = 1_u8;
+            let prec = precedence::NULL_COALESCE;
             let needs_parens = prec < min_prec;
             if needs_parens {
                 p.w("(");
@@ -211,7 +189,7 @@ fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: Layo
 
         // ── Postfix: call, field, index ────────────────────────────────────
         Expr::Call { callee, args, .. } => {
-            emit_expr_prec_mode(p, callee, 15, mode);
+            emit_expr_prec_mode(p, callee, precedence::POSTFIX, mode);
             p.w("(");
             if mode == LayoutMode::Normal && should_break_arg_list(p, &args) {
                 emit_multiline_arg_list_mode(p, &args, mode);
@@ -221,13 +199,13 @@ fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: Layo
             p.w(")");
         }
         Expr::Field { object, field, .. } => {
-            emit_expr_prec_mode(p, object, 15, mode);
+            emit_expr_prec_mode(p, object, precedence::POSTFIX, mode);
             p.w(".");
             let s = p.sym_s(field);
             p.w(&s);
         }
         Expr::Index { object, index, .. } => {
-            emit_expr_prec_mode(p, object, 15, mode);
+            emit_expr_prec_mode(p, object, precedence::POSTFIX, mode);
             p.w("[");
             emit_expr_prec_mode(p, index, 0, mode);
             p.w("]");
@@ -235,14 +213,14 @@ fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: Layo
 
         // ── Assignment (expression form) ───────────────────────────────────
         Expr::Assign { target, value, .. } => {
-            emit_expr_prec_mode(p, target, 15, mode);
+            emit_expr_prec_mode(p, target, precedence::POSTFIX, mode);
             p.w(" = ");
             emit_expr_prec_mode(p, value, 0, mode);
         }
         Expr::CompoundAssign {
             op, target, value, ..
         } => {
-            emit_expr_prec_mode(p, target, 15, mode);
+            emit_expr_prec_mode(p, target, precedence::POSTFIX, mode);
             p.w(" ");
             p.w(binop_str(op));
             p.w("= ");
@@ -262,11 +240,11 @@ fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: Layo
         // ── Spawn / await ─────────────────────────────────────────────────
         Expr::Spawn { expr, .. } => {
             p.w("spawn ");
-            emit_expr_prec_mode(p, expr, 13, mode);
+            emit_expr_prec_mode(p, expr, precedence::PREFIX, mode);
         }
         Expr::Await { expr, .. } => {
             p.w("await ");
-            emit_expr_prec_mode(p, expr, 13, mode);
+            emit_expr_prec_mode(p, expr, precedence::PREFIX, mode);
         }
 
         // ── Ternary ──────────────────────────────────────────────────────
@@ -277,7 +255,7 @@ fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: Layo
             else_val,
             ..
         } => {
-            let needs_parens = 0_u8 < min_prec;
+            let needs_parens = precedence::TERNARY < min_prec;
             if needs_parens {
                 p.w("(");
             }
@@ -336,7 +314,7 @@ fn emit_expr_prec_mode(p: &mut Printer<'_>, id: ExprId, min_prec: u8, mode: Layo
             step,
             ..
         } => {
-            emit_expr_prec_mode(p, target, 15, mode);
+            emit_expr_prec_mode(p, target, precedence::POSTFIX, mode);
             p.w("[");
             if let Some(s) = start {
                 emit_expr_prec_mode(p, s, 0, mode);
@@ -704,7 +682,7 @@ fn collect_chain_segments(p: &Printer<'_>, id: ExprId, segments: &mut Vec<ChainS
 }
 
 fn emit_wrapped_chain_expr(p: &mut Printer<'_>, root: ExprId, segments: &[ChainSegment]) {
-    emit_expr_prec(p, root, 15);
+    emit_expr_prec(p, root, precedence::POSTFIX);
     emit_wrapped_chain_segments(p, segments);
 }
 
@@ -738,7 +716,8 @@ fn emit_wrapped_chain_segments(p: &mut Printer<'_>, segments: &[ChainSegment]) {
 }
 
 fn root_fits_after_prefix(p: &Printer<'_>, root: ExprId) -> bool {
-    p.current_line_len() + render_expr_fragment(p, root, 15).len() <= p.opts.max_line_len
+    p.current_line_len() + render_expr_fragment(p, root, precedence::POSTFIX).len()
+        <= p.opts.max_line_len
 }
 
 fn should_break_arg_list(p: &Printer<'_>, args: &[Arg]) -> bool {

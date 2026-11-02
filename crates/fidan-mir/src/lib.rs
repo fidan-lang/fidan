@@ -222,4 +222,54 @@ mod tests {
             "expected stdlib namespace method call to lower as a namespace literal receiver"
         );
     }
+    #[test]
+    fn xor_uses_eager_checked_boolean_operations_in_the_existing_protocol() {
+        let program = lower(
+            "action calculate with (left oftype flexible, right oftype flexible) returns boolean { return left xor right }",
+        );
+        let function = &program.functions[1];
+        let instructions: Vec<_> = function
+            .blocks
+            .iter()
+            .flat_map(|block| &block.instructions)
+            .collect();
+        assert_eq!(
+            instructions
+                .iter()
+                .filter(|instruction| matches!(
+                    instruction,
+                    Instr::Assign {
+                        rhs: Rvalue::Unary {
+                            op: fidan_ast::UnOp::Not,
+                            ..
+                        },
+                        ty: MirTy::Boolean,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+        assert!(instructions.iter().any(|instruction| matches!(
+            instruction,
+            Instr::Assign {
+                rhs: Rvalue::Binary {
+                    op: fidan_ast::BinOp::NotEq,
+                    ..
+                },
+                ty: MirTy::Boolean,
+                ..
+            }
+        )));
+        assert!(!instructions.iter().any(|instruction| matches!(
+            instruction,
+            Instr::Assign {
+                rhs: Rvalue::Binary {
+                    op: fidan_ast::BinOp::Xor,
+                    ..
+                },
+                ..
+            }
+        )));
+    }
 }

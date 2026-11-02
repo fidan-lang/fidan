@@ -77,6 +77,7 @@ const COMPLETION_KEYWORDS: &[&str] = &[
     "true",
     "false",
     "and",
+    "xor",
     "or",
     "not",
     "set",

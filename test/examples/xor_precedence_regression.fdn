@@ -1,0 +1,118 @@
+# Boolean xor is eager; ^ remains integer-only. See docs/OPERATORS.md.
+action logical_xor with (certain left oftype boolean, certain right oftype boolean) returns boolean {
+    return left xor right
+}
+action erased_xor with (left oftype flexible, right oftype flexible) returns boolean {
+    return left xor right
+}
+action discard_xor with (left oftype flexible, right oftype flexible) {
+    left xor right
+}
+action dynamic_integer_xor with (left oftype flexible, right oftype flexible) returns flexible {
+    return left ^ right
+}
+const var constant_xor = true xor false
+assert_eq(constant_xor, true)
+action integer_xor with (certain left oftype integer, certain right oftype integer) returns integer {
+    return left ^ right
+}
+var events = []
+action mark with (certain label oftype string, value oftype flexible) returns flexible {
+    events.append(label)
+    return value
+}
+action fail returns boolean {
+    events.append("failure")
+    panic("xor failure")
+}
+for index in 0..20 {
+    assert_eq(logical_xor(false, false), false)
+    assert_eq(logical_xor(false, true), true)
+    assert_eq(logical_xor(true, false), true)
+    assert_eq(logical_xor(true, true), false)
+    assert_eq(erased_xor(true, false), true)
+    assert_eq(integer_xor(-1, 0), -1)
+    assert_eq(integer_xor(0b1101, 0b1011), 6)
+}
+assert_eq(0 ^ 0, 0)
+assert_eq(-1 ^ -1, 0)
+assert_eq(4 ^ 2 & 3, 6)
+assert_eq((4 ^ 2) & 3, 2)
+assert_eq(4 ^ (2 & 3), 6)
+assert_eq(1 | 2 ^ 3 & 4 << 1 + 1 * 2 ** 3, 3)
+assert_eq(8 >> 1 + 1, 2)
+assert_eq(1 + 2 << 1, 6)
+assert_eq(1 | 2 == 3, true)
+assert_eq(2 ** 3 ** 2, 64) # Preserve existing power associativity.
+assert_eq(2 ** (3 ** 2), 512)
+assert_eq((2 ** 3) ** 2, 64)
+assert_eq(not true xor true, true)
+assert_eq(false xor true and false, false)
+assert_eq(true or true xor true, true)
+assert_eq(1 < 2 xor 3 > 4, true)
+assert_eq(true xor false xor true, false)
+assert_eq(nothing ?? true xor false, true)
+assert_eq(true xor false if true else false, true)
+assert_eq(len(0..1 + 2), 3)
+assert_eq(mark("left", false) xor mark("right", true), true)
+assert_eq(events, ["left", "right"])
+events = []
+assert_eq(mark("a", true) xor mark("b", false) xor mark("c", true), false)
+assert_eq(events, ["a", "b", "c"])
+events = []
+var caught = 0
+attempt { print(false xor fail()) } catch error {
+    assert_eq(error, "xor failure")
+    caught = caught + 1
+}
+attempt { print(true xor fail()) } catch error {
+    assert_eq(error, "xor failure")
+    caught = caught + 1
+}
+assert_eq(events, ["failure", "failure"])
+assert_eq(caught, 2)
+events = []
+attempt { print(mark("invalid", 1) xor mark("evaluated", true)) } catch error {
+    assert(string(error).contains("R0001"))
+    caught = caught + 1
+}
+assert_eq(events, ["invalid", "evaluated"])
+assert_eq(caught, 3)
+for invalid in [1, 1.5, "invalid", [], {"x": 1}, nothing] {
+    caught = 0
+    attempt { print(erased_xor(invalid, false)) } catch error {
+        assert(string(error).contains("R0001"))
+        caught = caught + 1
+    }
+    attempt { print(erased_xor(true, invalid)) } catch error {
+        assert(string(error).contains("R0001"))
+        caught = caught + 1
+    }
+    attempt { discard_xor(invalid, true) } catch error {
+        assert(string(error).contains("R0001"))
+        caught = caught + 1
+    }
+    attempt { discard_xor(false, invalid) } catch error {
+        assert(string(error).contains("R0001"))
+        caught = caught + 1
+    }
+    assert_eq(caught, 4)
+}
+for invalid in [true, 1.5, "invalid", [], {"x": 1}, nothing] {
+    caught = 0
+    attempt { print(dynamic_integer_xor(invalid, 1)) } catch error {
+        assert(string(error).contains("R0001"))
+        caught = caught + 1
+    }
+    attempt { print(dynamic_integer_xor(1, invalid)) } catch error {
+        assert(string(error).contains("R0001"))
+        caught = caught + 1
+    }
+    assert_eq(caught, 2)
+}
+# Contextual spelling remains usable for bindings, calls and properties.
+var xor = true
+assert_eq(xor xor false, true)
+object Named { var xor oftype boolean = false }
+assert_eq(Named().xor xor true, true)
+print("xor precedence passed")

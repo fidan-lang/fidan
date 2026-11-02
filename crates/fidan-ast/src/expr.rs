@@ -258,6 +258,8 @@ pub enum BinOp {
     Shr,            // `>>`
     Range,          // `..`  exclusive (start..end)
     RangeInclusive, // `...` inclusive (start...end)
+    /// Strict Boolean exclusive-or; evaluates both operands once, left to right.
+    Xor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
