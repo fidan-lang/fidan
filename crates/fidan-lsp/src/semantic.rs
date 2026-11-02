@@ -18,7 +18,7 @@
 //!   bit 1 = readonly
 
 use crate::symbols::{SymKind, SymbolTable};
-use fidan_ast::{Item, Module};
+use fidan_ast::{BinOp, Expr, Item, Module};
 use fidan_config::is_type_like_name;
 use fidan_lexer::{Symbol, SymbolInterner, Token, TokenKind};
 use fidan_source::SourceFile;
@@ -100,6 +100,19 @@ pub fn compute(
 
     let n = meaningful.len();
     let enum_variant_decl_starts = enum_variant_declaration_starts(module);
+    // Use the parsed operator positions, not its spelling: `xor` remains a valid
+    // variable, function, parameter and property name in all other contexts.
+    let xor_starts: std::collections::HashSet<u32> = module.arena.exprs.iter()
+        .filter_map(|expr| {
+            let Expr::Binary { op: BinOp::Xor, lhs, rhs, .. } = expr else { return None; };
+            let end = module.arena.get_expr(*lhs).span().end;
+            let start = module.arena.get_expr(*rhs).span().start;
+            // Operand spans omit grouping parentheses, so inspect their token gap.
+            tokens[tokens.partition_point(|token| token.span.start < end)..]
+                .iter().take_while(|token| token.span.start < start)
+                .find(|token| matches!(token.kind, TokenKind::Ident(symbol) if interner.resolve(symbol).as_ref() == "xor"))
+                .map(|token| token.span.start)
+        }).collect();
 
     // Pre-pass: collect the set of symbols that appear in parameter-declaration
     // position so that `ident(` can be coloured as TT_PARAMETER (red) rather
@@ -226,7 +239,9 @@ pub fn compute(
         // Emit an explicit TT_KEYWORD so these are always coloured as keywords
         // regardless of which TextMate scope happens to apply nearby.
         let span_len = tok.span.end - tok.span.start;
-        if matches!(tok.kind, TokenKind::Comma | TokenKind::Semicolon) && span_len > 1 {
+        if xor_starts.contains(&tok.span.start)
+            || matches!(tok.kind, TokenKind::Comma | TokenKind::Semicolon) && span_len > 1
+        {
             let range = crate::convert::span_to_range(file, tok.span);
             let line = range.start.line;
             let start = range.start.character;
@@ -733,5 +748,27 @@ mod tests {
             token_types.iter().filter(|&&tt| tt == TT_TYPE).count() >= 1,
             "expected handle parameter type references to use type coloring: {token_types:?}"
         );
+    }
+    #[test]
+    fn contextual_xor_colors_only_the_operator_as_a_keyword() {
+        for expression in [
+            "xor xor false",
+            "(xor) xor (false)",
+            "((xor)) xor ((false))",
+        ] {
+            let tokens = semantic_token_text_types_for(&format!(
+                "var xor = true\nvar result = {expression}\nprint(xor)\n"
+            ));
+            let kinds: Vec<_> = tokens
+                .into_iter()
+                .filter(|(text, _)| text == "xor")
+                .map(|(_, kind)| kind)
+                .collect();
+            assert_eq!(
+                kinds,
+                vec![TT_VARIABLE, TT_VARIABLE, TT_KEYWORD, TT_VARIABLE],
+                "{expression}"
+            );
+        }
     }
 }

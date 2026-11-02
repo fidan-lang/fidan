@@ -928,6 +928,41 @@ impl<'p> FnCtx<'p> {
                 );
                 Operand::Local(dest)
             }
+            HirExprKind::Binary {
+                op: BinOp::Xor,
+                lhs,
+                rhs,
+            } => {
+                // Evaluate both operands before type validation, without branches.
+                // Existing strict Boolean negation checks boxed/nullable values in
+                // every backend. Comparing the inverted Booleans implements XOR
+                // without extending the runtime ABI or serialized helper protocol.
+                let operands = [self.lower_expr(lhs), self.lower_expr(rhs)];
+                let checked = operands.map(|operand| {
+                    let dest = self.alloc_local();
+                    self.emit(Instr::Assign {
+                        dest,
+                        ty: MirTy::Boolean,
+                        rhs: Rvalue::Unary {
+                            op: fidan_ast::UnOp::Not,
+                            operand,
+                        },
+                    });
+                    Operand::Local(dest)
+                });
+                let [lhs, rhs] = checked;
+                let dest = self.alloc_local();
+                self.emit(Instr::Assign {
+                    dest,
+                    ty: MirTy::Boolean,
+                    rhs: Rvalue::Binary {
+                        op: BinOp::NotEq,
+                        lhs,
+                        rhs,
+                    },
+                });
+                Operand::Local(dest)
+            }
             HirExprKind::Binary { op, lhs, rhs } => {
                 let l = self.lower_expr(lhs);
                 let r = self.lower_expr(rhs);

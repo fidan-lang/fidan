@@ -3705,6 +3705,7 @@ impl<'m, 'ctx, 'a> FunctionState<'m, 'ctx, 'a> {
             BinOp::LtEq => self.lower_cmp("fdn_dyn_le", lhs, rhs),
             BinOp::Gt => self.lower_cmp("fdn_dyn_gt", lhs, rhs),
             BinOp::GtEq => self.lower_cmp("fdn_dyn_ge", lhs, rhs),
+            BinOp::Xor => anyhow::bail!("logical xor must be normalized during MIR lowering"),
             BinOp::And => self.call_ptr("fdn_dyn_and", &[lhs.into(), rhs.into()]),
             BinOp::Or => self.call_ptr("fdn_dyn_or", &[lhs.into(), rhs.into()]),
             BinOp::BitXor => self.call_ptr("fdn_dyn_bit_xor", &[lhs.into(), rhs.into()]),

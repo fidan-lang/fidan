@@ -2977,3 +2977,61 @@ fn function_entry_guards_are_not_reentered_by_mir_backedges() {
     }
     remove_native_fixtures(&directory);
 }
+
+#[test]
+fn xor_precedence_and_errors_agree_across_aot_backends_and_optimization() {
+    let directory = temp_dir("fidan_xor_precedence");
+    for backend in [Backend::Cranelift, Backend::Llvm] {
+        if backend == Backend::Llvm && !llvm_available() {
+            eprintln!("SKIP LLVM XOR conformance: no compatible local helper");
+            continue;
+        }
+        for opt_level in [
+            OptLevel::O0,
+            OptLevel::O1,
+            OptLevel::O2,
+            OptLevel::O3,
+            OptLevel::Os,
+            OptLevel::Oz,
+        ] {
+            let output = directory.join(format!(
+                "xor-{backend:?}-{opt_level:?}{}",
+                std::env::consts::EXE_SUFFIX
+            ));
+            compile_program_with_settings(
+                include_str!("../../../test/examples/xor_precedence_regression.fdn"),
+                backend,
+                &output,
+                &AotTestSettings {
+                    opt_level,
+                    lto: if backend == Backend::Llvm {
+                        LtoMode::Full
+                    } else {
+                        LtoMode::Off
+                    },
+                    ..AotTestSettings::default()
+                },
+            );
+            run_compiled_binary_clean(&output, "xor precedence passed");
+        }
+        let output = directory.join(format!(
+            "invalid-xor-{backend:?}{}",
+            std::env::consts::EXE_SUFFIX
+        ));
+        compile_program_with_settings(
+            "var value oftype flexible = 1\nprint(true xor value)\n",
+            backend,
+            &output,
+            &AotTestSettings {
+                lto: if backend == Backend::Llvm {
+                    LtoMode::Full
+                } else {
+                    LtoMode::Off
+                },
+                ..AotTestSettings::default()
+            },
+        );
+        run_compiled_binary_expect_failure(&output, "R0001");
+    }
+    remove_native_fixtures(&directory);
+}

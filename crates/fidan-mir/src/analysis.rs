@@ -315,7 +315,7 @@ fn infer_rvalue_type(
                     MirTy::Integer
                 }
                 Add | Sub | Mul | Div | Rem | Pow => MirTy::Dynamic,
-                And | Or => MirTy::Boolean,
+                And | Xor | Or => MirTy::Boolean,
                 BitXor | BitAnd | BitOr | Shl | Shr
                     if matches!(lhs_ty, MirTy::Integer) && matches!(rhs_ty, MirTy::Integer) =>
                 {

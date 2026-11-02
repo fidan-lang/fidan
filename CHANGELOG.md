@@ -10,6 +10,26 @@ compiler releases.
 
 ## [Unreleased]
 
+### Added
+- Contextual Boolean `xor`, evaluated exactly once per operand from left to right,
+  with static E0203 and strict dynamic R0001 operand checks across execution backends.
+- Native selective-JIT lowering for integer bitwise XOR.
+
+### Fixed
+- Share operator precedence and associativity between parser and formatter.
+  Bitwise operators now follow power, multiplication, addition, shifts, `&`, `^`,
+  `|`, comparisons; logical tiers are `and`, `xor`, `or`. Existing tight prefix
+  `not` and left-associated `**` behavior are preserved.
+- Preserve parenthesized expression meaning during formatting, including powers.
+
+### Migration
+- Mixed unparenthesized bitwise expressions can change behavior: `4 ^ 2 & 3`
+  now returns `6` instead of `2`. Parenthesize intentional old grouping before
+  upgrading. See [the full operator contract](docs/OPERATORS.md).
+
+
+## [Unreleased]
+
 ## [1.1.0] — 2026-10-27
 
 ### Added

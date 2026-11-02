@@ -3357,7 +3357,7 @@ assert_eq(caught, true)
     }
 
     #[test]
-    fn short_circuit_executes_real_native_jit_entries() {
+    fn logical_operators_execute_real_native_jit_entries() {
         use fidan_lexer::Lexer;
         let source = r#"
 var effects = []
@@ -3366,6 +3366,9 @@ action lazy_and with (certain left oftype boolean) returns boolean { return left
 action lazy_or with (certain left oftype boolean) returns boolean { return left or probe() }
 action dynamic_and with (left oftype flexible, right oftype flexible) returns boolean { return left and right }
 action dynamic_or with (left oftype flexible, right oftype flexible) returns boolean { return left or right }
+action typed_xor with (certain left oftype boolean, certain right oftype boolean) returns boolean { return left xor right }
+action dynamic_xor with (left oftype flexible, right oftype flexible) returns boolean { return left xor right }
+action bit_xor with (certain left oftype integer, certain right oftype integer) returns integer { return left ^ right }
 for index in 0..100 {
     assert_eq(lazy_and(false), false)
     assert_eq(lazy_or(true), true)
@@ -3375,6 +3378,12 @@ for index in 0..100 {
     assert_eq(dynamic_or(true, nothing), true)
     assert_eq(dynamic_and(true, true), true)
     assert_eq(dynamic_or(false, false), false)
+    assert_eq(typed_xor(true, false), true)
+    assert_eq(typed_xor(false, true), true)
+    assert_eq(typed_xor(true, true), false)
+    assert_eq(typed_xor(false, false), false)
+    assert_eq(dynamic_xor(true, false), true)
+    assert_eq(bit_xor(-1, 3), -4)
 }
 assert_eq(len(effects), 200)
 var caught = 0
@@ -3398,7 +3407,15 @@ assert_eq(caught, 2)
         machine
             .run()
             .unwrap_or_else(|error| panic!("{}", error.message));
-        for name in ["lazy_and", "lazy_or", "dynamic_and", "dynamic_or"] {
+        for name in [
+            "lazy_and",
+            "lazy_or",
+            "dynamic_and",
+            "dynamic_or",
+            "typed_xor",
+            "dynamic_xor",
+            "bit_xor",
+        ] {
             let function = machine
                 .program
                 .functions

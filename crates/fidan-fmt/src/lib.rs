@@ -734,4 +734,94 @@ var x=1 # tail
             assert_round_trip_file(rel_path);
         }
     }
+    #[test]
+    fn xor_operator_roundtrip_preserves_structure_and_is_idempotent() {
+        use fidan_ast::{Expr, ExprId, Item};
+        fn tree(
+            module: &fidan_ast::Module,
+            id: ExprId,
+            names: &fidan_lexer::SymbolInterner,
+        ) -> String {
+            let arena = &module.arena;
+            match arena.get_expr(id) {
+                Expr::Binary { op, lhs, rhs, .. } => format!(
+                    "({:?} {} {})",
+                    op,
+                    tree(module, *lhs, names),
+                    tree(module, *rhs, names)
+                ),
+                Expr::Unary { op, operand, .. } => {
+                    format!("({op:?} {})", tree(module, *operand, names))
+                }
+                Expr::Ident { name, .. } => names.resolve(*name).to_string(),
+                Expr::NullCoalesce { lhs, rhs, .. } => format!(
+                    "(?? {} {})",
+                    tree(module, *lhs, names),
+                    tree(module, *rhs, names)
+                ),
+                Expr::Ternary {
+                    condition,
+                    then_val,
+                    else_val,
+                    ..
+                } => format!(
+                    "(if {} {} {})",
+                    tree(module, *condition, names),
+                    tree(module, *then_val, names),
+                    tree(module, *else_val, names)
+                ),
+                _ => panic!("unexpected test expression"),
+            }
+        }
+        fn structure(source: &str) -> String {
+            let names = std::sync::Arc::new(fidan_lexer::SymbolInterner::new());
+            let file =
+                fidan_source::SourceFile::new(fidan_source::FileId(0), "<roundtrip>", source);
+            let (tokens, lexical) = fidan_lexer::Lexer::new(&file, names.clone()).tokenise();
+            let (module, parsed) = fidan_parser::parse(&tokens, file.id, names.clone());
+            assert!(
+                lexical.is_empty() && parsed.is_empty(),
+                "{source}: {parsed:?}"
+            );
+            let Item::VarDecl {
+                init: Some(root), ..
+            } = module.arena.get_item(module.items[0])
+            else {
+                panic!("variable expected");
+            };
+            tree(&module, *root, &names)
+        }
+        let operators = [
+            "or", "xor", "and", "==", "|", "^", "&", "<<", "+", "*", "**",
+        ];
+        for first in operators {
+            for second in operators {
+                for expression in [
+                    format!("(a {first} b) {second} c"),
+                    format!("a {first} (b {second} c)"),
+                ] {
+                    let source = format!("var result = {expression}\n");
+                    let formatted = fmt(&source);
+                    assert_eq!(
+                        structure(&source),
+                        structure(&formatted),
+                        "{source} -> {formatted}"
+                    );
+                    assert_eq!(formatted, fmt(&formatted));
+                }
+            }
+        }
+        for expression in [
+            "not (a xor b)",
+            "(not a) xor b",
+            "a ?? (b xor c)",
+            "(a xor b) if c else d",
+            "(a..b) xor c",
+        ] {
+            let source = format!("var result = {expression}\n");
+            let formatted = fmt(&source);
+            assert_eq!(structure(&source), structure(&formatted), "{formatted}");
+            assert_eq!(formatted, fmt(&formatted));
+        }
+    }
 }

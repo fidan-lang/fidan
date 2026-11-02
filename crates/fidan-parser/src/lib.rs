@@ -489,6 +489,30 @@ mod tests {
     }
 
     #[test]
+    fn bitwise_precedence_and_left_associativity() {
+        use fidan_ast::{BinOp, Expr};
+        let (module, diags) = parse_src("var r = 4 ^ 2 & 3");
+        assert!(errors(&diags).is_empty());
+        let fidan_ast::Item::VarDecl {
+            init: Some(root), ..
+        } = module.arena.get_item(module.items[0])
+        else {
+            panic!("expected variable");
+        };
+        let Expr::Binary { op, rhs, .. } = module.arena.get_expr(*root) else {
+            panic!("expected final binary expression");
+        };
+        assert_eq!(*op, BinOp::BitXor);
+        assert!(matches!(
+            module.arena.get_expr(*rhs),
+            Expr::Binary {
+                op: BinOp::BitAnd,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn null_coalesce() {
         let (_, diags) = parse_src("var r = nothing ?? 42");
         assert!(
@@ -1041,5 +1065,84 @@ mod tests {
             "unexpected errors: {:?}",
             errors(&diags)
         );
+    }
+    #[test]
+    fn xor_context_preserves_calls_bindings_fields_and_statement_boundaries() {
+        for source in [
+            "action xor with (certain xor oftype boolean) returns boolean { return xor }\nvar previous = true\nxor(false)",
+            "var xor = true\nvar result = xor xor false",
+            "object Named { var xor oftype boolean = true }\nvar value = Named().xor xor false",
+        ] {
+            let (_, diagnostics) = parse_src(source);
+            assert!(errors(&diagnostics).is_empty(), "{source}: {diagnostics:?}");
+        }
+    }
+
+    #[test]
+    fn xor_and_bitwise_tiers_and_associativity_match_the_contract() {
+        use fidan_ast::{BinOp, Expr, Item};
+        let tiers = [
+            ("or", BinOp::Or),
+            ("xor", BinOp::Xor),
+            ("and", BinOp::And),
+            ("==", BinOp::Eq),
+            ("|", BinOp::BitOr),
+            ("^", BinOp::BitXor),
+            ("&", BinOp::BitAnd),
+            ("<<", BinOp::Shl),
+            ("+", BinOp::Add),
+            ("*", BinOp::Mul),
+            ("**", BinOp::Pow),
+        ];
+        for pair in tiers.windows(2) {
+            for expression in [
+                format!("a {} b {} c", pair[0].0, pair[1].0),
+                format!("a {} b {} c", pair[1].0, pair[0].0),
+            ] {
+                let (module, diagnostics) = parse_src(&format!("var result = {expression}"));
+                assert!(errors(&diagnostics).is_empty(), "{diagnostics:?}");
+                let Item::VarDecl {
+                    init: Some(root), ..
+                } = module.arena.get_item(module.items[0])
+                else {
+                    panic!("variable expected");
+                };
+                assert!(
+                    matches!(module.arena.get_expr(*root),Expr::Binary{op,..} if *op==pair[0].1),
+                    "{expression}"
+                );
+            }
+        }
+        for (spelling, expected) in tiers {
+            let (module, _) = parse_src(&format!("var result = a {spelling} b {spelling} c"));
+            let Item::VarDecl {
+                init: Some(root), ..
+            } = module.arena.get_item(module.items[0])
+            else {
+                panic!("variable expected");
+            };
+            let Expr::Binary { op, lhs, .. } = module.arena.get_expr(*root) else {
+                panic!("binary expected");
+            };
+            assert_eq!(*op, expected);
+            assert!(
+                matches!(module.arena.get_expr(*lhs), Expr::Binary {op,..} if *op==expected),
+                "left association: {spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn xor_call_after_a_declaration_is_not_reinterpreted_as_an_operator() {
+        use fidan_ast::{Expr, Item};
+        let (module, diags) = parse_src(
+            "action xor with (certain value oftype boolean) returns boolean {return value}\nvar previous = true\nxor(false)",
+        );
+        assert!(errors(&diags).is_empty());
+        assert_eq!(module.items.len(), 3);
+        let Item::ExprStmt(call) = module.arena.get_item(module.items[2]) else {
+            panic!("last statement must remain a call");
+        };
+        assert!(matches!(module.arena.get_expr(*call), Expr::Call { .. }));
     }
 }

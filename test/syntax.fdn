@@ -136,6 +136,8 @@ var op_pow2 = 2 pow 10   # `pow` alias for `**`
 var op_bitand = 0b1101 & 0b1011
 var op_bitor  = 0b1101 | 0b1011
 var op_bitxor = 0b1101 ^ 0b1011
+var op_logical_xor = true xor false
+var op_bitwise_precedence = 4 ^ 2 & 3  # 4 ^ (2 & 3) = 6
 var op_shl    = 1 << 3
 var op_shr    = 8 >> 2
 

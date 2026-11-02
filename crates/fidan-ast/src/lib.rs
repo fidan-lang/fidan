@@ -4,6 +4,7 @@ mod arena;
 mod expr;
 mod item;
 mod module;
+pub mod precedence;
 mod print;
 mod stmt;
 mod visitor;

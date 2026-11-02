@@ -3974,3 +3974,33 @@ fn sandbox_diagnostic_codes_are_catchable_at_each_jit_threshold() {
     }
     std::fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn repl_xor_is_eager_strict_and_preserves_identifier_calls() {
+    let output=run_repl_session(&["--trace","none"],br#"var effects = []
+action touch with (certain value oftype boolean) returns boolean { effects.append(value); return value }
+print(touch(false) xor touch(true))
+print("xor-count=" + string(len(effects)))
+var invalid oftype flexible = 1
+print(true xor invalid)
+print(1 xor true)
+print("xor-bits=" + string(4 ^ 2 & 3))
+action xor with (certain value oftype boolean) returns boolean { return value }
+print("identifier-xor=" + string(xor(true)))
+print("xor repl finished")
+:quit
+"#);
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stdout.contains("xor-count=2") && stdout.contains("xor repl finished"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("xor-bits=6"), "{stdout}");
+    assert!(stdout.contains("identifier-xor=true"), "{stdout}");
+    assert!(
+        stderr.contains("R0001") && stderr.contains("E0203"),
+        "{stderr}"
+    );
+}

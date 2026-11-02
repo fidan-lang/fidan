@@ -1,6 +1,6 @@
 // fidan-parser — Pratt (top-down operator precedence) expression parser
 use crate::parser::Parser;
-use fidan_ast::{BinOp, CheckArm, Expr, ExprId, InterpPart, Stmt, UnOp};
+use fidan_ast::{BinOp, CheckArm, Expr, ExprId, InterpPart, Stmt, UnOp, precedence};
 use fidan_lexer::{ESCAPED_INTERP_CLOSE, ESCAPED_INTERP_OPEN, Lexer, TokenKind};
 use fidan_source::{SourceFile, Span};
 use std::sync::Arc;
@@ -80,18 +80,7 @@ fn scan_interp_fragment_end(raw: &str, open_idx: usize) -> Option<usize> {
     None
 }
 
-// ── Binding-power table (ascending precedence) ───────────────────────────────
-//
-//  0  ternary `value if condition else fallback`  (handled separately)
-//  1  `??`  null-coalesce
-//  3  `or`
-//  5  `and`
-//  7  comparison  `== != < > <= >= is`
-//  9  additive    `+ -`
-// 11  multiplicative `* / %`
-// 13  power/xor `**` right-assoc; `^` bitwise-xor (same precedence slot)
-// 15  unary prefix  `- not spawn await`
-// 17  postfix   `.`  `()`  `[]`
+// Binding powers and associativity are shared with the formatter in fidan_ast.
 
 impl<'t> Parser<'t> {
     // ── Public entry point ────────────────────────────────────────────────────
@@ -131,7 +120,7 @@ impl<'t> Parser<'t> {
                             span: Span::new(self.module.file, start, end),
                         })
                     } else {
-                        let rhs = self.parse_expr_bp(7);
+                        let rhs = self.parse_expr_bp(precedence::COMPARISON);
                         let end = self.module.arena.get_expr(rhs).span().end;
                         self.module.arena.alloc_expr(Expr::Binary {
                             op: BinOp::NotEq,
@@ -141,7 +130,7 @@ impl<'t> Parser<'t> {
                         })
                     }
                 } else {
-                    let rhs = self.parse_expr_bp(7);
+                    let rhs = self.parse_expr_bp(precedence::COMPARISON);
                     let end = self.module.arena.get_expr(rhs).span().end;
                     self.module.arena.alloc_expr(Expr::Binary {
                         op: BinOp::Eq,
@@ -158,8 +147,8 @@ impl<'t> Parser<'t> {
             | TokenKind::Lt
             | TokenKind::LtEq => {
                 let op_tok = self.advance().kind.clone();
-                let op = Self::tok_to_binop_cmp(&op_tok).unwrap();
-                let rhs = self.parse_expr_bp(7);
+                let op = self.tok_to_binop(&op_tok).unwrap();
+                let rhs = self.parse_expr_bp(precedence::COMPARISON);
                 let end = self.module.arena.get_expr(rhs).span().end;
                 self.module.arena.alloc_expr(Expr::Binary {
                     op,
@@ -204,7 +193,10 @@ impl<'t> Parser<'t> {
             // work correctly.  We only consume the Newline when we are certain
             // the operator that follows will be accepted (l_bp >= min_bp), so
             // the parser state is never corrupted.
+            // A contextual identifier on a new statement must remain a name:
+            // `var previous = true\nxor(value)` is a call, not a continuation.
             if matches!(self.peek(), TokenKind::Newline)
+                && !matches!(self.peek_nth(1), TokenKind::Ident(symbol) if *symbol == self.sym_xor)
                 && let Some((l_bp, _)) = self.infix_bp(self.peek_nth(1))
                 && l_bp >= min_bp
             {
@@ -213,13 +205,13 @@ impl<'t> Parser<'t> {
 
             // `is not` → NotEq normalization (special two-token sequence)
             if matches!(self.peek(), TokenKind::Is) && matches!(self.peek_nth(1), TokenKind::Not) {
-                if 7 < min_bp {
+                if precedence::COMPARISON < min_bp {
                     break;
                 }
                 let start = self.module.arena.get_expr(lhs).span().start;
                 self.advance(); // eat `is`
                 self.advance(); // eat `not`
-                let rhs = self.parse_expr_bp(8);
+                let rhs = self.parse_expr_bp(precedence::COMPARISON + 1);
                 let end = self.module.arena.get_expr(rhs).span().end;
                 lhs = self.module.arena.alloc_expr(Expr::Binary {
                     op: BinOp::NotEq,
@@ -363,7 +355,7 @@ impl<'t> Parser<'t> {
             }
 
             // ── Binary operator ───────────────────────────────────────────────
-            if let Some(op) = Self::tok_to_binop(&op_kind) {
+            if let Some(op) = self.tok_to_binop(&op_kind) {
                 let rhs = self.parse_expr_bp(r_bp);
                 let end = self.module.arena.get_expr(rhs).span().end;
                 lhs = self.module.arena.alloc_expr(Expr::Binary {
@@ -385,7 +377,7 @@ impl<'t> Parser<'t> {
         match self.peek().clone() {
             TokenKind::Minus => {
                 self.advance();
-                let operand = self.parse_expr_bp(15);
+                let operand = self.parse_expr_bp(precedence::PREFIX);
                 let end = self.module.arena.get_expr(operand).span().end;
                 self.module.arena.alloc_expr(Expr::Unary {
                     op: UnOp::Neg,
@@ -396,7 +388,7 @@ impl<'t> Parser<'t> {
             // Unary plus — wrap in Unary so it is not a transparent lvalue
             TokenKind::Plus => {
                 self.advance();
-                let operand = self.parse_expr_bp(15);
+                let operand = self.parse_expr_bp(precedence::PREFIX);
                 let end = self.module.arena.get_expr(operand).span().end;
                 self.module.arena.alloc_expr(Expr::Unary {
                     op: UnOp::Pos,
@@ -406,7 +398,7 @@ impl<'t> Parser<'t> {
             }
             TokenKind::Not => {
                 self.advance();
-                let operand = self.parse_expr_bp(15);
+                let operand = self.parse_expr_bp(precedence::PREFIX);
                 let end = self.module.arena.get_expr(operand).span().end;
                 self.module.arena.alloc_expr(Expr::Unary {
                     op: UnOp::Not,
@@ -416,7 +408,7 @@ impl<'t> Parser<'t> {
             }
             TokenKind::Spawn => {
                 self.advance();
-                let expr = self.parse_expr_bp(15);
+                let expr = self.parse_expr_bp(precedence::PREFIX);
                 let end = self.module.arena.get_expr(expr).span().end;
                 self.module.arena.alloc_expr(Expr::Spawn {
                     expr,
@@ -425,7 +417,7 @@ impl<'t> Parser<'t> {
             }
             TokenKind::Await => {
                 self.advance();
-                let expr = self.parse_expr_bp(15);
+                let expr = self.parse_expr_bp(precedence::PREFIX);
                 let end = self.module.arena.get_expr(expr).span().end;
                 self.module.arena.alloc_expr(Expr::Await {
                     expr,
@@ -881,39 +873,19 @@ impl<'t> Parser<'t> {
     // ── Binding-power tables ──────────────────────────────────────────────────
 
     fn infix_bp(&self, kind: &TokenKind) -> Option<(u8, u8)> {
-        Some(match kind {
-            TokenKind::NullCoalesce => (1, 2),
-            TokenKind::DotDot | TokenKind::DotDotDot => {
-                // When parsing the start-expression of a slice we suppress range operators
-                // so that `obj[a..b]` doesn't turn `a..b` into an Expr::Binary(Range).
-                if self.in_slice_start {
-                    return None;
-                }
-                (2, 3) // range, lower than add
+        match kind {
+            TokenKind::NullCoalesce => {
+                Some((precedence::NULL_COALESCE, precedence::NULL_COALESCE + 1))
             }
-            TokenKind::Or => (3, 4),
-            TokenKind::And => (5, 6),
-            TokenKind::Is
-            | TokenKind::Eq
-            | TokenKind::NotEq
-            | TokenKind::Lt
-            | TokenKind::LtEq
-            | TokenKind::Gt
-            | TokenKind::GtEq => (7, 8),
-            TokenKind::Plus | TokenKind::Minus => (9, 10),
-            TokenKind::Star | TokenKind::Slash | TokenKind::Percent => (11, 12),
-            TokenKind::StarStar => (13, 14),  // right-assoc
-            TokenKind::Caret => (13, 13),     // bitwise XOR
-            TokenKind::Ampersand => (11, 12), // bitwise AND (same tier as mul)
-            TokenKind::Pipe => (9, 10),       // bitwise OR  (same tier as add)
-            TokenKind::LtLt | TokenKind::GtGt => (11, 12), // shift
-            // Postfix (call / member / index)
-            TokenKind::LParen | TokenKind::Dot | TokenKind::LBracket => (17, 18),
-            _ => return None,
-        })
+            TokenKind::DotDot | TokenKind::DotDotDot if self.in_slice_start => None,
+            TokenKind::LParen | TokenKind::Dot | TokenKind::LBracket => {
+                Some((precedence::POSTFIX, precedence::POSTFIX + 1))
+            }
+            _ => self.tok_to_binop(kind).map(BinOp::binding_power),
+        }
     }
 
-    fn tok_to_binop(kind: &TokenKind) -> Option<BinOp> {
+    fn tok_to_binop(&self, kind: &TokenKind) -> Option<BinOp> {
         Some(match kind {
             TokenKind::Plus => BinOp::Add,
             TokenKind::Minus => BinOp::Sub,
@@ -933,15 +905,12 @@ impl<'t> Parser<'t> {
             TokenKind::LtEq => BinOp::LtEq,
             TokenKind::Gt => BinOp::Gt,
             TokenKind::GtEq => BinOp::GtEq,
+            TokenKind::Ident(symbol) if *symbol == self.sym_xor => BinOp::Xor,
             TokenKind::And => BinOp::And,
             TokenKind::Or => BinOp::Or,
             TokenKind::DotDot => BinOp::Range,
             TokenKind::DotDotDot => BinOp::RangeInclusive,
             _ => return None,
         })
-    }
-
-    fn tok_to_binop_cmp(kind: &TokenKind) -> Option<BinOp> {
-        Self::tok_to_binop(kind)
     }
 }

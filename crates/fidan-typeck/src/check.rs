@@ -4460,6 +4460,10 @@ impl TypeChecker {
                 (C::Float(base), C::Int(exponent)) => Some(C::Float(base.powf(exponent as f64))),
                 _ => None,
             },
+            BinOp::Xor => match (lhs, rhs) {
+                (C::Bool(lhs), C::Bool(rhs)) => Some(C::Bool(lhs ^ rhs)),
+                _ => None,
+            },
             BinOp::And => match (lhs, rhs) {
                 (C::Bool(lhs), C::Bool(rhs)) => Some(C::Bool(lhs && rhs)),
                 _ => None,
@@ -4791,6 +4795,7 @@ impl TypeChecker {
             BinOp::LtEq => "<=",
             BinOp::Gt => ">",
             BinOp::GtEq => ">=",
+            BinOp::Xor => "xor",
             BinOp::And => "and",
             BinOp::Or => "or",
             BinOp::Range => "..",
@@ -4855,7 +4860,9 @@ impl TypeChecker {
                         integer(lhs) && integer(rhs),
                         FidanType::List(Box::new(FidanType::Integer)),
                     ),
-                    BinOp::And | BinOp::Or => (boolean(lhs) && boolean(rhs), FidanType::Boolean),
+                    BinOp::And | BinOp::Xor | BinOp::Or => {
+                        (boolean(lhs) && boolean(rhs), FidanType::Boolean)
+                    }
                     _ => (
                         (numeric(lhs) && numeric(rhs))
                             || ((matches!(lhs, FidanType::String) || unchecked(lhs))
