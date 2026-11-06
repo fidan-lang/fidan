@@ -96,6 +96,11 @@ fn registry_scoped_credentials() {
         let a = std::env::var("FIDAN_TEST_REGISTRY_A").unwrap();
         let b = std::env::var("FIDAN_TEST_REGISTRY_B").unwrap();
         command(&["dal", "login", "--token", TOKEN_A, "--registry", &a]).unwrap();
+        if case == "empty-env" {
+            let error = command(&["dal", "whoami", "--registry", &a]).unwrap_err();
+            assert!(error.to_string().contains("FIDAN_DAL_API_TOKEN"), "{error}");
+            return;
+        }
         if case == "explicit-env" {
             command(&["dal", "whoami", "--registry", &b]).unwrap();
             return;
@@ -118,7 +123,7 @@ fn registry_scoped_credentials() {
         assert!(command(&["dal", "whoami", "--registry", &b]).is_err());
         return;
     }
-    for case in ["explicit", "environment", "explicit-env"] {
+    for case in ["explicit", "environment", "explicit-env", "empty-env"] {
         let a = Registry::new();
         let b = Registry::new();
         let mut child = Command::new(std::env::current_exe().unwrap());
@@ -138,6 +143,8 @@ fn registry_scoped_credentials() {
         }
         if case == "explicit-env" {
             child.env("FIDAN_DAL_API_TOKEN", ENV_TOKEN);
+        } else if case == "empty-env" {
+            child.env("FIDAN_DAL_API_TOKEN", "");
         }
         let result = child.output().unwrap();
         assert!(
