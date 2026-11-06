@@ -77,8 +77,7 @@ fn make_fake_fidan(root: &Path, response_json: &str, capture_path: &Path) -> Pat
 
 fn run_mcp_request(envs: &[(&str, String)], request: Value) -> Value {
     let mut packet = serde_json::to_vec(&request).expect("serialize MCP request");
-    packet.push(b'
-');
+    packet.push(b'\n');
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fidan-ai-analysis-helper"));
     cmd.arg("mcp")
