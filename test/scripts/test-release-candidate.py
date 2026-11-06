@@ -18,10 +18,16 @@ class CandidateTests(unittest.TestCase):
     def test_committed_release_versions_and_protocols_match(self):
         value = candidate.configuration()
         self.assertEqual(tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"], value["compiler_version"])
-        for kind, version in (("llvm", "1.1.0"), ("ai-analysis", "1.0.5")):
-            self.assertEqual(tomllib.loads((ROOT / f"crates/fidan-{kind}-helper/Cargo.toml").read_text())["package"]["version"], version)
-        self.assertEqual(value["ai_analysis_helper_version"], "1.0.5")
-        self.assertEqual(value["ai_analysis_helper_protocol"], 2)
+        for kind, version_key in (
+            ("llvm", "llvm_helper_version"),
+            ("ai-analysis", "ai_analysis_helper_version"),
+        ):
+            declared_version = tomllib.loads(
+                (ROOT / f"crates/fidan-{kind}-helper/Cargo.toml").read_text()
+            )["package"]["version"]
+            self.assertEqual(declared_version, value[version_key])
+        # candidate.configuration() checks the protocol versions against
+        # the actual Rust constants, without pinning historical values here.
 
     def test_protocol_and_exact_args_version_are_one_contract(self):
         value = candidate.configuration()
@@ -30,15 +36,22 @@ class CandidateTests(unittest.TestCase):
 
     def test_final_release_is_stable_and_rejects_unmatched_or_prerelease_pairs(self):
         value = candidate.configuration()
-        self.assertEqual(value["compiler_version"], "1.1.0")
-        self.assertEqual(value["llvm_helper_version"], "1.1.0")
+        self.assertEqual(value["llvm_helper_version"], value["compiler_version"])
+        release = value["compiler_version"]
+        major, minor, patch = map(int, release.split("."))
+        next_patch = f"{major}.{minor}.{patch + 1}"
+        noncanonical = f"0{major}.{minor}.{patch}"
         with tempfile.TemporaryDirectory(dir=ROOT / "target") as temp:
             fixture = Path(temp)
             (fixture / "config").mkdir()
             source = fixture / "crates/fidan-driver/src"
             source.mkdir(parents=True)
             (source / "llvm_helper.rs").write_text((ROOT / "crates/fidan-driver/src/llvm_helper.rs").read_text())
-            for changes in ({"compiler_version": "1.1.0-rc.1"}, {"llvm_helper_version": "1.0.6"}, {"compiler_version": "01.1.0"}):
+            for changes in (
+                {"compiler_version": f"{release}-rc.1"},
+                {"llvm_helper_version": next_patch},
+                {"compiler_version": noncanonical},
+            ):
                 (fixture / "config/release-candidate.json").write_text(json.dumps({**value, **changes}))
                 with self.assertRaises(ValueError):
                     candidate.configuration(fixture)

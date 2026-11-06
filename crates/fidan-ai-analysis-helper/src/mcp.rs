@@ -58,7 +58,7 @@ pub fn serve() -> Result<()> {
                                     tool("symbol_info", "Return matching top-level symbol definitions for a file and symbol name."),
                                     tool("get_call_chain", "Return the static call graph for a Fidan source file."),
                                     tool("get_type_info", "Return the inferred type map for a Fidan source file."),
-                                    tool("get_runtime_trace", "Return the static runtime trace for a file or selected range."),
+                                    tool("get_runtime_trace", "Return a static source-level trace (not live execution) for a file or selected range."),
                                     tool("suggest_fix", "Return validated AI fix hunks for a file or selected range without applying them."),
                                     tool("apply_fix_preview", "Return a unified diff preview for validated AI fix hunks without applying them.")
                                 ]
@@ -294,53 +294,97 @@ fn render_unified_diff(file: &std::path::Path, hunks: &[fidan_driver::AiFixHunk]
 }
 
 fn read_message(reader: &mut impl BufRead) -> Result<Option<Value>> {
-    let mut content_length = None;
+    const MAX_MCP_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
+    let mut line = String::new();
     loop {
-        let mut line = String::new();
+        line.clear();
         let bytes = reader
             .read_line(&mut line)
-            .context("failed to read MCP header line")?;
+            .context("failed to read MCP JSON-RPC line")?;
         if bytes == 0 {
             return Ok(None);
         }
-        if line == "\r\n" {
-            break;
+        if line.len() > MAX_MCP_MESSAGE_BYTES {
+            anyhow::bail!("MCP message exceeds 8 MiB");
         }
-        if let Some(value) = line.strip_prefix("Content-Length:") {
-            content_length = Some(
-                value
-                    .trim()
-                    .parse::<usize>()
-                    .context("invalid MCP Content-Length header")?,
-            );
+        let payload = line.trim_end_matches(&['\r', '\n'][..]);
+        if payload.is_empty() {
+            continue;
         }
+        let value = serde_json::from_str(payload).context("invalid MCP JSON-RPC message")?;
+        return Ok(Some(value));
     }
-
-    let length = content_length.context("missing MCP Content-Length header")?;
-    let mut body = vec![0u8; length];
-    reader
-        .read_exact(&mut body)
-        .context("failed to read MCP body")?;
-    let value = serde_json::from_slice(&body).context("failed to parse MCP JSON body")?;
-    Ok(Some(value))
 }
 
 fn write_message(writer: &mut impl Write, value: Value) -> Result<()> {
-    let payload = serde_json::to_vec(&value).context("failed to serialize MCP message")?;
-    write!(writer, "Content-Length: {}\r\n\r\n", payload.len())
-        .context("failed to write MCP header")?;
+    let payload = serde_json::to_vec(&value).context("failed to serialize MCP JSON-RPC")?;
     writer
         .write_all(&payload)
-        .context("failed to write MCP body")?;
+        .context("failed to write MCP JSON-RPC body")?;
+    writer
+        .write_all(b"\n")
+        .context("failed to write MCP JSON-RPC newline")?;
     writer.flush().context("failed to flush MCP output")
 }
 
 fn tool(name: &str, description: &str) -> Value {
+    let mut properties = serde_json::Map::new();
+    let mut required: Vec<&str> = Vec::new();
+
+    if name == "project_summary" {
+        properties.insert(
+            "entry".to_string(),
+            json!({"type": "string", "description": "Entry .fdn source file path"}),
+        );
+        required.push("entry");
+    } else {
+        properties.insert(
+            "file".to_string(),
+            json!({"type": "string", "description": "Fidan .fdn source file path"}),
+        );
+        required.push("file");
+    }
+
+    if name == "symbol_info" {
+        properties.insert(
+            "symbol".to_string(),
+            json!({"type": "string", "description": "Symbol name to inspect"}),
+        );
+        required.push("symbol");
+    }
+
+    if matches!(
+        name,
+        "explain_target_context"
+            | "get_diagnostics"
+            | "get_runtime_trace"
+            | "suggest_fix"
+            | "apply_fix_preview"
+    ) {
+        properties.insert(
+            "line_start".to_string(),
+            json!({"type": "integer", "minimum": 1, "description": "Optional first source line, 1-based"}),
+        );
+        properties.insert(
+            "line_end".to_string(),
+            json!({"type": "integer", "minimum": 1, "description": "Optional last source line, 1-based"}),
+        );
+    }
+    if matches!(name, "suggest_fix" | "apply_fix_preview") {
+        properties.insert(
+            "prompt".to_string(),
+            json!({"type": "string", "description": "Optional steering instructions for the AI"}),
+        );
+    }
+
     json!({
         "name": name,
         "description": description,
         "inputSchema": {
-            "type": "object"
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": false
         }
     })
 }

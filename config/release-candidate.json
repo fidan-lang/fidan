@@ -6,6 +6,6 @@
   "llvm_backend_protocol": 8,
   "args_version": "0.1.0",
   "args_compiler_requirement": "=1.1.0",
-  "ai_analysis_helper_version": "1.0.5",
+  "ai_analysis_helper_version": "1.0.6",
   "ai_analysis_helper_protocol": 2
 }

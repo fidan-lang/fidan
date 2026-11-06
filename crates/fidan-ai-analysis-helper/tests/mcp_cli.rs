@@ -76,9 +76,8 @@ fn make_fake_fidan(root: &Path, response_json: &str, capture_path: &Path) -> Pat
 }
 
 fn run_mcp_request(envs: &[(&str, String)], request: Value) -> Value {
-    let request_bytes = serde_json::to_vec(&request).expect("serialize MCP request");
-    let mut packet = format!("Content-Length: {}\r\n\r\n", request_bytes.len()).into_bytes();
-    packet.extend_from_slice(&request_bytes);
+    let mut packet = serde_json::to_vec(&request).expect("serialize MCP request");
+    packet.push(b'\n');
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_fidan-ai-analysis-helper"));
     cmd.arg("mcp")
@@ -110,18 +109,13 @@ fn run_mcp_request(envs: &[(&str, String)], request: Value) -> Value {
 
 fn parse_single_mcp_response(stdout: &[u8]) -> Value {
     let output = String::from_utf8(stdout.to_vec()).expect("stdout should be utf-8");
-    let Some((header, body)) = output.split_once("\r\n\r\n") else {
-        panic!("missing MCP header separator in output: {output}");
-    };
-    let content_length = header
-        .lines()
-        .find_map(|line| line.strip_prefix("Content-Length:"))
-        .map(str::trim)
-        .and_then(|value| value.parse::<usize>().ok())
-        .expect("parse Content-Length header");
-    let body_bytes = body.as_bytes();
-    let payload = &body_bytes[..content_length.min(body_bytes.len())];
-    serde_json::from_slice(payload).expect("parse MCP response payload")
+    let mut lines = output.lines();
+    let first = lines.next().expect("MCP server must send a JSON-RPC line");
+    assert!(
+        lines.next().is_none(),
+        "expected one MCP response: {output}"
+    );
+    serde_json::from_str(first).expect("parse newline-delimited MCP response")
 }
 
 fn explain_context_response(file: &Path, diagnostics: Vec<AiDiagnosticSummary>) -> String {
@@ -190,6 +184,77 @@ fn write_config(path: &Path, base_url: &str) {
         "schema_version = 1\nprovider = \"openai-compatible\"\nmodel = \"test-model\"\nbase_url = \"{base_url}\"\napi_key_env = \"FIDAN_TEST_FAKE_API_KEY_SHOULD_NOT_EXIST\"\ntimeout_secs = 10\n"
     );
     std::fs::write(path, config).expect("write helper config");
+}
+
+#[test]
+fn mcp_stdio_initialize_and_multiple_requests_are_newline_delimited() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fidan-ai-analysis-helper"))
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("launch MCP helper");
+
+    let requests = [
+        json!({
+            "jsonrpc": "2.0", "id": 100, "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "fidan-mcp-integration-test", "version": "1.0.0"}
+            }
+        }),
+        json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        json!({"jsonrpc": "2.0", "id": 101, "method": "tools/list"}),
+        json!({"jsonrpc": "2.0", "id": 102, "method": "ping"}),
+    ];
+    {
+        let input = child.stdin.as_mut().unwrap();
+        for request in &requests {
+            input
+                .write_all(serde_json::to_string(request).unwrap().as_bytes())
+                .unwrap();
+            input
+                .write_all(
+                    b"
+",
+                )
+                .unwrap();
+        }
+    }
+    let output = child.wait_with_output().expect("wait for MCP server");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 output");
+    assert!(
+        !stdout.contains("Content-Length:"),
+        "stdio must use newline-delimited JSON"
+    );
+    let messages = stdout
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).expect("JSON-RPC line"))
+        .collect::<Vec<_>>();
+    assert_eq!(messages.len(), 3, "only request messages receive replies");
+    assert_eq!(messages[0]["id"], 100);
+    assert_eq!(messages[0]["result"]["protocolVersion"], "2024-11-05");
+    assert_eq!(messages[1]["id"], 101);
+    let tools = messages[1]["result"]["tools"].as_array().unwrap();
+    let diagnostics = tools
+        .iter()
+        .find(|t| t["name"] == "get_diagnostics")
+        .unwrap();
+    assert_eq!(
+        diagnostics["inputSchema"]["properties"]["file"]["type"],
+        "string"
+    );
+    assert_eq!(diagnostics["inputSchema"]["required"][0], "file");
+    let symbol = tools.iter().find(|t| t["name"] == "symbol_info").unwrap();
+    assert_eq!(symbol["inputSchema"]["required"], json!(["file", "symbol"]));
+    assert_eq!(messages[2]["id"], 102);
 }
 
 #[test]
