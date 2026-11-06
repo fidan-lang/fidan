@@ -111,7 +111,10 @@ fn parse_single_mcp_response(stdout: &[u8]) -> Value {
     let output = String::from_utf8(stdout.to_vec()).expect("stdout should be utf-8");
     let mut lines = output.lines();
     let first = lines.next().expect("MCP server must send a JSON-RPC line");
-    assert!(lines.next().is_none(), "expected one MCP response: {output}");
+    assert!(
+        lines.next().is_none(),
+        "expected one MCP response: {output}"
+    );
     serde_json::from_str(first).expect("parse newline-delimited MCP response")
 }
 
@@ -209,15 +212,28 @@ fn mcp_stdio_initialize_and_multiple_requests_are_newline_delimited() {
     {
         let input = child.stdin.as_mut().unwrap();
         for request in &requests {
-            input.write_all(serde_json::to_string(request).unwrap().as_bytes()).unwrap();
-            input.write_all(b"
-").unwrap();
+            input
+                .write_all(serde_json::to_string(request).unwrap().as_bytes())
+                .unwrap();
+            input
+                .write_all(
+                    b"
+",
+                )
+                .unwrap();
         }
     }
     let output = child.wait_with_output().expect("wait for MCP server");
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8(output.stdout).expect("UTF-8 output");
-    assert!(!stdout.contains("Content-Length:"), "stdio must use newline-delimited JSON");
+    assert!(
+        !stdout.contains("Content-Length:"),
+        "stdio must use newline-delimited JSON"
+    );
     let messages = stdout
         .lines()
         .map(|line| serde_json::from_str::<Value>(line).expect("JSON-RPC line"))
@@ -227,8 +243,14 @@ fn mcp_stdio_initialize_and_multiple_requests_are_newline_delimited() {
     assert_eq!(messages[0]["result"]["protocolVersion"], "2024-11-05");
     assert_eq!(messages[1]["id"], 101);
     let tools = messages[1]["result"]["tools"].as_array().unwrap();
-    let diagnostics = tools.iter().find(|t| t["name"] == "get_diagnostics").unwrap();
-    assert_eq!(diagnostics["inputSchema"]["properties"]["file"]["type"], "string");
+    let diagnostics = tools
+        .iter()
+        .find(|t| t["name"] == "get_diagnostics")
+        .unwrap();
+    assert_eq!(
+        diagnostics["inputSchema"]["properties"]["file"]["type"],
+        "string"
+    );
     assert_eq!(diagnostics["inputSchema"]["required"][0], "file");
     let symbol = tools.iter().find(|t| t["name"] == "symbol_info").unwrap();
     assert_eq!(symbol["inputSchema"]["required"], json!(["file", "symbol"]));
