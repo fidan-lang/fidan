@@ -918,8 +918,11 @@ fn run_unyank(package: &str, version: &str, registry: Option<String>) -> Result<
 
 fn authenticated_client(registry: Option<String>) -> Result<DalClient> {
     let registry = config::resolve_registry(registry.as_deref())?;
-    let token = config::resolve_token(&registry, None)?;
-    DalClient::new(registry, token)
+    let token = config::resolve_token(&registry, None)?
+        .with_context(|| format!(
+            "No Dal API token found for {registry}. Run `fidan dal login` again, then verify with `fidan dal whoami`."
+        ))?;
+    DalClient::new(registry, Some(token))
 }
 
 fn prompt_token() -> Result<String> {

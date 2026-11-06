@@ -63,7 +63,15 @@ pub fn resolve_token(registry: &str, explicit: Option<&str>) -> Result<Option<St
     let registry = canonical_registry(registry)?;
     let account = account(&registry)?;
     let spec = token_spec(&account);
-    // A present-but-empty env override deliberately disables saved credentials.
+    // Keep the environment override higher priority than the OS keychain, but
+    // explain an empty override instead of reporting an unrelated login failure.
+    if let Some(value) = env::var_os(TOKEN_ENV)
+        && value.to_str().is_some_and(|value| value.trim().is_empty())
+    {
+        bail!(
+            "FIDAN_DAL_API_TOKEN is set but empty; it overrides the saved Dal login. Unset it to use your OS keychain credential (PowerShell: Remove-Item Env:FIDAN_DAL_API_TOKEN)"
+        );
+    }
     if explicit.is_some_and(|value| !value.trim().is_empty()) || env::var_os(TOKEN_ENV).is_some() {
         return resolve_secret(
             &SecretSpec {
