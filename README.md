@@ -10,11 +10,24 @@
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) &nbsp; [![CI](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml/badge.svg)](https://github.com/fidan-lang/fidan/actions/workflows/ci.yaml) &nbsp; ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg) &nbsp; [![VS Code Extension](https://img.shields.io/badge/VS%20Code-Extension%20Available-007ACC.svg)](https://marketplace.visualstudio.com/items?itemName=fidan.fidan)
 
-[Getting Started](#getting-started) • [Language Tour](#language-tour) • [CLI Reference](#cli-reference) • [Standard Library](#standard-library) • [VS Code Extension](#vs-code-extension) • [Contributing](#contributing)
+[Compiler-Grounded AI Quickstart](docs/COMPILER_GROUNDED_AI_QUICKSTART.md) • [Getting Started](#getting-started) • [Language Tour](#language-tour) • [CLI Reference](#cli-reference) • [Standard Library](#standard-library) • [VS Code Extension](#vs-code-extension) • [Contributing](#contributing)
 
 </div>
 
 ---
+
+## Give AI more than source code
+
+Fidan's compiler can provide **inferred types, diagnostics, symbol information, reads/writes, call relationships, and static traces** to AI workflows. Instead of relying on source text alone, the optional AI helper makes compiler-derived context available to `explain`, `fix`, `improve`, and MCP clients.
+
+**Try the deterministic compiler analysis without an API key** from a checkout of this repository:
+
+```bash
+fidan check test/examples/check_val.fdn
+fidan explain test/examples/check_val.fdn --line 2
+```
+
+For optional model-assisted analysis, provider setup, safe fix previews, and reproducible examples, follow the [compiler-grounded AI quickstart](docs/COMPILER_GROUNDED_AI_QUICKSTART.md). Live inspection of running variables and stack frames is **not** implemented in this release.
 
 ## What is Fidan?
 
@@ -24,15 +37,9 @@ Fidan is designed around the idea that AI development tools should understand pr
 
 Implemented in Rust, the compiler lowers source through typed HIR and MIR optimization to a MIR interpreter with selective Cranelift JIT, Cranelift AOT, or optional LLVM AOT. The workspace also includes a formatter, LSP server, REPL, package tooling, and embedding APIs. See [AI-native tooling](#ai-native-tooling) for the analysis interfaces and provider requirements.
 
-The next release adds eager Boolean `xor` while `^` remains integer bitwise XOR,
-and corrects bitwise precedence. See [operators and migration](docs/OPERATORS.md)
-for the exact table and compatibility impact.
-
-Logical `and` (`&&`) and `or` (`||`) use left-to-right short-circuit evaluation:
-`false and rhs` and `true or rhs` skip `rhs`. Both operands are still statically
-checked. Evaluated operands must be Boolean; flexible non-Booleans, including
-`nothing`, raise R0001. This upcoming candidate intentionally changes the earlier
-eager behavior.
+Operator and short-circuit semantics may differ between the latest published release
+and ongoing work on `main`. Consult [operators and migration](docs/OPERATORS.md)
+and the release notes for version-specific behavior.
 
 
 ```fidan
@@ -67,8 +74,8 @@ still be called before their textual declaration in the same module.
 
 ## Operational diagnostics
 
-The upcoming compiler candidate provides `-v` (INFO), `-vv` (DEBUG), and `-vvv`
-(TRACE). `-V` still prints the version. Diagnostics go to stderr; program output
+The current source tree supports `-v` (INFO), `-vv` (DEBUG), and `-vvv`
+(TRACE). `-V` prints the version. Check your installed release for flag availability. Diagnostics go to stderr; program output
 and LSP JSON-RPC keep stdout. Existing errors, warnings and progress stay active
 without verbosity. Put verbosity before the source path when running a program:
 
@@ -1375,30 +1382,18 @@ Made with ❤️ by [Kaan Gönüldinc (AppSolves)](https://github.com/AppSolves)
 
 </div>
 
-## Fidan 1.1.0 compatibility
+## Published toolchain compatibility
 
-This source tree reports **Fidan 1.1.0**. It adds callable `.name`/`.parameters`
-metadata and `.invoke(list)`, custom decorator replacement, Boolean short-circuit
-execution, recursive source-tool directory handling and global `-v` diagnostics
-compared with the published 1.0.16 binary. Publication is verified separately;
-committed version metadata alone does not mean release artifacts are available.
+The published stable compiler release is **Fidan 1.1.0**. Its optional **AI Analysis
+Helper 1.0.6** uses helper protocol **2**. The optional LLVM toolchain/helper
+for compiler 1.1.0 is **1.1.0**, using backend protocol **8** and LLVM 23.1.2.
+These helpers are installed independently of the main Fidan CLI:
 
-Use `callback(a, b)` normally; `callback.invoke(arguments)` is for a positional
-argument list computed at runtime. It reuses normal arity/default/type/error
-handling. Reflection never executes computed defaults or exposes closure captures.
-Both operands of `and`/`or` are statically checked; only the necessary RHS executes.
-Sequence RHS work explicitly if an older program relied on eager evaluation.
+```bash
+fidan toolchain available
+fidan toolchain add ai-analysis --version 1.0.6
+fidan toolchain list
+```
 
-LLVM AOT requires **LLVM toolchain/helper 1.1.0**, backend protocol **8**, built
-against LLVM **23.1.2**. The older published 1.0.6 helper uses protocol 5 and is
-not compatible with this compiler. **AI Analysis toolchain/helper 1.0.5** retains
-helper protocol **2**; it refreshes packaging and integration without adding AI
-features. Existing 1.0.16 and older toolchain artifacts remain immutable.
-
-## Coordinated release order
-
-Engineering/merge gates → Fidan 1.1.0 stable compiler and optional toolchains →
-DAL production readiness and launch → args 0.1.0 publication → separately approved
-editor and website updates. No public RC is planned. DAL production and args
-publication are separate gates; the checked-in args manifest intentionally retains
-its unpublished compiler sentinel until both prerequisites are operational.
+`main` can contain changes not yet shipped in the published compiler binary. When
+trying an example or reporting a problem, include the output of `fidan --version`.
